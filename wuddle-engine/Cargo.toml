@@ -1,0 +1,27 @@
+[package]
+name = "wuddle-engine"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "wuddle_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wuddle"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+zip = "0.6"
+sha2 = "0.10"
+hex = "0.4"
+url = "2"
+urlencoding = "2"

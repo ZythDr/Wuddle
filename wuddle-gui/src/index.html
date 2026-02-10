@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wuddle</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+
+  <body>
+    <header class="topbar">
+      <div class="title">
+        <div class="appname">Wuddle</div>
+        <div class="subtitle">WoW DLL mods updater</div>
+      </div>
+
+      <div class="actions">
+        <div id="busyIndicator" class="busy-indicator hidden">Working…</div>
+        <div class="tabs top-tabs">
+          <div id="profileTabs" class="tabs profile-tabs"></div>
+          <div id="topTabsDivider" class="tabs-divider" aria-hidden="true"></div>
+          <button id="tabOptions" class="tab-btn tab-icon-btn" title="Options" aria-label="Options">
+            <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.28 7.28 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.49-.42h-3.84a.5.5 0 0 0-.49.42l-.36 2.54c-.58.22-1.13.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.7 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.82 14.5a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.41 1.05.72 1.63.94l.36 2.54a.5.5 0 0 0 .49.42h3.84a.5.5 0 0 0 .49-.42l.36-2.54c.58-.22 1.13-.53 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.56ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z"
+              />
+            </svg>
+            <span class="sr-only">Options</span>
+          </button>
+          <button id="tabLogs" class="tab-btn tab-icon-btn" title="Logs" aria-label="Logs">
+            <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M5 4.5A1.5 1.5 0 0 1 6.5 3h9l4.5 4.5V19.5A1.5 1.5 0 0 1 18.5 21h-12A1.5 1.5 0 0 1 5 19.5v-15Zm10 .5v3h3"
+              />
+              <path d="M8 11h8M8 14h8M8 17h6" />
+            </svg>
+            <span class="sr-only">Logs</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <section id="panelProjects" class="card panel projects-panel">
+      <div class="row space-between align-end">
+        <div>
+          <div class="section-title"></div>
+        </div>
+
+        <div class="row tight">
+          <button id="btnAddOpen" class="btn">＋ Add New Mod</button>
+        </div>
+      </div>
+
+      <div class="filter-status-row">
+        <div class="filter-group" id="filterGroup" role="group" aria-label="Project filters">
+          <button class="btn filter-btn active" data-filter="all">All</button>
+          <button class="btn filter-btn" data-filter="updates">Updates</button>
+          <button class="btn filter-btn" data-filter="errors">Errors</button>
+          <button class="btn filter-btn" data-filter="disabled">Disabled</button>
+        </div>
+        <div class="status-strip" id="projectStatusStrip" aria-label="Project summary">
+          <span id="statRepoCount" class="stat-pill">0 projects</span>
+          <span id="statEnabledCount" class="stat-pill">0 enabled</span>
+          <span id="statUpdateCount" class="stat-pill">0 updates</span>
+          <span id="statErrorCount" class="stat-pill">0 errors</span>
+          <span id="statApiState" class="stat-pill muted">API status: unknown</span>
+        </div>
+      </div>
+
+      <div class="table table-scroll">
+        <div id="repoThead" class="thead">
+          <div class="th select-col">
+            <input id="selectAllRepos" type="checkbox" aria-label="Select all projects" />
+          </div>
+          <div class="th sortable active" data-sort="name" data-dir="asc">Name</div>
+          <div class="th sortable" data-sort="current">Current</div>
+          <div class="th sortable" data-sort="latest">Latest</div>
+          <div>Enabled</div>
+          <div class="th sortable" data-sort="status">Status</div>
+          <div>Actions</div>
+        </div>
+
+        <div id="repoRows" class="tbody">
+          <div class="empty">No repos yet. Click “＋ Add”.</div>
+        </div>
+      </div>
+
+      <div class="project-footer">
+        <div class="row align-center footer-tools">
+          <div class="row tight align-center footer-actions">
+            <div id="lastChecked" class="hint">Last checked: never</div>
+            <button id="btnRetryFailed" class="btn">Retry Failed</button>
+            <button id="btnRefresh" class="btn">Check for updates</button>
+            <button id="btnUpdateAll" class="btn primary">Update All</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="panelOptions" class="card panel hidden">
+      <div class="options-grid">
+        <section class="settings-card">
+          <div class="settings-head">Instances</div>
+          <div class="hint">Each instance has its own tracked mod list.</div>
+          <div id="instanceList" class="instance-list options-block"></div>
+          <div class="row tight options-block">
+            <button id="btnAddInstance" class="btn">+ Add Instance</button>
+          </div>
+        </section>
+
+        <section class="settings-card">
+          <div class="settings-head">Behavior</div>
+          <div class="row options-block checks">
+            <label class="check">
+              <input id="optSymlinks" type="checkbox" />
+              <span>Use symlink installs when possible</span>
+            </label>
+            <label class="check">
+              <input id="optXattr" type="checkbox" />
+              <span>Set xattr file comments (if OS supports it)</span>
+            </label>
+          </div>
+        </section>
+
+        <section class="settings-card">
+          <div class="settings-head">Time and display</div>
+          <div class="row options-block checks">
+            <label class="check">
+              <input id="optClock12" type="checkbox" />
+              <span>Use 12-hour time format (AM/PM)</span>
+            </label>
+          </div>
+        </section>
+
+        <section class="settings-card auth-block">
+          <div class="row align-center auth-header-row">
+            <div class="settings-head">GitHub Authentication</div>
+            <div id="ghAuthHint" class="hint">
+              Optional: add a GitHub token to avoid anonymous API rate limits.
+            </div>
+          </div>
+
+          <div class="row tight auth-connect-row">
+            <button
+              id="btnConnectGithub"
+              class="btn"
+              title="Opens GitHub in your browser so you can create or manage a token."
+            >
+              GitHub Tokens
+            </button>
+          </div>
+
+          <div class="hint auth-recommended">Recommended: create a classic token with no scopes/permissions selected, and set a custom expiration of 1 year.</div>
+          
+          <div class="row align-end auth-row">
+            <label class="field grow">
+              GitHub token (stored in system keychain):
+              <input
+                id="githubToken"
+                type="password"
+                placeholder="ghp_..."
+                autocomplete="off"
+                spellcheck="false"
+            />
+            </label>
+            <button id="btnSaveGithubToken" class="btn primary">Save token</button>
+            <button id="btnClearGithubToken" class="btn danger">Forget</button>
+          </div>
+
+          <div class="auth-status-row">
+            <span id="ghAuthBadge" class="auth-badge">No token</span>
+            <div id="ghAuthStatus" class="hint"></div>
+          </div>
+          <div id="ghAuthHealth" class="auth-health hidden"></div>
+        </section>
+      </div>
+    </section>
+
+    <section id="panelLogs" class="card panel hidden">
+      <div class="row space-between align-center">
+        <div>
+          <div class="section-title">Logs</div>
+          <div class="hint">Action and error messages.</div>
+        </div>
+        <div class="row tight">
+          <button id="btnClearLog" class="btn" type="button">Clear</button>
+          <button id="btnCopyLog" class="btn" type="button">Copy Log</button>
+        </div>
+      </div>
+
+      <div class="row space-between align-center projects-tools">
+        <div class="filter-group" id="logLevelGroup" role="group" aria-label="Log level filters">
+          <button id="btnLogLevelAll" class="btn filter-btn active" data-log-level="all">All</button>
+          <button id="btnLogLevelInfo" class="btn filter-btn" data-log-level="info">Info</button>
+          <button id="btnLogLevelError" class="btn filter-btn" data-log-level="error">Errors</button>
+        </div>
+        <div class="row tight align-center">
+          <label class="check">
+            <input id="optLogWrap" type="checkbox" />
+            <span>Wrap lines</span>
+          </label>
+          <label class="check">
+            <input id="optLogAutoscroll" type="checkbox" checked />
+            <span>Auto-scroll</span>
+          </label>
+          <label class="field log-search">
+            <input id="logSearch" placeholder="Search logs" />
+          </label>
+        </div>
+      </div>
+
+      <pre id="log" class="log log-panel"></pre>
+    </section>
+
+    <!-- Add modal -->
+    <dialog id="dlgAdd" class="dialog">
+      <form method="dialog" class="dialog-inner">
+        <div class="dialog-head">
+          <div>
+            <div class="dialog-title">Add a repo</div>
+            <div class="hint">Paste a repo URL (or /releases). Wuddle will detect the rest.</div>
+          </div>
+          <button id="btnAddCloseX" class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
+        </div>
+
+        <div class="field">
+          <div class="label">Quick add (recommended)</div>
+          <div id="addPresetList" class="preset-list"></div>
+        </div>
+
+        <label class="field">
+          <div class="label">Repo URL</div>
+          <input id="repoUrl" placeholder="https://gitea.com/avitasia/nampower" />
+        </label>
+
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <label class="field">
+            <div class="label">Mode override (optional)</div>
+            <select id="mode">
+              <option value="auto" selected>auto (recommended)</option>
+              <option value="addon">addon</option>
+              <option value="dll">dll</option>
+              <option value="mixed">mixed</option>
+              <option value="raw">raw</option>
+            </select>
+          </label>
+        </details>
+
+        <div class="dialog-actions">
+          <button class="btn ghost" value="cancel">Cancel</button>
+          <button id="btnAdd" class="btn primary" value="ok">Add</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Remove modal -->
+    <dialog id="dlgRemove" class="dialog">
+      <form method="dialog" class="dialog-inner">
+        <div class="dialog-head">
+          <div>
+            <div class="dialog-title">Remove Project</div>
+            <div class="hint">Choose whether to remove only from Wuddle, or also delete local installed files.</div>
+          </div>
+          <button class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
+        </div>
+
+        <div class="field">
+          <div class="label">Project</div>
+          <div id="removeRepoName" class="hint"></div>
+        </div>
+
+        <label class="check remove-check">
+          <input id="removeLocalFiles" type="checkbox" />
+          <span>Remove local files</span>
+        </label>
+
+        <div class="dialog-actions">
+          <button class="btn ghost" value="cancel">Cancel</button>
+          <button id="btnRemoveConfirm" class="btn danger" value="ok">Remove</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Remove instance modal -->
+    <dialog id="dlgRemoveInstance" class="dialog">
+      <form method="dialog" class="dialog-inner">
+        <div class="dialog-head">
+          <div>
+            <div class="dialog-title">Remove Instance</div>
+            <div class="hint">This removes the instance from Wuddle.</div>
+          </div>
+          <button class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
+        </div>
+
+        <div class="field">
+          <div class="label">Instance</div>
+          <div id="removeInstanceName" class="hint"></div>
+        </div>
+
+        <label class="check remove-check">
+          <input id="removeInstanceLocalFiles" type="checkbox" />
+          <span>Remove installed mods from this instance</span>
+        </label>
+
+        <div class="dialog-actions">
+          <button class="btn ghost" value="cancel">Cancel</button>
+          <button id="btnRemoveInstanceConfirm" class="btn danger" value="ok">Remove</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,434 @@
+use anyhow::{Context, Result};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InstallOptions {
+    pub use_symlinks: bool,
+    pub set_xattr_comment: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstallRecord {
+    pub path: PathBuf,
+    pub kind: &'static str, // "dll" | "addon" | "raw"
+}
+
+/// Install from a downloaded ZIP into the WoW directory.
+///
+/// Modes:
+/// - addon: copy addon folders into Interface/AddOns
+/// - dll: copy *.dll into WoW root
+/// - mixed: both
+/// - raw: currently unused for zip
+pub fn install_from_zip(
+    zip_path: &Path,
+    extract_dir: &Path,
+    wow_dir: &Path,
+    mode: &str,
+    opts: InstallOptions,
+    comment: &str,
+) -> Result<Vec<InstallRecord>> {
+    let want_addon = mode == "addon" || mode == "mixed" || mode == "auto";
+    let want_dll = mode == "dll" || mode == "mixed" || mode == "auto";
+
+    let wow_root = wow_dir;
+    let addons_dir = wow_dir.join("Interface").join("AddOns");
+    fs::create_dir_all(&addons_dir).context("create Interface/AddOns")?;
+
+    unzip(zip_path, extract_dir).context("unzip")?;
+
+    let mut records = Vec::new();
+
+    if want_dll {
+        let mut installed_dlls: Vec<String> = Vec::new();
+        for dll in select_dlls_for_install(extract_dir, detect_dlls(extract_dir)) {
+            if let Some(fname) = dll.file_name().and_then(|s| s.to_str()) {
+                let dst = wow_root.join(fname);
+                install_file_or_symlink(&dll, &dst, opts.use_symlinks)?;
+                maybe_set_comment(&dst, comment, opts.set_xattr_comment);
+                installed_dlls.push(fname.to_string());
+                records.push(InstallRecord {
+                    path: dst,
+                    kind: "dll",
+                });
+            }
+        }
+        update_dlls_txt(wow_root, &installed_dlls)?;
+    }
+
+    if want_addon {
+        for (src_dir, addon_folder_name) in detect_addons(extract_dir) {
+            let dst_dir = addons_dir.join(&addon_folder_name);
+            install_dir_or_symlink(&src_dir, &dst_dir, opts.use_symlinks)?;
+            maybe_set_comment(&dst_dir, comment, opts.set_xattr_comment);
+            records.push(InstallRecord {
+                path: dst_dir,
+                kind: "addon",
+            });
+        }
+    }
+
+    Ok(records)
+}
+
+/// Unzip ZIP file into destination directory.
+fn unzip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
+    if dest_dir.exists() {
+        fs::remove_dir_all(dest_dir).with_context(|| format!("cleanup {:?}", dest_dir))?;
+    }
+    fs::create_dir_all(dest_dir).with_context(|| format!("mkdir {:?}", dest_dir))?;
+
+    let file = fs::File::open(zip_path).with_context(|| format!("open zip {:?}", zip_path))?;
+    let mut archive = zip::ZipArchive::new(file).context("read zip")?;
+
+    for i in 0..archive.len() {
+        let mut f = archive.by_index(i).context("zip entry")?;
+        let outpath = dest_dir.join(f.mangled_name());
+
+        if f.is_dir() {
+            fs::create_dir_all(&outpath).with_context(|| format!("mkdir {:?}", outpath))?;
+            continue;
+        }
+
+        if let Some(parent) = outpath.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("mkdir {:?}", parent))?;
+        }
+
+        let mut outfile =
+            fs::File::create(&outpath).with_context(|| format!("create {:?}", outpath))?;
+        io::copy(&mut f, &mut outfile).context("extract file")?;
+    }
+
+    Ok(())
+}
+
+fn copy_file(src: &Path, dst: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {:?}", parent))?;
+    }
+    fs::copy(src, dst).with_context(|| format!("copy {:?} -> {:?}", src, dst))?;
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst).with_context(|| format!("mkdir {:?}", dst))?;
+    for entry in fs::read_dir(src).with_context(|| format!("read_dir {:?}", src))? {
+        let entry = entry?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else {
+            copy_file(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_any_target(path: &Path) -> Result<()> {
+    if !path.exists() {
+        if !path.is_symlink() {
+            return Ok(());
+        }
+    }
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        let ft = meta.file_type();
+        if ft.is_symlink() {
+            fs::remove_file(path).with_context(|| format!("remove symlink {:?}", path))?;
+            return Ok(());
+        }
+        if ft.is_dir() {
+            fs::remove_dir_all(path).with_context(|| format!("remove dir {:?}", path))?;
+            return Ok(());
+        }
+        fs::remove_file(path).with_context(|| format!("remove file {:?}", path))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn symlink_path(src: &Path, dst: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(src, dst)
+        .with_context(|| format!("symlink {:?} -> {:?}", src, dst))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn symlink_path(src: &Path, dst: &Path) -> Result<()> {
+    if src.is_dir() {
+        std::os::windows::fs::symlink_dir(src, dst)
+            .with_context(|| format!("symlink dir {:?} -> {:?}", src, dst))?;
+    } else {
+        std::os::windows::fs::symlink_file(src, dst)
+            .with_context(|| format!("symlink file {:?} -> {:?}", src, dst))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn symlink_path(_src: &Path, _dst: &Path) -> Result<()> {
+    anyhow::bail!("symlinks are not supported on this platform")
+}
+
+fn install_file_or_symlink(src: &Path, dst: &Path, use_symlink: bool) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {:?}", parent))?;
+    }
+    remove_any_target(dst)?;
+
+    if use_symlink {
+        if symlink_path(src, dst).is_ok() {
+            return Ok(());
+        }
+    }
+
+    copy_file(src, dst)
+}
+
+fn install_dir_or_symlink(src_dir: &Path, dst_dir: &Path, use_symlink: bool) -> Result<()> {
+    if let Some(parent) = dst_dir.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {:?}", parent))?;
+    }
+    remove_any_target(dst_dir)?;
+
+    if use_symlink {
+        if symlink_path(src_dir, dst_dir).is_ok() {
+            return Ok(());
+        }
+    }
+
+    copy_dir_recursive(src_dir, dst_dir)
+}
+
+fn maybe_set_comment(path: &Path, comment: &str, enabled: bool) {
+    if !enabled {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let setfattr_ok = Command::new("setfattr")
+            .args(["-n", "user.xdg.comment", "-v", comment])
+            .arg(path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if setfattr_ok {
+            return;
+        }
+        let _ = Command::new("xattr")
+            .args(["-w", "user.xdg.comment", comment])
+            .arg(path)
+            .status();
+    }
+}
+
+fn update_dlls_txt(wow_dir: &Path, dll_names: &[String]) -> Result<()> {
+    if dll_names.is_empty() {
+        return Ok(());
+    }
+
+    let path = wow_dir.join("dlls.txt");
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+
+    let mut lines: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
+
+    for dll in dll_names {
+        let mut found = false;
+
+        for line in lines.iter_mut() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let (_commented, rest) = if let Some(stripped) = trimmed.strip_prefix('#') {
+                (true, stripped.trim())
+            } else {
+                (false, trimmed)
+            };
+
+            if rest.eq_ignore_ascii_case(dll) {
+                *line = dll.clone();
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            lines.push(dll.clone());
+        }
+    }
+
+    let mut out = lines.join("\n");
+    out.push('\n');
+    fs::write(&path, out).with_context(|| format!("write {:?}", path))?;
+    Ok(())
+}
+
+fn has_filename(path: &Path, name: &str) -> bool {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case(name))
+        .unwrap_or(false)
+}
+
+fn rel_has_component(root: &Path, path: &Path, want: &str) -> bool {
+    path.strip_prefix(root)
+        .ok()
+        .map(|rel| {
+            rel.components().any(|c| {
+                c.as_os_str()
+                    .to_str()
+                    .map(|s| s.eq_ignore_ascii_case(want))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn select_dlls_for_install(root: &Path, dlls: Vec<PathBuf>) -> Vec<PathBuf> {
+    if dlls.is_empty() {
+        return dlls;
+    }
+
+    // DXVK archives bundle many x32/x64 DLLs, but for vanilla WoW we only want x32/d3d9.dll.
+    let has_dxgi_x32 = dlls
+        .iter()
+        .any(|p| has_filename(p, "dxgi.dll") && rel_has_component(root, p, "x32"));
+    if has_dxgi_x32 {
+        if let Some(d3d9_x32) = dlls
+            .iter()
+            .find(|p| has_filename(p, "d3d9.dll") && rel_has_component(root, p, "x32"))
+            .cloned()
+        {
+            return vec![d3d9_x32];
+        }
+    }
+
+    dlls
+}
+
+fn detect_dlls(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    walk_dir(root, &mut |p| {
+        if p.is_file() {
+            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                if ext.eq_ignore_ascii_case("dll") {
+                    out.push(p.to_path_buf());
+                }
+            }
+        }
+    });
+    out
+}
+
+fn detect_addons(root: &Path) -> Vec<(PathBuf, String)> {
+    let mut candidates: Vec<(PathBuf, String)> = Vec::new();
+
+    let ia = root.join("Interface").join("AddOns");
+    if ia.exists() {
+        if let Ok(rd) = fs::read_dir(&ia) {
+            for entry in rd.flatten() {
+                let dir = entry.path();
+                if dir.is_dir() {
+                    if let Some(folder_name) = addon_folder_name_from_toc(&dir) {
+                        candidates.push((dir, folder_name));
+                    }
+                }
+            }
+        }
+        if !candidates.is_empty() {
+            return candidates;
+        }
+    }
+
+    walk_dir(root, &mut |p| {
+        if p.is_file() {
+            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                if ext.eq_ignore_ascii_case("toc") {
+                    if let Some(parent) = p.parent() {
+                        if let Some(toc_stem) = p.file_stem().and_then(|s| s.to_str()) {
+                            candidates.push((parent.to_path_buf(), toc_stem.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    candidates.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    candidates
+}
+
+fn addon_folder_name_from_toc(dir: &Path) -> Option<String> {
+    let rd = fs::read_dir(dir).ok()?;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            if p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("toc"))
+                .unwrap_or(false)
+            {
+                return p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn walk_dir(root: &Path, cb: &mut dyn FnMut(&Path)) {
+    let rd = match fs::read_dir(root) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        cb(&p);
+        if p.is_dir() {
+            walk_dir(&p, cb);
+        }
+    }
+}
+
+pub fn install_dll(
+    downloaded: &Path,
+    wow_dir: &Path,
+    filename: &str,
+    opts: InstallOptions,
+    comment: &str,
+) -> Result<InstallRecord> {
+    let dst = wow_dir.join(filename);
+    install_file_or_symlink(downloaded, &dst, opts.use_symlinks)?;
+    update_dlls_txt(wow_dir, &[filename.to_string()])?;
+    maybe_set_comment(&dst, comment, opts.set_xattr_comment);
+    Ok(InstallRecord {
+        path: dst,
+        kind: "dll",
+    })
+}
+
+pub fn install_raw_file(
+    downloaded: &Path,
+    dest_dir: &Path,
+    filename: &str,
+    opts: InstallOptions,
+    comment: &str,
+) -> Result<InstallRecord> {
+    fs::create_dir_all(dest_dir).context("create raw destination dir")?;
+    let dst = dest_dir.join(filename);
+    install_file_or_symlink(downloaded, &dst, opts.use_symlinks)?;
+    maybe_set_comment(&dst, comment, opts.set_xattr_comment);
+    Ok(InstallRecord {
+        path: dst,
+        kind: "raw",
+    })
+}
