@@ -90,11 +90,48 @@ fn active_profile_id() -> String {
 }
 
 fn app_dir() -> Result<PathBuf, String> {
-    let dir = dirs::data_dir()
-        .ok_or_else(|| "no data_dir".to_string())?
-        .join("wuddle");
+    let dir = if portable_mode_enabled() {
+        portable_app_dir()?
+    } else {
+        dirs::data_dir()
+            .ok_or_else(|| "no data_dir".to_string())?
+            .join("wuddle")
+    };
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
+}
+
+fn portable_mode_enabled() -> bool {
+    let env_enabled = std::env::var("WUDDLE_PORTABLE")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false);
+    if env_enabled {
+        return true;
+    }
+
+    portable_mode_flag_path()
+        .map(|p| p.exists())
+        .unwrap_or(false)
+}
+
+fn portable_mode_flag_path() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "no executable parent dir".to_string())?;
+    Ok(dir.join("wuddle-portable.flag"))
+}
+
+fn portable_app_dir() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "no executable parent dir".to_string())?;
+    Ok(dir.join("wuddle-data"))
 }
 
 fn profile_db_path(profile_id: &str) -> Result<PathBuf, String> {
@@ -163,6 +200,9 @@ fn env_token_present() -> bool {
 }
 
 fn read_keychain_token() -> Result<Option<String>, String> {
+    if portable_mode_enabled() {
+        return Ok(None);
+    }
     keychain_call_with_timeout("reading token", || {
         let entry = keychain_entry(KEYCHAIN_ACCOUNT_GITHUB_TOKEN)?;
         match entry.get_password() {
@@ -181,6 +221,9 @@ fn read_keychain_token() -> Result<Option<String>, String> {
 }
 
 fn keychain_probe_available() -> Result<(), String> {
+    if portable_mode_enabled() {
+        return Err("system keychain disabled in portable mode".to_string());
+    }
     keychain_call_with_timeout("probing keychain", || {
         let probe = format!("wuddle-probe-{}", std::process::id());
         let entry = keychain_entry(KEYCHAIN_ACCOUNT_PROBE)?;
@@ -195,6 +238,9 @@ fn keychain_probe_available() -> Result<(), String> {
 }
 
 fn set_keychain_token(token: String) -> Result<(), String> {
+    if portable_mode_enabled() {
+        return Err("system keychain disabled in portable mode".to_string());
+    }
     keychain_call_with_timeout("saving token", move || {
         let entry = keychain_entry(KEYCHAIN_ACCOUNT_GITHUB_TOKEN)?;
         entry.set_password(&token).map_err(|e| e.to_string())
@@ -202,6 +248,9 @@ fn set_keychain_token(token: String) -> Result<(), String> {
 }
 
 fn clear_keychain_token() -> Result<(), String> {
+    if portable_mode_enabled() {
+        return Ok(());
+    }
     keychain_call_with_timeout("clearing token", || {
         let entry = keychain_entry(KEYCHAIN_ACCOUNT_GITHUB_TOKEN)?;
         if let Err(e) = entry.delete_credential() {
@@ -599,6 +648,14 @@ async fn wuddle_delete_profile(
 #[tauri::command]
 async fn wuddle_github_auth_status() -> Result<GithubAuthStatus, String> {
     run_blocking(|| {
+        if portable_mode_enabled() {
+            return Ok(GithubAuthStatus {
+                keychain_available: false,
+                token_stored: false,
+                env_token_present: env_token_present(),
+            });
+        }
+
         let (keychain_available, token_stored) = match read_keychain_token() {
             Ok(Some(token)) => {
                 std::env::set_var("WUDDLE_GITHUB_TOKEN", token);
