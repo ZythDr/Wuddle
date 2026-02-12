@@ -90,22 +90,38 @@ const CURATED_MOD_PRESETS = [
       "Fixes 1.12.1 client bugs and expands addon API; required or beneficial for many addons.",
     longDescription:
       "Client mod for WoW 1.12.1 that fixes engine/client bugs and expands the Lua API used by addons. Some addons require SuperWoW directly, and many others gain improved functionality when it is present.",
+    warning:
+      "Known issue: SuperWoW will trigger antivirus false-positive alerts on Windows.",
   },
   {
-    id: "placeholder_1",
-    name: "More Mods (Placeholder)",
-    url: "",
+    id: "dxvk_gplasync",
+    name: "DXVK (GPLAsync fork)",
+    url: "https://gitlab.com/Ph42oN/dxvk-gplasync",
     mode: "auto",
-    description: "Reserved for additional curated mods.",
-    placeholder: true,
+    description:
+      "Vulkan translation layer for D3D 8/9/10/11; often improves FPS and smoothness in Vanilla WoW.",
+    longDescription:
+      "DXVK can massively improve performance in old Direct3D titles (including WoW 1.12) by using Vulkan. This fork includes Async + GPL options aimed at further reducing stutters. Async/GPL behavior is controlled through dxvk.conf, so users can keep default behavior if they prefer.",
   },
   {
-    id: "placeholder_2",
-    name: "More Mods (Placeholder)",
-    url: "",
+    id: "perf_boost",
+    name: "perf_boost",
+    url: "https://gitea.com/avitasia/perf_boost",
     mode: "auto",
-    description: "Reserved for additional curated mods.",
-    placeholder: true,
+    description:
+      "Performance optimization DLL for WoW 1.12.1 with advanced render-distance controls.",
+    longDescription:
+      "Performance-focused DLL for WoW 1.12.1 intended to improve FPS in crowded areas and raids. Uses advanced render-distance controls. Companion app for settings: https://gitea.com/avitasia/PerfBoostSettings",
+  },
+  {
+    id: "vanillahelpers",
+    name: "VanillaHelpers",
+    url: "https://github.com/isfir/VanillaHelpers",
+    mode: "auto",
+    description:
+      "Helper library for Vanilla WoW with file ops, minimap features, memory/texture upgrades, and morph tools.",
+    longDescription:
+      "Utility library for WoW 1.12 adding file read/write helpers, minimap blip customization, larger allocator capacity, higher-resolution texture/skin support, and character morph-related functionality.",
   },
 ];
 
@@ -368,6 +384,7 @@ function renderAddPresets() {
     const expanded = isPresetExpanded(preset);
     const longDescription = String(preset.longDescription || "").trim();
     const shortDescription = String(preset.description || "").trim();
+    const warning = String(preset.warning || "").trim();
     const canExpand = !preset.placeholder && !!longDescription && longDescription !== shortDescription;
     const card = document.createElement("div");
     card.className = `preset-card${preset.placeholder ? " placeholder" : ""}${installed ? " installed" : ""}${expanded ? " expanded" : ""}${canExpand ? " can-expand" : ""}`;
@@ -400,6 +417,25 @@ function renderAddPresets() {
       title.className = "preset-title";
       title.textContent = preset.name;
       head.appendChild(title);
+    }
+
+    const flags = document.createElement("div");
+    flags.className = "preset-flags";
+    if (!preset.placeholder) {
+      const recommendedTag = document.createElement("span");
+      recommendedTag.className = "preset-flag recommended";
+      recommendedTag.textContent = "Recommended";
+      flags.appendChild(recommendedTag);
+    }
+    if (warning) {
+      const warningTag = document.createElement("span");
+      warningTag.className = "preset-flag warning";
+      warningTag.textContent = "AV false-positive risk";
+      warningTag.title = warning;
+      flags.appendChild(warningTag);
+    }
+    if (flags.childElementCount > 0) {
+      head.appendChild(flags);
     }
 
     const desc = document.createElement("div");

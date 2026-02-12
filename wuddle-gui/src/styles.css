@@ -953,10 +953,11 @@ dialog.dialog::backdrop {
 .preset-head {
   display: flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: space-between;
   gap: 10px;
   grid-column: 1;
   min-width: 0;
+  padding-right: 28px;
 }
 
 .preset-title {
@@ -1004,6 +1005,37 @@ dialog.dialog::backdrop {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.preset-flags {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.preset-flag {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.preset-flag.recommended {
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.preset-flag.warning {
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.12);
 }
 
 .preset-actions {
