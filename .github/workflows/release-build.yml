@@ -24,6 +24,10 @@ jobs:
           cache: npm
           cache-dependency-path: wuddle-gui/package-lock.json
 
+      - name: Sync App Version From Tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node ./scripts/sync-version.mjs "${{ github.ref_name }}"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -78,6 +82,10 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: wuddle-gui/package-lock.json
+
+      - name: Sync App Version From Tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node ./scripts/sync-version.mjs "${{ github.ref_name }}"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

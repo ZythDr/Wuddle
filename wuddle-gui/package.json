@@ -1,11 +1,14 @@
 {
   "name": "wuddle-gui",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.2",
   "type": "module",
   "scripts": {
     "pretauri": "npm run icon",
-    "tauri": "GDK_BACKEND=x11 WINIT_UNIX_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri",
+    "tauri": "bash ./scripts/tauri-linux.sh",
+    "tauri:wayland": "GDK_BACKEND=wayland,x11 tauri",
+    "tauri:compat": "GDK_BACKEND=x11 WINIT_UNIX_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri",
+    "sync:version": "node ./scripts/sync-version.mjs",
     "icon": "tauri icon src-tauri/icons/app-icon.png",
     "dev": "vite",
     "build": "vite build",

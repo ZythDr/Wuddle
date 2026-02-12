@@ -17,6 +17,7 @@ const OPT_CLOCK12_KEY = "wuddle.opt.clock12";
 const LOG_WRAP_KEY = "wuddle.log.wrap";
 const LOG_AUTOSCROLL_KEY = "wuddle.log.autoscroll";
 const LOG_LEVEL_KEY = "wuddle.log.level";
+const WUDDLE_REPO_URL = "https://github.com/ZythDr/Wuddle";
 
 const state = {
   repos: [],
@@ -27,6 +28,7 @@ const state = {
   pending: 0,
   refreshInFlight: null,
   removeTargetRepo: null,
+  removeSelectedIds: [],
   removeTargetProfile: null,
   githubAuth: null,
   initialAutoCheckDone: false,
@@ -48,6 +50,9 @@ const state = {
   authHealthSeenSession: false,
   authHealthActiveIssue: "",
   presetExpanded: new Set(),
+  aboutInfo: null,
+  aboutLoaded: false,
+  aboutRefreshedAt: null,
 };
 
 const CURATED_MOD_PRESETS = [
@@ -60,6 +65,7 @@ const CURATED_MOD_PRESETS = [
       "Legacy WoW client mod that brings Dragonflight-style interact key support to Vanilla.",
     longDescription:
       "Legacy WoW client mod for 1.12 that brings a Dragonflight-style interact key workflow to Vanilla, reducing click friction and improving moment-to-moment interaction quality.",
+    categories: ["QoL"],
     recommended: false,
   },
   {
@@ -71,6 +77,7 @@ const CURATED_MOD_PRESETS = [
       "Adds camera offset, proper nameplates, improved tab-targeting, LoS/distance checks, and more.",
     longDescription:
       "Adds optional camera offset, proper nameplates (showing only with LoS), improved tab-targeting keybind behavior, LoS and distance checks in Lua, screenshot format options, network tweaks, background notifications, and additional QoL features.",
+    categories: ["QoL", "API"],
     recommended: true,
   },
   {
@@ -82,6 +89,13 @@ const CURATED_MOD_PRESETS = [
       "Reduces cast downtime caused by 1.12 client spell-completion delay, improving effective DPS.",
     longDescription:
       "Addresses a 1.12 client casting flow limitation where follow-up casts wait on round-trip completion feedback. The result is reduced cast downtime and better effective DPS, especially on higher-latency realm routes.",
+    companionLinks: [
+      {
+        label: "nampowersettings",
+        url: "https://gitea.com/avitasia/nampowersettings",
+      },
+    ],
+    categories: ["API"],
     recommended: true,
   },
   {
@@ -95,6 +109,22 @@ const CURATED_MOD_PRESETS = [
       "Client mod for WoW 1.12.1 that fixes engine/client bugs and expands the Lua API used by addons. Some addons require SuperWoW directly, and many others gain improved functionality when it is present.",
     warning:
       "Known issue: SuperWoW will trigger antivirus false-positive alerts on Windows.",
+    companionLinks: [
+      {
+        label: "SuperAPI",
+        url: "https://github.com/balakethelock/SuperAPI",
+      },
+      {
+        label: "SuperAPI_Castlib",
+        url: "https://github.com/balakethelock/SuperAPI_Castlib",
+      },
+    ],
+    expandedNotes: [
+      "SuperAPI improves compatibility with the default interface and adds a minimap icon for persistent mod settings.",
+      "It exposes settings like autoloot, clickthrough corpses, GUID in combat log/events, adjustable FoV, enable background sound, uncapped sound channels, and targeting circle style.",
+      "SuperAPI_Castlib adds default-style nameplate castbars. If you're using pfUI/shaguplates, you do not need this module.",
+    ],
+    categories: ["QoL", "API"],
     recommended: true,
   },
   {
@@ -106,6 +136,7 @@ const CURATED_MOD_PRESETS = [
       "Vulkan translation layer for D3D 8/9/10/11; often improves FPS and smoothness in Vanilla WoW.",
     longDescription:
       "DXVK can massively improve performance in old Direct3D titles (including WoW 1.12) by using Vulkan. This fork includes Async + GPL options aimed at further reducing stutters. Async/GPL behavior is controlled through dxvk.conf, so users can keep default behavior if they prefer.",
+    categories: ["Performance"],
     recommended: true,
   },
   {
@@ -117,8 +148,13 @@ const CURATED_MOD_PRESETS = [
       "Performance optimization DLL for WoW 1.12.1 with advanced render-distance controls.",
     longDescription:
       "Performance-focused DLL for WoW 1.12.1 intended to improve FPS in crowded areas and raids. Uses advanced render-distance controls.",
-    companionLabel: "PerfBoostSettings companion app",
-    companionUrl: "https://gitea.com/avitasia/PerfBoostSettings",
+    companionLinks: [
+      {
+        label: "PerfBoostSettings",
+        url: "https://gitea.com/avitasia/PerfBoostSettings",
+      },
+    ],
+    categories: ["Performance"],
     recommended: false,
   },
   {
@@ -130,9 +166,16 @@ const CURATED_MOD_PRESETS = [
       "Helper library for Vanilla WoW with file ops, minimap features, memory/texture upgrades, and morph tools.",
     longDescription:
       "Utility library for WoW 1.12 adding file read/write helpers, minimap blip customization, larger allocator capacity, higher-resolution texture/skin support, and character morph-related functionality.",
+    categories: ["API", "Performance"],
     recommended: true,
   },
 ];
+
+const PRESET_CATEGORY_CLASS = {
+  qol: "cat-qol",
+  api: "cat-api",
+  performance: "cat-performance",
+};
 
 function normalizeProfileId(value) {
   const base = String(value ?? "")
@@ -363,23 +406,39 @@ function togglePresetExpanded(preset) {
   else state.presetExpanded.add(preset.id);
 }
 
-function presetMetaText(preset) {
-  if (!preset?.url) return "";
+function isSuperWoWUrl(url) {
+  const text = String(url || "").trim();
+  if (!text) return false;
   try {
-    const parsed = new URL(String(preset.url));
-    const segs = parsed.pathname
-      .split("/")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const owner = segs[0] || "";
-    const name = (segs[1] || "").replace(/\.git$/i, "");
-    const host = parsed.hostname.replace(/^www\./i, "");
-    const mode = String(preset.mode || "auto");
-    if (owner && name) return `${host} • ${owner}/${name} • ${mode}`;
-    return `${host} • ${mode}`;
+    const parsed = new URL(text);
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname.toLowerCase().replace(/\/+$/, "");
+    if (host.endsWith("github.com") && path.includes("/balakethelock/superwow")) return true;
+    return false;
   } catch (_) {
-    return String(preset.mode || "auto");
+    return /balakethelock\/superwow/i.test(text);
   }
+}
+
+async function confirmSuperWoWRisk() {
+  const message =
+    "SuperWoW is known to trigger false-positives as malware in many antivirus products.\n\nInstalling SuperWoW can trigger AV warnings that reference Wuddle.exe because Wuddle performs the download/install.\n\nDo you want to continue adding SuperWoW?";
+  const dlg = $("dlgSuperwowRisk");
+  if (!dlg || typeof dlg.showModal !== "function") {
+    return window.confirm(message);
+  }
+  if (dlg.open) dlg.close("cancel");
+  dlg.returnValue = "cancel";
+  return await new Promise((resolve) => {
+    dlg.addEventListener(
+      "close",
+      () => {
+        resolve(dlg.returnValue === "ok");
+      },
+      { once: true },
+    );
+    dlg.showModal();
+  });
 }
 
 function renderAddPresets() {
@@ -402,7 +461,7 @@ function renderAddPresets() {
         if (!(ev.target instanceof Element)) return;
         if (ev.target.closest(".preset-actions")) return;
         if (ev.target.closest(".preset-title-link")) return;
-        if (ev.target.closest(".preset-desc-link")) return;
+        if (ev.target.closest(".preset-inline-link")) return;
         togglePresetExpanded(preset);
         renderAddPresets();
       });
@@ -439,9 +498,22 @@ function renderAddPresets() {
     if (warning) {
       const warningTag = document.createElement("span");
       warningTag.className = "preset-flag warning";
-      warningTag.textContent = "AV false-positive risk";
+      warningTag.textContent = "AV false-positive";
       warningTag.title = warning;
       flags.appendChild(warningTag);
+    }
+    if (!preset.placeholder) {
+      const categories = Array.isArray(preset.categories) ? preset.categories : [];
+      for (const rawCategory of categories) {
+        const category = String(rawCategory || "").trim();
+        if (!category) continue;
+        const key = category.toLowerCase();
+        const cls = PRESET_CATEGORY_CLASS[key] || "";
+        const tag = document.createElement("span");
+        tag.className = `preset-flag category${cls ? ` ${cls}` : ""}`;
+        tag.textContent = category;
+        flags.appendChild(tag);
+      }
     }
     if (flags.childElementCount > 0) {
       head.appendChild(flags);
@@ -449,25 +521,62 @@ function renderAddPresets() {
 
     const desc = document.createElement("div");
     desc.className = "preset-desc";
-    desc.textContent = expanded && longDescription ? longDescription : shortDescription;
+    const descText = document.createElement("div");
+    descText.className = "preset-desc-text";
+    descText.textContent = expanded && longDescription ? longDescription : shortDescription;
+    desc.appendChild(descText);
 
-    const companionUrl = String(preset.companionUrl || "").trim();
-    const companionLabel = String(preset.companionLabel || "").trim();
-    if (companionUrl && companionLabel) {
-      const descLink = document.createElement("button");
-      descLink.type = "button";
-      descLink.className = "preset-desc-link";
-      descLink.textContent = companionLabel;
-      descLink.addEventListener("click", async (ev) => {
-        ev.stopPropagation();
-        await openUrl(companionUrl);
-      });
-      card.appendChild(descLink);
+    const companionLinks = Array.isArray(preset.companionLinks)
+      ? preset.companionLinks
+      : [];
+
+    if (expanded && Array.isArray(preset.expandedNotes) && preset.expandedNotes.length > 0) {
+      const notes = document.createElement("div");
+      notes.className = "preset-desc-notes";
+      for (const rawLine of preset.expandedNotes) {
+        const line = String(rawLine || "").trim();
+        if (!line) continue;
+        const row = document.createElement("div");
+        row.className = "preset-desc-note";
+        row.textContent = `• ${line}`;
+        notes.appendChild(row);
+      }
+      if (notes.childElementCount > 0) {
+        desc.appendChild(notes);
+      }
     }
 
-    const meta = document.createElement("div");
-    meta.className = "preset-meta";
-    meta.textContent = presetMetaText(preset);
+    if (!preset.placeholder && companionLinks.length > 0) {
+      const linksWrap = document.createElement("div");
+      linksWrap.className = "preset-desc-links";
+      const label = document.createElement("span");
+      label.textContent = "Companion addons:";
+      linksWrap.appendChild(label);
+      companionLinks.forEach((entry, idx) => {
+        const url = String(entry?.url || "").trim();
+        const text = String(entry?.label || "").trim();
+        if (!url || !text) return;
+        if (idx > 0) {
+          const sep = document.createElement("span");
+          sep.textContent = "•";
+          sep.className = "preset-desc-sep";
+          linksWrap.appendChild(sep);
+        }
+        const linkBtn = document.createElement("button");
+        linkBtn.type = "button";
+        linkBtn.className = "preset-inline-link";
+        linkBtn.textContent = text;
+        linkBtn.title = url;
+        linkBtn.addEventListener("click", async (ev) => {
+          ev.stopPropagation();
+          await openUrl(url);
+        });
+        linksWrap.appendChild(linkBtn);
+      });
+      if (linksWrap.childElementCount > 1) {
+        desc.appendChild(linksWrap);
+      }
+    }
 
     const actions = document.createElement("div");
     actions.className = "preset-actions";
@@ -479,6 +588,7 @@ function renderAddPresets() {
       addBtn.disabled = true;
     } else if (installed) {
       addBtn.textContent = "Installed";
+      addBtn.classList.add("installed-state");
       addBtn.disabled = true;
     } else if (!hasProfile) {
       addBtn.textContent = "Add instance first";
@@ -487,12 +597,6 @@ function renderAddPresets() {
       addBtn.textContent = "Add";
       addBtn.addEventListener("click", async (ev) => {
         ev.stopPropagation();
-        if (preset.id === "superwow") {
-          const proceed = window.confirm(
-            "SuperWoW is known to trigger antivirus false-positive alerts on some systems.\n\nThis can make Wuddle look suspicious even when the file is legitimate.\n\nDo you want to continue adding SuperWoW?",
-          );
-          if (!proceed) return;
-        }
         const ok = await addRepo(preset.url, preset.mode, preset.name);
         if (ok) renderAddPresets();
       });
@@ -502,7 +606,6 @@ function renderAddPresets() {
 
     card.appendChild(head);
     card.appendChild(desc);
-    card.appendChild(meta);
     card.appendChild(actions);
     host.appendChild(card);
   }
@@ -622,23 +725,91 @@ function setTheme() {
   document.documentElement.setAttribute("data-theme", "dark");
 }
 
+function aboutValue(value, fallback = "Unknown") {
+  if (value === null || value === undefined) return fallback;
+  const text = String(value).trim();
+  return text || fallback;
+}
+
+function yesNo(value) {
+  return value ? "Yes" : "No";
+}
+
+function setAboutStatus(message, kind = "") {
+  const status = $("aboutStatus");
+  status.classList.remove("status-ok", "status-warn");
+  if (kind) status.classList.add(kind);
+  status.textContent = message;
+}
+
+function renderAboutInfo() {
+  const info = state.aboutInfo || {};
+  $("aboutAppVersion").textContent = aboutValue(info.appVersion, "Unknown");
+  $("aboutPackageName").textContent = aboutValue(info.packageName, "Unknown");
+  $("aboutPortableMode").textContent = yesNo(!!info.portableMode);
+  $("aboutAppImage").textContent = yesNo(!!info.appImageRuntime);
+
+  const osText = [aboutValue(info.os, "Unknown"), info.osFamily ? `(${info.osFamily})` : ""]
+    .filter(Boolean)
+    .join(" ");
+  $("aboutOs").textContent = osText;
+  $("aboutArch").textContent = aboutValue(info.arch, "Unknown");
+  $("aboutSessionType").textContent = aboutValue(info.sessionType, "Unknown");
+  $("aboutLaunchMode").textContent = aboutValue(info.launchMode, "Unknown");
+  $("aboutWindowBackend").textContent = aboutValue(info.windowBackend, "Unknown");
+  $("aboutDesktopEnv").textContent = aboutValue(info.desktopEnv, "Unknown");
+
+  $("aboutWebviewRuntime").textContent = aboutValue(info.webviewRuntime, "Unknown");
+  $("aboutGdkBackend").textContent = aboutValue(info.gdkBackend, "Not set");
+  $("aboutWaylandDisplay").textContent = aboutValue(info.waylandDisplay, "Not set");
+  $("aboutX11Display").textContent = aboutValue(info.x11Display, "Not set");
+}
+
+async function refreshAboutInfo({ force = false } = {}) {
+  if (state.aboutLoaded && !force) {
+    renderAboutInfo();
+    setAboutStatus(
+      `Detected at ${formatTime(state.aboutRefreshedAt || new Date())}.`,
+      "status-ok",
+    );
+    return;
+  }
+  setAboutStatus("Loading runtime details…");
+  try {
+    const info = await safeInvoke("wuddle_about_info", {}, { timeoutMs: 4000 });
+    state.aboutInfo = info && typeof info === "object" ? info : {};
+    state.aboutLoaded = true;
+    state.aboutRefreshedAt = new Date();
+    renderAboutInfo();
+    setAboutStatus(`Detected at ${formatTime(state.aboutRefreshedAt)}.`, "status-ok");
+  } catch (e) {
+    setAboutStatus(`Could not detect runtime details: ${e.message}`, "status-warn");
+    log(`ERROR about: ${e.message}`);
+  }
+}
+
 function setTab(tab) {
   if (tab === "options") state.tab = "options";
   else if (tab === "logs") state.tab = "logs";
+  else if (tab === "about") state.tab = "about";
   else state.tab = "projects";
   localStorage.setItem(TAB_KEY, state.tab);
 
   $("panelProjects").classList.toggle("hidden", state.tab !== "projects");
   $("panelOptions").classList.toggle("hidden", state.tab !== "options");
   $("panelLogs").classList.toggle("hidden", state.tab !== "logs");
+  $("panelAbout").classList.toggle("hidden", state.tab !== "about");
 
   $("tabOptions").classList.toggle("active", state.tab === "options");
   $("tabLogs").classList.toggle("active", state.tab === "logs");
+  $("tabAbout").classList.toggle("active", state.tab === "about");
   renderProfileTabs();
 
   if (state.tab === "options") {
     renderInstanceList();
     void refreshGithubAuthStatus();
+  } else if (state.tab === "about") {
+    void refreshAboutInfo();
   }
 }
 
@@ -1225,9 +1396,24 @@ function bindDialogOutsideToClose(dlg) {
 }
 
 async function openUrl(url) {
+  const target = String(url ?? "").trim();
+  if (!target) {
+    log("ERROR open url: URL is empty.");
+    return;
+  }
   try {
-    await safeInvoke("plugin:opener|open_url", { url });
-  } catch (_) {}
+    await safeInvoke("plugin:opener|open_url", { url: target });
+    return;
+  } catch (firstErr) {
+    try {
+      await safeInvoke("plugin:opener|open_url", { url: target, with: null });
+      return;
+    } catch (secondErr) {
+      const msg1 = firstErr?.message || String(firstErr);
+      const msg2 = secondErr?.message || String(secondErr);
+      log(`ERROR open url: ${msg1} (fallback failed: ${msg2})`);
+    }
+  }
 }
 
 async function openPath(path) {
@@ -1256,6 +1442,23 @@ function openRemoveDialog(repo) {
   $("removeRepoName").textContent = `${repo.owner}/${repo.name}`;
   $("removeLocalFiles").checked = false;
   $("dlgRemove").showModal();
+}
+
+function openRemoveSelectedDialog() {
+  const selected = state.repos.filter((repo) => state.selectedRepoIds.has(repo.id));
+  if (!selected.length) return;
+  state.removeSelectedIds = selected.map((repo) => repo.id);
+
+  const count = selected.length;
+  $("removeSelectedCount").textContent = `${count} project${count === 1 ? "" : "s"} selected`;
+  const preview = selected
+    .slice(0, 4)
+    .map((repo) => `${repo.owner}/${repo.name}`)
+    .join(", ");
+  const more = count > 4 ? ` +${count - 4} more` : "";
+  $("removeSelectedNames").textContent = preview ? `${preview}${more}` : "";
+  $("removeSelectedLocalFiles").checked = false;
+  $("dlgRemoveSelected").showModal();
 }
 
 function openRemoveInstanceDialog(profile) {
@@ -1295,6 +1498,52 @@ async function confirmRemove() {
     } catch (e) {
       log(`ERROR removing: ${e.message}`);
     }
+  });
+}
+
+async function confirmRemoveSelected() {
+  const selectedIds = Array.isArray(state.removeSelectedIds)
+    ? state.removeSelectedIds.filter((id) => state.repos.some((repo) => repo.id === id))
+    : [];
+  if (!selectedIds.length) {
+    state.removeSelectedIds = [];
+    $("dlgRemoveSelected").close();
+    return;
+  }
+
+  const removeLocalFiles = $("removeSelectedLocalFiles").checked;
+  const wowDir = removeLocalFiles ? readWowDir() : null;
+  if (removeLocalFiles && !wowDir) {
+    log("ERROR remove selected: WoW directory is required to remove local files.");
+    return;
+  }
+
+  await withBusy(async () => {
+    const repoById = new Map(state.repos.map((repo) => [repo.id, repo]));
+    let removed = 0;
+    let failed = 0;
+    for (const id of selectedIds) {
+      const repo = repoById.get(id);
+      const label = repo ? `${repo.owner}/${repo.name}` : `repo id=${id}`;
+      try {
+        const msg = await safeInvoke(
+          "wuddle_remove_repo",
+          { id, removeLocalFiles, wowDir },
+          { timeoutMs: 45000 },
+        );
+        state.selectedRepoIds.delete(id);
+        log(msg);
+        removed += 1;
+      } catch (e) {
+        failed += 1;
+        log(`ERROR remove ${label}: ${e.message}`);
+      }
+    }
+    state.removeSelectedIds = [];
+    $("dlgRemoveSelected").close();
+    if (failed > 0) log(`Removed ${removed} selected project(s); ${failed} failed.`);
+    else log(`Removed ${removed} selected project(s).`);
+    await refreshAll();
   });
 }
 
@@ -1398,11 +1647,26 @@ function render() {
 
   const selectedCount = Array.from(state.selectedRepoIds).filter((id) => state.repos.some((repo) => repo.id === id)).length;
   const updateActionBtn = $("btnUpdateAll");
-  updateActionBtn.textContent = selectedCount > 0 ? "Update Selected" : "Update All";
+  const removeSelectedBtn = $("btnRemoveSelected");
+  updateActionBtn.textContent = selectedCount > 0 ? `Update Selected (${selectedCount})` : "Update All";
   updateActionBtn.title = selectedCount > 0 ? `Update selected projects (${selectedCount})` : "Update all projects";
+  if (removeSelectedBtn) {
+    removeSelectedBtn.disabled = !hasProfile || selectedCount === 0;
+    removeSelectedBtn.textContent =
+      selectedCount > 0 ? `Remove Selected (${selectedCount})` : "Remove Selected";
+    removeSelectedBtn.title =
+      selectedCount > 0
+        ? `Remove selected projects (${selectedCount})`
+        : hasProfile
+          ? "Select one or more projects first."
+          : "Add an instance in Options first.";
+  }
   if (!hasProfile) {
     updateActionBtn.textContent = "Update All";
     updateActionBtn.title = "Add an instance in Options first.";
+    if (removeSelectedBtn) {
+      removeSelectedBtn.textContent = "Remove Selected";
+    }
   }
 
   const visibleRepos = sortedFilteredRepos();
@@ -1792,6 +2056,14 @@ async function addRepo(urlOverride = null, modeOverride = null, label = "") {
     return false;
   }
 
+  if (isSuperWoWUrl(url)) {
+    const proceed = await confirmSuperWoWRisk();
+    if (!proceed) {
+      log("Add cancelled for SuperWoW.");
+      return false;
+    }
+  }
+
   log(label ? `Adding ${label}…` : "Adding repo…");
   return await withBusy(async () => {
     try {
@@ -1914,6 +2186,7 @@ $("btnRefresh").addEventListener("click", () => {
   void refreshAll({ forceCheck: true });
 });
 $("btnUpdateAll").addEventListener("click", handleUpdateAction);
+$("btnRemoveSelected").addEventListener("click", openRemoveSelectedDialog);
 $("btnAddInstance").addEventListener("click", async () => {
   await addInstance();
 });
@@ -1922,6 +2195,7 @@ $("selectAllRepos").addEventListener("change", toggleSelectAllVisible);
 
 $("tabOptions").addEventListener("click", () => setTab("options"));
 $("tabLogs").addEventListener("click", () => setTab("logs"));
+$("tabAbout").addEventListener("click", () => setTab("about"));
 
 $("optSymlinks").addEventListener("change", saveOptionFlags);
 $("optXattr").addEventListener("change", saveOptionFlags);
@@ -1929,6 +2203,16 @@ $("optClock12").addEventListener("change", saveOptionFlags);
 $("btnConnectGithub").addEventListener("click", connectGithub);
 $("btnSaveGithubToken").addEventListener("click", saveGithubToken);
 $("btnClearGithubToken").addEventListener("click", clearGithubToken);
+$("btnAboutRefresh").addEventListener("click", () => {
+  void refreshAboutInfo({ force: true });
+});
+$("btnAboutGithub").addEventListener("click", async () => {
+  await openUrl(WUDDLE_REPO_URL);
+});
+$("superwowGuideLink")?.addEventListener("click", async (ev) => {
+  ev.preventDefault();
+  await openUrl("https://github.com/pepopo978/SuperwowInstallation");
+});
 
 const dlgAdd = $("dlgAdd");
 $("btnAddOpen").addEventListener("click", () => dlgAdd.showModal());
@@ -1956,6 +2240,10 @@ $("btnRemoveConfirm").addEventListener("click", async (ev) => {
   ev.preventDefault();
   await confirmRemove();
 });
+$("btnRemoveSelectedConfirm").addEventListener("click", async (ev) => {
+  ev.preventDefault();
+  await confirmRemoveSelected();
+});
 $("btnRemoveInstanceConfirm").addEventListener("click", async (ev) => {
   ev.preventDefault();
   await confirmRemoveInstance();
@@ -1981,6 +2269,7 @@ document.querySelectorAll(".filter-btn[data-log-level]").forEach((btn) => {
 
 bindDialogOutsideToClose(dlgAdd);
 bindDialogOutsideToClose($("dlgRemove"));
+bindDialogOutsideToClose($("dlgRemoveSelected"));
 bindDialogOutsideToClose($("dlgRemoveInstance"));
 
 document.addEventListener("click", (ev) => {
@@ -2014,6 +2303,7 @@ renderAddPresets();
 renderBusy();
 renderLog();
 renderGithubAuth(null);
+renderAboutInfo();
 void refreshGithubAuthStatus();
 log("Ready.");
 refreshAll();

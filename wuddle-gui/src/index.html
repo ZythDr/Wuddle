@@ -36,6 +36,14 @@
             </svg>
             <span class="sr-only">Logs</span>
           </button>
+          <button id="tabAbout" class="tab-btn tab-icon-btn" title="About" aria-label="About">
+            <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 10v6" />
+              <path d="M12 7h.01" />
+            </svg>
+            <span class="sr-only">About</span>
+          </button>
         </div>
       </div>
     </header>
@@ -87,6 +95,9 @@
 
       <div class="project-footer">
         <div class="row align-center footer-tools">
+          <div class="row tight align-center footer-left-actions">
+            <button id="btnRemoveSelected" class="btn danger" disabled>Remove Selected</button>
+          </div>
           <div class="row tight align-center footer-actions">
             <div id="lastChecked" class="hint">Last checked: never</div>
             <button id="btnRetryFailed" class="btn">Retry Failed</button>
@@ -212,13 +223,104 @@
       <pre id="log" class="log log-panel"></pre>
     </section>
 
+    <section id="panelAbout" class="card panel hidden">
+      <div class="row space-between align-center">
+        <div>
+          <div class="section-title">About</div>
+          <div class="hint">Detected runtime and platform information for troubleshooting.</div>
+        </div>
+        <div class="row tight">
+          <button id="btnAboutRefresh" class="btn" type="button">Refresh details</button>
+          <button id="btnAboutGithub" class="btn" type="button">Open Wuddle on GitHub</button>
+        </div>
+      </div>
+
+      <div class="about-grid">
+        <section class="settings-card">
+          <div class="settings-head">Application</div>
+          <div class="about-list">
+            <div class="about-row">
+              <div class="about-key">App version</div>
+              <div id="aboutAppVersion" class="about-value about-mono">—</div>
+            </div>
+            <div class="about-row">
+              <div class="about-key">Package name</div>
+              <div id="aboutPackageName" class="about-value about-mono">—</div>
+            </div>
+            <div class="about-row">
+              <div class="about-key">Portable mode</div>
+              <div id="aboutPortableMode" class="about-value">—</div>
+            </div>
+            <div class="about-row">
+              <div class="about-key">AppImage runtime</div>
+              <div id="aboutAppImage" class="about-value">—</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-card">
+          <div class="settings-head">Platform</div>
+          <div class="about-list">
+            <div class="about-row">
+              <div class="about-key">Operating system</div>
+              <div id="aboutOs" class="about-value">—</div>
+            </div>
+            <div class="about-row">
+              <div class="about-key">CPU architecture</div>
+              <div id="aboutArch" class="about-value about-mono">—</div>
+            </div>
+            <div class="about-row">
+              <div class="about-key">Session type</div>
+              <div id="aboutSessionType" class="about-value">—</div>
+            </div>
+            <div class="about-row">
+              <div class="about-key">Launch mode</div>
+              <div id="aboutLaunchMode" class="about-value">—</div>
+            </div>
+            <div class="about-row">
+              <div class="about-key">Window backend</div>
+              <div id="aboutWindowBackend" class="about-value">—</div>
+            </div>
+            <div class="about-row">
+              <div class="about-key">Desktop/session</div>
+              <div id="aboutDesktopEnv" class="about-value">—</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-card">
+          <div class="settings-head">Runtime</div>
+          <div class="about-list">
+            <div class="about-row">
+              <div class="about-key">WebView runtime</div>
+              <div id="aboutWebviewRuntime" class="about-value">—</div>
+            </div>
+            <div class="about-row">
+              <div class="about-key">GDK backend hint</div>
+              <div id="aboutGdkBackend" class="about-value about-mono">—</div>
+            </div>
+            <div class="about-row">
+              <div class="about-key">Wayland display</div>
+              <div id="aboutWaylandDisplay" class="about-value about-mono">—</div>
+            </div>
+            <div class="about-row">
+              <div class="about-key">X11 display</div>
+              <div id="aboutX11Display" class="about-value about-mono">—</div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div id="aboutStatus" class="hint about-status">Loading runtime details…</div>
+    </section>
+
     <!-- Add modal -->
     <dialog id="dlgAdd" class="dialog">
       <form method="dialog" class="dialog-inner">
         <div class="dialog-head">
           <div>
             <div class="dialog-title">Add a repo</div>
-            <div class="hint">Paste a repo URL (or /releases). Wuddle will detect the rest.</div>
+            <div class="hint">Quick-add from the mods listed, or add your own Git repo URL below.</div>
           </div>
           <button id="btnAddCloseX" class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
         </div>
@@ -230,7 +332,7 @@
 
         <label class="field">
           <div class="label">Repo URL</div>
-          <input id="repoUrl" placeholder="https://gitea.com/avitasia/nampower" />
+          <input id="repoUrl" placeholder="(e.g. https://gitea.com/avitasia/nampower)" />
         </label>
 
         <details class="advanced">
@@ -250,6 +352,49 @@
         <div class="dialog-actions">
           <button class="btn ghost" value="cancel">Cancel</button>
           <button id="btnAdd" class="btn primary" value="ok">Add</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- SuperWoW risk warning modal -->
+    <dialog id="dlgSuperwowRisk" class="dialog">
+      <form method="dialog" class="dialog-inner">
+        <div class="dialog-head">
+          <div>
+            <div class="dialog-title">SuperWoW Anti-Virus Warning!</div>
+            <div class="hint">
+              SuperWoW is known to false-flag as malware in most antivirus software.
+            </div>
+          </div>
+          <button class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
+        </div>
+
+        <div class="field">
+          <div class="hint risk-note">
+            Installing SuperWoW will almost certainly trigger your anti-virus software, and it will likely seem like
+            <code>Wuddle.exe</code> is responsible (since Wuddle is what downloads and installs it). This happens
+            because SuperWoW itself is known to trigger false-positives in many anti-virus products.
+          </div>
+          <div class="hint risk-note">
+            For this reason, you have three options:
+          </div>
+          <ol class="risk-list">
+            <li>
+              Temporarily disable your anti-virus and add your WoW directory to AV exclusions
+              (Follow step 1 &amp; 2 in
+              <button id="superwowGuideLink" class="inline-link" type="button">Pepopo978's guide</button>), so
+              <code>SuperWoWhook.dll</code> is not removed after install.
+            </li>
+            <li>
+              Allow the false-positive threat for Wuddle/SuperWoW so you do not need to disable AV for future SuperWoW updates.
+            </li>
+            <li>Do not install SuperWoW.</li>
+          </ol>
+        </div>
+
+        <div class="dialog-actions">
+          <button class="btn ghost" value="cancel">Cancel</button>
+          <button class="btn warn" value="ok">Continue</button>
         </div>
       </form>
     </dialog>
@@ -278,6 +423,35 @@
         <div class="dialog-actions">
           <button class="btn ghost" value="cancel">Cancel</button>
           <button id="btnRemoveConfirm" class="btn danger" value="ok">Remove</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Remove selected modal -->
+    <dialog id="dlgRemoveSelected" class="dialog">
+      <form method="dialog" class="dialog-inner">
+        <div class="dialog-head">
+          <div>
+            <div class="dialog-title">Remove Selected Projects</div>
+            <div class="hint">Choose whether to remove only from Wuddle, or also delete local installed files.</div>
+          </div>
+          <button class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
+        </div>
+
+        <div class="field">
+          <div class="label">Selection</div>
+          <div id="removeSelectedCount" class="hint"></div>
+          <div id="removeSelectedNames" class="hint"></div>
+        </div>
+
+        <label class="check remove-check">
+          <input id="removeSelectedLocalFiles" type="checkbox" />
+          <span>Remove local files</span>
+        </label>
+
+        <div class="dialog-actions">
+          <button class="btn ghost" value="cancel">Cancel</button>
+          <button id="btnRemoveSelectedConfirm" class="btn danger" value="ok">Remove Selected</button>
         </div>
       </form>
     </dialog>

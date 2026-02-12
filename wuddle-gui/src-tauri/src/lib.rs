@@ -44,6 +44,26 @@ struct GithubAuthStatus {
     env_token_present: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AboutInfo {
+    app_version: String,
+    package_name: String,
+    os: String,
+    os_family: String,
+    arch: String,
+    session_type: Option<String>,
+    launch_mode: String,
+    window_backend: String,
+    desktop_env: Option<String>,
+    webview_runtime: String,
+    gdk_backend: Option<String>,
+    wayland_display: Option<String>,
+    x11_display: Option<String>,
+    portable_mode: bool,
+    app_image_runtime: bool,
+}
+
 const KEYCHAIN_SERVICE: &str = "wuddle";
 const KEYCHAIN_ACCOUNT_GITHUB_TOKEN: &str = "github_token";
 const KEYCHAIN_ACCOUNT_PROBE: &str = "github_token_probe";
@@ -329,6 +349,83 @@ fn normalize_optional_wow_dir(wow_dir: Option<String>) -> Option<String> {
     wow_dir
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn env_bool(name: &str) -> bool {
+    env_non_empty(name)
+        .map(|v| {
+            let n = v.to_ascii_lowercase();
+            n == "1" || n == "true" || n == "yes" || n == "on"
+        })
+        .unwrap_or(false)
+}
+
+fn format_launch_mode(launch_mode: Option<&str>, fallback: bool, window_backend: &str) -> String {
+    if fallback || matches!(launch_mode, Some("x11-fallback")) {
+        return "X11 fallback (Wayland start failed)".to_string();
+    }
+    if matches!(launch_mode, Some("wayland-primary")) {
+        return "Wayland primary".to_string();
+    }
+    if let Some(mode) = launch_mode {
+        let cleaned = mode.trim();
+        if !cleaned.is_empty() {
+            return cleaned.to_string();
+        }
+    }
+    format!("Direct ({})", window_backend)
+}
+
+fn webview_runtime_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "WebView2"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "WKWebView"
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        "WebKitGTK"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    {
+        "Unknown"
+    }
+}
+
+fn detect_window_backend(
+    session_type: Option<&str>,
+    wayland_display: Option<&str>,
+    x11_display: Option<&str>,
+    gdk_backend: Option<&str>,
+) -> String {
+    if let Some(session) = session_type {
+        let normalized = session.trim().to_ascii_lowercase();
+        if !normalized.is_empty() {
+            return normalized;
+        }
+    }
+    if let Some(backend) = gdk_backend {
+        let normalized = backend.trim().to_ascii_lowercase();
+        if !normalized.is_empty() {
+            return normalized;
+        }
+    }
+    match (wayland_display.is_some(), x11_display.is_some()) {
+        (true, true) => "wayland+x11".to_string(),
+        (true, false) => "wayland".to_string(),
+        (false, true) => "x11".to_string(),
+        _ => "unknown".to_string(),
+    }
 }
 
 fn install_options(use_symlinks: Option<bool>, set_xattr_comment: Option<bool>) -> InstallOptions {
@@ -708,6 +805,50 @@ async fn wuddle_github_auth_clear_token() -> Result<(), String> {
     .await
 }
 
+#[tauri::command]
+fn wuddle_about_info() -> AboutInfo {
+    let session_type = env_non_empty("XDG_SESSION_TYPE");
+    let wayland_display = env_non_empty("WAYLAND_DISPLAY");
+    let x11_display = env_non_empty("DISPLAY");
+    let gdk_backend = env_non_empty("GDK_BACKEND");
+    let launch_mode_raw = env_non_empty("WUDDLE_LAUNCH_MODE");
+    let wayland_fallback = env_bool("WUDDLE_WAYLAND_FALLBACK");
+    let desktop_env = env_non_empty("XDG_CURRENT_DESKTOP")
+        .or_else(|| env_non_empty("XDG_SESSION_DESKTOP"))
+        .or_else(|| env_non_empty("DESKTOP_SESSION"));
+
+    let window_backend = detect_window_backend(
+        session_type.as_deref(),
+        wayland_display.as_deref(),
+        x11_display.as_deref(),
+        gdk_backend.as_deref(),
+    );
+    let launch_mode = format_launch_mode(
+        launch_mode_raw.as_deref(),
+        wayland_fallback,
+        window_backend.as_str(),
+    );
+
+    AboutInfo {
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        package_name: env!("CARGO_PKG_NAME").to_string(),
+        os: std::env::consts::OS.to_string(),
+        os_family: std::env::consts::FAMILY.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        session_type,
+        launch_mode,
+        window_backend,
+        desktop_env,
+        webview_runtime: webview_runtime_name().to_string(),
+        gdk_backend,
+        wayland_display,
+        x11_display,
+        portable_mode: portable_mode_enabled(),
+        app_image_runtime: std::env::var_os("APPIMAGE").is_some()
+            || std::env::var_os("APPDIR").is_some(),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -740,7 +881,8 @@ pub fn run() {
             wuddle_delete_profile,
             wuddle_github_auth_status,
             wuddle_github_auth_set_token,
-            wuddle_github_auth_clear_token
+            wuddle_github_auth_clear_token,
+            wuddle_about_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
