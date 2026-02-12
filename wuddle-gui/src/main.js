@@ -60,6 +60,7 @@ const CURATED_MOD_PRESETS = [
       "Legacy WoW client mod that brings Dragonflight-style interact key support to Vanilla.",
     longDescription:
       "Legacy WoW client mod for 1.12 that brings a Dragonflight-style interact key workflow to Vanilla, reducing click friction and improving moment-to-moment interaction quality.",
+    recommended: false,
   },
   {
     id: "unitxp_sp3",
@@ -70,6 +71,7 @@ const CURATED_MOD_PRESETS = [
       "Adds camera offset, proper nameplates, improved tab-targeting, LoS/distance checks, and more.",
     longDescription:
       "Adds optional camera offset, proper nameplates (showing only with LoS), improved tab-targeting keybind behavior, LoS and distance checks in Lua, screenshot format options, network tweaks, background notifications, and additional QoL features.",
+    recommended: true,
   },
   {
     id: "nampower",
@@ -80,6 +82,7 @@ const CURATED_MOD_PRESETS = [
       "Reduces cast downtime caused by 1.12 client spell-completion delay, improving effective DPS.",
     longDescription:
       "Addresses a 1.12 client casting flow limitation where follow-up casts wait on round-trip completion feedback. The result is reduced cast downtime and better effective DPS, especially on higher-latency realm routes.",
+    recommended: true,
   },
   {
     id: "superwow",
@@ -92,6 +95,7 @@ const CURATED_MOD_PRESETS = [
       "Client mod for WoW 1.12.1 that fixes engine/client bugs and expands the Lua API used by addons. Some addons require SuperWoW directly, and many others gain improved functionality when it is present.",
     warning:
       "Known issue: SuperWoW will trigger antivirus false-positive alerts on Windows.",
+    recommended: true,
   },
   {
     id: "dxvk_gplasync",
@@ -102,6 +106,7 @@ const CURATED_MOD_PRESETS = [
       "Vulkan translation layer for D3D 8/9/10/11; often improves FPS and smoothness in Vanilla WoW.",
     longDescription:
       "DXVK can massively improve performance in old Direct3D titles (including WoW 1.12) by using Vulkan. This fork includes Async + GPL options aimed at further reducing stutters. Async/GPL behavior is controlled through dxvk.conf, so users can keep default behavior if they prefer.",
+    recommended: true,
   },
   {
     id: "perf_boost",
@@ -111,7 +116,10 @@ const CURATED_MOD_PRESETS = [
     description:
       "Performance optimization DLL for WoW 1.12.1 with advanced render-distance controls.",
     longDescription:
-      "Performance-focused DLL for WoW 1.12.1 intended to improve FPS in crowded areas and raids. Uses advanced render-distance controls. Companion app for settings: https://gitea.com/avitasia/PerfBoostSettings",
+      "Performance-focused DLL for WoW 1.12.1 intended to improve FPS in crowded areas and raids. Uses advanced render-distance controls.",
+    companionLabel: "PerfBoostSettings companion app",
+    companionUrl: "https://gitea.com/avitasia/PerfBoostSettings",
+    recommended: false,
   },
   {
     id: "vanillahelpers",
@@ -122,6 +130,7 @@ const CURATED_MOD_PRESETS = [
       "Helper library for Vanilla WoW with file ops, minimap features, memory/texture upgrades, and morph tools.",
     longDescription:
       "Utility library for WoW 1.12 adding file read/write helpers, minimap blip customization, larger allocator capacity, higher-resolution texture/skin support, and character morph-related functionality.",
+    recommended: true,
   },
 ];
 
@@ -393,7 +402,7 @@ function renderAddPresets() {
         if (!(ev.target instanceof Element)) return;
         if (ev.target.closest(".preset-actions")) return;
         if (ev.target.closest(".preset-title-link")) return;
-        if (ev.target.closest(".preset-expand-icon")) return;
+        if (ev.target.closest(".preset-desc-link")) return;
         togglePresetExpanded(preset);
         renderAddPresets();
       });
@@ -421,7 +430,7 @@ function renderAddPresets() {
 
     const flags = document.createElement("div");
     flags.className = "preset-flags";
-    if (!preset.placeholder) {
+    if (!preset.placeholder && preset.recommended) {
       const recommendedTag = document.createElement("span");
       recommendedTag.className = "preset-flag recommended";
       recommendedTag.textContent = "Recommended";
@@ -442,23 +451,23 @@ function renderAddPresets() {
     desc.className = "preset-desc";
     desc.textContent = expanded && longDescription ? longDescription : shortDescription;
 
+    const companionUrl = String(preset.companionUrl || "").trim();
+    const companionLabel = String(preset.companionLabel || "").trim();
+    if (companionUrl && companionLabel) {
+      const descLink = document.createElement("button");
+      descLink.type = "button";
+      descLink.className = "preset-desc-link";
+      descLink.textContent = companionLabel;
+      descLink.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        await openUrl(companionUrl);
+      });
+      card.appendChild(descLink);
+    }
+
     const meta = document.createElement("div");
     meta.className = "preset-meta";
     meta.textContent = presetMetaText(preset);
-
-    if (canExpand) {
-      const expandIcon = document.createElement("button");
-      expandIcon.type = "button";
-      expandIcon.className = "preset-expand-icon";
-      expandIcon.title = expanded ? "Collapse" : "Expand";
-      expandIcon.textContent = expanded ? "▾" : "▸";
-      expandIcon.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        togglePresetExpanded(preset);
-        renderAddPresets();
-      });
-      card.appendChild(expandIcon);
-    }
 
     const actions = document.createElement("div");
     actions.className = "preset-actions";
@@ -475,11 +484,17 @@ function renderAddPresets() {
       addBtn.textContent = "Add instance first";
       addBtn.disabled = true;
     } else {
-      addBtn.textContent = "Install";
+      addBtn.textContent = "Add";
       addBtn.addEventListener("click", async (ev) => {
         ev.stopPropagation();
+        if (preset.id === "superwow") {
+          const proceed = window.confirm(
+            "SuperWoW is known to trigger antivirus false-positive alerts on some systems.\n\nThis can make Wuddle look suspicious even when the file is legitimate.\n\nDo you want to continue adding SuperWoW?",
+          );
+          if (!proceed) return;
+        }
         const ok = await addRepo(preset.url, preset.mode, preset.name);
-        if (ok) $("dlgAdd").close();
+        if (ok) renderAddPresets();
       });
     }
     addBtn.addEventListener("click", (ev) => ev.stopPropagation());

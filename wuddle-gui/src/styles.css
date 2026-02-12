@@ -953,11 +953,12 @@ dialog.dialog::backdrop {
 .preset-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  justify-content: flex-start;
+  gap: 8px;
   grid-column: 1;
   min-width: 0;
-  padding-right: 28px;
+  width: fit-content;
+  max-width: 100%;
 }
 
 .preset-title {
@@ -977,6 +978,11 @@ dialog.dialog::backdrop {
   font-weight: 700;
   cursor: pointer;
   text-align: left;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .preset-card.installed .preset-title-link {
@@ -1007,12 +1013,32 @@ dialog.dialog::backdrop {
   text-overflow: ellipsis;
 }
 
+.preset-desc-link {
+  grid-column: 1;
+  border: none;
+  background: transparent;
+  color: var(--primary);
+  font-size: 12px;
+  text-align: left;
+  padding: 0;
+  margin-top: -2px;
+  width: fit-content;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.preset-desc-link:hover {
+  color: #60a5fa;
+}
+
 .preset-flags {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  flex: 0 0 auto;
 }
 
 .preset-flag {
@@ -1053,29 +1079,6 @@ dialog.dialog::backdrop {
   padding: 0 10px;
   border-radius: 10px;
   white-space: nowrap;
-}
-
-.preset-expand-icon {
-  position: absolute;
-  top: 8px;
-  right: 10px;
-  width: 22px;
-  height: 22px;
-  border: 1px solid var(--btnBorder);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  cursor: pointer;
-}
-
-.preset-expand-icon:hover {
-  background: rgba(255, 255, 255, 0.09);
-  color: var(--text);
 }
 
 .preset-card.expanded .preset-desc {
