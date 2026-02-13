@@ -31,14 +31,3 @@ Wuddle shows an in-app warning before adding SuperWoW from Quick Add so users kn
 - Linux: AppImage
 - Windows: portable ZIP (`Wuddle.exe`, no installer)
 
-## Project Structure
-
-- `wuddle-engine/`: Rust core engine
-- `wuddle-gui/`: Tauri GUI (HTML/CSS/JS + Rust host)
-
-## Local Development
-
-```bash
-cd wuddle-gui
-npm ci
-npm run tauri dev
