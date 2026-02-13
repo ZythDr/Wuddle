@@ -6,6 +6,7 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+*.code-workspace
 
 # Logs
 *.log
@@ -40,4 +41,3 @@ wuddle-gui/src-tauri/gen/schemas
 *.dmg
 *.zip
 *.tar.gz
-
