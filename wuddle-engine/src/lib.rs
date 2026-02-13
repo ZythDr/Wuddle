@@ -3,9 +3,12 @@ use reqwest::Client;
 use std::{
     collections::HashSet,
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
+    sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+use url::Url;
 
 mod db;
 mod forge;
@@ -40,6 +43,7 @@ pub struct UpdatePlan {
     pub asset_name: String,
     pub asset_url: String,
     pub asset_size: Option<u64>,
+    pub asset_sha256: Option<String>,
 
     pub repair_needed: bool,
     pub not_modified: bool,
@@ -50,6 +54,37 @@ pub struct UpdatePlan {
 pub struct Engine {
     db: Db,
     client: Client,
+}
+
+static GITHUB_TOKEN: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn github_token_state() -> &'static Mutex<Option<String>> {
+    GITHUB_TOKEN.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_github_token(token: Option<String>) {
+    let normalized = token
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    if let Ok(mut guard) = github_token_state().lock() {
+        *guard = normalized;
+    }
+}
+
+pub fn github_token() -> Option<String> {
+    if let Ok(guard) = github_token_state().lock() {
+        if let Some(token) = guard.clone() {
+            let token = token.trim().to_string();
+            if !token.is_empty() {
+                return Some(token);
+            }
+        }
+    }
+    std::env::var("WUDDLE_GITHUB_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 impl Engine {
@@ -114,6 +149,7 @@ impl Engine {
             asset_name: "".to_string(),
             asset_url: "".to_string(),
             asset_size: None,
+            asset_sha256: None,
             repair_needed: false,
             not_modified: false,
             applied: false,
@@ -135,18 +171,13 @@ impl Engine {
     }
 
     fn has_github_token() -> bool {
-        std::env::var("WUDDLE_GITHUB_TOKEN")
-            .ok()
-            .or_else(|| std::env::var("GITHUB_TOKEN").ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .is_some()
+        github_token().is_some()
     }
 
     fn rate_limited_plan(r: &Repo, reset_epoch: i64) -> UpdatePlan {
         let mut p = Self::blank_plan(r);
         p.error = Some(format!(
-            "GitHub API rate-limited for {} until unix {}. Set WUDDLE_GITHUB_TOKEN/GITHUB_TOKEN.",
+            "GitHub API rate-limited for {} until unix {}. Add a GitHub token in Wuddle settings to raise limits.",
             r.host, reset_epoch
         ));
         p
@@ -349,6 +380,7 @@ impl Engine {
                 p.asset_id = r.installed_asset_id.clone().unwrap_or_default();
                 p.asset_name = r.installed_asset_name.clone().unwrap_or_default();
                 p.asset_size = r.installed_asset_size.and_then(|n| u64::try_from(n).ok());
+                p.asset_sha256 = None;
                 p.error = None;
                 if can_repair {
                     p.asset_url = r.installed_asset_url.clone().unwrap_or_default();
@@ -367,7 +399,14 @@ impl Engine {
         };
 
         let mode = r.mode.clone();
-        let asset = Self::pick_asset(&rel, mode.clone(), r.asset_regex.as_deref())?;
+        let asset = match Self::pick_asset(&rel, mode.clone(), r.asset_regex.as_deref()) {
+            Ok(asset) => asset,
+            Err(e) => {
+                let mut p = Self::blank_plan(r);
+                p.error = Some(e.to_string());
+                return Ok(p);
+            }
+        };
         let latest_tag = Self::effective_latest_label(&rel.tag, &asset.name);
         let asset_id = Self::effective_asset_id(&asset);
         let asset_size_i64 = Self::size_u64_to_i64(asset.size);
@@ -395,6 +434,7 @@ impl Engine {
                 "".to_string()
             },
             asset_size: asset.size,
+            asset_sha256: asset.sha256.clone(),
             repair_needed,
             not_modified: false,
             applied: false,
@@ -462,9 +502,14 @@ impl Engine {
             anyhow::bail!("No assets found in latest release {}", rel.tag);
         }
 
+        let is_allowed = |a: &ReleaseAsset| Self::is_asset_allowed(a, &mode);
+
         if let Some(rx) = asset_regex {
             let re = regex::Regex::new(rx)?;
-            if let Some(a) = assets.iter().find(|a| re.is_match(&a.name)) {
+            if let Some(a) = assets
+                .iter()
+                .find(|a| re.is_match(&a.name) && is_allowed(a))
+            {
                 return Ok(a.clone());
             }
         }
@@ -477,7 +522,7 @@ impl Engine {
         if prefer_zip {
             if let Some(a) = assets
                 .iter()
-                .find(|a| a.name.to_lowercase().ends_with(".zip"))
+                .find(|a| a.name.to_lowercase().ends_with(".zip") && is_allowed(a))
             {
                 return Ok(a.clone());
             }
@@ -486,13 +531,188 @@ impl Engine {
         if matches!(mode, InstallMode::Dll) {
             if let Some(a) = assets
                 .iter()
-                .find(|a| a.name.to_lowercase().ends_with(".dll"))
+                .find(|a| a.name.to_lowercase().ends_with(".dll") && is_allowed(a))
             {
                 return Ok(a.clone());
             }
         }
 
-        Ok(assets[0].clone())
+        if let Some(a) = assets.iter().find(|a| is_allowed(a)) {
+            return Ok(a.clone());
+        }
+
+        anyhow::bail!(
+            "No safe/compatible release asset found for mode {} in {}.",
+            mode.as_str(),
+            rel.tag
+        )
+    }
+
+    fn asset_extension(name: &str) -> Option<String> {
+        Path::new(name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.trim().to_ascii_lowercase())
+            .filter(|ext| !ext.is_empty())
+    }
+
+    fn is_blocked_extension(ext: &str) -> bool {
+        matches!(
+            ext,
+            "exe"
+                | "msi"
+                | "msix"
+                | "appx"
+                | "bat"
+                | "cmd"
+                | "ps1"
+                | "vbs"
+                | "js"
+                | "jse"
+                | "wsf"
+                | "wsh"
+                | "scr"
+                | "com"
+                | "sh"
+                | "run"
+                | "apk"
+                | "jar"
+                | "py"
+                | "pl"
+                | "rb"
+                | "dmg"
+                | "pkg"
+        )
+    }
+
+    fn is_asset_allowed(asset: &ReleaseAsset, mode: &InstallMode) -> bool {
+        let name = asset.name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        let ext = match Self::asset_extension(name) {
+            Some(ext) => ext,
+            None => return matches!(mode, InstallMode::Raw),
+        };
+        if Self::is_blocked_extension(&ext) {
+            return false;
+        }
+        match mode {
+            InstallMode::Addon | InstallMode::Mixed => ext == "zip",
+            InstallMode::Dll => ext == "dll" || ext == "zip",
+            InstallMode::Auto => ext == "dll" || ext == "zip",
+            InstallMode::Raw => true,
+        }
+    }
+
+    fn host_matches_or_subdomain(host: &str, trusted: &str) -> bool {
+        host.eq_ignore_ascii_case(trusted)
+            || host
+                .to_ascii_lowercase()
+                .ends_with(&format!(".{}", trusted.to_ascii_lowercase()))
+    }
+
+    fn validate_asset_url(plan: &UpdatePlan) -> Result<()> {
+        let parsed = Url::parse(&plan.asset_url)?;
+        if parsed.scheme() != "https" {
+            anyhow::bail!("Blocked non-HTTPS asset URL: {}", plan.asset_url);
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("Asset URL missing host"))?;
+
+        let mut trusted_hosts = vec![plan.host.as_str()];
+        if plan.forge.eq_ignore_ascii_case("github") {
+            trusted_hosts.extend([
+                "github.com",
+                "objects.githubusercontent.com",
+                "release-assets.githubusercontent.com",
+                "codeload.github.com",
+            ]);
+        }
+
+        if trusted_hosts
+            .iter()
+            .any(|h| Self::host_matches_or_subdomain(host, h))
+        {
+            return Ok(());
+        }
+
+        anyhow::bail!(
+            "Blocked asset host '{}' (not trusted for {}/{})",
+            host,
+            plan.owner,
+            plan.name
+        )
+    }
+
+    fn looks_like_zip_bytes(head: &[u8]) -> bool {
+        head.starts_with(b"PK\x03\x04")
+            || head.starts_with(b"PK\x05\x06")
+            || head.starts_with(b"PK\x07\x08")
+    }
+
+    fn looks_like_dll_bytes(head: &[u8]) -> bool {
+        head.starts_with(b"MZ")
+    }
+
+    fn validate_downloaded_asset(path: &Path, plan: &UpdatePlan) -> Result<()> {
+        if !path.exists() {
+            anyhow::bail!("Downloaded asset not found: {:?}", path);
+        }
+
+        let file_len = fs::metadata(path)?.len();
+        if let Some(expected) = plan.asset_size {
+            if file_len != expected {
+                anyhow::bail!(
+                    "Downloaded asset size mismatch for {}: expected {}, got {}",
+                    plan.asset_name,
+                    expected,
+                    file_len
+                );
+            }
+        }
+
+        let lower = plan.asset_name.to_ascii_lowercase();
+        if !(lower.ends_with(".zip") || lower.ends_with(".dll")) {
+            return Ok(());
+        }
+
+        let mut f = fs::File::open(path)?;
+        let mut head = [0u8; 4];
+        let n = f.read(&mut head)?;
+        let slice = &head[..n];
+
+        if lower.ends_with(".zip") && !Self::looks_like_zip_bytes(slice) {
+            anyhow::bail!(
+                "Downloaded ZIP asset failed signature check: {}",
+                plan.asset_name
+            );
+        }
+        if lower.ends_with(".dll") && !Self::looks_like_dll_bytes(slice) {
+            anyhow::bail!(
+                "Downloaded DLL asset failed signature check: {}",
+                plan.asset_name
+            );
+        }
+        Ok(())
+    }
+
+    fn verify_asset_digest(path: &Path, expected_sha256: Option<&str>) -> Result<()> {
+        let expected = match expected_sha256 {
+            Some(v) if !v.trim().is_empty() => v.trim().to_ascii_lowercase(),
+            _ => return Ok(()),
+        };
+        let actual = util::sha256_file_hex(path)?;
+        if actual != expected {
+            anyhow::bail!(
+                "SHA-256 mismatch for {:?} (expected {}, got {})",
+                path.file_name().unwrap_or_default(),
+                expected,
+                actual
+            );
+        }
+        Ok(())
     }
 
     fn sanitize_for_fs(s: &str) -> String {
@@ -524,14 +744,15 @@ impl Engine {
         Ok(dir)
     }
 
-    async fn download_asset_to(&self, url: &str, dest: &Path) -> Result<()> {
+    async fn download_asset_to(&self, plan: &UpdatePlan, dest: &Path) -> Result<()> {
+        Self::validate_asset_url(plan)?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         let bytes = self
             .client
-            .get(url)
+            .get(&plan.asset_url)
             .send()
             .await?
             .error_for_status()?
@@ -827,14 +1048,22 @@ impl Engine {
             .to_string();
         let asset_path = release_dir.join(asset_name_fs);
 
-        let should_download = match (asset_path.metadata().ok(), plan.asset_size) {
+        Self::validate_asset_url(plan)?;
+
+        let mut should_download = match (asset_path.metadata().ok(), plan.asset_size) {
             (Some(meta), Some(expected)) => meta.len() != expected,
             (Some(_), None) => false,
             (None, _) => true,
         };
-        if should_download {
-            self.download_asset_to(&plan.asset_url, &asset_path).await?;
+        if !should_download && plan.asset_sha256.is_some() {
+            should_download =
+                Self::verify_asset_digest(&asset_path, plan.asset_sha256.as_deref()).is_err();
         }
+        if should_download {
+            self.download_asset_to(plan, &asset_path).await?;
+        }
+        Self::validate_downloaded_asset(&asset_path, plan)?;
+        Self::verify_asset_digest(&asset_path, plan.asset_sha256.as_deref())?;
 
         let comment = format!(
             "{}/{} {} - managed by Wuddle",
@@ -924,9 +1153,10 @@ impl Engine {
             current: Self::normalized_current_version(&r),
             latest,
             asset_id: Self::effective_asset_id(&asset),
-            asset_name: asset.name,
-            asset_url: asset.download_url,
+            asset_name: asset.name.clone(),
+            asset_url: asset.download_url.clone(),
             asset_size: asset.size,
+            asset_sha256: asset.sha256.clone(),
             repair_needed: false,
             not_modified: false,
             applied: false,

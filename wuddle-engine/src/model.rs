@@ -77,4 +77,5 @@ pub struct ReleaseAsset {
     pub download_url: String,
     pub size: Option<u64>,
     pub content_type: Option<String>,
+    pub sha256: Option<String>,
 }

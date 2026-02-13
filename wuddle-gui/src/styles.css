@@ -456,7 +456,6 @@ body.busy {
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   -webkit-overflow-scrolling: touch;
-  contain: layout paint;
 }
 
 .projects-tools {

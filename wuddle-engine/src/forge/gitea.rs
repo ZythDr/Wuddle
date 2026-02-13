@@ -61,6 +61,7 @@ pub async fn latest_release(
             download_url: a.browser_download_url,
             size: a.size,
             content_type: None,
+            sha256: None,
         })
         .collect();
 

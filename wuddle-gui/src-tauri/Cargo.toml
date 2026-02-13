@@ -1,6 +1,6 @@
 [package]
 name = "wuddle-gui"
-version = "1.0.4"
+version = "1.0.6"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"

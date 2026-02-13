@@ -754,15 +754,7 @@ function renderAboutInfo() {
     .join(" ");
   $("aboutOs").textContent = osText;
   $("aboutArch").textContent = aboutValue(info.arch, "Unknown");
-  $("aboutSessionType").textContent = aboutValue(info.sessionType, "Unknown");
-  $("aboutLaunchMode").textContent = aboutValue(info.launchMode, "Unknown");
-  $("aboutWindowBackend").textContent = aboutValue(info.windowBackend, "Unknown");
-  $("aboutDesktopEnv").textContent = aboutValue(info.desktopEnv, "Unknown");
-
   $("aboutWebviewRuntime").textContent = aboutValue(info.webviewRuntime, "Unknown");
-  $("aboutGdkBackend").textContent = aboutValue(info.gdkBackend, "Not set");
-  $("aboutWaylandDisplay").textContent = aboutValue(info.waylandDisplay, "Not set");
-  $("aboutX11Display").textContent = aboutValue(info.x11Display, "Not set");
 }
 
 async function refreshAboutInfo({ force = false } = {}) {
@@ -1381,7 +1373,10 @@ function positionOpenMenu() {
 
   let top = wrapRect.bottom + 6;
   if (top + menuRect.height > window.innerHeight - margin) {
-    top = Math.max(margin, window.innerHeight - menuRect.height - margin);
+    top = wrapRect.top - menuRect.height - 6;
+    if (top < margin) {
+      top = Math.max(margin, window.innerHeight - menuRect.height - margin);
+    }
   }
 
   menu.style.left = `${left}px`;
@@ -1403,16 +1398,8 @@ async function openUrl(url) {
   }
   try {
     await safeInvoke("plugin:opener|open_url", { url: target });
-    return;
-  } catch (firstErr) {
-    try {
-      await safeInvoke("plugin:opener|open_url", { url: target, with: null });
-      return;
-    } catch (secondErr) {
-      const msg1 = firstErr?.message || String(firstErr);
-      const msg2 = secondErr?.message || String(secondErr);
-      log(`ERROR open url: ${msg1} (fallback failed: ${msg2})`);
-    }
+  } catch (err) {
+    log(`ERROR open url: ${err?.message || String(err)}`);
   }
 }
 
@@ -1423,16 +1410,15 @@ async function openPath(path) {
     return;
   }
   try {
-    // reveal_item_in_dir is available via opener:default and does not need path scope config.
+    // reveal_item_in_dir does not require filesystem scope entries like open_path does.
     await safeInvoke("plugin:opener|reveal_item_in_dir", { paths: [target] });
-    return;
   } catch (revealErr) {
     try {
-      await safeInvoke("plugin:opener|open_path", { path: target, with: null });
+      await safeInvoke("plugin:opener|open_path", { path: target });
     } catch (openErr) {
-      const first = revealErr?.message || String(revealErr);
-      const second = openErr?.message || String(openErr);
-      log(`ERROR open dir: ${first} (fallback failed: ${second})`);
+      const r = revealErr?.message || String(revealErr);
+      const o = openErr?.message || String(openErr);
+      log(`ERROR open dir: ${r} (fallback failed: ${o})`);
     }
   }
 }

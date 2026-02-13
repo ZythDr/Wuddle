@@ -18,12 +18,30 @@ struct GhAsset {
     browser_download_url: String,
     size: Option<u64>,
     content_type: Option<String>,
+    digest: Option<String>,
 }
 
 pub struct GitHub;
 
 fn compact_body(body: &str) -> String {
     body.replace('\n', " ").trim().chars().take(220).collect()
+}
+
+fn parse_sha256_digest(raw: Option<&str>) -> Option<String> {
+    let digest = raw?.trim();
+    if digest.is_empty() {
+        return None;
+    }
+    let hex = digest
+        .strip_prefix("sha256:")
+        .or_else(|| digest.strip_prefix("SHA256:"))
+        .unwrap_or(digest)
+        .trim()
+        .to_ascii_lowercase();
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(hex)
 }
 
 impl GitHub {
@@ -41,11 +59,7 @@ impl GitHub {
             .header("User-Agent", "wuddle-engine")
             .header("Accept", "application/vnd.github+json");
 
-        let token = std::env::var("WUDDLE_GITHUB_TOKEN")
-            .ok()
-            .or_else(|| std::env::var("GITHUB_TOKEN").ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        let token = crate::github_token();
         if let Some(token) = token {
             req = req.bearer_auth(token);
         }
@@ -87,7 +101,7 @@ impl GitHub {
                 .to_string();
             let body = compact_body(&resp.text().await.unwrap_or_default());
             anyhow::bail!(
-                "GitHub API rate-limited or forbidden (HTTP {}, remaining {}, reset {}). {} Set WUDDLE_GITHUB_TOKEN (or GITHUB_TOKEN) to raise limits.",
+                "GitHub API rate-limited or forbidden (HTTP {}, remaining {}, reset {}). {} Add a GitHub token in Wuddle settings to raise limits.",
                 status,
                 remaining,
                 reset,
@@ -111,6 +125,7 @@ impl GitHub {
                 download_url: a.browser_download_url,
                 size: a.size,
                 content_type: a.content_type,
+                sha256: parse_sha256_digest(a.digest.as_deref()),
             })
             .collect();
 
