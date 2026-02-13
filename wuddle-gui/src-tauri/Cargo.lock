@@ -5951,7 +5951,7 @@ dependencies = [
 
 [[package]]
 name = "wuddle-gui"
-version = "1.0.2"
+version = "1.0.4"
 dependencies = [
  "dirs 5.0.1",
  "keyring",
