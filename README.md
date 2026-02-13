@@ -3,6 +3,8 @@
 Wuddle is a desktop app that simplifies WoW DLL mods management, primarily for the Vanilla 1.12.1 client. 
 
 A user-friendly app for installing DLL mods and keeping them up-to-date (checks for new Releases), Wuddle will also install companion addons if they're bundled with the DLL mod's download asset.
+> [!WARNING]
+> Please scroll down and read the Important Note before downloading.
 
 <img width="1120" height="805" alt="image" src="https://github.com/user-attachments/assets/698f2f7b-0c4b-49be-8aa3-177431fad1de" />
 
@@ -27,6 +29,15 @@ While Wuddle itself is not a malicious app of any kind, the actions it performs 
 I don't think I can ever make it not get at least a few false-positives or appearing suspicious to malware scanners.
 Wuddle itself shouldn't trigger any warnings in Windows Defender unless SuperWoW is installed through it.  
 This will make Defender or any other anti-virus software pinpoint Wuddle.exe as the culprit, since Wuddle is downloading and installing the client mod to your WoW directory.
+
+For transparency, here are VirusTotal + Hybrid-Analysis scan results for the latest version (v1.0.6):
+- Windows: Wuddle.exe
+  - [VirusTotal Scan Results](https://www.virustotal.com/gui/file/b80eea0d8b1d10025cdfa5ceb718ab42da5b60682c5e6208618faf10cf2c320a/detection)
+  
+- Linux: wuddle-gui_1.0.6_amd64.appimage
+  - [VirusTotal Scan Results](https://www.virustotal.com/gui/file/5fb985a1b954509f498e84f784d569f5ed2f8a06fa49a31049885b996ee825bb/detection)
+
+- Hybrid-Analysis (Windows + Linux): [Scan Results](https://hybrid-analysis.com/file-collection/698f55aacef48b40b400f75b#)
 
 ## Supported Builds
 
