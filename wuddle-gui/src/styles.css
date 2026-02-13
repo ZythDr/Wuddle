@@ -462,7 +462,7 @@ body.busy {
   margin-top: 12px;
 }
 
-.filter-status-row {
+.projects-toolbar {
   margin-top: 12px;
   display: flex;
   align-items: center;
@@ -471,12 +471,12 @@ body.busy {
   flex-wrap: wrap;
 }
 
-.status-strip {
-  margin-top: 0;
+.filter-status-row {
   display: flex;
-  gap: 8px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
   flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 .stat-pill {
@@ -1365,10 +1365,6 @@ dialog.dialog::backdrop {
 
   .card {
     margin: 10px 12px 14px;
-  }
-
-  .status-strip {
-    margin-right: 6px;
   }
 
   .project-footer {

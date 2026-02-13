@@ -49,30 +49,17 @@
     </header>
 
     <section id="panelProjects" class="card panel projects-panel">
-      <div class="row space-between align-end">
-        <div>
-          <div class="section-title"></div>
-        </div>
-
-        <div class="row tight">
-          <button id="btnAddOpen" class="btn">＋ Add New Mod</button>
-        </div>
-      </div>
-
-      <div class="filter-status-row">
-        <div class="filter-group" id="filterGroup" role="group" aria-label="Project filters">
-          <button class="btn filter-btn active" data-filter="all">All</button>
-          <button class="btn filter-btn" data-filter="updates">Updates</button>
-          <button class="btn filter-btn" data-filter="errors">Errors</button>
-          <button class="btn filter-btn" data-filter="disabled">Disabled</button>
-        </div>
-        <div class="status-strip" id="projectStatusStrip" aria-label="Project summary">
-          <span id="statRepoCount" class="stat-pill">0 projects</span>
-          <span id="statEnabledCount" class="stat-pill">0 enabled</span>
-          <span id="statUpdateCount" class="stat-pill">0 updates</span>
-          <span id="statErrorCount" class="stat-pill">0 errors</span>
+      <div class="projects-toolbar">
+        <div class="filter-status-row">
+          <div class="filter-group" id="filterGroup" role="group" aria-label="Project filters">
+            <button class="btn filter-btn active" data-filter="all">All (0)</button>
+            <button class="btn filter-btn" data-filter="updates">Updates (0)</button>
+            <button class="btn filter-btn" data-filter="errors">Errors (0)</button>
+            <button class="btn filter-btn" data-filter="disabled">Disabled (0)</button>
+          </div>
           <span id="statApiState" class="stat-pill muted">API status: unknown</span>
         </div>
+        <button id="btnAddOpen" class="btn">＋ Add New Mod</button>
       </div>
 
       <div class="table table-scroll">
@@ -101,8 +88,7 @@
           <div class="row tight align-center footer-actions">
             <div id="lastChecked" class="hint">Last checked: never</div>
             <button id="btnRetryFailed" class="btn">Retry Failed</button>
-            <button id="btnRefresh" class="btn">Check for updates</button>
-            <button id="btnUpdateAll" class="btn primary">Update All</button>
+            <button id="btnUpdateAll" class="btn">Check for updates</button>
           </div>
         </div>
       </div>
@@ -227,7 +213,7 @@
       <div class="row space-between align-center">
         <div>
           <div class="section-title">About</div>
-          <div class="hint">Basic application and runtime information.</div>
+          <div class="hint">Basic application metadata.</div>
         </div>
         <div class="row tight">
           <button id="btnAboutRefresh" class="btn" type="button">Refresh details</button>
@@ -247,43 +233,11 @@
               <div class="about-key">Package name</div>
               <div id="aboutPackageName" class="about-value about-mono">—</div>
             </div>
-            <div class="about-row">
-              <div class="about-key">Portable mode</div>
-              <div id="aboutPortableMode" class="about-value">—</div>
-            </div>
-            <div class="about-row">
-              <div class="about-key">AppImage runtime</div>
-              <div id="aboutAppImage" class="about-value">—</div>
-            </div>
-          </div>
-        </section>
-
-        <section class="settings-card">
-          <div class="settings-head">Platform</div>
-          <div class="about-list">
-            <div class="about-row">
-              <div class="about-key">Operating system</div>
-              <div id="aboutOs" class="about-value">—</div>
-            </div>
-            <div class="about-row">
-              <div class="about-key">CPU architecture</div>
-              <div id="aboutArch" class="about-value about-mono">—</div>
-            </div>
-          </div>
-        </section>
-
-        <section class="settings-card">
-          <div class="settings-head">Runtime</div>
-          <div class="about-list">
-            <div class="about-row">
-              <div class="about-key">WebView runtime</div>
-              <div id="aboutWebviewRuntime" class="about-value">—</div>
-            </div>
           </div>
         </section>
       </div>
 
-      <div id="aboutStatus" class="hint about-status">Loading runtime details…</div>
+      <div id="aboutStatus" class="hint about-status">Loading application details…</div>
     </section>
 
     <!-- Add modal -->

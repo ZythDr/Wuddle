@@ -731,10 +731,6 @@ function aboutValue(value, fallback = "Unknown") {
   return text || fallback;
 }
 
-function yesNo(value) {
-  return value ? "Yes" : "No";
-}
-
 function setAboutStatus(message, kind = "") {
   const status = $("aboutStatus");
   status.classList.remove("status-ok", "status-warn");
@@ -746,15 +742,6 @@ function renderAboutInfo() {
   const info = state.aboutInfo || {};
   $("aboutAppVersion").textContent = aboutValue(info.appVersion, "Unknown");
   $("aboutPackageName").textContent = aboutValue(info.packageName, "Unknown");
-  $("aboutPortableMode").textContent = yesNo(!!info.portableMode);
-  $("aboutAppImage").textContent = yesNo(!!info.appImageRuntime);
-
-  const osText = [aboutValue(info.os, "Unknown"), info.osFamily ? `(${info.osFamily})` : ""]
-    .filter(Boolean)
-    .join(" ");
-  $("aboutOs").textContent = osText;
-  $("aboutArch").textContent = aboutValue(info.arch, "Unknown");
-  $("aboutWebviewRuntime").textContent = aboutValue(info.webviewRuntime, "Unknown");
 }
 
 async function refreshAboutInfo({ force = false } = {}) {
@@ -766,7 +753,7 @@ async function refreshAboutInfo({ force = false } = {}) {
     );
     return;
   }
-  setAboutStatus("Loading runtime details…");
+  setAboutStatus("Loading application details…");
   try {
     const info = await safeInvoke("wuddle_about_info", {}, { timeoutMs: 4000 });
     state.aboutInfo = info && typeof info === "object" ? info : {};
@@ -775,7 +762,7 @@ async function refreshAboutInfo({ force = false } = {}) {
     renderAboutInfo();
     setAboutStatus(`Detected at ${formatTime(state.aboutRefreshedAt)}.`, "status-ok");
   } catch (e) {
-    setAboutStatus(`Could not detect runtime details: ${e.message}`, "status-warn");
+    setAboutStatus(`Could not load application details: ${e.message}`, "status-warn");
     log(`ERROR about: ${e.message}`);
   }
 }
@@ -1293,9 +1280,19 @@ function sortedFilteredRepos() {
 }
 
 function renderFilterButtons() {
+  const summary = getProjectSummary();
+  const labels = {
+    all: `All (${summary.total})`,
+    updates: `Updates (${summary.updates})`,
+    errors: `Errors (${summary.errors})`,
+    disabled: `Disabled (${summary.disabled})`,
+  };
   document.querySelectorAll(".filter-btn[data-filter]").forEach((btn) => {
     const key = btn.getAttribute("data-filter");
     btn.classList.toggle("active", key === state.filter);
+    if (key && Object.prototype.hasOwnProperty.call(labels, key)) {
+      btn.textContent = labels[key];
+    }
   });
 }
 
@@ -1312,10 +1309,10 @@ function renderLastChecked() {
   $("lastChecked").textContent = `Last checked: ${formatTime(state.lastCheckedAt)}`;
 }
 
-function renderProjectStatusStrip() {
-  const hasProfile = !!activeProfile();
+function getProjectSummary() {
   const total = state.repos.length;
   const enabled = state.repos.filter((repo) => repo.enabled).length;
+  const disabled = total - enabled;
   const updates = state.repos.filter((repo) => {
     const plan = getPlanForRepo(repo.id);
     return repo.enabled && !!plan?.has_update && !plan?.error;
@@ -1326,26 +1323,30 @@ function renderProjectStatusStrip() {
     return /rate[\s-]?limit|http 403|http 429/i.test(error);
   });
 
-  $("statRepoCount").textContent = `${total} project${total === 1 ? "" : "s"}`;
-  $("statEnabledCount").textContent = `${enabled} enabled`;
-  $("statUpdateCount").textContent = `${updates} update${updates === 1 ? "" : "s"}`;
-  $("statErrorCount").textContent = `${errors} error${errors === 1 ? "" : "s"}`;
+  return { total, enabled, disabled, updates, errors, rateLimited };
+}
+
+function renderProjectStatusStrip() {
+  const hasProfile = !!activeProfile();
+  const summary = getProjectSummary();
 
   const apiEl = $("statApiState");
+  if (!apiEl) return;
   apiEl.className = "stat-pill";
   if (!hasProfile) {
     apiEl.textContent = "API status: no instance";
     apiEl.classList.add("muted");
-  } else if (rateLimited) {
+  } else if (summary.rateLimited) {
     apiEl.textContent = "API status: rate limited";
     apiEl.classList.add("warn");
-  } else if (errors > 0) {
+  } else if (summary.errors > 0) {
     apiEl.textContent = "API status: partial errors";
     apiEl.classList.add("bad");
   } else {
     apiEl.textContent = "API status: healthy";
     apiEl.classList.add("good");
   }
+  apiEl.title = `${summary.enabled}/${summary.total} enabled`;
 }
 
 function closeActionsMenu() {
@@ -1390,10 +1391,27 @@ function bindDialogOutsideToClose(dlg) {
   });
 }
 
+function confirmExternalOpen(kind, target) {
+  const value = String(target ?? "").trim();
+  if (!value) return false;
+  if (kind === "path") {
+    return window.confirm(
+      `Wuddle is about to open this directory in your file manager:\n\n${value}`,
+    );
+  }
+  return window.confirm(
+    `Wuddle is about to open this link in your default browser:\n\n${value}`,
+  );
+}
+
 async function openUrl(url) {
   const target = String(url ?? "").trim();
   if (!target) {
     log("ERROR open url: URL is empty.");
+    return;
+  }
+  if (!confirmExternalOpen("url", target)) {
+    log("Cancelled opening external link.");
     return;
   }
   try {
@@ -1407,6 +1425,10 @@ async function openPath(path) {
   const target = String(path ?? "").trim();
   if (!target) {
     log("ERROR open dir: Path is empty.");
+    return;
+  }
+  if (!confirmExternalOpen("path", target)) {
+    log("Cancelled opening directory.");
     return;
   }
   try {
@@ -1618,7 +1640,6 @@ function render() {
   const profile = activeProfile();
   const hasProfile = !!profile;
   $("btnAddOpen").disabled = !hasProfile;
-  $("btnRefresh").disabled = !hasProfile;
   $("btnUpdateAll").disabled = !hasProfile;
 
   renderFilterButtons();
@@ -1631,11 +1652,16 @@ function render() {
   $("btnRetryFailed").disabled = failedCount === 0 || !hasProfile;
   $("btnRetryFailed").title = failedCount ? `Retry ${failedCount} failed fetch(es)` : "No failed fetches";
 
-  const selectedCount = Array.from(state.selectedRepoIds).filter((id) => state.repos.some((repo) => repo.id === id)).length;
+  const selectedCount = Array.from(state.selectedRepoIds).filter((id) =>
+    state.repos.some((repo) => repo.id === id),
+  ).length;
+  const updateActionState = getUpdateActionState();
   const updateActionBtn = $("btnUpdateAll");
   const removeSelectedBtn = $("btnRemoveSelected");
-  updateActionBtn.textContent = selectedCount > 0 ? `Update Selected (${selectedCount})` : "Update All";
-  updateActionBtn.title = selectedCount > 0 ? `Update selected projects (${selectedCount})` : "Update all projects";
+  updateActionBtn.textContent = updateActionState.label;
+  updateActionBtn.title = updateActionState.title;
+  updateActionBtn.classList.toggle("primary", updateActionState.primary);
+  updateActionBtn.disabled = !hasProfile || updateActionState.disabled;
   if (removeSelectedBtn) {
     removeSelectedBtn.disabled = !hasProfile || selectedCount === 0;
     removeSelectedBtn.textContent =
@@ -1648,7 +1674,7 @@ function render() {
           : "Add an instance in Options first.";
   }
   if (!hasProfile) {
-    updateActionBtn.textContent = "Update All";
+    updateActionBtn.textContent = "Check for updates";
     updateActionBtn.title = "Add an instance in Options first.";
     if (removeSelectedBtn) {
       removeSelectedBtn.textContent = "Remove Selected";
@@ -1840,6 +1866,61 @@ function render() {
   requestAnimationFrame(positionOpenMenu);
 }
 
+function getUpdateActionState() {
+  const hasProfile = !!activeProfile();
+  if (!hasProfile) {
+    return {
+      mode: "check",
+      label: "Check for updates",
+      title: "Add an instance in Options first.",
+      primary: false,
+      disabled: true,
+    };
+  }
+
+  const selectedRepos = state.repos.filter((repo) => state.selectedRepoIds.has(repo.id));
+  const selectedCount = selectedRepos.length;
+  const selectedUpdatableCount = selectedRepos.filter((repo) => canUpdateRepo(repo)).length;
+  const updatableCount = state.repos.filter((repo) => canUpdateRepo(repo)).length;
+
+  if (selectedCount > 0) {
+    if (selectedUpdatableCount > 0) {
+      return {
+        mode: "update_selected",
+        label: `Update (${selectedUpdatableCount})`,
+        title: `Update selected projects with available updates (${selectedUpdatableCount}).`,
+        primary: true,
+        disabled: false,
+      };
+    }
+    return {
+      mode: "reinstall_selected",
+      label: `Reinstall Selected (${selectedCount})`,
+      title: `Reinstall selected projects (${selectedCount}).`,
+      primary: true,
+      disabled: false,
+    };
+  }
+
+  if (updatableCount > 0) {
+    return {
+      mode: "update_all",
+      label: `Update (${updatableCount})`,
+      title: `Update all projects with available updates (${updatableCount}).`,
+      primary: true,
+      disabled: false,
+    };
+  }
+
+  return {
+    mode: "check",
+    label: "Check for updates",
+    title: "Check all tracked projects for updates.",
+    primary: false,
+    disabled: false,
+  };
+}
+
 function escapeHtml(s) {
   return String(s ?? "")
     .replaceAll("&", "&amp;")
@@ -2013,12 +2094,58 @@ async function updateSelected() {
   });
 }
 
+async function reinstallSelected() {
+  const wowDir = currentWowDirStrict();
+  if (!wowDir) return;
+
+  const selected = state.repos.filter((repo) => state.selectedRepoIds.has(repo.id));
+  if (!selected.length) {
+    log("No selected projects.");
+    return;
+  }
+
+  log(`Reinstalling selected (${selected.length})…`);
+  await withBusy(async () => {
+    let reinstalled = 0;
+    let failed = 0;
+    for (const repo of selected) {
+      try {
+        const msg = await safeInvoke("wuddle_reinstall_repo", {
+          id: repo.id,
+          wowDir,
+          ...installOptions(),
+        });
+        if (/^Reinstalled\b/i.test(msg)) reinstalled += 1;
+        log(msg);
+      } catch (e) {
+        failed += 1;
+        log(`ERROR reinstall selected ${repo.owner}/${repo.name}: ${e.message}`);
+      }
+    }
+    if (failed > 0) {
+      log(`Done. Reinstalled ${reinstalled} selected repo(s); ${failed} failed.`);
+    } else {
+      log(`Done. Reinstalled ${reinstalled} selected repo(s).`);
+    }
+    await refreshAll({ forceCheck: true });
+  });
+}
+
 async function handleUpdateAction() {
-  if (state.selectedRepoIds.size > 0) {
+  const action = getUpdateActionState();
+  if (action.mode === "update_selected") {
     await updateSelected();
     return;
   }
-  await updateAll();
+  if (action.mode === "update_all") {
+    await updateAll();
+    return;
+  }
+  if (action.mode === "reinstall_selected") {
+    await reinstallSelected();
+    return;
+  }
+  await refreshAll({ forceCheck: true });
 }
 
 function toggleSelectAllVisible() {
@@ -2168,9 +2295,6 @@ function toggleSort(sortKey) {
   render();
 }
 
-$("btnRefresh").addEventListener("click", () => {
-  void refreshAll({ forceCheck: true });
-});
 $("btnUpdateAll").addEventListener("click", handleUpdateAction);
 $("btnRemoveSelected").addEventListener("click", openRemoveSelectedDialog);
 $("btnAddInstance").addEventListener("click", async () => {

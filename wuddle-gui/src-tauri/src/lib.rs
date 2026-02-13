@@ -49,12 +49,6 @@ struct GithubAuthStatus {
 struct AboutInfo {
     app_version: String,
     package_name: String,
-    os: String,
-    os_family: String,
-    arch: String,
-    webview_runtime: String,
-    portable_mode: bool,
-    app_image_runtime: bool,
 }
 
 const KEYCHAIN_SERVICE: &str = "wuddle";
@@ -343,25 +337,6 @@ fn normalize_optional_wow_dir(wow_dir: Option<String>) -> Option<String> {
     wow_dir
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-fn webview_runtime_name() -> &'static str {
-    #[cfg(target_os = "windows")]
-    {
-        "WebView2"
-    }
-    #[cfg(target_os = "macos")]
-    {
-        "WKWebView"
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        "WebKitGTK"
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
-    {
-        "Unknown"
-    }
 }
 
 fn install_options(use_symlinks: Option<bool>, set_xattr_comment: Option<bool>) -> InstallOptions {
@@ -759,13 +734,6 @@ fn wuddle_about_info() -> AboutInfo {
     AboutInfo {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         package_name: env!("CARGO_PKG_NAME").to_string(),
-        os: std::env::consts::OS.to_string(),
-        os_family: std::env::consts::FAMILY.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
-        webview_runtime: webview_runtime_name().to_string(),
-        portable_mode: portable_mode_enabled(),
-        app_image_runtime: std::env::var_os("APPIMAGE").is_some()
-            || std::env::var_os("APPDIR").is_some(),
     }
 }
 
