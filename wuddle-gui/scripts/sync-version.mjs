@@ -21,10 +21,15 @@ function writeJson(filePath, data) {
 
 function updateCargoVersion(filePath, version) {
   const text = fs.readFileSync(filePath, "utf8");
-  const next = text.replace(/^version\s*=\s*"[^"]*"/m, `version = "${version}"`);
-  if (next === text) {
+  const packageVersionPattern = /^version\s*=\s*"([^"]*)"/m;
+  const match = text.match(packageVersionPattern);
+  if (!match) {
     throw new Error(`Could not update version in ${filePath}`);
   }
+  if (match[1] === version) {
+    return;
+  }
+  const next = text.replace(packageVersionPattern, `version = "${version}"`);
   fs.writeFileSync(filePath, next, "utf8");
 }
 
