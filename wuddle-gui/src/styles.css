@@ -1297,6 +1297,28 @@ dialog.dialog::backdrop {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
+.about-link-btn {
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  color: #93c5fd;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-align: left;
+}
+
+.about-link-btn:hover {
+  color: #bfdbfe;
+}
+
+.about-link-btn:disabled {
+  cursor: default;
+  text-decoration: none;
+  color: var(--muted);
+  opacity: 1;
+}
+
 .about-status {
   margin-top: 12px;
 }

@@ -18,6 +18,8 @@ const LOG_WRAP_KEY = "wuddle.log.wrap";
 const LOG_AUTOSCROLL_KEY = "wuddle.log.autoscroll";
 const LOG_LEVEL_KEY = "wuddle.log.level";
 const WUDDLE_REPO_URL = "https://github.com/ZythDr/Wuddle";
+const WUDDLE_RELEASES_URL = "https://github.com/ZythDr/Wuddle/releases";
+const WUDDLE_RELEASES_API_URL = "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
 
 const state = {
   repos: [],
@@ -53,9 +55,22 @@ const state = {
   aboutInfo: null,
   aboutLoaded: false,
   aboutRefreshedAt: null,
+  aboutLatestVersion: null,
 };
 
 const CURATED_MOD_PRESETS = [
+  {
+    id: "vanillafixes",
+    name: "VanillaFixes",
+    url: "https://github.com/hannesmann/vanillafixes",
+    mode: "auto",
+    description:
+      "A client modification for World of Warcraft 1.6.1-1.12.1 to eliminate stutter and animation lag.",
+    longDescription:
+      "A client modification for World of Warcraft 1.6.1-1.12.1 to eliminate stutter and animation lag.\nVanillaFixes also acts as a launcher (start game via VanillaFixes.exe instead of Wow.exe) and DLL mod loader which loads DLL files listed in dlls.txt found in the WoW install directory.",
+    categories: ["Performance"],
+    recommended: true,
+  },
   {
     id: "interact",
     name: "Interact",
@@ -741,11 +756,45 @@ function setAboutStatus(message, kind = "") {
 function renderAboutInfo() {
   const info = state.aboutInfo || {};
   $("aboutAppVersion").textContent = aboutValue(info.appVersion, "Unknown");
+  const latestEl = $("aboutLatestVersion");
+  const latest = String(state.aboutLatestVersion || "").trim();
+  if (latest) {
+    latestEl.textContent = latest;
+    latestEl.disabled = false;
+    latestEl.title = "Open GitHub Releases";
+  } else {
+    latestEl.textContent = "Unknown";
+    latestEl.disabled = true;
+    latestEl.title = "Latest release version unavailable.";
+  }
   $("aboutPackageName").textContent = aboutValue(info.packageName, "Unknown");
 }
 
+async function fetchLatestWuddleReleaseTag() {
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), 4500);
+  try {
+    const resp = await fetch(WUDDLE_RELEASES_API_URL, {
+      method: "GET",
+      headers: { Accept: "application/vnd.github+json" },
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    const data = await resp.json();
+    const tag = String(data?.tag_name || "").trim();
+    if (!tag) {
+      throw new Error("Latest release tag not found");
+    }
+    return tag;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 async function refreshAboutInfo({ force = false } = {}) {
-  if (state.aboutLoaded && !force) {
+  if (state.aboutLoaded && !force && state.aboutLatestVersion) {
     renderAboutInfo();
     setAboutStatus(
       `Detected at ${formatTime(state.aboutRefreshedAt || new Date())}.`,
@@ -757,10 +806,17 @@ async function refreshAboutInfo({ force = false } = {}) {
   try {
     const info = await safeInvoke("wuddle_about_info", {}, { timeoutMs: 4000 });
     state.aboutInfo = info && typeof info === "object" ? info : {};
+    try {
+      state.aboutLatestVersion = await fetchLatestWuddleReleaseTag();
+    } catch (latestErr) {
+      state.aboutLatestVersion = null;
+      log(`ERROR latest version check: ${latestErr.message || latestErr}`);
+    }
     state.aboutLoaded = true;
     state.aboutRefreshedAt = new Date();
     renderAboutInfo();
-    setAboutStatus(`Detected at ${formatTime(state.aboutRefreshedAt)}.`, "status-ok");
+    const latestHint = state.aboutLatestVersion ? "" : " Latest version unavailable.";
+    setAboutStatus(`Detected at ${formatTime(state.aboutRefreshedAt)}.${latestHint}`, "status-ok");
   } catch (e) {
     setAboutStatus(`Could not load application details: ${e.message}`, "status-warn");
     log(`ERROR about: ${e.message}`);
@@ -1408,10 +1464,6 @@ async function openUrl(url) {
   const target = String(url ?? "").trim();
   if (!target) {
     log("ERROR open url: URL is empty.");
-    return;
-  }
-  if (!confirmExternalOpen("url", target)) {
-    log("Cancelled opening external link.");
     return;
   }
   try {
@@ -2318,6 +2370,12 @@ $("btnAboutRefresh").addEventListener("click", () => {
 });
 $("btnAboutGithub").addEventListener("click", async () => {
   await openUrl(WUDDLE_REPO_URL);
+});
+$("aboutLatestVersion").addEventListener("click", async (ev) => {
+  ev.preventDefault();
+  if (!$("aboutLatestVersion").disabled) {
+    await openUrl(WUDDLE_RELEASES_URL);
+  }
 });
 $("superwowGuideLink")?.addEventListener("click", async (ev) => {
   ev.preventDefault();

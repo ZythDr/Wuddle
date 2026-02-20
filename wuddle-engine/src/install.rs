@@ -45,8 +45,47 @@ pub fn install_from_zip(
 
     if want_dll {
         let mut installed_dlls: Vec<String> = Vec::new();
+        let mut handled_vfpatcher = false;
+        if let (Some(vf_exe_src), Some(vf_patcher_src)) = (
+            find_first_file_by_name(extract_dir, "VanillaFixes.exe"),
+            find_first_file_by_name(extract_dir, "VfPatcher.dll"),
+        ) {
+            let vf_exe_dst = wow_root.join("VanillaFixes.exe");
+            install_file_or_symlink(&vf_exe_src, &vf_exe_dst, opts.use_symlinks)?;
+            maybe_set_comment(&vf_exe_dst, comment, opts.set_xattr_comment);
+            records.push(InstallRecord {
+                path: vf_exe_dst,
+                kind: "raw",
+            });
+
+            let vf_patcher_dst = wow_root.join("VfPatcher.dll");
+            install_file_or_symlink(&vf_patcher_src, &vf_patcher_dst, opts.use_symlinks)?;
+            maybe_set_comment(&vf_patcher_dst, comment, opts.set_xattr_comment);
+            installed_dlls.push("VfPatcher.dll".to_string());
+            records.push(InstallRecord {
+                path: vf_patcher_dst,
+                kind: "dll",
+            });
+            handled_vfpatcher = true;
+
+            let dlls_txt_dst = wow_root.join("dlls.txt");
+            if !dlls_txt_dst.exists() {
+                if let Some(dlls_txt_src) = find_first_file_by_name(extract_dir, "dlls.txt") {
+                    install_file_or_symlink(&dlls_txt_src, &dlls_txt_dst, opts.use_symlinks)?;
+                    maybe_set_comment(&dlls_txt_dst, comment, opts.set_xattr_comment);
+                    records.push(InstallRecord {
+                        path: dlls_txt_dst,
+                        kind: "raw",
+                    });
+                }
+            }
+        }
+
         for dll in select_dlls_for_install(extract_dir, detect_dlls(extract_dir)) {
             if let Some(fname) = dll.file_name().and_then(|s| s.to_str()) {
+                if handled_vfpatcher && fname.eq_ignore_ascii_case("VfPatcher.dll") {
+                    continue;
+                }
                 let dst = wow_root.join(fname);
                 install_file_or_symlink(&dll, &dst, opts.use_symlinks)?;
                 maybe_set_comment(&dst, comment, opts.set_xattr_comment);
@@ -73,6 +112,25 @@ pub fn install_from_zip(
     }
 
     Ok(records)
+}
+
+fn find_first_file_by_name(root: &Path, want: &str) -> Option<PathBuf> {
+    let mut matches = Vec::<PathBuf>::new();
+    walk_dir(root, &mut |p| {
+        if !p.is_file() {
+            return;
+        }
+        if p.file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case(want))
+            .unwrap_or(false)
+        {
+            matches.push(p.to_path_buf());
+        }
+    });
+
+    matches.sort_by_key(|p| p.components().count());
+    matches.into_iter().next()
 }
 
 /// Unzip ZIP file into destination directory.

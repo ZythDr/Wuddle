@@ -520,6 +520,19 @@ impl Engine {
         );
 
         if prefer_zip {
+            let has_vanillafixes_assets = assets
+                .iter()
+                .any(|a| a.name.to_ascii_lowercase().starts_with("vanillafixes"));
+
+            if has_vanillafixes_assets {
+                if let Some(a) = assets.iter().find(|a| {
+                    let lower = a.name.to_ascii_lowercase();
+                    lower.ends_with(".zip") && !lower.contains("-dxvk") && is_allowed(a)
+                }) {
+                    return Ok(a.clone());
+                }
+            }
+
             if let Some(a) = assets
                 .iter()
                 .find(|a| a.name.to_lowercase().ends_with(".zip") && is_allowed(a))
