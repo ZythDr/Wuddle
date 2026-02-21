@@ -3,6 +3,8 @@ name: Build Release Artifacts
 on:
   workflow_dispatch:
   push:
+    branches:
+      - "v2-dev"
     tags:
       - "v*"
 
@@ -200,7 +202,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Publish GitHub Release
+    name: Publish GitHub Release (main tags only)
     needs: [build-linux, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -212,19 +214,36 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate Tag Belongs To main
+        id: tag_guard
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          TAG_SHA="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
+          if git merge-base --is-ancestor "${TAG_SHA}" origin/main; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${GITHUB_REF_NAME} is on main; publishing release."
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${GITHUB_REF_NAME} is not on main; skipping release publish."
+          fi
+
       - name: Download Linux Artifacts
+        if: steps.tag_guard.outputs.publish == 'true'
         uses: actions/download-artifact@v4
         with:
           name: wuddle-linux-bundles
           path: dist/linux
 
       - name: Download Windows Artifact
+        if: steps.tag_guard.outputs.publish == 'true'
         uses: actions/download-artifact@v4
         with:
           name: wuddle-windows-portable
           path: dist/windows
 
       - name: Build Release Summary
+        if: steps.tag_guard.outputs.publish == 'true'
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
@@ -255,6 +274,7 @@ jobs:
           } > "${NOTES_FILE}"
 
       - name: Create GitHub Release
+        if: steps.tag_guard.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           body_path: dist/RELEASE_BODY.md
