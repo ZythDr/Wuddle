@@ -14,7 +14,7 @@ A user-friendly app for installing DLL mods and keeping them up-to-date (checks 
 - **Multi-forge support:** GitHub, Codeberg, Gitea, GitLab
 - **Quick Add** Provides easy installation of commonly used Vanilla 1.12 mods
 - **Custom Git URL support:** Add any DLL mods from the aforementioned git forges not included in the Quick Add section
-- **Companion Addons:** Installs companion addons when bundled in mod zip (i.e Interact, UnitXP_SP3)
+- **Companion Addons:** Installs companion addons when bundled in mod zip (e.g. Interact, UnitXP_SP3)
 - **Multi-instance/profile:** Add multiple WoW installs, each with its own tracked mod list
 - **Manage `dlls.txt`:** Wuddle will update `dlls.txt` when adding, removing, or enabling/disabling mods
 - **GitHub Token:** Optional GitHub auth token support to reduce anonymous API rate-limit issues
