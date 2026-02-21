@@ -24,7 +24,6 @@
   --col-status: 146px;
   --col-enabled: 86px;
   --col-actions: 96px;
-  --col-select: 30px;
 }
 
 html,
@@ -50,7 +49,7 @@ body {
 }
 
 .topbar {
-  margin: 0 18px;
+  margin: 0 12px;
   padding: 22px 8px 12px;
   display: flex;
   align-items: flex-end;
@@ -105,7 +104,7 @@ body.busy {
 }
 
 .card {
-  margin: 12px 18px 18px;
+  margin: 12px 12px 12px;
   padding: 18px;
   background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
   border: 1px solid var(--border);
@@ -444,7 +443,7 @@ body.busy {
 }
 
 .table {
-  margin-top: 14px;
+  margin-top: 10px;
   border: 1px solid var(--border);
   border-radius: 14px;
   overflow: hidden;
@@ -463,7 +462,7 @@ body.busy {
 }
 
 .projects-toolbar {
-  margin-top: 12px;
+  margin-top: 6px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -516,8 +515,8 @@ body.busy {
   padding: 10px 12px;
   background: var(--card2);
   position: fixed;
-  left: 18px;
-  right: 18px;
+  left: 12px;
+  right: 12px;
   bottom: 12px;
   z-index: 50;
   backdrop-filter: none;
@@ -534,11 +533,18 @@ body.busy {
   flex-wrap: nowrap;
 }
 
+.view-btn.active {
+  background: rgba(59, 130, 246, 0.24);
+  border-color: rgba(59, 130, 246, 0.55);
+  color: #bfdbfe;
+}
+
 .projects-panel {
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  padding-top: 12px;
   padding-bottom: 110px;
 }
 
@@ -573,7 +579,6 @@ body.busy {
 .thead {
   display: grid;
   grid-template-columns:
-    var(--col-select)
     minmax(280px, 1fr)
     var(--col-current)
     var(--col-latest)
@@ -591,6 +596,15 @@ body.busy {
   box-shadow:
     0 1px 0 var(--border),
     0 8px 14px rgba(0, 0, 0, 0.16);
+}
+
+.projects-panel.addons-mode .thead,
+.projects-panel.addons-mode .trow {
+  grid-template-columns:
+    minmax(280px, 1fr)
+    minmax(170px, 220px)
+    var(--col-status)
+    var(--col-actions);
 }
 
 .th.sortable {
@@ -625,7 +639,6 @@ body.busy {
 .trow {
   display: grid;
   grid-template-columns:
-    var(--col-select)
     minmax(280px, 1fr)
     var(--col-current)
     var(--col-latest)
@@ -637,16 +650,20 @@ body.busy {
   align-items: center;
 }
 
+.col-hidden {
+  display: none !important;
+}
+
 .empty {
   padding: 14px;
   color: var(--muted);
 }
 
-.thead > div:nth-child(2) {
+.thead > div:first-child {
   text-align: left;
 }
 
-.thead > div:not(:nth-child(2)) {
+.thead > div:not(:first-child) {
   text-align: center;
 }
 
@@ -695,69 +712,11 @@ body.busy {
   overflow: visible;
 }
 
-.select-col {
-  display: inline-flex;
-  justify-content: flex-start;
-  align-items: center;
-  width: 100%;
-}
-
 .enabled-col {
   display: inline-flex;
   justify-content: center;
   align-items: center;
   width: 100%;
-}
-
-.select-col input[type="checkbox"] {
-  appearance: none;
-  -webkit-appearance: none;
-  width: 18px;
-  height: 18px;
-  border-radius: 5px;
-  border: 1px solid var(--btnBorder);
-  background: var(--card2);
-  display: inline-grid;
-  place-content: center;
-  margin: 0;
-  cursor: pointer;
-}
-
-.select-col input[type="checkbox"]::after {
-  content: "";
-  width: 5px;
-  height: 9px;
-  border: solid #fff;
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg) scale(0);
-  transition: transform 120ms ease;
-}
-
-.select-col input[type="checkbox"]:checked {
-  background: var(--primary);
-  border-color: var(--primary);
-}
-
-.select-col input[type="checkbox"]:checked::after {
-  transform: rotate(45deg) scale(1);
-}
-
-.select-col input[type="checkbox"]:indeterminate {
-  background: var(--primary);
-  border-color: var(--primary);
-}
-
-.select-col input[type="checkbox"]:indeterminate::after {
-  width: 8px;
-  height: 2px;
-  border: none;
-  background: #fff;
-  transform: none;
-}
-
-.select-col input[type="checkbox"]:focus-visible {
-  outline: 2px solid rgba(59, 130, 246, 0.75);
-  outline-offset: 2px;
 }
 
 .menu-wrap { position: relative; }
@@ -821,7 +780,7 @@ body.busy {
   border: none;
   background: transparent;
   color: var(--primary);
-  font-size: 21px;
+  font-size: 19px;
   font-weight: 700;
   line-height: 1.1;
   padding: 0;
@@ -840,7 +799,7 @@ body.busy {
   text-decoration-color: #60a5fa;
 }
 .name-sub {
-  color: var(--muted);
+  color: rgba(255, 255, 255, 0.52);
   font-size: 12px;
   margin-top: 3px;
   white-space: nowrap;
@@ -858,6 +817,16 @@ body.busy {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.branch-select {
+  width: 100%;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--card2);
+  color: var(--text);
+  padding: 0 8px;
 }
 
 .badge {
@@ -1381,17 +1350,17 @@ dialog.dialog::backdrop {
   .topbar {
     align-items: flex-start;
     flex-direction: column;
-    margin: 0 12px;
+    margin: 0 10px;
     padding: 18px 6px 10px;
   }
 
   .card {
-    margin: 10px 12px 14px;
+    margin: 10px;
   }
 
   .project-footer {
-    left: 12px;
-    right: 12px;
+    left: 10px;
+    right: 10px;
     bottom: 10px;
     padding: 10px;
   }

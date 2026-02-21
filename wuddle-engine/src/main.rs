@@ -14,7 +14,7 @@ struct Cli {
 enum Cmd {
     Add {
         url: String,
-        /// auto|addon|dll|mixed|raw
+        /// auto|addon|addon_git|dll|mixed|raw
         #[arg(long, default_value = "auto")]
         mode: String,
         /// optional regex override for selecting the release asset

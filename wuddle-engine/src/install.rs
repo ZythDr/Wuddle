@@ -36,8 +36,8 @@ pub fn install_from_zip(
     let want_dll = mode == "dll" || mode == "mixed" || mode == "auto";
 
     let wow_root = wow_dir;
-    let addons_dir = wow_dir.join("Interface").join("AddOns");
-    fs::create_dir_all(&addons_dir).context("create Interface/AddOns")?;
+    fs::create_dir_all(wow_dir.join("Interface").join("AddOns"))
+        .context("create Interface/AddOns")?;
 
     unzip(zip_path, extract_dir).context("unzip")?;
 
@@ -101,13 +101,8 @@ pub fn install_from_zip(
 
     if want_addon {
         for (src_dir, addon_folder_name) in detect_addons(extract_dir) {
-            let dst_dir = addons_dir.join(&addon_folder_name);
-            install_dir_or_symlink(&src_dir, &dst_dir, opts.use_symlinks)?;
-            maybe_set_comment(&dst_dir, comment, opts.set_xattr_comment);
-            records.push(InstallRecord {
-                path: dst_dir,
-                kind: "addon",
-            });
+            let rec = install_addon_folder(&src_dir, wow_dir, &addon_folder_name, opts, comment)?;
+            records.push(rec);
         }
     }
 
@@ -423,6 +418,10 @@ fn detect_addons(root: &Path) -> Vec<(PathBuf, String)> {
     candidates
 }
 
+pub fn detect_addons_in_tree(root: &Path) -> Vec<(PathBuf, String)> {
+    detect_addons(root)
+}
+
 fn addon_folder_name_from_toc(dir: &Path) -> Option<String> {
     let rd = fs::read_dir(dir).ok()?;
     for entry in rd.flatten() {
@@ -452,9 +451,35 @@ fn walk_dir(root: &Path, cb: &mut dyn FnMut(&Path)) {
         let p = entry.path();
         cb(&p);
         if p.is_dir() {
+            if p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|name| name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".wuddle"))
+                .unwrap_or(false)
+            {
+                continue;
+            }
             walk_dir(&p, cb);
         }
     }
+}
+
+pub fn install_addon_folder(
+    src_dir: &Path,
+    wow_dir: &Path,
+    addon_folder_name: &str,
+    opts: InstallOptions,
+    comment: &str,
+) -> Result<InstallRecord> {
+    let dst_dir = wow_dir
+        .join("Interface")
+        .join("AddOns")
+        .join(addon_folder_name);
+    install_dir_or_symlink(src_dir, &dst_dir, opts.use_symlinks)?;
+    maybe_set_comment(&dst_dir, comment, opts.set_xattr_comment);
+    Ok(InstallRecord {
+        path: dst_dir,
+        kind: "addon",
+    })
 }
 
 pub fn install_dll(

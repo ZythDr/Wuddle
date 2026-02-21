@@ -9,6 +9,10 @@ pub enum InstallMode {
     ///   - copy any addon folder(s) into Interface/AddOns/, renaming folder to match the .toc stem exactly
     Auto,
     Addon,
+    /// Track addon directly from its Git repository using clone/fetch/pull.
+    /// Synced into hidden staging under WoW/Interface/AddOns/.wuddle/,
+    /// then addon folders are deployed into Interface/AddOns by .toc detection.
+    AddonGit,
     Dll,
     Mixed,
     Raw, // downloads asset to a chosen folder (no unzip)
@@ -19,6 +23,7 @@ impl InstallMode {
         match self {
             InstallMode::Auto => "auto",
             InstallMode::Addon => "addon",
+            InstallMode::AddonGit => "addon_git",
             InstallMode::Dll => "dll",
             InstallMode::Mixed => "mixed",
             InstallMode::Raw => "raw",
@@ -29,6 +34,7 @@ impl InstallMode {
         match s.to_lowercase().as_str() {
             "auto" => Some(InstallMode::Auto),
             "addon" => Some(InstallMode::Addon),
+            "addon_git" | "addongit" | "git_addon" => Some(InstallMode::AddonGit),
             "dll" => Some(InstallMode::Dll),
             "mixed" => Some(InstallMode::Mixed),
             "raw" => Some(InstallMode::Raw),
@@ -52,6 +58,7 @@ pub struct Repo {
 
     pub mode: InstallMode,
     pub enabled: bool,
+    pub git_branch: Option<String>, // only used by addon_git mode (None = remote default HEAD)
     pub asset_regex: Option<String>, // optional override for picking asset
     pub last_version: Option<String>, // tag_name last installed
     pub etag: Option<String>,        // for conditional GET (if supported)

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, Error as SqlError, ErrorCode};
 use std::collections::HashSet;
+use std::time::Duration;
 
 use crate::model::{InstallMode, Repo};
 
@@ -21,6 +22,13 @@ pub struct Db {
 impl Db {
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let conn = Connection::open(path).context("open sqlite db")?;
+        conn.busy_timeout(Duration::from_millis(8000))?;
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            "#,
+        )?;
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
@@ -41,6 +49,7 @@ impl Db {
               name          TEXT NOT NULL,
               mode          TEXT NOT NULL,
               enabled       INTEGER NOT NULL DEFAULT 1,
+              git_branch    TEXT,
               asset_regex   TEXT,
               last_version  TEXT,
               etag          TEXT,
@@ -76,6 +85,10 @@ impl Db {
         self.ensure_repo_columns()?;
         self.conn
             .execute("UPDATE repos SET enabled=1 WHERE enabled IS NULL", [])?;
+        self.conn.execute(
+            "UPDATE repos SET git_branch='master' WHERE mode='addon_git' AND (git_branch IS NULL OR TRIM(git_branch)='')",
+            [],
+        )?;
 
         Ok(())
     }
@@ -94,6 +107,10 @@ impl Db {
             Ok(())
         };
 
+        ensure(
+            "git_branch",
+            "ALTER TABLE repos ADD COLUMN git_branch TEXT",
+        )?;
         ensure(
             "enabled",
             "ALTER TABLE repos ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
@@ -123,12 +140,12 @@ impl Db {
         let insert_result = self.conn.execute(
             r#"
             INSERT INTO repos(
-              url, forge, host, owner, name, mode, enabled, asset_regex, last_version, etag,
+              url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
               installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url
             )
             VALUES (
-              ?1,  ?2,   ?3,   ?4,    ?5,   ?6,   ?7,      ?8,         ?9,          ?10,
-              ?11,               ?12,                 ?13,                  ?14
+              ?1,  ?2,   ?3,   ?4,    ?5,   ?6,   ?7,      ?8,         ?9,         ?10,         ?11,
+              ?12,               ?13,                 ?14,                  ?15
             )
             "#,
             params![
@@ -139,6 +156,7 @@ impl Db {
                 repo.name,
                 mode_str,
                 if repo.enabled { 1 } else { 0 },
+                repo.git_branch,
                 repo.asset_regex,
                 repo.last_version,
                 repo.etag,
@@ -177,7 +195,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
-              id, url, forge, host, owner, name, mode, enabled, asset_regex, last_version, etag,
+              id, url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
               installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url
             FROM repos
             ORDER BY host, owner, name
@@ -195,13 +213,14 @@ impl Db {
                 name: row.get(5)?,
                 enabled: row.get::<_, i64>(7)? != 0,
                 mode: InstallMode::from_str(&mode_str).unwrap_or(InstallMode::Auto),
-                asset_regex: row.get(8)?,
-                last_version: row.get(9)?,
-                etag: row.get(10)?,
-                installed_asset_id: row.get(11)?,
-                installed_asset_name: row.get(12)?,
-                installed_asset_size: row.get(13)?,
-                installed_asset_url: row.get(14)?,
+                git_branch: row.get(8)?,
+                asset_regex: row.get(9)?,
+                last_version: row.get(10)?,
+                etag: row.get(11)?,
+                installed_asset_id: row.get(12)?,
+                installed_asset_name: row.get(13)?,
+                installed_asset_size: row.get(14)?,
+                installed_asset_url: row.get(15)?,
             })
         })?;
 
@@ -216,7 +235,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
-              id, url, forge, host, owner, name, mode, enabled, asset_regex, last_version, etag,
+              id, url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
               installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url
             FROM repos
             WHERE id=?1
@@ -234,13 +253,14 @@ impl Db {
                 name: row.get(5)?,
                 enabled: row.get::<_, i64>(7)? != 0,
                 mode: InstallMode::from_str(&mode_str).unwrap_or(InstallMode::Auto),
-                asset_regex: row.get(8)?,
-                last_version: row.get(9)?,
-                etag: row.get(10)?,
-                installed_asset_id: row.get(11)?,
-                installed_asset_name: row.get(12)?,
-                installed_asset_size: row.get(13)?,
-                installed_asset_url: row.get(14)?,
+                git_branch: row.get(8)?,
+                asset_regex: row.get(9)?,
+                last_version: row.get(10)?,
+                etag: row.get(11)?,
+                installed_asset_id: row.get(12)?,
+                installed_asset_name: row.get(13)?,
+                installed_asset_size: row.get(14)?,
+                installed_asset_url: row.get(15)?,
             })
         })?;
 
@@ -265,6 +285,14 @@ impl Db {
         self.conn.execute(
             r#"UPDATE repos SET enabled=?1 WHERE id=?2"#,
             params![if enabled { 1 } else { 0 }, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_repo_git_branch(&self, id: i64, git_branch: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            r#"UPDATE repos SET git_branch=?1 WHERE id=?2"#,
+            params![git_branch, id],
         )?;
         Ok(())
     }

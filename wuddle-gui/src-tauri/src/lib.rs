@@ -4,6 +4,7 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::{mpsc, Mutex, OnceLock},
     time::Duration,
 };
@@ -20,6 +21,8 @@ struct RepoRow {
     mode: String,
     enabled: bool,
     url: String,
+    #[serde(rename = "gitBranch")]
+    git_branch: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -398,6 +401,7 @@ async fn wuddle_list_repos() -> Result<Vec<RepoRow>, String> {
                 mode: r.mode.as_str().to_string(),
                 enabled: r.enabled,
                 url: r.url,
+                git_branch: r.git_branch,
             })
             .collect())
     })
@@ -592,6 +596,32 @@ async fn wuddle_reinstall_repo(
 }
 
 #[tauri::command]
+async fn wuddle_list_repo_branches(id: i64) -> Result<Vec<String>, String> {
+    run_blocking(move || {
+        let eng = engine()?;
+        eng.list_repo_branches(id).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn wuddle_set_repo_branch(id: i64, branch: Option<String>) -> Result<String, String> {
+    run_blocking(move || {
+        let eng = engine()?;
+        let normalized = branch
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty());
+        eng.set_repo_git_branch(id, normalized.clone())
+            .map_err(|e| e.to_string())?;
+        Ok(match normalized {
+            Some(b) => format!("Set branch to {}.", b),
+            None => "Using default remote branch.".to_string(),
+        })
+    })
+    .await
+}
+
+#[tauri::command]
 #[allow(non_snake_case)]
 async fn wuddle_set_active_profile(profileId: String) -> Result<String, String> {
     run_blocking(move || {
@@ -737,6 +767,47 @@ fn wuddle_about_info() -> AboutInfo {
     }
 }
 
+#[tauri::command]
+fn wuddle_open_directory(path: String) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Path is empty.".to_string());
+    }
+
+    let path_buf = PathBuf::from(trimmed);
+    if !path_buf.exists() {
+        return Err(format!("Path does not exist: {}", path_buf.display()));
+    }
+    if !path_buf.is_dir() {
+        return Err(format!("Path is not a directory: {}", path_buf.display()));
+    }
+
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = Command::new("explorer");
+        c.arg(&path_buf);
+        c
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = Command::new("open");
+        c.arg(&path_buf);
+        c
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = Command::new("xdg-open");
+        c.arg(&path_buf);
+        c
+    };
+
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Failed to open directory {}: {}", path_buf.display(), e))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -765,12 +836,15 @@ pub fn run() {
             wuddle_update_all,
             wuddle_update_repo,
             wuddle_reinstall_repo,
+            wuddle_list_repo_branches,
+            wuddle_set_repo_branch,
             wuddle_set_active_profile,
             wuddle_delete_profile,
             wuddle_github_auth_status,
             wuddle_github_auth_set_token,
             wuddle_github_auth_clear_token,
-            wuddle_about_info
+            wuddle_about_info,
+            wuddle_open_directory
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
