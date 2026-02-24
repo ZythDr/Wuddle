@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::{
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
     process::Command,
@@ -9,6 +10,7 @@ use std::{
 pub struct InstallOptions {
     pub use_symlinks: bool,
     pub set_xattr_comment: bool,
+    pub replace_addon_conflicts: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -36,8 +38,8 @@ pub fn install_from_zip(
     let want_dll = mode == "dll" || mode == "mixed" || mode == "auto";
 
     let wow_root = wow_dir;
-    let addons_dir = wow_dir.join("Interface").join("AddOns");
-    fs::create_dir_all(&addons_dir).context("create Interface/AddOns")?;
+    fs::create_dir_all(wow_dir.join("Interface").join("AddOns"))
+        .context("create Interface/AddOns")?;
 
     unzip(zip_path, extract_dir).context("unzip")?;
 
@@ -101,13 +103,8 @@ pub fn install_from_zip(
 
     if want_addon {
         for (src_dir, addon_folder_name) in detect_addons(extract_dir) {
-            let dst_dir = addons_dir.join(&addon_folder_name);
-            install_dir_or_symlink(&src_dir, &dst_dir, opts.use_symlinks)?;
-            maybe_set_comment(&dst_dir, comment, opts.set_xattr_comment);
-            records.push(InstallRecord {
-                path: dst_dir,
-                kind: "addon",
-            });
+            let rec = install_addon_folder(&src_dir, wow_dir, &addon_folder_name, opts, comment)?;
+            records.push(rec);
         }
     }
 
@@ -393,7 +390,7 @@ fn detect_addons(root: &Path) -> Vec<(PathBuf, String)> {
             for entry in rd.flatten() {
                 let dir = entry.path();
                 if dir.is_dir() {
-                    if let Some(folder_name) = addon_folder_name_from_toc(&dir) {
+                    if let Some(folder_name) = addon_folder_name_from_toc(&dir, &ia) {
                         candidates.push((dir, folder_name));
                     }
                 }
@@ -409,8 +406,8 @@ fn detect_addons(root: &Path) -> Vec<(PathBuf, String)> {
             if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
                 if ext.eq_ignore_ascii_case("toc") {
                     if let Some(parent) = p.parent() {
-                        if let Some(toc_stem) = p.file_stem().and_then(|s| s.to_str()) {
-                            candidates.push((parent.to_path_buf(), toc_stem.to_string()));
+                        if let Some(folder_name) = addon_folder_name_from_toc(parent, root) {
+                            candidates.push((parent.to_path_buf(), folder_name));
                         }
                     }
                 }
@@ -423,7 +420,15 @@ fn detect_addons(root: &Path) -> Vec<(PathBuf, String)> {
     candidates
 }
 
-fn addon_folder_name_from_toc(dir: &Path) -> Option<String> {
+pub fn detect_addons_in_tree(root: &Path) -> Vec<(PathBuf, String)> {
+    detect_addons(root)
+}
+
+fn addon_folder_name_from_toc(dir: &Path, scan_root: &Path) -> Option<String> {
+    let is_root = dir == scan_root;
+    let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+    let mut stems: Vec<String> = Vec::new();
+
     let rd = fs::read_dir(dir).ok()?;
     for entry in rd.flatten() {
         let p = entry.path();
@@ -433,14 +438,133 @@ fn addon_folder_name_from_toc(dir: &Path) -> Option<String> {
                 .map(|e| e.eq_ignore_ascii_case("toc"))
                 .unwrap_or(false)
             {
-                return p
+                let stem = p
                     .file_stem()
                     .and_then(|s| s.to_str())
-                    .map(|s| s.to_string());
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                if let Some(name) = stem {
+                    stems.push(name);
+                }
             }
         }
     }
-    None
+    if stems.is_empty() {
+        return None;
+    }
+
+    let normalized: Vec<String> = stems.iter().map(|s| normalize_toc_stem(s)).collect();
+
+    // Credit: inspired by GitAddonsManager's subfolder scan behavior.
+    // For non-root addon directories, if any TOC matches this folder directly
+    // (or after suffix normalization), keep the folder name as-is.
+    if !is_root && !dir_name.is_empty() {
+        if stems.iter().any(|name| name.eq_ignore_ascii_case(dir_name))
+            || normalized
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(dir_name))
+        {
+            return Some(dir_name.to_string());
+        }
+    }
+
+    let first_norm = normalized[0].to_ascii_lowercase();
+    let all_same_norm = normalized
+        .iter()
+        .all(|name| name.to_ascii_lowercase() == first_norm);
+
+    // If all TOCs normalize to the same base, use that base (GAM-style).
+    if all_same_norm {
+        return normalized.into_iter().next();
+    }
+
+    // Root disagreement means this is likely a repo root with multiple modules;
+    // skip root here and let nested addon folders be detected.
+    if is_root {
+        return None;
+    }
+
+    // Non-root fallback: choose the most common normalized name.
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for name in normalized {
+        *counts.entry(name.to_ascii_lowercase()).or_insert(0) += 1;
+    }
+    let mut best: Option<(String, usize)> = None;
+    for (key, count) in counts {
+        match &best {
+            None => best = Some((key, count)),
+            Some((prev, prev_count)) => {
+                if count > *prev_count || (count == *prev_count && key < *prev) {
+                    best = Some((key, count));
+                }
+            }
+        }
+    }
+
+    best.map(|(name, _)| name)
+}
+
+fn normalize_toc_stem(stem: &str) -> String {
+    let mut out = stem.trim().to_string();
+    if out.is_empty() {
+        return out;
+    }
+
+    // Common expansion/channel suffixes used in WoW addon TOCs.
+    // Credit: inspired by GitAddonsManager's TOC suffix handling
+    // (Control::removeTocSuffixes in control.cpp), expanded here to cover both
+    // dash/underscore forms and additional channel tags seen in the wild.
+    const SUFFIXES: &[&str] = &[
+        "-classic",
+        "_classic",
+        "-bcc",
+        "_bcc",
+        "-vanilla",
+        "_vanilla",
+        "-tbc",
+        "_tbc",
+        "-mainline",
+        "_mainline",
+        "-wrath",
+        "_wrath",
+        "-wotlk",
+        "_wotlk",
+        "-wotlkc",
+        "_wotlkc",
+        "-era",
+        "_era",
+        "-classicera",
+        "_classicera",
+        "-retail",
+        "_retail",
+        "-cata",
+        "_cata",
+        "-sod",
+        "_sod",
+    ];
+
+    loop {
+        let lower = out.to_ascii_lowercase();
+        let mut changed = false;
+        for suffix in SUFFIXES {
+            if lower.ends_with(suffix) && out.len() > suffix.len() {
+                let new_len = out.len() - suffix.len();
+                out.truncate(new_len);
+                out = out.trim_end_matches(['-', '_']).trim().to_string();
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    if out.is_empty() {
+        stem.trim().to_string()
+    } else {
+        out
+    }
 }
 
 fn walk_dir(root: &Path, cb: &mut dyn FnMut(&Path)) {
@@ -452,9 +576,35 @@ fn walk_dir(root: &Path, cb: &mut dyn FnMut(&Path)) {
         let p = entry.path();
         cb(&p);
         if p.is_dir() {
+            if p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|name| name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".wuddle"))
+                .unwrap_or(false)
+            {
+                continue;
+            }
             walk_dir(&p, cb);
         }
     }
+}
+
+pub fn install_addon_folder(
+    src_dir: &Path,
+    wow_dir: &Path,
+    addon_folder_name: &str,
+    opts: InstallOptions,
+    comment: &str,
+) -> Result<InstallRecord> {
+    let dst_dir = wow_dir
+        .join("Interface")
+        .join("AddOns")
+        .join(addon_folder_name);
+    install_dir_or_symlink(src_dir, &dst_dir, opts.use_symlinks)?;
+    maybe_set_comment(&dst_dir, comment, opts.set_xattr_comment);
+    Ok(InstallRecord {
+        path: dst_dir,
+        kind: "addon",
+    })
 }
 
 pub fn install_dll(
@@ -489,4 +639,25 @@ pub fn install_raw_file(
         path: dst,
         kind: "raw",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_toc_stem;
+
+    #[test]
+    fn normalize_toc_suffixes_common_cases() {
+        assert_eq!(normalize_toc_stem("pfQuest-tbc"), "pfQuest");
+        assert_eq!(normalize_toc_stem("pfQuest-wotlk"), "pfQuest");
+        assert_eq!(normalize_toc_stem("pfQuest_Wrath"), "pfQuest");
+        assert_eq!(normalize_toc_stem("pfUI-Classic"), "pfUI");
+        assert_eq!(normalize_toc_stem("MyAddon-WOTLKC"), "MyAddon");
+    }
+
+    #[test]
+    fn normalize_toc_suffixes_preserves_non_suffix_names() {
+        assert_eq!(normalize_toc_stem("nampower"), "nampower");
+        assert_eq!(normalize_toc_stem("VanillaHelpers"), "VanillaHelpers");
+        assert_eq!(normalize_toc_stem("Addon-Tooling"), "Addon-Tooling");
+    }
 }

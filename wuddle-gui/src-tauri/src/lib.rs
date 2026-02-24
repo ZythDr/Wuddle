@@ -1,9 +1,10 @@
 use keyring::Entry;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::{mpsc, Mutex, OnceLock},
     time::Duration,
 };
@@ -20,6 +21,8 @@ struct RepoRow {
     mode: String,
     enabled: bool,
     url: String,
+    #[serde(rename = "gitBranch")]
+    git_branch: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -49,6 +52,27 @@ struct GithubAuthStatus {
 struct AboutInfo {
     app_version: String,
     package_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationResult {
+    message: String,
+    steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchConfig {
+    method: Option<String>,
+    executable_path: Option<String>,
+    lutris_target: Option<String>,
+    wine_command: Option<String>,
+    wine_args: Option<String>,
+    custom_command: Option<String>,
+    custom_args: Option<String>,
+    working_dir: Option<String>,
+    env: Option<HashMap<String, String>>,
 }
 
 const KEYCHAIN_SERVICE: &str = "wuddle";
@@ -339,11 +363,24 @@ fn normalize_optional_wow_dir(wow_dir: Option<String>) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn install_options(use_symlinks: Option<bool>, set_xattr_comment: Option<bool>) -> InstallOptions {
+fn install_options(
+    use_symlinks: Option<bool>,
+    set_xattr_comment: Option<bool>,
+    replace_addon_conflicts: Option<bool>,
+) -> InstallOptions {
     InstallOptions {
         use_symlinks: use_symlinks.unwrap_or(false),
         set_xattr_comment: set_xattr_comment.unwrap_or(false),
+        replace_addon_conflicts: replace_addon_conflicts.unwrap_or(false),
     }
+}
+
+fn expand_install_path(wow_dir: &str, path: &str) -> String {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return p.display().to_string();
+    }
+    Path::new(wow_dir).join(p).display().to_string()
 }
 
 #[cfg(target_os = "linux")]
@@ -383,9 +420,15 @@ where
 }
 
 #[tauri::command]
-async fn wuddle_list_repos() -> Result<Vec<RepoRow>, String> {
-    run_blocking(|| {
+#[allow(non_snake_case)]
+async fn wuddle_list_repos(wowDir: Option<String>) -> Result<Vec<RepoRow>, String> {
+    let wow_dir = normalize_optional_wow_dir(wowDir);
+
+    run_blocking(move || {
         let eng = engine()?;
+        if let Some(ref wow_dir) = wow_dir {
+            let _ = eng.import_existing_addon_git_repos(Path::new(wow_dir));
+        }
         let repos = eng.db().list_repos().map_err(|e| e.to_string())?;
 
         Ok(repos
@@ -398,6 +441,7 @@ async fn wuddle_list_repos() -> Result<Vec<RepoRow>, String> {
                 mode: r.mode.as_str().to_string(),
                 enabled: r.enabled,
                 url: r.url,
+                git_branch: r.git_branch,
             })
             .collect())
     })
@@ -481,6 +525,9 @@ async fn wuddle_check_updates(wowDir: Option<String>) -> Result<Vec<PlanRow>, St
         let plans = tauri::async_runtime::block_on(async {
             let eng = engine()?;
             let wow_path = wow_dir.as_deref().map(Path::new);
+            if let Some(wow_dir) = wow_path {
+                let _ = eng.import_existing_addon_git_repos(wow_dir);
+            }
             eng.check_updates_with_wow(wow_path)
                 .await
                 .map_err(|e| e.to_string())
@@ -511,9 +558,10 @@ async fn wuddle_update_all(
     wowDir: String,
     useSymlinks: Option<bool>,
     setXattrComment: Option<bool>,
+    replaceAddonConflicts: Option<bool>,
 ) -> Result<String, String> {
     let wowDir = normalize_wow_dir(wowDir)?;
-    let opts = install_options(useSymlinks, setXattrComment);
+    let opts = install_options(useSymlinks, setXattrComment, replaceAddonConflicts);
 
     run_blocking(move || {
         let plans = tauri::async_runtime::block_on(async {
@@ -544,21 +592,92 @@ async fn wuddle_update_repo(
     wowDir: String,
     useSymlinks: Option<bool>,
     setXattrComment: Option<bool>,
-) -> Result<String, String> {
+    replaceAddonConflicts: Option<bool>,
+) -> Result<OperationResult, String> {
     let wowDir = normalize_wow_dir(wowDir)?;
-    let opts = install_options(useSymlinks, setXattrComment);
+    let opts = install_options(useSymlinks, setXattrComment, replaceAddonConflicts);
 
     run_blocking(move || {
+        let eng = engine()?;
+        let repo = eng.db().get_repo(id).map_err(|e| e.to_string())?;
+        let mut steps: Vec<String> = Vec::new();
+        steps.push(format!(
+            "{}/{}: update requested (mode: {}).",
+            repo.owner,
+            repo.name,
+            repo.mode.as_str()
+        ));
+        steps.push(format!("{}/{}: source: {}", repo.owner, repo.name, repo.url));
+        if repo.mode.as_str() == "addon_git" {
+            let branch = repo
+                .git_branch
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("master");
+            steps.push(format!(
+                "{}/{}: syncing git branch '{}'.",
+                repo.owner, repo.name, branch
+            ));
+        } else {
+            steps.push(format!(
+                "{}/{}: checking release assets.",
+                repo.owner, repo.name
+            ));
+        }
+
         let updated = tauri::async_runtime::block_on(async {
-            let eng = engine()?;
             eng.update_repo(id, Path::new(&wowDir), None, opts)
                 .await
                 .map_err(|e| e.to_string())
         })?;
 
         match updated {
-            Some(p) => Ok(format!("Updated {}/{} to {}.", p.owner, p.name, p.latest)),
-            None => Ok("No update available.".to_string()),
+            Some(p) => {
+                if p.mode.as_str() == "addon_git" {
+                    steps.push(format!(
+                        "{}/{}: repository sync complete.",
+                        p.owner, p.name
+                    ));
+                } else {
+                    if !p.asset_name.is_empty() {
+                        steps.push(format!(
+                            "{}/{}: selected asset '{}'.",
+                            p.owner, p.name, p.asset_name
+                        ));
+                    }
+                    if !p.asset_url.is_empty() {
+                        steps.push(format!(
+                            "{}/{}: downloading from {}.",
+                            p.owner, p.name, p.asset_url
+                        ));
+                    }
+                    if p.asset_name.to_ascii_lowercase().ends_with(".zip") {
+                        steps.push(format!(
+                            "{}/{}: extracting archive '{}'.",
+                            p.owner, p.name, p.asset_name
+                        ));
+                    }
+                }
+
+                let installs = eng.db().list_installs(id).map_err(|e| e.to_string())?;
+                for entry in installs {
+                    let full = expand_install_path(&wowDir, &entry.path);
+                    steps.push(format!(
+                        "{}/{}: target [{}] {}",
+                        p.owner, p.name, entry.kind, full
+                    ));
+                }
+                steps.push(format!("{}/{}: install complete.", p.owner, p.name));
+                Ok(OperationResult {
+                    message: format!("Updated {}/{} to {}.", p.owner, p.name, p.latest),
+                    steps,
+                })
+            }
+            None => Ok(OperationResult {
+                message: "No update available.".to_string(),
+                steps,
+            }),
         }
     })
     .await
@@ -571,22 +690,72 @@ async fn wuddle_reinstall_repo(
     wowDir: String,
     useSymlinks: Option<bool>,
     setXattrComment: Option<bool>,
-) -> Result<String, String> {
+    replaceAddonConflicts: Option<bool>,
+) -> Result<OperationResult, String> {
     let wowDir = normalize_wow_dir(wowDir)?;
-    let opts = install_options(useSymlinks, setXattrComment);
+    let opts = install_options(useSymlinks, setXattrComment, replaceAddonConflicts);
 
     run_blocking(move || {
+        let eng = engine()?;
+        let repo = eng.db().get_repo(id).map_err(|e| e.to_string())?;
+        let mut steps: Vec<String> = Vec::new();
+        steps.push(format!(
+            "{}/{}: reinstall requested (mode: {}).",
+            repo.owner,
+            repo.name,
+            repo.mode.as_str()
+        ));
+        steps.push(format!("{}/{}: source: {}", repo.owner, repo.name, repo.url));
+
         let plan = tauri::async_runtime::block_on(async {
-            let eng = engine()?;
             eng.reinstall_repo(id, Path::new(&wowDir), None, opts)
                 .await
                 .map_err(|e| e.to_string())
         })?;
 
-        Ok(format!(
-            "Reinstalled {}/{} from {}.",
-            plan.owner, plan.name, plan.latest
-        ))
+        let installs = eng.db().list_installs(id).map_err(|e| e.to_string())?;
+        for entry in installs {
+            let full = expand_install_path(&wowDir, &entry.path);
+            steps.push(format!(
+                "{}/{}: target [{}] {}",
+                plan.owner, plan.name, entry.kind, full
+            ));
+        }
+        steps.push(format!("{}/{}: reinstall complete.", plan.owner, plan.name));
+
+        Ok(OperationResult {
+            message: format!(
+                "Reinstalled {}/{} from {}.",
+                plan.owner, plan.name, plan.latest
+            ),
+            steps,
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn wuddle_list_repo_branches(id: i64) -> Result<Vec<String>, String> {
+    run_blocking(move || {
+        let eng = engine()?;
+        eng.list_repo_branches(id).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn wuddle_set_repo_branch(id: i64, branch: Option<String>) -> Result<String, String> {
+    run_blocking(move || {
+        let eng = engine()?;
+        let normalized = branch
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty());
+        eng.set_repo_git_branch(id, normalized.clone())
+            .map_err(|e| e.to_string())?;
+        Ok(match normalized {
+            Some(b) => format!("Set branch to {}.", b),
+            None => "Using default remote branch.".to_string(),
+        })
     })
     .await
 }
@@ -737,6 +906,261 @@ fn wuddle_about_info() -> AboutInfo {
     }
 }
 
+fn first_existing_file(dir: &Path, names: &[&str]) -> Option<PathBuf> {
+    names
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn parse_arg_string(raw: &str) -> Vec<String> {
+    raw.split_whitespace().map(|s| s.to_string()).collect()
+}
+
+fn normalize_working_dir(wow_path: &Path, override_dir: Option<&str>) -> PathBuf {
+    let raw = override_dir.unwrap_or("").trim();
+    if raw.is_empty() {
+        return wow_path.to_path_buf();
+    }
+    let candidate = PathBuf::from(raw);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        wow_path.join(candidate)
+    }
+}
+
+fn spawn_launch_command(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    env_map: Option<&HashMap<String, String>>,
+) -> Result<(), String> {
+    let mut cmd = Command::new(program);
+    cmd.args(args).current_dir(cwd);
+    if let Some(env_map) = env_map {
+        for (k, v) in env_map {
+            let key = k.trim();
+            if key.is_empty() {
+                continue;
+            }
+            cmd.env(key, v);
+        }
+    }
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Failed to launch {}: {}", program, e))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn wuddle_launch_game(wowDir: String, launch: Option<LaunchConfig>) -> Result<String, String> {
+    let trimmed = wowDir.trim();
+    if trimmed.is_empty() {
+        return Err("WoW directory is empty.".to_string());
+    }
+
+    let wow_path = PathBuf::from(trimmed);
+    if !wow_path.exists() {
+        return Err(format!("WoW directory does not exist: {}", wow_path.display()));
+    }
+    if !wow_path.is_dir() {
+        return Err(format!("WoW path is not a directory: {}", wow_path.display()));
+    }
+
+    let launch_cfg = launch.unwrap_or_default();
+    let explicit_exe = launch_cfg
+        .executable_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    let target = if let Some(raw) = explicit_exe {
+        let candidate = if raw.is_absolute() {
+            raw
+        } else {
+            wow_path.join(raw)
+        };
+        if !candidate.exists() {
+            return Err(format!(
+                "Configured executable does not exist: {}",
+                candidate.display()
+            ));
+        }
+        if !candidate.is_file() {
+            return Err(format!(
+                "Configured executable path is not a file: {}",
+                candidate.display()
+            ));
+        }
+        candidate
+    } else {
+        first_existing_file(&wow_path, &["VanillaFixes.exe", "vanillafixes.exe"])
+            .or_else(|| first_existing_file(&wow_path, &["Wow.exe", "wow.exe", "WoW.exe"]))
+            .ok_or_else(|| {
+                format!(
+                    "No launcher found in {} (expected VanillaFixes.exe or Wow.exe).",
+                    wow_path.display()
+                )
+            })?
+    };
+    let target_name = target
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "game executable".to_string());
+    let target_str = target.to_string_lossy().to_string();
+
+    let method = launch_cfg
+        .method
+        .as_deref()
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase();
+    let cwd = normalize_working_dir(&wow_path, launch_cfg.working_dir.as_deref());
+    let env_map = launch_cfg.env.as_ref();
+
+    if method == "lutris" {
+        let command = launch_cfg
+            .custom_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("lutris");
+        let target_arg = launch_cfg
+            .lutris_target
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "Lutris launch target is empty (expected e.g. lutris:rungameid/2).".to_string())?;
+        let mut args = vec![target_arg.to_string()];
+        args.extend(parse_arg_string(
+            launch_cfg.custom_args.as_deref().unwrap_or(""),
+        ));
+        spawn_launch_command(command, &args, &cwd, env_map)?;
+        return Ok(format!("Launched {} via {}.", target_name, command));
+    }
+
+    if method == "wine" {
+        let command = launch_cfg
+            .wine_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("wine");
+        let mut args = parse_arg_string(launch_cfg.wine_args.as_deref().unwrap_or(""));
+        args.push(target_str);
+        spawn_launch_command(command, &args, &cwd, env_map)?;
+        return Ok(format!("Launched {} via {}.", target_name, command));
+    }
+
+    if method == "custom" {
+        let command = launch_cfg
+            .custom_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "Custom launch command is empty.".to_string())?;
+        let mut args = parse_arg_string(launch_cfg.custom_args.as_deref().unwrap_or(""));
+        let mut inserted_exe = false;
+        for arg in &mut args {
+            if arg.contains("{exe}") {
+                *arg = arg.replace("{exe}", &target_str);
+                inserted_exe = true;
+            }
+            if arg.contains("{wow_dir}") {
+                *arg = arg.replace("{wow_dir}", wow_path.to_string_lossy().as_ref());
+            }
+        }
+        if !inserted_exe {
+            args.push(target_str);
+        }
+        spawn_launch_command(command, &args, &cwd, env_map)?;
+        return Ok(format!("Launched {} via custom command.", target_name));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = Command::new(&target);
+        cmd.current_dir(&cwd);
+        if let Some(env_map) = env_map {
+            for (k, v) in env_map {
+                let key = k.trim();
+                if key.is_empty() {
+                    continue;
+                }
+                cmd.env(key, v);
+            }
+        }
+        cmd.spawn()
+            .map_err(|e| format!("Failed to launch {}: {}", target.display(), e))?;
+        return Ok(format!("Launched {}.", target_name));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if spawn_launch_command("wine", &vec![target.to_string_lossy().to_string()], &cwd, env_map).is_ok() {
+            return Ok(format!("Launched {} via wine.", target_name));
+        }
+        spawn_launch_command("open", &vec![target.to_string_lossy().to_string()], &cwd, env_map)?;
+        return Ok(format!("Launched {} via open.", target_name));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if spawn_launch_command("wine", &vec![target.to_string_lossy().to_string()], &cwd, env_map).is_ok() {
+            return Ok(format!("Launched {} via wine.", target_name));
+        }
+        if spawn_launch_command("xdg-open", &vec![target.to_string_lossy().to_string()], &cwd, env_map).is_ok() {
+            return Ok(format!("Launched {} via system handler.", target_name));
+        }
+        return Err(format!(
+            "Failed to launch {}. Install wine or configure an .exe handler.",
+            target.display()
+        ));
+    }
+}
+
+#[tauri::command]
+fn wuddle_open_directory(path: String) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Path is empty.".to_string());
+    }
+
+    let path_buf = PathBuf::from(trimmed);
+    if !path_buf.exists() {
+        return Err(format!("Path does not exist: {}", path_buf.display()));
+    }
+    if !path_buf.is_dir() {
+        return Err(format!("Path is not a directory: {}", path_buf.display()));
+    }
+
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = Command::new("explorer");
+        c.arg(&path_buf);
+        c
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = Command::new("open");
+        c.arg(&path_buf);
+        c
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = Command::new("xdg-open");
+        c.arg(&path_buf);
+        c
+    };
+
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Failed to open directory {}: {}", path_buf.display(), e))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -765,12 +1189,16 @@ pub fn run() {
             wuddle_update_all,
             wuddle_update_repo,
             wuddle_reinstall_repo,
+            wuddle_list_repo_branches,
+            wuddle_set_repo_branch,
             wuddle_set_active_profile,
             wuddle_delete_profile,
             wuddle_github_auth_status,
             wuddle_github_auth_set_token,
             wuddle_github_auth_clear_token,
-            wuddle_about_info
+            wuddle_about_info,
+            wuddle_launch_game,
+            wuddle_open_directory
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -11,6 +11,7 @@ const WOW_KEY = "wuddle.wow_dir";
 const PROFILES_KEY = "wuddle.profiles";
 const ACTIVE_PROFILE_KEY = "wuddle.profile.active";
 const TAB_KEY = "wuddle.tab";
+const PROJECT_VIEW_BY_PROFILE_KEY = "wuddle.project_view.by_profile";
 const OPT_SYMLINKS_KEY = "wuddle.opt.symlinks";
 const OPT_XATTR_KEY = "wuddle.opt.xattr";
 const OPT_CLOCK12_KEY = "wuddle.opt.clock12";
@@ -20,17 +21,19 @@ const LOG_LEVEL_KEY = "wuddle.log.level";
 const WUDDLE_REPO_URL = "https://github.com/ZythDr/Wuddle";
 const WUDDLE_RELEASES_URL = "https://github.com/ZythDr/Wuddle/releases";
 const WUDDLE_RELEASES_API_URL = "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
+const MAX_PARALLEL_UPDATES = 5;
 
 const state = {
   repos: [],
   plans: [],
   planByRepoId: new Map(),
+  branchOptionsByRepoId: new Map(),
+  branchOptionsLoading: new Set(),
   openMenuRepoId: null,
-  tab: "projects",
+  tab: "home",
   pending: 0,
   refreshInFlight: null,
   removeTargetRepo: null,
-  removeSelectedIds: [],
   removeTargetProfile: null,
   githubAuth: null,
   initialAutoCheckDone: false,
@@ -39,16 +42,16 @@ const state = {
   sortKey: "name",
   sortDir: "asc",
   lastCheckedAt: null,
-  lastCheckedByRepo: new Map(),
   clock12: false,
   logLines: [],
   logLevel: "all",
   logQuery: "",
   logAutoScroll: true,
   logWrap: false,
-  selectedRepoIds: new Set(),
   profiles: [],
   activeProfileId: "default",
+  projectViewByProfile: {},
+  projectView: "mods",
   authHealthSeenSession: false,
   authHealthActiveIssue: "",
   presetExpanded: new Set(),
@@ -57,6 +60,8 @@ const state = {
   aboutRefreshedAt: null,
   aboutLatestVersion: null,
 };
+
+const themedSelectBindings = new WeakMap();
 
 const CURATED_MOD_PRESETS = [
   {
@@ -210,6 +215,111 @@ function makeDefaultProfile() {
     id: "default",
     name: "WoW1",
     wowDir: defaultProfileWowDir(),
+    launch: defaultLaunchConfig(),
+  };
+}
+
+function defaultLaunchConfig() {
+  return {
+    method: "auto",
+    lutrisTarget: "",
+    wineCommand: "wine",
+    wineArgs: "",
+    customCommand: "",
+    customArgs: "",
+    workingDir: "",
+    envText: "",
+  };
+}
+
+function normalizeLaunchConfig(raw) {
+  const input = raw && typeof raw === "object" ? raw : {};
+  const methodRaw = String(input.method || "auto").trim().toLowerCase();
+  const method = new Set(["auto", "lutris", "wine", "custom"]).has(methodRaw)
+    ? methodRaw
+    : "auto";
+  return {
+    method,
+    lutrisTarget: String(input.lutrisTarget || "").trim(),
+    wineCommand: String(input.wineCommand || "wine").trim() || "wine",
+    wineArgs: String(input.wineArgs || "").trim(),
+    customCommand: String(input.customCommand || "").trim(),
+    customArgs: String(input.customArgs || "").trim(),
+    workingDir: String(input.workingDir || "").trim(),
+    envText: String(input.envText || "").trim(),
+  };
+}
+
+function profileLaunch(profile) {
+  return normalizeLaunchConfig(profile?.launch);
+}
+
+function rawWowPath(profile) {
+  return String(profile?.wowDir || "").trim();
+}
+
+function parentDirOfPath(path) {
+  const value = String(path || "").trim();
+  if (!value) return "";
+  const cut = Math.max(value.lastIndexOf("/"), value.lastIndexOf("\\"));
+  if (cut < 1) return "";
+  return value.slice(0, cut);
+}
+
+function isExePath(path) {
+  return /\.exe$/i.test(String(path || "").trim());
+}
+
+function profileExecutablePath(profile) {
+  const raw = rawWowPath(profile);
+  return isExePath(raw) ? raw : "";
+}
+
+function profileWowDir(profile) {
+  const raw = rawWowPath(profile);
+  if (!raw) return "";
+  if (isExePath(raw)) return parentDirOfPath(raw);
+  return raw;
+}
+
+function launchSummary(profile) {
+  const launch = profileLaunch(profile);
+  if (launch.method === "lutris") {
+    return launch.lutrisTarget ? `Lutris: ${launch.lutrisTarget}` : "Lutris";
+  }
+  if (launch.method === "wine") {
+    return launch.wineCommand ? `Wine: ${launch.wineCommand}` : "Wine";
+  }
+  if (launch.method === "custom") {
+    return launch.customCommand ? `Custom: ${launch.customCommand}` : "Custom command";
+  }
+  return "Auto";
+}
+
+function launchPayload(profile) {
+  const launch = profileLaunch(profile);
+  const env = {};
+  const lines = launch.envText.split(/\r?\n/);
+  for (const line of lines) {
+    const text = String(line || "").trim();
+    if (!text || text.startsWith("#")) continue;
+    const idx = text.indexOf("=");
+    if (idx <= 0) continue;
+    const key = text.slice(0, idx).trim();
+    const value = text.slice(idx + 1).trim();
+    if (!key) continue;
+    env[key] = value;
+  }
+  return {
+    method: launch.method,
+    executablePath: profileExecutablePath(profile),
+    lutrisTarget: launch.lutrisTarget,
+    wineCommand: launch.wineCommand,
+    wineArgs: launch.wineArgs,
+    customCommand: launch.customCommand,
+    customArgs: launch.customArgs,
+    workingDir: launch.workingDir,
+    env,
   };
 }
 
@@ -224,6 +334,68 @@ function persistProfiles() {
 
 function activeProfile() {
   return state.profiles.find((p) => p.id === state.activeProfileId) || state.profiles[0] || null;
+}
+
+function normalizeProjectView(value) {
+  return String(value || "").toLowerCase() === "addons" ? "addons" : "mods";
+}
+
+function readProjectViewByProfile() {
+  try {
+    const raw = localStorage.getItem(PROJECT_VIEW_BY_PROFILE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      out[normalizeProfileId(key)] = normalizeProjectView(value);
+    }
+    return out;
+  } catch (_) {
+    return {};
+  }
+}
+
+function persistProjectViewByProfile() {
+  localStorage.setItem(PROJECT_VIEW_BY_PROFILE_KEY, JSON.stringify(state.projectViewByProfile));
+}
+
+function syncProjectViewFromActiveProfile() {
+  const profile = activeProfile();
+  if (!profile) {
+    state.projectView = "mods";
+    return;
+  }
+  const profileId = normalizeProfileId(profile.id);
+  state.projectView = normalizeProjectView(state.projectViewByProfile[profileId] || "mods");
+}
+
+function setProjectView(view, { persist = true } = {}) {
+  const normalized = normalizeProjectView(view);
+  state.projectView = normalized;
+  const profile = activeProfile();
+  if (persist && profile) {
+    const profileId = normalizeProfileId(profile.id);
+    state.projectViewByProfile[profileId] = normalized;
+    persistProjectViewByProfile();
+  }
+  render();
+}
+
+function isAddonRepo(repo) {
+  const mode = String(repo?.mode || "")
+    .trim()
+    .toLowerCase();
+  return mode === "addon" || mode === "addon_git";
+}
+
+function reposForView(view) {
+  const addonsView = normalizeProjectView(view) === "addons";
+  return state.repos.filter((repo) => (addonsView ? isAddonRepo(repo) : !isAddonRepo(repo)));
+}
+
+function reposForCurrentView() {
+  return reposForView(state.projectView);
 }
 
 function getProfileById(profileId) {
@@ -266,113 +438,283 @@ function renderInstanceList() {
     const empty = document.createElement("div");
     empty.className = "instance-empty hint";
     empty.textContent =
-      "No instances configured yet. Add an instance, then choose the folder where wow.exe is located.";
+      "No instances configured yet. Add an instance, then choose the game executable path.";
     host.appendChild(empty);
     return;
   }
 
   for (const profile of state.profiles) {
-    const row = document.createElement("div");
-    row.className = `instance-row${profile.id === state.activeProfileId ? " active" : ""}`;
+    const card = document.createElement("div");
+    card.className = `instance-card${profile.id === state.activeProfileId ? " active" : ""}`;
+    card.addEventListener("click", () => {
+      openInstanceSettingsDialog(profile);
+    });
 
-    const nameField = document.createElement("label");
-    nameField.className = "field";
-    const nameLabel = document.createElement("div");
-    nameLabel.className = "label";
-    nameLabel.textContent = "Name";
-    const nameInput = document.createElement("input");
-    nameInput.placeholder = "WoW1";
-    nameInput.value = profile.name || "";
-    nameInput.addEventListener("input", () => {
-      saveProfileName(profile.id, nameInput.value);
-    });
-    nameField.appendChild(nameLabel);
-    nameField.appendChild(nameInput);
+    const head = document.createElement("div");
+    head.className = "instance-card-head";
+    const title = document.createElement("div");
+    title.className = "instance-card-title";
+    title.textContent = profile.name || "WoW";
+    head.appendChild(title);
+    if (profile.id === state.activeProfileId) {
+      const badge = document.createElement("span");
+      badge.className = "stat-pill";
+      badge.textContent = "Active";
+      head.appendChild(badge);
+    }
 
-    const pathField = document.createElement("label");
-    pathField.className = "field grow";
-    const pathLabel = document.createElement("div");
-    pathLabel.className = "label";
-    pathLabel.textContent = "Path";
-    const pathInput = document.createElement("input");
-    pathInput.placeholder = "/path/to/WoW";
-    pathInput.value = profile.wowDir || "";
-    pathInput.addEventListener("input", () => {
-      saveProfileWowDir(profile.id, pathInput.value);
-    });
-    pathInput.addEventListener("change", async () => {
-      if (profile.id === state.activeProfileId) {
-        await refreshAll();
-      }
-    });
-    pathField.appendChild(pathLabel);
-    pathField.appendChild(pathInput);
+    const path = document.createElement("div");
+    path.className = "instance-card-path";
+    path.textContent = profile.wowDir || "No WoW path configured";
+    path.title = profile.wowDir || "";
+
+    const launch = document.createElement("div");
+    launch.className = "instance-card-launch";
+    launch.textContent = `Launch: ${launchSummary(profile)}`;
 
     const actions = document.createElement("div");
     actions.className = "instance-actions";
-
-    const chooseBtn = document.createElement("button");
-    chooseBtn.className = "btn";
-    chooseBtn.textContent = "Choose...";
-    chooseBtn.addEventListener("click", async () => {
-      await pickWowDirForProfile(profile.id);
-    });
-
-    const openBtn = document.createElement("button");
-    openBtn.className = "btn";
-    openBtn.textContent = "Open Directory";
-    openBtn.disabled = !profile.wowDir;
-    openBtn.addEventListener("click", async () => {
-      await openPath(profile.wowDir);
-    });
+    const leftActions = document.createElement("div");
+    leftActions.className = "instance-actions-left";
+    const rightActions = document.createElement("div");
+    rightActions.className = "instance-actions-right";
 
     const activateBtn = document.createElement("button");
     activateBtn.className = "btn";
-    activateBtn.textContent = profile.id === state.activeProfileId ? "Active" : "Open";
+    activateBtn.textContent = profile.id === state.activeProfileId ? "Active" : "Switch";
     activateBtn.disabled = profile.id === state.activeProfileId;
-    activateBtn.addEventListener("click", async () => {
+    activateBtn.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
       await selectProfile(profile.id);
     });
 
     const removeBtn = document.createElement("button");
     removeBtn.className = "btn danger";
     removeBtn.textContent = "Remove";
-    removeBtn.addEventListener("click", async () => {
+    removeBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
       openRemoveInstanceDialog(profile);
     });
 
-    actions.appendChild(chooseBtn);
-    actions.appendChild(openBtn);
-    actions.appendChild(activateBtn);
-    actions.appendChild(removeBtn);
+    leftActions.appendChild(activateBtn);
+    rightActions.appendChild(removeBtn);
+    actions.appendChild(leftActions);
+    actions.appendChild(rightActions);
 
-    row.appendChild(nameField);
-    row.appendChild(pathField);
-    row.appendChild(actions);
-    host.appendChild(row);
+    card.appendChild(head);
+    card.appendChild(path);
+    card.appendChild(launch);
+    card.appendChild(actions);
+    host.appendChild(card);
   }
 }
 
 function renderProfileTabs() {
-  const host = $("profileTabs");
-  const divider = $("topTabsDivider");
+  const host = $("profilePickerHost");
+  if (!host) return;
   host.innerHTML = "";
-  for (const profile of state.profiles) {
-    const btn = document.createElement("button");
-    btn.className = "tab-btn";
-    if (state.tab === "projects" && profile.id === state.activeProfileId) {
-      btn.classList.add("active");
+
+  const menu = document.createElement("div");
+  menu.id = "profilePicker";
+  menu.className = "profile-menu";
+
+  const summary = document.createElement("button");
+  summary.type = "button";
+  summary.className = "profile-picker profile-menu-btn";
+  const selected = activeProfile();
+  summary.textContent = selected ? (selected.name || "WoW") : "No instances configured";
+  summary.title = selected?.wowDir || "";
+  menu.appendChild(summary);
+
+  const pop = document.createElement("div");
+  pop.className = "profile-menu-pop";
+
+  if (!state.profiles.length) {
+    menu.classList.add("disabled");
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "menu-item profile-menu-item";
+    item.textContent = "No instances configured";
+    item.disabled = true;
+    pop.appendChild(item);
+  } else {
+    for (const profile of state.profiles) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = `menu-item profile-menu-item${
+        profile.id === state.activeProfileId ? " active" : ""
+      }`;
+      item.textContent = profile.name || "WoW";
+      item.title = profile.wowDir || "";
+      item.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        menu.classList.remove("open");
+        if (profile.id === state.activeProfileId) return;
+        await selectProfile(profile.id);
+      });
+      pop.appendChild(item);
     }
-    btn.textContent = profile.name || "WoW";
-    btn.title = profile.wowDir || "";
-    btn.addEventListener("click", async () => {
-      await selectProfile(profile.id);
+  }
+
+  summary.addEventListener("click", (ev) => {
+    if (menu.classList.contains("disabled")) {
+      ev.preventDefault();
+      return;
+    }
+    ev.stopPropagation();
+    menu.classList.toggle("open");
+  });
+
+  menu.appendChild(pop);
+  host.appendChild(menu);
+}
+
+function closeThemedSelectMenus(except = null) {
+  document.querySelectorAll(".select-menu.open").forEach((menu) => {
+    if (!(menu instanceof HTMLElement)) return;
+    if (except && menu === except) return;
+    menu.classList.remove("open");
+    const select = menu.previousElementSibling;
+    if (!(select instanceof HTMLSelectElement)) return;
+    const binding = themedSelectBindings.get(select);
+    if (!binding) return;
+    binding.pop.classList.remove("open");
+    if (binding.pop.parentElement !== binding.menu) {
+      binding.menu.appendChild(binding.pop);
+    }
+  });
+}
+
+function closeThemedSelectMenu(select) {
+  const binding = themedSelectBindings.get(select);
+  if (!binding) return;
+  binding.menu.classList.remove("open");
+  binding.pop.classList.remove("open");
+  if (binding.pop.parentElement !== binding.menu) {
+    binding.menu.appendChild(binding.pop);
+  }
+}
+
+function positionThemedSelectMenu(select) {
+  const binding = themedSelectBindings.get(select);
+  if (!binding) return;
+  if (!binding.menu.classList.contains("open")) return;
+  const btnRect = binding.btn.getBoundingClientRect();
+  const viewportW = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportH = window.innerHeight || document.documentElement.clientHeight || 0;
+  const margin = 8;
+  const preferredWidth = Math.max(btnRect.width, 160);
+
+  binding.pop.style.width = `${preferredWidth}px`;
+  binding.pop.style.maxHeight = `${Math.max(120, Math.min(320, viewportH - 24))}px`;
+
+  const popRect = binding.pop.getBoundingClientRect();
+  const popH = popRect.height || 220;
+  let left = btnRect.left;
+  if (left + preferredWidth > viewportW - margin) {
+    left = Math.max(margin, viewportW - preferredWidth - margin);
+  }
+  if (left < margin) left = margin;
+
+  const roomBelow = viewportH - btnRect.bottom - margin;
+  const roomAbove = btnRect.top - margin;
+  let top = btnRect.bottom + 2;
+  if (roomBelow < popH && roomAbove > roomBelow) {
+    top = Math.max(margin, btnRect.top - popH - 2);
+  }
+
+  binding.pop.style.left = `${Math.round(left)}px`;
+  binding.pop.style.top = `${Math.round(top)}px`;
+}
+
+function syncThemedSelect(select) {
+  const binding = themedSelectBindings.get(select);
+  if (!binding) return;
+  const selectedOption = select.options[select.selectedIndex] || null;
+  const text = selectedOption?.textContent?.trim() || selectedOption?.value || "";
+  binding.value.textContent = text;
+  binding.btn.title = text;
+  binding.btn.disabled = !!select.disabled;
+  binding.menu.classList.toggle("disabled", !!select.disabled);
+  binding.items.forEach((item) => {
+    item.classList.toggle("active", item.dataset.value === select.value);
+  });
+}
+
+function rebuildThemedSelect(select) {
+  const binding = themedSelectBindings.get(select);
+  if (!binding) return;
+  binding.pop.innerHTML = "";
+  binding.items = [];
+  for (const option of Array.from(select.options || [])) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "select-menu-item";
+    item.dataset.value = option.value;
+    item.textContent = option.textContent || option.value;
+    item.disabled = !!option.disabled;
+    item.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (select.value !== option.value) {
+        select.value = option.value;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      closeThemedSelectMenu(select);
+      syncThemedSelect(select);
     });
-    host.appendChild(btn);
+    binding.pop.appendChild(item);
+    binding.items.push(item);
   }
-  if (divider) {
-    divider.classList.toggle("hidden", state.profiles.length === 0);
+  syncThemedSelect(select);
+}
+
+function ensureThemedSelect(select, extraClass = "") {
+  if (!(select instanceof HTMLSelectElement)) return null;
+  let binding = themedSelectBindings.get(select);
+  if (!binding) {
+    const menu = document.createElement("div");
+    menu.className = "select-menu";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "select-menu-btn";
+    const value = document.createElement("span");
+    value.className = "select-menu-value";
+    btn.appendChild(value);
+    const pop = document.createElement("div");
+    pop.className = "select-menu-pop";
+    menu.appendChild(btn);
+    menu.appendChild(pop);
+    select.classList.add("native-select-hidden");
+    select.insertAdjacentElement("afterend", menu);
+    binding = { menu, btn, pop, value, items: [] };
+    themedSelectBindings.set(select, binding);
+
+    btn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (select.disabled) return;
+      const willOpen = !menu.classList.contains("open");
+      closeThemedSelectMenus(menu);
+      if (willOpen && binding.pop.parentElement !== document.body) {
+        document.body.appendChild(binding.pop);
+      }
+      menu.classList.toggle("open", willOpen);
+      binding.pop.classList.toggle("open", willOpen);
+      if (!willOpen && binding.pop.parentElement !== menu) {
+        menu.appendChild(binding.pop);
+      }
+      if (willOpen) {
+        requestAnimationFrame(() => positionThemedSelectMenu(select));
+      }
+    });
+    select.addEventListener("change", () => {
+      syncThemedSelect(select);
+    });
   }
+  if (extraClass) binding.menu.classList.add(extraClass);
+  rebuildThemedSelect(select);
+  return binding;
 }
 
 function repoKeyFromUrl(url) {
@@ -454,6 +796,22 @@ async function confirmSuperWoWRisk() {
     );
     dlg.showModal();
   });
+}
+
+const ADDON_CONFLICT_PREFIX = "ADDON_CONFLICT:";
+
+function parseAddonConflictError(message) {
+  const text = String(message || "").trim();
+  if (!text.startsWith(ADDON_CONFLICT_PREFIX)) return null;
+  const details = text.slice(ADDON_CONFLICT_PREFIX.length).trim();
+  return details || "Existing addon files were found in the destination folder.";
+}
+
+async function confirmAddonConflict(repo, details) {
+  const name = `${repo.owner}/${repo.name}`;
+  return window.confirm(
+    `Addon install conflict for ${name}.\n\n${details}\n\nClick OK to delete conflicting addon folders and continue, or Cancel to keep existing files and stop this install.`,
+  );
 }
 
 function renderAddPresets() {
@@ -626,6 +984,42 @@ function renderAddPresets() {
   }
 }
 
+function applyAddDialogContext() {
+  const addons = state.projectView === "addons";
+  const addButton = $("btnAddOpen");
+  const addTitle = $("addDialogTitle");
+  const addHint = $("addDialogHint");
+  const quickAddField = $("quickAddField");
+  const repoUrlLabel = $("addRepoUrlLabel");
+  const modeSelect = $("mode");
+
+  if (addButton) {
+    addButton.textContent = addons ? "＋ Add New Addon" : "＋ Add New Mod";
+  }
+  if (addTitle) {
+    addTitle.textContent = addons ? "Add an addon repo" : "Add a repo";
+  }
+  if (addHint) {
+    addHint.textContent = addons
+      ? "Add a Git repo URL for an addon. Wuddle will clone/pull it for this instance."
+      : "Quick-add from the mods listed, or add your own Git repo URL below.";
+  }
+  if (repoUrlLabel) {
+    repoUrlLabel.textContent = addons ? "Addon Repo URL" : "Repo URL";
+  }
+  if (quickAddField) {
+    quickAddField.classList.toggle("hidden", addons);
+  }
+  if (modeSelect && addons) {
+    modeSelect.value = "addon_git";
+  } else if (modeSelect && modeSelect.value === "addon_git") {
+    modeSelect.value = "auto";
+  }
+  if (modeSelect) {
+    syncThemedSelect(modeSelect);
+  }
+}
+
 async function setBackendActiveProfile() {
   const profile = activeProfile();
   if (!profile) return;
@@ -666,6 +1060,25 @@ function log(line) {
     state.logLines.shift();
   }
   renderLog();
+}
+
+function logOperationResult(result) {
+  if (typeof result === "string") {
+    log(result);
+    return result;
+  }
+  if (!result || typeof result !== "object") {
+    const msg = String(result ?? "");
+    if (msg) log(msg);
+    return msg;
+  }
+  const steps = Array.isArray(result.steps) ? result.steps : [];
+  for (const step of steps) {
+    if (step) log(step);
+  }
+  const msg = String(result.message ?? "");
+  if (msg) log(msg);
+  return msg;
 }
 
 function filteredLogLines() {
@@ -770,6 +1183,127 @@ function renderAboutInfo() {
   $("aboutPackageName").textContent = aboutValue(info.packageName, "Unknown");
 }
 
+function updateCounts() {
+  const mods = reposForView("mods").filter((repo) => canUpdateRepo(repo)).length;
+  const addons = reposForView("addons").filter((repo) => canUpdateRepo(repo)).length;
+  return { mods, addons, total: mods + addons };
+}
+
+function openAddDialogFor(view) {
+  setProjectView(view);
+  showProjectsPanel();
+  applyAddDialogContext();
+  $("dlgAdd").showModal();
+}
+
+function renderHome() {
+  const profile = activeProfile();
+  const hasProfile = !!profile;
+  const counts = updateCounts();
+  const modUpdates = reposForView("mods").filter((repo) => canUpdateRepo(repo));
+  const addonUpdates = reposForView("addons").filter((repo) => canUpdateRepo(repo));
+
+  $("homeModsUpdateCount").textContent = String(modUpdates.length);
+  $("homeAddonsUpdateCount").textContent = String(addonUpdates.length);
+
+  const homeUpdateAllBtn = $("homeBtnUpdateAll");
+  homeUpdateAllBtn.textContent = `Update All (${counts.total})`;
+  homeUpdateAllBtn.disabled = !hasProfile || counts.total <= 0;
+  homeUpdateAllBtn.classList.toggle("primary", hasProfile && counts.total > 0);
+  homeUpdateAllBtn.title =
+    counts.total > 0
+      ? `Update all mods/addons with available updates (${counts.total}).`
+      : "No updates available.";
+
+  const homeAddMenu = $("homeAddMenu");
+  if (homeAddMenu) {
+    homeAddMenu.classList.toggle("disabled", !hasProfile);
+    if (!hasProfile) homeAddMenu.open = false;
+  }
+
+  const wowDir = readWowDir();
+  const explicitExe = profileExecutablePath(profile);
+  const canPlay = hasProfile && !!wowDir;
+  const playBtn = $("homeBtnPlay");
+  playBtn.disabled = !canPlay;
+  playBtn.title = canPlay
+    ? (explicitExe
+      ? "Launch the executable configured in Instance Settings."
+      : "Launch VanillaFixes.exe if present, otherwise Wow.exe.")
+    : "Set a valid WoW directory in Options first.";
+  const launchStatus = $("homeLaunchStatus");
+  if (!hasProfile) {
+    launchStatus.textContent = "No instance selected.";
+  } else if (!wowDir) {
+    launchStatus.textContent = "Set your WoW path in Options to enable launching.";
+  } else if (explicitExe) {
+    launchStatus.textContent = `Launch mode: ${launchSummary(profile)}. Executable: ${explicitExe}.`;
+  } else {
+    launchStatus.textContent = `Launch mode: ${launchSummary(profile)}. Target executable fallback: VanillaFixes.exe -> Wow.exe.`;
+  }
+
+  const modListEl = $("homeModList");
+  if (modListEl) {
+    if (!modUpdates.length) {
+      modListEl.innerHTML = `<div class="home-update-empty">${
+        hasProfile ? "No mod updates." : "Add an instance in Options."
+      }</div>`;
+    } else {
+      modListEl.innerHTML = modUpdates
+        .slice(0, 12)
+        .map(
+          (repo) =>
+            `<div class="home-update-line" title="${escapeHtml(repo.owner)}/${escapeHtml(repo.name)}">${escapeHtml(repo.name)}</div>`,
+        )
+        .join("");
+    }
+  }
+
+  const addonListEl = $("homeAddonList");
+  if (addonListEl) {
+    if (!addonUpdates.length) {
+      addonListEl.innerHTML = `<div class="home-update-empty">${
+        hasProfile ? "No addon updates." : "Add an instance in Options."
+      }</div>`;
+    } else {
+      addonListEl.innerHTML = addonUpdates
+        .slice(0, 12)
+        .map(
+          (repo) =>
+            `<div class="home-update-line" title="${escapeHtml(repo.owner)}/${escapeHtml(repo.name)}">${escapeHtml(repo.name)}</div>`,
+        )
+        .join("");
+    }
+  }
+
+  $("homeBtnRefreshOnly").disabled = !hasProfile;
+}
+
+async function launchGameFromHome() {
+  const profile = activeProfile();
+  if (!profile) {
+    log("ERROR launch: No active instance selected.");
+    return;
+  }
+  const wowDir = readWowDir();
+  if (!wowDir) {
+    log("ERROR launch: WoW directory is not set.");
+    return;
+  }
+  await withBusy(async () => {
+    try {
+      const msg = await safeInvoke(
+        "wuddle_launch_game",
+        { wowDir, launch: launchPayload(profile) },
+        { timeoutMs: 8000 },
+      );
+      log(msg || "Launched game.");
+    } catch (e) {
+      log(`ERROR launch: ${e.message}`);
+    }
+  });
+}
+
 async function fetchLatestWuddleReleaseTag() {
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), 4500);
@@ -824,27 +1358,39 @@ async function refreshAboutInfo({ force = false } = {}) {
 }
 
 function setTab(tab) {
-  if (tab === "options") state.tab = "options";
+  if (tab === "home") state.tab = "home";
+  else if (tab === "options") state.tab = "options";
   else if (tab === "logs") state.tab = "logs";
   else if (tab === "about") state.tab = "about";
   else state.tab = "projects";
   localStorage.setItem(TAB_KEY, state.tab);
 
+  $("panelHome").classList.toggle("hidden", state.tab !== "home");
   $("panelProjects").classList.toggle("hidden", state.tab !== "projects");
   $("panelOptions").classList.toggle("hidden", state.tab !== "options");
   $("panelLogs").classList.toggle("hidden", state.tab !== "logs");
   $("panelAbout").classList.toggle("hidden", state.tab !== "about");
 
+  $("tabHome").classList.toggle("active", state.tab === "home");
   $("tabOptions").classList.toggle("active", state.tab === "options");
   $("tabLogs").classList.toggle("active", state.tab === "logs");
   $("tabAbout").classList.toggle("active", state.tab === "about");
   renderProfileTabs();
+  renderProjectViewButtons();
 
   if (state.tab === "options") {
     renderInstanceList();
     void refreshGithubAuthStatus();
+  } else if (state.tab === "home") {
+    renderHome();
   } else if (state.tab === "about") {
     void refreshAboutInfo();
+  }
+}
+
+function showProjectsPanel() {
+  if (state.tab !== "projects") {
+    setTab("projects");
   }
 }
 
@@ -860,6 +1406,7 @@ function loadSettings() {
             id: normalizeProfileId(p?.id || p?.name || "default"),
             name: String(p?.name || "").trim() || "WoW",
             wowDir: String(p?.wowDir || "").trim(),
+            launch: normalizeLaunchConfig(p?.launch),
           }));
       }
     }
@@ -884,6 +1431,8 @@ function loadSettings() {
   state.activeProfileId = state.profiles.some((p) => p.id === wanted)
     ? wanted
     : (state.profiles[0]?.id || "");
+  state.projectViewByProfile = readProjectViewByProfile();
+  syncProjectViewFromActiveProfile();
 
   setTheme();
 
@@ -895,8 +1444,8 @@ function loadSettings() {
   $("optClock12").checked = clock12;
   state.clock12 = clock12;
 
-  const savedTab = localStorage.getItem(TAB_KEY) || "projects";
-  setTab(savedTab);
+  const savedTab = localStorage.getItem(TAB_KEY) || "home";
+  setTab(new Set(["home", "projects", "options", "logs", "about"]).has(savedTab) ? savedTab : "home");
 
   const logWrap = localStorage.getItem(LOG_WRAP_KEY) === "true";
   const logAutoScrollRaw = localStorage.getItem(LOG_AUTOSCROLL_KEY);
@@ -922,16 +1471,18 @@ function saveOptionFlags() {
   renderLog();
 }
 
-function installOptions() {
+function installOptions(overrides = {}) {
   return {
     useSymlinks: $("optSymlinks").checked,
     setXattrComment: $("optXattr").checked,
+    replaceAddonConflicts: false,
+    ...overrides,
   };
 }
 
 function readWowDir() {
   const profile = activeProfile();
-  return profile?.wowDir?.trim() || "";
+  return profileWowDir(profile);
 }
 
 function currentWowDirStrict() {
@@ -949,9 +1500,10 @@ async function selectProfile(profileId) {
   const id = normalizeProfileId(profileId);
   if (!state.profiles.some((p) => p.id === id)) return;
   state.activeProfileId = id;
-  state.selectedRepoIds.clear();
-  state.lastCheckedByRepo = new Map();
   state.lastCheckedAt = null;
+  state.branchOptionsByRepoId.clear();
+  state.branchOptionsLoading.clear();
+  syncProjectViewFromActiveProfile();
   const selected = activeProfile();
   if (selected?.wowDir) {
     localStorage.setItem(WOW_KEY, selected.wowDir);
@@ -959,7 +1511,7 @@ async function selectProfile(profileId) {
   persistProfiles();
   renderProfileTabs();
   renderInstanceList();
-  setTab("projects");
+  setTab("home");
   await setBackendActiveProfile();
   await refreshAll();
 }
@@ -974,14 +1526,18 @@ async function addInstance() {
     id = `${idBase}-${n++}`;
   }
   const wowDir = "";
-  state.profiles.push({ id, name, wowDir });
+  state.profiles.push({ id, name, wowDir, launch: defaultLaunchConfig() });
   state.activeProfileId = id;
+  state.projectViewByProfile[id] = "mods";
+  syncProjectViewFromActiveProfile();
+  persistProjectViewByProfile();
   persistProfiles();
   renderProfileTabs();
   renderInstanceList();
   await setBackendActiveProfile();
   log(`Created instance ${name}.`);
   render();
+  openInstanceSettingsDialog(getProfileById(id));
 }
 
 async function removeInstance(profileId) {
@@ -989,13 +1545,16 @@ async function removeInstance(profileId) {
   const before = state.profiles.length;
   state.profiles = state.profiles.filter((p) => p.id !== id);
   if (state.profiles.length === before) return;
+  delete state.projectViewByProfile[id];
 
   if (state.activeProfileId === id) {
     state.activeProfileId = state.profiles[0]?.id || "";
   }
-  state.selectedRepoIds.clear();
-  state.lastCheckedByRepo = new Map();
   state.lastCheckedAt = null;
+  state.branchOptionsByRepoId.clear();
+  state.branchOptionsLoading.clear();
+  syncProjectViewFromActiveProfile();
+  persistProjectViewByProfile();
   if (!state.profiles.length) {
     localStorage.removeItem(WOW_KEY);
   } else if (state.activeProfileId) {
@@ -1039,20 +1598,70 @@ async function pickWowDirForProfile(profileId) {
   }
 }
 
+function renderInstanceSettingsLaunchFields(method) {
+  const current = String(method || "auto").toLowerCase();
+  $("instanceSettingsLaunchAuto").classList.toggle("hidden", current !== "auto");
+  $("instanceSettingsLaunchLutris").classList.toggle("hidden", current !== "lutris");
+  $("instanceSettingsLaunchWine").classList.toggle("hidden", current !== "wine");
+  $("instanceSettingsLaunchCustom").classList.toggle("hidden", current !== "custom");
+}
+
+function openInstanceSettingsDialog(profile) {
+  if (!profile) return;
+  const launch = profileLaunch(profile);
+  $("instanceSettingsId").value = profile.id;
+  $("instanceSettingsName").value = profile.name || "";
+  $("instanceSettingsPath").value = rawWowPath(profile);
+  $("instanceSettingsLaunchMethod").value = launch.method;
+  syncThemedSelect($("instanceSettingsLaunchMethod"));
+  $("instanceSettingsLutrisTarget").value = launch.lutrisTarget || "";
+  $("instanceSettingsWineCommand").value = launch.wineCommand || "wine";
+  $("instanceSettingsWineArgs").value = launch.wineArgs || "";
+  $("instanceSettingsCustomCommand").value = launch.customCommand || "";
+  $("instanceSettingsCustomArgs").value = launch.customArgs || "";
+  $("instanceSettingsWorkingDir").value = launch.workingDir || "";
+  $("instanceSettingsEnv").value = launch.envText || "";
+  $("btnInstanceSettingsOpenPath").disabled = !profileWowDir(profile);
+  renderInstanceSettingsLaunchFields(launch.method);
+  $("dlgInstanceSettings").showModal();
+}
+
+function saveInstanceSettingsFromDialog() {
+  const id = normalizeProfileId($("instanceSettingsId").value || "");
+  const profile = getProfileById(id);
+  if (!profile) return false;
+
+  const nextName = String($("instanceSettingsName").value || "").trim() || profile.name || "WoW";
+  const nextPath = String($("instanceSettingsPath").value || "").trim();
+  const launch = normalizeLaunchConfig({
+    method: $("instanceSettingsLaunchMethod").value,
+    lutrisTarget: $("instanceSettingsLutrisTarget").value,
+    wineCommand: $("instanceSettingsWineCommand").value,
+    wineArgs: $("instanceSettingsWineArgs").value,
+    customCommand: $("instanceSettingsCustomCommand").value,
+    customArgs: $("instanceSettingsCustomArgs").value,
+    workingDir: $("instanceSettingsWorkingDir").value,
+    envText: $("instanceSettingsEnv").value,
+  });
+
+  profile.name = nextName;
+  profile.wowDir = nextPath;
+  profile.launch = launch;
+  if (profile.id === state.activeProfileId) {
+    localStorage.setItem(WOW_KEY, profile.wowDir || "");
+  }
+  persistProfiles();
+  renderProfileTabs();
+  renderInstanceList();
+  render();
+  return true;
+}
+
 function setGithubAuthStatus(message, kind = "") {
   const statusLine = $("ghAuthStatus");
   statusLine.classList.remove("status-ok", "status-warn");
   if (kind) statusLine.classList.add(kind);
   statusLine.textContent = message;
-}
-
-function pruneSelectedRepos() {
-  const valid = new Set(state.repos.map((repo) => repo.id));
-  for (const id of state.selectedRepoIds) {
-    if (!valid.has(id)) {
-      state.selectedRepoIds.delete(id);
-    }
-  }
 }
 
 function renderGithubAuth(status) {
@@ -1262,6 +1871,67 @@ function getPlanForRepo(repoId) {
   return state.planByRepoId.get(repoId) || null;
 }
 
+function branchOptionsForRepo(repo) {
+  const cached = state.branchOptionsByRepoId.get(repo.id);
+  const out = [];
+  const seen = new Set();
+  const selected = String(repo?.gitBranch || "").trim() || "master";
+
+  out.push({ value: "master", label: "master (default)" });
+  seen.add("master");
+
+  if (selected && !seen.has(selected.toLowerCase())) {
+    out.push({ value: selected, label: selected });
+    seen.add(selected.toLowerCase());
+  }
+
+  for (const b of cached || []) {
+    const v = String(b || "").trim();
+    if (!v) continue;
+    const key = v.toLowerCase();
+    if (seen.has(key)) continue;
+    out.push({ value: v, label: v });
+    seen.add(key);
+  }
+  return out;
+}
+
+async function loadRepoBranches(repo) {
+  if (!isAddonRepo(repo)) return;
+  if (state.branchOptionsByRepoId.has(repo.id)) return;
+  if (state.branchOptionsLoading.has(repo.id)) return;
+
+  state.branchOptionsLoading.add(repo.id);
+  try {
+    const branches = await safeInvoke("wuddle_list_repo_branches", { id: repo.id }, { timeoutMs: 20000 });
+    state.branchOptionsByRepoId.set(repo.id, Array.isArray(branches) ? branches : []);
+    render();
+  } catch (e) {
+    log(`ERROR branches ${repo.owner}/${repo.name}: ${e.message}`);
+  } finally {
+    state.branchOptionsLoading.delete(repo.id);
+  }
+}
+
+async function setRepoBranch(repo, branch) {
+  const normalized = String(branch || "").trim();
+  const chosen = normalized || "master";
+  try {
+    const msg = await safeInvoke("wuddle_set_repo_branch", {
+      id: repo.id,
+      branch: chosen,
+    });
+    log(`${repo.owner}/${repo.name}: ${msg}`);
+    const current = state.repos.find((r) => r.id === repo.id);
+    if (current) {
+      current.gitBranch = chosen;
+    }
+    await refreshAll({ forceCheck: true });
+  } catch (e) {
+    log(`ERROR set branch ${repo.owner}/${repo.name}: ${e.message}`);
+  }
+}
+
 function canUpdateRepo(repo) {
   if (!repo.enabled) return false;
   const plan = getPlanForRepo(repo.id);
@@ -1310,15 +1980,19 @@ function matchesFilter(repo) {
 
 function sortedFilteredRepos() {
   const dir = state.sortDir === "desc" ? -1 : 1;
-  const list = state.repos.filter(matchesFilter);
+  const list = reposForCurrentView().filter(matchesFilter);
 
   list.sort((a, b) => {
     if (state.sortKey === "name") {
       return dir * a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
     }
     if (state.sortKey === "current") {
-      const av = versionLabel(getPlanForRepo(a.id)?.current);
-      const bv = versionLabel(getPlanForRepo(b.id)?.current);
+      const av = state.projectView === "addons"
+        ? String(a.gitBranch || "").trim() || "default"
+        : versionLabel(getPlanForRepo(a.id)?.current);
+      const bv = state.projectView === "addons"
+        ? String(b.gitBranch || "").trim() || "default"
+        : versionLabel(getPlanForRepo(b.id)?.current);
       return dir * compareVersionText(av, bv);
     }
     if (state.sortKey === "latest") {
@@ -1352,8 +2026,51 @@ function renderFilterButtons() {
   });
 }
 
+function renderProjectViewButtons() {
+  const modsBtn = $("btnViewMods");
+  const addonsBtn = $("btnViewAddons");
+  if (!modsBtn || !addonsBtn) return;
+
+  const modsUpdates = reposForView("mods").filter((repo) => canUpdateRepo(repo)).length;
+  const addonsUpdates = reposForView("addons").filter((repo) => canUpdateRepo(repo)).length;
+  modsBtn.textContent = `Mods (${modsUpdates})`;
+  addonsBtn.textContent = `Addons (${addonsUpdates})`;
+
+  if (state.tab !== "projects") {
+    modsBtn.classList.remove("active");
+    addonsBtn.classList.remove("active");
+    return;
+  }
+
+  const addons = state.projectView === "addons";
+  modsBtn.classList.toggle("active", !addons);
+  addonsBtn.classList.toggle("active", addons);
+}
+
 function renderSortHeaders() {
+  const addonsView = state.projectView === "addons";
+  const panel = $("panelProjects");
+  panel?.classList.toggle("addons-mode", addonsView);
+
+  const thCurrent = $("thCurrent");
+  const thLatest = $("thLatest");
+  const thEnabled = $("thEnabled");
+  if (thCurrent) thCurrent.textContent = addonsView ? "Branch" : "Current";
+  if (thLatest) thLatest.classList.toggle("col-hidden", addonsView);
+  if (thEnabled) thEnabled.classList.toggle("col-hidden", addonsView);
+
+  if (addonsView && state.sortKey === "latest") {
+    // Keep sort predictable when switching view.
+    state.sortKey = "name";
+    state.sortDir = "asc";
+  }
+
   document.querySelectorAll("#repoThead .th.sortable").forEach((th) => {
+    if (addonsView && th.id === "thLatest") {
+      th.classList.add("col-hidden");
+      return;
+    }
+    th.classList.remove("col-hidden");
     const key = th.getAttribute("data-sort");
     const active = key === state.sortKey;
     th.classList.toggle("active", active);
@@ -1366,15 +2083,16 @@ function renderLastChecked() {
 }
 
 function getProjectSummary() {
-  const total = state.repos.length;
-  const enabled = state.repos.filter((repo) => repo.enabled).length;
+  const viewRepos = reposForCurrentView();
+  const total = viewRepos.length;
+  const enabled = viewRepos.filter((repo) => repo.enabled).length;
   const disabled = total - enabled;
-  const updates = state.repos.filter((repo) => {
+  const updates = viewRepos.filter((repo) => {
     const plan = getPlanForRepo(repo.id);
     return repo.enabled && !!plan?.has_update && !plan?.error;
   }).length;
-  const errors = state.repos.filter((repo) => !!getPlanForRepo(repo.id)?.error).length;
-  const rateLimited = state.repos.some((repo) => {
+  const errors = viewRepos.filter((repo) => !!getPlanForRepo(repo.id)?.error).length;
+  const rateLimited = viewRepos.some((repo) => {
     const error = getPlanForRepo(repo.id)?.error || "";
     return /rate[\s-]?limit|http 403|http 429/i.test(error);
   });
@@ -1484,16 +2202,9 @@ async function openPath(path) {
     return;
   }
   try {
-    // reveal_item_in_dir does not require filesystem scope entries like open_path does.
-    await safeInvoke("plugin:opener|reveal_item_in_dir", { paths: [target] });
-  } catch (revealErr) {
-    try {
-      await safeInvoke("plugin:opener|open_path", { path: target });
-    } catch (openErr) {
-      const r = revealErr?.message || String(revealErr);
-      const o = openErr?.message || String(openErr);
-      log(`ERROR open dir: ${r} (fallback failed: ${o})`);
-    }
+    await safeInvoke("wuddle_open_directory", { path: target });
+  } catch (err) {
+    log(`ERROR open dir: ${err?.message || String(err)}`);
   }
 }
 
@@ -1502,23 +2213,6 @@ function openRemoveDialog(repo) {
   $("removeRepoName").textContent = `${repo.owner}/${repo.name}`;
   $("removeLocalFiles").checked = false;
   $("dlgRemove").showModal();
-}
-
-function openRemoveSelectedDialog() {
-  const selected = state.repos.filter((repo) => state.selectedRepoIds.has(repo.id));
-  if (!selected.length) return;
-  state.removeSelectedIds = selected.map((repo) => repo.id);
-
-  const count = selected.length;
-  $("removeSelectedCount").textContent = `${count} project${count === 1 ? "" : "s"} selected`;
-  const preview = selected
-    .slice(0, 4)
-    .map((repo) => `${repo.owner}/${repo.name}`)
-    .join(", ");
-  const more = count > 4 ? ` +${count - 4} more` : "";
-  $("removeSelectedNames").textContent = preview ? `${preview}${more}` : "";
-  $("removeSelectedLocalFiles").checked = false;
-  $("dlgRemoveSelected").showModal();
 }
 
 function openRemoveInstanceDialog(profile) {
@@ -1558,52 +2252,6 @@ async function confirmRemove() {
     } catch (e) {
       log(`ERROR removing: ${e.message}`);
     }
-  });
-}
-
-async function confirmRemoveSelected() {
-  const selectedIds = Array.isArray(state.removeSelectedIds)
-    ? state.removeSelectedIds.filter((id) => state.repos.some((repo) => repo.id === id))
-    : [];
-  if (!selectedIds.length) {
-    state.removeSelectedIds = [];
-    $("dlgRemoveSelected").close();
-    return;
-  }
-
-  const removeLocalFiles = $("removeSelectedLocalFiles").checked;
-  const wowDir = removeLocalFiles ? readWowDir() : null;
-  if (removeLocalFiles && !wowDir) {
-    log("ERROR remove selected: WoW directory is required to remove local files.");
-    return;
-  }
-
-  await withBusy(async () => {
-    const repoById = new Map(state.repos.map((repo) => [repo.id, repo]));
-    let removed = 0;
-    let failed = 0;
-    for (const id of selectedIds) {
-      const repo = repoById.get(id);
-      const label = repo ? `${repo.owner}/${repo.name}` : `repo id=${id}`;
-      try {
-        const msg = await safeInvoke(
-          "wuddle_remove_repo",
-          { id, removeLocalFiles, wowDir },
-          { timeoutMs: 45000 },
-        );
-        state.selectedRepoIds.delete(id);
-        log(msg);
-        removed += 1;
-      } catch (e) {
-        failed += 1;
-        log(`ERROR remove ${label}: ${e.message}`);
-      }
-    }
-    state.removeSelectedIds = [];
-    $("dlgRemoveSelected").close();
-    if (failed > 0) log(`Removed ${removed} selected project(s); ${failed} failed.`);
-    else log(`Removed ${removed} selected project(s).`);
-    await refreshAll();
   });
 }
 
@@ -1652,14 +2300,35 @@ async function updateRepo(repo) {
   log(`Updating ${repo.owner}/${repo.name}...`);
   await withBusy(async () => {
     try {
-      const msg = await safeInvoke("wuddle_update_repo", {
+      const result = await safeInvoke("wuddle_update_repo", {
         id: repo.id,
         wowDir,
         ...installOptions(),
       });
-      log(msg);
+      const msg = logOperationResult(result);
       await refreshAll({ forceCheck: true });
     } catch (e) {
+      const conflict = isAddonRepo(repo) ? parseAddonConflictError(e.message) : null;
+      if (conflict) {
+        const proceed = await confirmAddonConflict(repo, conflict);
+        if (!proceed) {
+          log(`${repo.owner}/${repo.name}: cancelled install (existing addon files kept).`);
+          return;
+        }
+        try {
+          const retryResult = await safeInvoke("wuddle_update_repo", {
+            id: repo.id,
+            wowDir,
+            ...installOptions({ replaceAddonConflicts: true }),
+          });
+          logOperationResult(retryResult);
+          await refreshAll({ forceCheck: true });
+          return;
+        } catch (retryErr) {
+          log(`ERROR update ${repo.owner}/${repo.name}: ${retryErr.message}`);
+          return;
+        }
+      }
       log(`ERROR update ${repo.owner}/${repo.name}: ${e.message}`);
     }
   });
@@ -1672,73 +2341,77 @@ async function reinstallRepo(repo) {
   log(`Reinstalling ${repo.owner}/${repo.name}...`);
   await withBusy(async () => {
     try {
-      const msg = await safeInvoke("wuddle_reinstall_repo", {
+      const result = await safeInvoke("wuddle_reinstall_repo", {
         id: repo.id,
         wowDir,
         ...installOptions(),
       });
-      log(msg);
+      logOperationResult(result);
       await refreshAll({ forceCheck: true });
     } catch (e) {
+      const conflict = isAddonRepo(repo) ? parseAddonConflictError(e.message) : null;
+      if (conflict) {
+        const proceed = await confirmAddonConflict(repo, conflict);
+        if (!proceed) {
+          log(`${repo.owner}/${repo.name}: cancelled reinstall (existing addon files kept).`);
+          return;
+        }
+        try {
+          const retryResult = await safeInvoke("wuddle_reinstall_repo", {
+            id: repo.id,
+            wowDir,
+            ...installOptions({ replaceAddonConflicts: true }),
+          });
+          logOperationResult(retryResult);
+          await refreshAll({ forceCheck: true });
+          return;
+        } catch (retryErr) {
+          log(`ERROR reinstall ${repo.owner}/${repo.name}: ${retryErr.message}`);
+          return;
+        }
+      }
       log(`ERROR reinstall ${repo.owner}/${repo.name}: ${e.message}`);
     }
   });
 }
 
 function render() {
+  closeThemedSelectMenus();
   renderAddPresets();
+  renderHome();
   const host = $("repoRows");
   host.innerHTML = "";
+  renderProjectViewButtons();
+  applyAddDialogContext();
   const profile = activeProfile();
   const hasProfile = !!profile;
   $("btnAddOpen").disabled = !hasProfile;
   $("btnUpdateAll").disabled = !hasProfile;
+  $("btnViewMods").disabled = !hasProfile;
+  $("btnViewAddons").disabled = !hasProfile;
 
   renderFilterButtons();
   renderSortHeaders();
   renderLastChecked();
   renderProjectStatusStrip();
   renderGithubAuthHealth();
-  const failedCount = state.repos.filter((r) => !!getPlanForRepo(r.id)?.error).length;
+  const failedCount = reposForCurrentView().filter((r) => !!getPlanForRepo(r.id)?.error).length;
   $("btnRetryFailed").classList.toggle("hidden", failedCount === 0);
   $("btnRetryFailed").disabled = failedCount === 0 || !hasProfile;
   $("btnRetryFailed").title = failedCount ? `Retry ${failedCount} failed fetch(es)` : "No failed fetches";
 
-  const selectedCount = Array.from(state.selectedRepoIds).filter((id) =>
-    state.repos.some((repo) => repo.id === id),
-  ).length;
   const updateActionState = getUpdateActionState();
   const updateActionBtn = $("btnUpdateAll");
-  const removeSelectedBtn = $("btnRemoveSelected");
   updateActionBtn.textContent = updateActionState.label;
   updateActionBtn.title = updateActionState.title;
   updateActionBtn.classList.toggle("primary", updateActionState.primary);
   updateActionBtn.disabled = !hasProfile || updateActionState.disabled;
-  if (removeSelectedBtn) {
-    removeSelectedBtn.disabled = !hasProfile || selectedCount === 0;
-    removeSelectedBtn.textContent =
-      selectedCount > 0 ? `Remove Selected (${selectedCount})` : "Remove Selected";
-    removeSelectedBtn.title =
-      selectedCount > 0
-        ? `Remove selected projects (${selectedCount})`
-        : hasProfile
-          ? "Select one or more projects first."
-          : "Add an instance in Options first.";
-  }
   if (!hasProfile) {
     updateActionBtn.textContent = "Check for updates";
     updateActionBtn.title = "Add an instance in Options first.";
-    if (removeSelectedBtn) {
-      removeSelectedBtn.textContent = "Remove Selected";
-    }
   }
 
   const visibleRepos = sortedFilteredRepos();
-  const visibleSelectedCount = visibleRepos.filter((repo) => state.selectedRepoIds.has(repo.id)).length;
-  const selectAll = $("selectAllRepos");
-  selectAll.checked = visibleRepos.length > 0 && visibleSelectedCount === visibleRepos.length;
-  selectAll.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < visibleRepos.length;
-  selectAll.disabled = !hasProfile;
 
   if (!hasProfile) {
     return;
@@ -1747,9 +2420,11 @@ function render() {
   if (!visibleRepos.length) {
     const div = document.createElement("div");
     div.className = "empty";
-    div.textContent = state.repos.length
-      ? "No projects match the current filter."
-      : "No repos yet. Click “＋ Add”.";
+    const totalForView = reposForCurrentView().length;
+    const noun = state.projectView === "addons" ? "addons" : "mods";
+    div.textContent = totalForView
+      ? `No ${noun} match the current filter.`
+      : `No ${noun} yet. Click “＋ Add”.`;
     host.appendChild(div);
     return;
   }
@@ -1760,27 +2435,12 @@ function render() {
     const row = document.createElement("div");
     row.className = "trow";
 
-    const selectCell = document.createElement("div");
-    selectCell.className = "select-col";
-    const selectInput = document.createElement("input");
-    selectInput.type = "checkbox";
-    selectInput.checked = state.selectedRepoIds.has(r.id);
-    selectInput.setAttribute("aria-label", `Select ${r.owner}/${r.name}`);
-    selectInput.addEventListener("change", (ev) => {
-      ev.stopPropagation();
-      if (selectInput.checked) state.selectedRepoIds.add(r.id);
-      else state.selectedRepoIds.delete(r.id);
-      render();
-    });
-    selectCell.appendChild(selectInput);
-
     const nameCell = document.createElement("div");
     nameCell.className = "namecell";
 
     const nameMain = document.createElement("div");
     const forgeLabel = displayForge(r);
     const plan = getPlanForRepo(r.id);
-    const checkedAt = state.lastCheckedByRepo.get(r.id);
     nameMain.className = "name-main";
     nameMain.title = r.url;
 
@@ -1799,7 +2459,7 @@ function render() {
 
     const nameSub = document.createElement("div");
     nameSub.className = "name-sub";
-    nameSub.textContent = `${r.owner} • ${forgeLabel} • ${r.mode}${r.enabled ? "" : " • disabled"} • checked ${formatTime(checkedAt)}`;
+    nameSub.textContent = `${r.owner} • ${forgeLabel}${r.enabled ? "" : " • disabled"}`;
 
     nameHeader.appendChild(nameLink);
     nameMain.appendChild(nameHeader);
@@ -1812,12 +2472,46 @@ function render() {
       status.title = plan.error;
     }
 
+    const addonsView = state.projectView === "addons";
     const currentCell = document.createElement("div");
-    currentCell.className = "version-cell";
-    currentCell.textContent = versionLabel(plan?.current);
+    if (addonsView) {
+      currentCell.className = "branch-cell";
+      const select = document.createElement("select");
+      select.className = "branch-select";
+      const options = branchOptionsForRepo(r);
+      const selected = String(r.gitBranch || "").trim() || "master";
+      for (const opt of options) {
+        const el = document.createElement("option");
+        el.value = opt.value;
+        el.textContent = opt.label;
+        if ((selected || "") === opt.value) {
+          el.selected = true;
+        }
+        select.appendChild(el);
+      }
+      if (state.branchOptionsLoading.has(r.id)) {
+        select.disabled = true;
+      } else {
+        select.disabled = false;
+      }
+      select.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+      });
+      select.addEventListener("change", async (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        await setRepoBranch(r, select.value);
+      });
+      currentCell.appendChild(select);
+      ensureThemedSelect(select, "branch-select-menu");
+      void loadRepoBranches(r);
+    } else {
+      currentCell.className = "version-cell";
+      currentCell.textContent = versionLabel(plan?.current);
+    }
 
     const latestCell = document.createElement("div");
-    latestCell.className = "version-cell";
+    latestCell.className = `version-cell${addonsView ? " col-hidden" : ""}`;
     latestCell.textContent = versionLabel(plan?.latest);
 
     const actions = document.createElement("div");
@@ -1851,7 +2545,7 @@ function render() {
     });
 
     const enabledCell = document.createElement("div");
-    enabledCell.className = "enabled-col";
+    enabledCell.className = `enabled-col${addonsView ? " col-hidden" : ""}`;
     enabledCell.appendChild(enableBtn);
 
     const menuWrap = document.createElement("div");
@@ -1897,6 +2591,18 @@ function render() {
     });
 
     menu.appendChild(reinstall);
+    if (!isAddonRepo(r)) {
+      const toggle = document.createElement("button");
+      toggle.className = "menu-item";
+      toggle.textContent = r.enabled ? "Disable" : "Enable";
+      toggle.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        state.openMenuRepoId = null;
+        await setRepoEnabled(r, !r.enabled);
+      });
+      menu.appendChild(toggle);
+    }
     menu.appendChild(del);
     menuWrap.appendChild(menuBtn);
     menuWrap.appendChild(menu);
@@ -1904,7 +2610,6 @@ function render() {
     actions.appendChild(updateBtn);
     actions.appendChild(menuWrap);
 
-    row.appendChild(selectCell);
     row.appendChild(nameCell);
     row.appendChild(currentCell);
     row.appendChild(latestCell);
@@ -1930,35 +2635,13 @@ function getUpdateActionState() {
     };
   }
 
-  const selectedRepos = state.repos.filter((repo) => state.selectedRepoIds.has(repo.id));
-  const selectedCount = selectedRepos.length;
-  const selectedUpdatableCount = selectedRepos.filter((repo) => canUpdateRepo(repo)).length;
   const updatableCount = state.repos.filter((repo) => canUpdateRepo(repo)).length;
-
-  if (selectedCount > 0) {
-    if (selectedUpdatableCount > 0) {
-      return {
-        mode: "update_selected",
-        label: `Update (${selectedUpdatableCount})`,
-        title: `Update selected projects with available updates (${selectedUpdatableCount}).`,
-        primary: true,
-        disabled: false,
-      };
-    }
-    return {
-      mode: "reinstall_selected",
-      label: `Reinstall Selected (${selectedCount})`,
-      title: `Reinstall selected projects (${selectedCount}).`,
-      primary: true,
-      disabled: false,
-    };
-  }
 
   if (updatableCount > 0) {
     return {
       mode: "update_all",
       label: `Update (${updatableCount})`,
-      title: `Update all projects with available updates (${updatableCount}).`,
+      title: `Update all tracked mods/addons with available updates (${updatableCount}).`,
       primary: true,
       disabled: false,
     };
@@ -1967,7 +2650,7 @@ function getUpdateActionState() {
   return {
     mode: "check",
     label: "Check for updates",
-    title: "Check all tracked projects for updates.",
+    title: "Check tracked mods/addons for updates.",
     primary: false,
     disabled: false,
   };
@@ -1983,8 +2666,15 @@ function escapeHtml(s) {
 }
 
 async function loadRepos() {
-  state.repos = await safeInvoke("wuddle_list_repos", {}, { timeoutMs: 12000 });
-  pruneSelectedRepos();
+  const wowDir = readWowDir() || null;
+  state.repos = await safeInvoke("wuddle_list_repos", { wowDir }, { timeoutMs: 12000 });
+  const known = new Set(state.repos.map((r) => r.id));
+  state.branchOptionsByRepoId = new Map(
+    Array.from(state.branchOptionsByRepoId.entries()).filter(([id]) => known.has(id)),
+  );
+  state.branchOptionsLoading = new Set(
+    Array.from(state.branchOptionsLoading.values()).filter((id) => known.has(id)),
+  );
 }
 
 async function checkUpdates() {
@@ -2015,9 +2705,6 @@ async function checkUpdates() {
   state.planByRepoId = new Map(state.plans.map((plan) => [plan.repo_id, plan]));
 
   state.lastCheckedAt = checkedAt;
-  for (const plan of next) {
-    state.lastCheckedByRepo.set(plan.repo_id, checkedAt);
-  }
 
   const repoById = new Map(state.repos.map((repo) => [repo.id, repo]));
   for (const plan of state.plans) {
@@ -2051,7 +2738,6 @@ async function refreshAll(options = {}) {
       state.plans = [];
       state.planByRepoId = new Map();
       state.lastCheckedAt = null;
-      state.lastCheckedByRepo = new Map();
       render();
       return;
     }
@@ -2059,6 +2745,7 @@ async function refreshAll(options = {}) {
     try {
       await setBackendActiveProfile();
       await loadRepos();
+      render();
       const allowInitial = !state.initialAutoCheckDone;
       const shouldCheckUpdates = forceCheck || hasGithubAuthToken() || allowInitial;
 
@@ -2088,133 +2775,85 @@ async function updateAll() {
   const wowDir = currentWowDirStrict();
   if (!wowDir) return;
 
-  log("Updating all…");
-  await withBusy(async () => {
-    try {
-      const msg = await safeInvoke("wuddle_update_all", {
-        wowDir,
-        ...installOptions(),
-      });
-      log(msg);
-      await refreshAll({ forceCheck: true });
-    } catch (e) {
-      log(`ERROR update: ${e.message}`);
-    }
-  });
-}
-
-async function updateSelected() {
-  const wowDir = currentWowDirStrict();
-  if (!wowDir) return;
-
-  const selected = state.repos.filter((repo) => state.selectedRepoIds.has(repo.id));
-  if (!selected.length) {
-    log("No selected projects.");
-    return;
-  }
-
-  const updatable = selected.filter((repo) => canUpdateRepo(repo));
+  const updatable = state.repos.filter((repo) => canUpdateRepo(repo));
   if (!updatable.length) {
-    log("No selected projects have updates available.");
+    log("No updates available.");
     return;
   }
 
-  log(`Updating selected (${updatable.length})…`);
+  log("Updating mods/addons…");
   await withBusy(async () => {
     let updated = 0;
     let failed = 0;
-    for (const repo of updatable) {
+    const addonConflicts = [];
+    const limit = Math.max(1, Math.min(MAX_PARALLEL_UPDATES, updatable.length));
+    let nextIndex = 0;
+    const workers = Array.from({ length: limit }, async () => {
+      while (true) {
+        const idx = nextIndex++;
+        if (idx >= updatable.length) return;
+        const repo = updatable[idx];
+        try {
+          const result = await safeInvoke("wuddle_update_repo", {
+            id: repo.id,
+            wowDir,
+            ...installOptions(),
+          });
+          const msg = logOperationResult(result);
+          if (/^Updated\b/i.test(msg)) updated += 1;
+        } catch (e) {
+          const conflict = isAddonRepo(repo) ? parseAddonConflictError(e.message) : null;
+          if (conflict) {
+            addonConflicts.push({ repo, conflict });
+            continue;
+          }
+          failed += 1;
+          log(`ERROR update ${repo.owner}/${repo.name}: ${e.message}`);
+        }
+      }
+    });
+    await Promise.all(workers);
+
+    for (const { repo, conflict } of addonConflicts) {
+      const proceed = await confirmAddonConflict(repo, conflict);
+      if (!proceed) {
+        log(`${repo.owner}/${repo.name}: cancelled install (existing addon files kept).`);
+        continue;
+      }
       try {
-        const msg = await safeInvoke("wuddle_update_repo", {
+        const result = await safeInvoke("wuddle_update_repo", {
           id: repo.id,
           wowDir,
-          ...installOptions(),
+          ...installOptions({ replaceAddonConflicts: true }),
         });
+        const msg = logOperationResult(result);
         if (/^Updated\b/i.test(msg)) updated += 1;
-        log(msg);
       } catch (e) {
         failed += 1;
-        log(`ERROR update selected ${repo.owner}/${repo.name}: ${e.message}`);
+        log(`ERROR update ${repo.owner}/${repo.name}: ${e.message}`);
       }
     }
-    if (failed > 0) {
-      log(`Done. Updated ${updated} selected repo(s); ${failed} failed.`);
-    } else {
-      log(`Done. Updated ${updated} selected repo(s).`);
-    }
-    await refreshAll({ forceCheck: true });
-  });
-}
 
-async function reinstallSelected() {
-  const wowDir = currentWowDirStrict();
-  if (!wowDir) return;
-
-  const selected = state.repos.filter((repo) => state.selectedRepoIds.has(repo.id));
-  if (!selected.length) {
-    log("No selected projects.");
-    return;
-  }
-
-  log(`Reinstalling selected (${selected.length})…`);
-  await withBusy(async () => {
-    let reinstalled = 0;
-    let failed = 0;
-    for (const repo of selected) {
-      try {
-        const msg = await safeInvoke("wuddle_reinstall_repo", {
-          id: repo.id,
-          wowDir,
-          ...installOptions(),
-        });
-        if (/^Reinstalled\b/i.test(msg)) reinstalled += 1;
-        log(msg);
-      } catch (e) {
-        failed += 1;
-        log(`ERROR reinstall selected ${repo.owner}/${repo.name}: ${e.message}`);
-      }
-    }
-    if (failed > 0) {
-      log(`Done. Reinstalled ${reinstalled} selected repo(s); ${failed} failed.`);
-    } else {
-      log(`Done. Reinstalled ${reinstalled} selected repo(s).`);
-    }
+    if (failed > 0) log(`Done. Updated ${updated} repo(s); ${failed} failed.`);
+    else log(`Done. Updated ${updated} repo(s).`);
     await refreshAll({ forceCheck: true });
   });
 }
 
 async function handleUpdateAction() {
   const action = getUpdateActionState();
-  if (action.mode === "update_selected") {
-    await updateSelected();
-    return;
-  }
   if (action.mode === "update_all") {
     await updateAll();
-    return;
-  }
-  if (action.mode === "reinstall_selected") {
-    await reinstallSelected();
     return;
   }
   await refreshAll({ forceCheck: true });
 }
 
-function toggleSelectAllVisible() {
-  const visibleRepos = sortedFilteredRepos();
-  if (!visibleRepos.length) return;
-  const allVisibleSelected = visibleRepos.every((repo) => state.selectedRepoIds.has(repo.id));
-  for (const repo of visibleRepos) {
-    if (allVisibleSelected) state.selectedRepoIds.delete(repo.id);
-    else state.selectedRepoIds.add(repo.id);
-  }
-  render();
-}
-
 async function addRepo(urlOverride = null, modeOverride = null, label = "") {
   if (!ensureActiveProfile()) return false;
   const url = String(urlOverride ?? $("repoUrl").value ?? "").trim();
-  const mode = String(modeOverride ?? $("mode").value ?? "auto");
+  const defaultMode = state.projectView === "addons" ? "addon_git" : "auto";
+  const mode = String(modeOverride ?? $("mode").value ?? defaultMode);
 
   if (!url) {
     log("ERROR: Repo URL is empty.");
@@ -2282,7 +2921,7 @@ async function copyLogToClipboard() {
 
 async function retryFailedFetches() {
   if (!ensureActiveProfile()) return;
-  const before = state.repos.filter((r) => !!getPlanForRepo(r.id)?.error).length;
+  const before = reposForCurrentView().filter((r) => !!getPlanForRepo(r.id)?.error).length;
   if (!before) {
     log("No failed fetches to retry.");
     return;
@@ -2293,7 +2932,7 @@ async function retryFailedFetches() {
     try {
       await checkUpdates();
       render();
-      const after = state.repos.filter((r) => !!getPlanForRepo(r.id)?.error).length;
+      const after = reposForCurrentView().filter((r) => !!getPlanForRepo(r.id)?.error).length;
       if (!after) {
         log("All fetch errors cleared.");
       } else {
@@ -2348,16 +2987,91 @@ function toggleSort(sortKey) {
 }
 
 $("btnUpdateAll").addEventListener("click", handleUpdateAction);
-$("btnRemoveSelected").addEventListener("click", openRemoveSelectedDialog);
 $("btnAddInstance").addEventListener("click", async () => {
   await addInstance();
 });
 $("btnRetryFailed").addEventListener("click", retryFailedFetches);
-$("selectAllRepos").addEventListener("change", toggleSelectAllVisible);
+$("btnViewMods").addEventListener("click", () => {
+  setProjectView("mods");
+  showProjectsPanel();
+});
+$("btnViewAddons").addEventListener("click", () => {
+  setProjectView("addons");
+  showProjectsPanel();
+});
 
+$("tabHome").addEventListener("click", () => setTab("home"));
 $("tabOptions").addEventListener("click", () => setTab("options"));
 $("tabLogs").addEventListener("click", () => setTab("logs"));
 $("tabAbout").addEventListener("click", () => setTab("about"));
+
+$("homeBtnUpdateAll").addEventListener("click", updateAll);
+$("homeBtnRefreshOnly").addEventListener("click", () => refreshAll({ forceCheck: true }));
+$("homeBtnPlay").addEventListener("click", launchGameFromHome);
+$("homeBtnAddMod").addEventListener("click", () => {
+  const menu = $("homeAddMenu");
+  if (menu) menu.open = false;
+  openAddDialogFor("mods");
+});
+$("homeBtnAddAddon").addEventListener("click", () => {
+  const menu = $("homeAddMenu");
+  if (menu) menu.open = false;
+  openAddDialogFor("addons");
+});
+
+$("instanceSettingsLaunchMethod").addEventListener("change", () => {
+  renderInstanceSettingsLaunchFields($("instanceSettingsLaunchMethod").value);
+  syncThemedSelect($("instanceSettingsLaunchMethod"));
+});
+$("btnInstanceSettingsChoosePath").addEventListener("click", async () => {
+  try {
+    const res = await safeInvoke(
+      "plugin:dialog|open",
+      {
+        options: {
+          directory: false,
+          multiple: false,
+          title: "Select game executable (Wow.exe or VanillaFixes.exe)",
+          filters: [
+            {
+              name: "Windows executable",
+              extensions: ["exe"],
+            },
+          ],
+        },
+      },
+      { timeoutMs: 0 },
+    );
+    const picked = Array.isArray(res) ? res[0] : res;
+    if (!picked) return;
+    $("instanceSettingsPath").value = String(picked);
+    $("btnInstanceSettingsOpenPath").disabled = !profileWowDir({
+      wowDir: String(picked),
+    });
+  } catch (e) {
+    log(`ERROR picker: ${e.message}`);
+  }
+});
+$("btnInstanceSettingsOpenPath").addEventListener("click", async () => {
+  const path = profileWowDir({ wowDir: $("instanceSettingsPath").value });
+  await openPath(path);
+});
+$("instanceSettingsPath").addEventListener("input", () => {
+  $("btnInstanceSettingsOpenPath").disabled = !profileWowDir({
+    wowDir: $("instanceSettingsPath").value,
+  });
+});
+$("btnInstanceSettingsSave").addEventListener("click", async (ev) => {
+  ev.preventDefault();
+  const profileId = normalizeProfileId($("instanceSettingsId").value || "");
+  const isActive = profileId === state.activeProfileId;
+  const ok = saveInstanceSettingsFromDialog();
+  if (!ok) return;
+  $("dlgInstanceSettings").close();
+  if (isActive) {
+    await refreshAll();
+  }
+});
 
 $("optSymlinks").addEventListener("change", saveOptionFlags);
 $("optXattr").addEventListener("change", saveOptionFlags);
@@ -2383,7 +3097,10 @@ $("superwowGuideLink")?.addEventListener("click", async (ev) => {
 });
 
 const dlgAdd = $("dlgAdd");
-$("btnAddOpen").addEventListener("click", () => dlgAdd.showModal());
+$("btnAddOpen").addEventListener("click", () => {
+  applyAddDialogContext();
+  dlgAdd.showModal();
+});
 $("btnAdd").addEventListener("click", async (ev) => {
   ev.preventDefault();
   const ok = await addRepo();
@@ -2407,10 +3124,6 @@ $("logSearch").addEventListener("input", () => {
 $("btnRemoveConfirm").addEventListener("click", async (ev) => {
   ev.preventDefault();
   await confirmRemove();
-});
-$("btnRemoveSelectedConfirm").addEventListener("click", async (ev) => {
-  ev.preventDefault();
-  await confirmRemoveSelected();
 });
 $("btnRemoveInstanceConfirm").addEventListener("click", async (ev) => {
   ev.preventDefault();
@@ -2437,8 +3150,8 @@ document.querySelectorAll(".filter-btn[data-log-level]").forEach((btn) => {
 
 bindDialogOutsideToClose(dlgAdd);
 bindDialogOutsideToClose($("dlgRemove"));
-bindDialogOutsideToClose($("dlgRemoveSelected"));
 bindDialogOutsideToClose($("dlgRemoveInstance"));
+bindDialogOutsideToClose($("dlgInstanceSettings"));
 
 document.addEventListener("click", (ev) => {
   if (state.openMenuRepoId === null) return;
@@ -2447,16 +3160,48 @@ document.addEventListener("click", (ev) => {
   closeActionsMenu();
 });
 
+document.addEventListener("click", (ev) => {
+  const menu = $("homeAddMenu");
+  if (!menu || !menu.open) return;
+  if (!(ev.target instanceof Element)) return;
+  if (ev.target.closest("#homeAddMenu")) return;
+  menu.open = false;
+});
+
+document.addEventListener("click", (ev) => {
+  const menu = $("profilePicker");
+  if (!(menu instanceof HTMLElement) || !menu.classList.contains("open")) return;
+  if (!(ev.target instanceof Element)) return;
+  if (ev.target.closest("#profilePicker")) return;
+  menu.classList.remove("open");
+});
+
+document.addEventListener("click", (ev) => {
+  if (!(ev.target instanceof Element)) return;
+  if (ev.target.closest(".select-menu")) return;
+  closeThemedSelectMenus();
+});
+
 document.addEventListener("keydown", (ev) => {
   if (ev.key !== "Escape") return;
+  closeThemedSelectMenus();
   if (state.openMenuRepoId === null) return;
   closeActionsMenu();
 });
 
 window.addEventListener("resize", () => {
+  closeThemedSelectMenus();
   if (state.openMenuRepoId === null) return;
   requestAnimationFrame(positionOpenMenu);
 });
+
+window.addEventListener(
+  "scroll",
+  () => {
+    closeThemedSelectMenus();
+  },
+  true,
+);
 
 const tableScroller = document.querySelector(".table-scroll");
 if (tableScroller instanceof HTMLElement) {
@@ -2467,6 +3212,8 @@ if (tableScroller instanceof HTMLElement) {
 }
 
 loadSettings();
+ensureThemedSelect($("mode"));
+ensureThemedSelect($("instanceSettingsLaunchMethod"));
 renderAddPresets();
 renderBusy();
 renderLog();

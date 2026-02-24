@@ -14,7 +14,7 @@ struct Cli {
 enum Cmd {
     Add {
         url: String,
-        /// auto|addon|dll|mixed|raw
+        /// auto|addon|addon_git|dll|mixed|raw
         #[arg(long, default_value = "auto")]
         mode: String,
         /// optional regex override for selecting the release asset
@@ -120,6 +120,7 @@ async fn main() -> Result<()> {
             let opts = InstallOptions {
                 use_symlinks: symlink_targets,
                 set_xattr_comment,
+                replace_addon_conflicts: false,
             };
             let plans = engine.apply_updates(&wow_dir, raw_dest_ref, opts).await?;
             let mut updated = 0;

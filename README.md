@@ -14,7 +14,7 @@ A user-friendly app for installing DLL mods and keeping them up-to-date (checks 
 - **Multi-forge support:** GitHub, Codeberg, Gitea, GitLab
 - **Quick Add** Provides easy installation of commonly used Vanilla 1.12 mods
 - **Custom Git URL support:** Add any DLL mods from the aforementioned git forges not included in the Quick Add section
-- **Companion Addons:** Installs companion addons when bundled in mod zip (i.e Interact, UnitXP_SP3)
+- **Companion Addons:** Installs companion addons when bundled in mod zip (e.g. Interact, UnitXP_SP3)
 - **Multi-instance/profile:** Add multiple WoW installs, each with its own tracked mod list
 - **Manage `dlls.txt`:** Wuddle will update `dlls.txt` when adding, removing, or enabling/disabling mods
 - **GitHub Token:** Optional GitHub auth token support to reduce anonymous API rate-limit issues
@@ -43,3 +43,15 @@ For transparency, here are VirusTotal + Hybrid-Analysis scan results for the lat
 
 - Linux: AppImage
 - Windows: portable ZIP (`Wuddle.exe`, no installer)
+
+## Credits / Inspiration
+
+Wuddle is its own implementation, but several workflows and UX ideas were inspired by existing community projects:
+
+- **GitAddonsManager** (WobLight)  - Big inspiration for solving multi-toc addons scenarios
+  Git-based addon update workflow, `.toc`-driven addon folder handling, and branch-focused addon management ideas.  
+  https://gitlab.com/woblight/GitAddonsManager
+
+- **WoWRetroLauncher** (Parquelle)  - Vaguely inspired the UI redesign idea seen in Wuddle's v2.0 release.
+  Reference for retro launcher visual direction and layout experimentation.  
+  https://github.com/Parquelle/WoWRetroLauncher

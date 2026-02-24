@@ -11,14 +11,20 @@
     <header class="topbar">
       <div class="title">
         <div class="appname">Wuddle</div>
-        <div class="subtitle">WoW DLL mods updater</div>
+        <div class="subtitle">Apparently a launcher now?</div>
+      </div>
+
+      <div class="tabs view-tabs-center" role="group" aria-label="Project view">
+        <button id="tabHome" class="btn view-btn" type="button">Home</button>
+        <button id="btnViewMods" class="btn view-btn active" type="button">Mods</button>
+        <button id="btnViewAddons" class="btn view-btn" type="button">Addons</button>
       </div>
 
       <div class="actions">
-        <div id="busyIndicator" class="busy-indicator hidden">Working…</div>
+        <div id="busyIndicator" class="busy-indicator hidden" title="Working" aria-label="Working"></div>
         <div class="tabs top-tabs">
-          <div id="profileTabs" class="tabs profile-tabs"></div>
-          <div id="topTabsDivider" class="tabs-divider" aria-hidden="true"></div>
+          <div id="profilePickerHost" class="profile-picker-host"></div>
+          <div class="tabs-divider" aria-hidden="true"></div>
           <button id="tabOptions" class="tab-btn tab-icon-btn" title="Options" aria-label="Options">
             <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">
               <path
@@ -48,6 +54,59 @@
       </div>
     </header>
 
+    <section id="panelHome" class="card panel hidden">
+      <div class="home-grid">
+        <section class="settings-card home-card home-card-main">
+          <div class="row space-between align-center home-head">
+            <div class="settings-head">Updates</div>
+            <div class="row tight align-center home-head-actions">
+              <details id="homeAddMenu" class="home-add-menu">
+                <summary id="homeBtnAddMenu" class="btn">Add new</summary>
+                <div class="home-add-menu-pop">
+                  <button id="homeBtnAddMod" class="menu-item" type="button">Add mod</button>
+                  <button id="homeBtnAddAddon" class="menu-item" type="button">Add addon</button>
+                </div>
+              </details>
+              <span class="home-action-sep" aria-hidden="true"></span>
+              <button id="homeBtnRefreshOnly" class="btn">Check for updates</button>
+              <button id="homeBtnUpdateAll" class="btn">Update All (0)</button>
+            </div>
+          </div>
+
+          <div class="home-updates-columns">
+            <div class="home-update-col">
+              <div class="home-update-col-head">
+                <span>Mods</span>
+                <span id="homeModsUpdateCount" class="home-update-col-count">0</span>
+              </div>
+              <div id="homeModList" class="home-update-lines">
+                <div class="home-update-empty">No mod updates.</div>
+              </div>
+            </div>
+            <div class="home-update-col">
+              <div class="home-update-col-head">
+                <span>Addons</span>
+                <span id="homeAddonsUpdateCount" class="home-update-col-count">0</span>
+              </div>
+              <div id="homeAddonList" class="home-update-lines">
+                <div class="home-update-empty">No addon updates.</div>
+              </div>
+            </div>
+          </div>
+
+        </section>
+      </div>
+
+      <div class="project-footer home-footer">
+        <div class="row align-center footer-tools">
+          <div id="homeLaunchStatus" class="hint">Launch target: VanillaFixes.exe if installed, otherwise Wow.exe.</div>
+          <div class="row tight align-center footer-actions">
+            <button id="homeBtnPlay" class="btn home-play-btn" type="button">PLAY</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section id="panelProjects" class="card panel projects-panel">
       <div class="projects-toolbar">
         <div class="filter-status-row">
@@ -64,15 +123,12 @@
 
       <div class="table table-scroll">
         <div id="repoThead" class="thead">
-          <div class="th select-col">
-            <input id="selectAllRepos" type="checkbox" aria-label="Select all projects" />
-          </div>
-          <div class="th sortable active" data-sort="name" data-dir="asc">Name</div>
-          <div class="th sortable" data-sort="current">Current</div>
-          <div class="th sortable" data-sort="latest">Latest</div>
-          <div>Enabled</div>
-          <div class="th sortable" data-sort="status">Status</div>
-          <div>Actions</div>
+          <div id="thName" class="th sortable active" data-sort="name" data-dir="asc">Name</div>
+          <div id="thCurrent" class="th sortable" data-sort="current">Current</div>
+          <div id="thLatest" class="th sortable" data-sort="latest">Latest</div>
+          <div id="thEnabled">Enabled</div>
+          <div id="thStatus" class="th sortable" data-sort="status">Status</div>
+          <div id="thActions">Actions</div>
         </div>
 
         <div id="repoRows" class="tbody">
@@ -82,9 +138,6 @@
 
       <div class="project-footer">
         <div class="row align-center footer-tools">
-          <div class="row tight align-center footer-left-actions">
-            <button id="btnRemoveSelected" class="btn danger" disabled>Remove Selected</button>
-          </div>
           <div class="row tight align-center footer-actions">
             <div id="lastChecked" class="hint">Last checked: never</div>
             <button id="btnRetryFailed" class="btn">Retry Failed</button>
@@ -98,7 +151,7 @@
       <div class="options-grid">
         <section class="settings-card">
           <div class="settings-head">Instances</div>
-          <div class="hint">Each instance has its own tracked mod list.</div>
+          <div class="hint">Each instance has its own tracked mod/addon list. Click a card to edit details.</div>
           <div id="instanceList" class="instance-list options-block"></div>
           <div class="row tight options-block">
             <button id="btnAddInstance" class="btn">+ Add Instance</button>
@@ -249,19 +302,19 @@
       <form method="dialog" class="dialog-inner">
         <div class="dialog-head">
           <div>
-            <div class="dialog-title">Add a repo</div>
-            <div class="hint">Quick-add from the mods listed, or add your own Git repo URL below.</div>
+            <div id="addDialogTitle" class="dialog-title">Add a repo</div>
+            <div id="addDialogHint" class="hint">Quick-add from the mods listed, or add your own Git repo URL below.</div>
           </div>
           <button id="btnAddCloseX" class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
         </div>
 
-        <div class="field">
+        <div id="quickAddField" class="field">
           <div class="label">Quick add (click to expand)</div>
           <div id="addPresetList" class="preset-list"></div>
         </div>
 
         <label class="field">
-          <div class="label">Repo URL</div>
+          <div id="addRepoUrlLabel" class="label">Repo URL</div>
           <input id="repoUrl" placeholder="(e.g. https://gitea.com/avitasia/nampower)" />
         </label>
 
@@ -272,6 +325,7 @@
             <select id="mode">
               <option value="auto" selected>auto (recommended)</option>
               <option value="addon">addon</option>
+              <option value="addon_git">addon_git (clone/pull)</option>
               <option value="dll">dll</option>
               <option value="mixed">mixed</option>
               <option value="raw">raw</option>
@@ -357,35 +411,6 @@
       </form>
     </dialog>
 
-    <!-- Remove selected modal -->
-    <dialog id="dlgRemoveSelected" class="dialog">
-      <form method="dialog" class="dialog-inner">
-        <div class="dialog-head">
-          <div>
-            <div class="dialog-title">Remove Selected Projects</div>
-            <div class="hint">Choose whether to remove only from Wuddle, or also delete local installed files.</div>
-          </div>
-          <button class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
-        </div>
-
-        <div class="field">
-          <div class="label">Selection</div>
-          <div id="removeSelectedCount" class="hint"></div>
-          <div id="removeSelectedNames" class="hint"></div>
-        </div>
-
-        <label class="check remove-check">
-          <input id="removeSelectedLocalFiles" type="checkbox" />
-          <span>Remove local files</span>
-        </label>
-
-        <div class="dialog-actions">
-          <button class="btn ghost" value="cancel">Cancel</button>
-          <button id="btnRemoveSelectedConfirm" class="btn danger" value="ok">Remove Selected</button>
-        </div>
-      </form>
-    </dialog>
-
     <!-- Remove instance modal -->
     <dialog id="dlgRemoveInstance" class="dialog">
       <form method="dialog" class="dialog-inner">
@@ -410,6 +435,105 @@
         <div class="dialog-actions">
           <button class="btn ghost" value="cancel">Cancel</button>
           <button id="btnRemoveInstanceConfirm" class="btn danger" value="ok">Remove</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Instance settings modal -->
+    <dialog id="dlgInstanceSettings" class="dialog">
+      <form method="dialog" class="dialog-inner">
+        <div class="dialog-head">
+          <div>
+            <div class="dialog-title">Instance Settings</div>
+            <div class="hint">Configure name, game executable path, and launch behavior for this instance.</div>
+          </div>
+          <button class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
+        </div>
+
+        <input id="instanceSettingsId" type="hidden" />
+
+        <label class="field">
+          <div class="label">Name</div>
+          <input id="instanceSettingsName" placeholder="WoW1" />
+        </label>
+
+        <div class="row align-end instance-path-row">
+          <label class="field grow instance-path-field">
+            <div class="label">WoW path</div>
+            <input id="instanceSettingsPath" placeholder="/path/to/Wow.exe (or VanillaFixes.exe)" />
+          </label>
+          <button id="btnInstanceSettingsChoosePath" class="btn" type="button">Choose...</button>
+          <button id="btnInstanceSettingsOpenPath" class="btn" type="button">Open</button>
+        </div>
+
+        <label class="field">
+          <div class="label">Launch method</div>
+          <select id="instanceSettingsLaunchMethod">
+            <option value="auto">Auto (VanillaFixes.exe / Wow.exe)</option>
+            <option value="lutris">Lutris</option>
+            <option value="wine">Wine</option>
+            <option value="custom">Custom command</option>
+          </select>
+        </label>
+
+        <div id="instanceSettingsLaunchAuto" class="instance-launch-group hint">
+          Wuddle launches <code>VanillaFixes.exe</code> if present, otherwise <code>Wow.exe</code>.
+        </div>
+
+        <div id="instanceSettingsLaunchLutris" class="instance-launch-group hidden">
+          <label class="field">
+            <div class="label">Lutris target</div>
+            <input
+              id="instanceSettingsLutrisTarget"
+              placeholder="lutris:rungameid/2"
+            />
+          </label>
+          <div class="hint">Example: <code>lutris:rungameid/2</code></div>
+        </div>
+
+        <div id="instanceSettingsLaunchWine" class="instance-launch-group hidden">
+          <label class="field">
+            <div class="label">Wine command</div>
+            <input id="instanceSettingsWineCommand" placeholder="wine" />
+          </label>
+          <label class="field">
+            <div class="label">Extra args (optional)</div>
+            <input id="instanceSettingsWineArgs" placeholder="--some-arg value" />
+          </label>
+        </div>
+
+        <div id="instanceSettingsLaunchCustom" class="instance-launch-group hidden">
+          <label class="field">
+            <div class="label">Custom command</div>
+            <input id="instanceSettingsCustomCommand" placeholder="command" />
+          </label>
+          <label class="field">
+            <div class="label">Arguments (optional)</div>
+            <input
+              id="instanceSettingsCustomArgs"
+              placeholder="--flag value"
+            />
+          </label>
+          <div class="hint">Tip: use <code>{exe}</code> in args to inject the detected game executable path.</div>
+        </div>
+
+        <label class="field">
+          <div class="label">Working directory override (optional)</div>
+          <input id="instanceSettingsWorkingDir" placeholder="/path/to/working/dir" />
+        </label>
+
+        <label class="field">
+          <div class="label">Environment variables (optional)</div>
+          <textarea
+            id="instanceSettingsEnv"
+            rows="4"
+            placeholder="KEY=VALUE"
+          ></textarea>
+        </label>
+
+        <div class="dialog-actions">
+          <button id="btnInstanceSettingsCancel" class="btn ghost" value="cancel">Cancel</button>
+          <button id="btnInstanceSettingsSave" class="btn primary" value="ok">Save</button>
         </div>
       </form>
     </dialog>

@@ -25,3 +25,5 @@ sha2 = "0.10"
 hex = "0.4"
 url = "2"
 urlencoding = "2"
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "https"] }
+tempfile = "3"
