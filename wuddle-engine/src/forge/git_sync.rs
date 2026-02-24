@@ -83,11 +83,15 @@ fn remote_refs_for_url(url: &str) -> Result<Vec<RemoteRefInfo>> {
         .remote_anonymous(url)
         .context("create anonymous remote")?;
 
-    // Try anonymous connect first for public repos, then fall back to credential callbacks.
-    if let Err(first_err) = remote.connect(Direction::Fetch) {
+    // Try credential-aware connect first (works for both public and private remotes),
+    // then fall back to plain anonymous fetch if needed.
+    let auth_res = remote
+        .connect_auth(Direction::Fetch, Some(remote_callbacks()), None)
+        .map(|_| ());
+    if let Err(auth_err) = auth_res {
         remote
-            .connect_auth(Direction::Fetch, Some(remote_callbacks()), None)
-            .with_context(|| format!("connect remote {} (plain failed: {})", url, first_err))?;
+            .connect(Direction::Fetch)
+            .with_context(|| format!("connect remote {} (auth failed: {})", url, auth_err))?;
     }
     let refs = remote
         .list()

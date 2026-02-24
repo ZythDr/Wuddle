@@ -43,3 +43,15 @@ For transparency, here are VirusTotal + Hybrid-Analysis scan results for the lat
 
 - Linux: AppImage
 - Windows: portable ZIP (`Wuddle.exe`, no installer)
+
+## Credits / Inspiration
+
+Wuddle is its own implementation, but several workflows and UX ideas were inspired by existing community projects:
+
+- **GitAddonsManager** (WobLight)  - Big inspiration for solving multi-toc addons scenarios
+  Git-based addon update workflow, `.toc`-driven addon folder handling, and branch-focused addon management ideas.  
+  https://gitlab.com/woblight/GitAddonsManager
+
+- **WoWRetroLauncher** (Parquelle)  - Vaguely inspired the UI redesign idea seen in Wuddle's v2.0 release.
+  Reference for retro launcher visual direction and layout experimentation.  
+  https://github.com/Parquelle/WoWRetroLauncher
