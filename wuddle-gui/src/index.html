@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="cata">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -118,7 +118,20 @@
           </div>
           <span id="statApiState" class="stat-pill muted">API status: unknown</span>
         </div>
-        <button id="btnAddOpen" class="btn">＋ Add New Mod</button>
+        <div class="projects-actions">
+          <div class="project-search">
+            <input
+              id="projectSearchInput"
+              class="project-search-input"
+              type="text"
+              placeholder="Search..."
+              aria-label="Filter projects by name"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </div>
+          <button id="btnAddOpen" class="btn">＋ Add New Mod</button>
+        </div>
       </div>
 
       <div class="table table-scroll">
@@ -179,7 +192,21 @@
               <input id="optClock12" type="checkbox" />
               <span>Use 12-hour time format (AM/PM)</span>
             </label>
+            <label class="check">
+              <input id="optFrizFont" type="checkbox" />
+              <span>Use Friz Quadrata font</span>
+            </label>
           </div>
+          <label class="field options-block">
+            Theme
+            <select id="optTheme">
+              <option value="cata">Cata Ember (Default)</option>
+              <option value="obsidian">Obsidian Blue</option>
+              <option value="emerald">Emerald Night</option>
+              <option value="ashen">Ashen Crimson</option>
+              <option value="wowui">WoW Interface</option>
+            </select>
+          </label>
         </section>
 
         <section class="settings-card auth-block">

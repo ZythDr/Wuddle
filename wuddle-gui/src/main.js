@@ -15,6 +15,8 @@ const PROJECT_VIEW_BY_PROFILE_KEY = "wuddle.project_view.by_profile";
 const OPT_SYMLINKS_KEY = "wuddle.opt.symlinks";
 const OPT_XATTR_KEY = "wuddle.opt.xattr";
 const OPT_CLOCK12_KEY = "wuddle.opt.clock12";
+const OPT_THEME_KEY = "wuddle.opt.theme";
+const OPT_FRIZ_FONT_KEY = "wuddle.opt.frizfont";
 const LOG_WRAP_KEY = "wuddle.log.wrap";
 const LOG_AUTOSCROLL_KEY = "wuddle.log.autoscroll";
 const LOG_LEVEL_KEY = "wuddle.log.level";
@@ -22,6 +24,9 @@ const WUDDLE_REPO_URL = "https://github.com/ZythDr/Wuddle";
 const WUDDLE_RELEASES_URL = "https://github.com/ZythDr/Wuddle/releases";
 const WUDDLE_RELEASES_API_URL = "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
 const MAX_PARALLEL_UPDATES = 5;
+const DEFAULT_THEME_ID = "cata";
+const DEFAULT_USE_FRIZ_FONT = true;
+const SUPPORTED_THEMES = new Set(["cata", "obsidian", "emerald", "ashen", "wowui"]);
 
 const state = {
   repos: [],
@@ -39,10 +44,13 @@ const state = {
   initialAutoCheckDone: false,
   loggedNoTokenAutoSkip: false,
   filter: "all",
+  projectSearchQuery: "",
   sortKey: "name",
   sortDir: "asc",
   lastCheckedAt: null,
   clock12: false,
+  theme: DEFAULT_THEME_ID,
+  useFrizFont: DEFAULT_USE_FRIZ_FONT,
   logLines: [],
   logLevel: "all",
   logQuery: "",
@@ -1138,6 +1146,14 @@ function renderBusy() {
   $("busyIndicator").classList.toggle("hidden", !busy);
 }
 
+function normalizeThemeId(raw) {
+  const value = String(raw || "")
+    .trim()
+    .toLowerCase();
+  if (value === "dark") return DEFAULT_THEME_ID; // migration from old theme key usage
+  return SUPPORTED_THEMES.has(value) ? value : DEFAULT_THEME_ID;
+}
+
 async function withBusy(work) {
   state.pending += 1;
   renderBusy();
@@ -1149,8 +1165,16 @@ async function withBusy(work) {
   }
 }
 
-function setTheme() {
-  document.documentElement.setAttribute("data-theme", "dark");
+function setTheme(themeId = state.theme) {
+  const next = normalizeThemeId(themeId);
+  state.theme = next;
+  document.documentElement.setAttribute("data-theme", next);
+}
+
+function setUiFontStyle(enabled = state.useFrizFont) {
+  const useFriz = !!enabled;
+  state.useFrizFont = useFriz;
+  document.documentElement.setAttribute("data-font-style", useFriz ? "friz" : "default");
 }
 
 function aboutValue(value, fallback = "Unknown") {
@@ -1193,7 +1217,25 @@ function openAddDialogFor(view) {
   setProjectView(view);
   showProjectsPanel();
   applyAddDialogContext();
-  $("dlgAdd").showModal();
+  openAddDialog();
+}
+
+function focusAddDialogUrlInput() {
+  const input = $("repoUrl");
+  if (!(input instanceof HTMLInputElement)) return;
+  requestAnimationFrame(() => {
+    input.focus();
+    input.select();
+  });
+}
+
+function openAddDialog() {
+  const dlg = $("dlgAdd");
+  if (!dlg) return;
+  if (!dlg.open) {
+    dlg.showModal();
+  }
+  focusAddDialogUrlInput();
 }
 
 function renderHome() {
@@ -1434,15 +1476,22 @@ function loadSettings() {
   state.projectViewByProfile = readProjectViewByProfile();
   syncProjectViewFromActiveProfile();
 
-  setTheme();
-
   const symlinks = localStorage.getItem(OPT_SYMLINKS_KEY) === "true";
   const xattr = localStorage.getItem(OPT_XATTR_KEY) === "true";
   const clock12 = localStorage.getItem(OPT_CLOCK12_KEY) === "true";
+  const savedTheme = normalizeThemeId(localStorage.getItem(OPT_THEME_KEY));
+  const rawFriz = localStorage.getItem(OPT_FRIZ_FONT_KEY);
+  const useFrizFont = rawFriz === null ? DEFAULT_USE_FRIZ_FONT : rawFriz === "true";
   $("optSymlinks").checked = symlinks;
   $("optXattr").checked = xattr;
   $("optClock12").checked = clock12;
+  $("optTheme").value = savedTheme;
+  $("optFrizFont").checked = useFrizFont;
   state.clock12 = clock12;
+  state.theme = savedTheme;
+  state.useFrizFont = useFrizFont;
+  setTheme(savedTheme);
+  setUiFontStyle(useFrizFont);
 
   const savedTab = localStorage.getItem(TAB_KEY) || "home";
   setTab(new Set(["home", "projects", "options", "logs", "about"]).has(savedTab) ? savedTab : "home");
@@ -1465,6 +1514,12 @@ function saveOptionFlags() {
   localStorage.setItem(OPT_SYMLINKS_KEY, $("optSymlinks").checked ? "true" : "false");
   localStorage.setItem(OPT_XATTR_KEY, $("optXattr").checked ? "true" : "false");
   localStorage.setItem(OPT_CLOCK12_KEY, $("optClock12").checked ? "true" : "false");
+  const selectedTheme = normalizeThemeId($("optTheme")?.value);
+  const useFrizFont = !!$("optFrizFont")?.checked;
+  localStorage.setItem(OPT_THEME_KEY, selectedTheme);
+  localStorage.setItem(OPT_FRIZ_FONT_KEY, useFrizFont ? "true" : "false");
+  setTheme(selectedTheme);
+  setUiFontStyle(useFrizFont);
   state.clock12 = $("optClock12").checked;
   renderLastChecked();
   render();
@@ -1978,9 +2033,37 @@ function matchesFilter(repo) {
   return true;
 }
 
+function matchesProjectSearch(repo) {
+  const raw = String(state.projectSearchQuery || "").trim().toLowerCase();
+  if (!raw) return true;
+
+  const haystack = [
+    String(repo?.name || ""),
+    String(repo?.owner || ""),
+    String(repo?.forge || ""),
+    String(repo?.host || ""),
+    String(repo?.url || ""),
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  const terms = raw.split(/\s+/).filter(Boolean);
+  return terms.every((term) => haystack.includes(term));
+}
+
+function renderProjectSearch() {
+  const input = $("projectSearchInput");
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+  if (input.value !== state.projectSearchQuery) {
+    input.value = state.projectSearchQuery;
+  }
+}
+
 function sortedFilteredRepos() {
   const dir = state.sortDir === "desc" ? -1 : 1;
-  const list = reposForCurrentView().filter(matchesFilter);
+  const list = reposForCurrentView().filter((repo) => matchesFilter(repo) && matchesProjectSearch(repo));
 
   list.sort((a, b) => {
     if (state.sortKey === "name") {
@@ -2379,6 +2462,7 @@ function render() {
   closeThemedSelectMenus();
   renderAddPresets();
   renderHome();
+  renderProjectSearch();
   const host = $("repoRows");
   host.innerHTML = "";
   renderProjectViewButtons();
@@ -2879,7 +2963,67 @@ async function addRepo(urlOverride = null, modeOverride = null, label = "") {
         log(label ? `Added ${label} (id=${id}).` : `Added repo id=${id}`);
       }
       if (!urlOverride) $("repoUrl").value = "";
-      await refreshAll();
+      await loadRepos();
+      render();
+      const addedRepo = state.repos.find((repo) => repo.id === id) || null;
+      const wowDir = currentWowDirStrict();
+      if (!wowDir) {
+        log("Install skipped. Set a valid WoW path for this instance first.");
+      } else {
+        const repoLabel = addedRepo ? `${addedRepo.owner}/${addedRepo.name}` : `repo id=${id}`;
+        log(`Installing ${repoLabel}...`);
+        try {
+          const result = await safeInvoke("wuddle_update_repo", {
+            id,
+            wowDir,
+            ...installOptions(),
+          });
+          if (result) {
+            logOperationResult(result);
+          } else {
+            const reinstallResult = await safeInvoke("wuddle_reinstall_repo", {
+              id,
+              wowDir,
+              ...installOptions(),
+            });
+            logOperationResult(reinstallResult);
+          }
+        } catch (e) {
+          const conflict = parseAddonConflictError(e.message);
+          if (conflict) {
+            const proceed = await confirmAddonConflict(
+              addedRepo || { owner: "repo", name: String(id) },
+              conflict,
+            );
+            if (!proceed) {
+              log(`${repoLabel}: cancelled install (existing addon files kept).`);
+            } else {
+              try {
+                const retryResult = await safeInvoke("wuddle_update_repo", {
+                  id,
+                  wowDir,
+                  ...installOptions({ replaceAddonConflicts: true }),
+                });
+                if (retryResult) {
+                  logOperationResult(retryResult);
+                } else {
+                  const reinstallRetryResult = await safeInvoke("wuddle_reinstall_repo", {
+                    id,
+                    wowDir,
+                    ...installOptions({ replaceAddonConflicts: true }),
+                  });
+                  logOperationResult(reinstallRetryResult);
+                }
+              } catch (retryErr) {
+                log(`ERROR install ${repoLabel}: ${retryErr.message}`);
+              }
+            }
+          } else {
+            log(`ERROR install ${repoLabel}: ${e.message}`);
+          }
+        }
+      }
+      await refreshAll({ forceCheck: true });
       return true;
     } catch (e) {
       log(label ? `ERROR add ${label}: ${e.message}` : `ERROR add: ${e.message}`);
@@ -3076,6 +3220,8 @@ $("btnInstanceSettingsSave").addEventListener("click", async (ev) => {
 $("optSymlinks").addEventListener("change", saveOptionFlags);
 $("optXattr").addEventListener("change", saveOptionFlags);
 $("optClock12").addEventListener("change", saveOptionFlags);
+$("optTheme").addEventListener("change", saveOptionFlags);
+$("optFrizFont").addEventListener("change", saveOptionFlags);
 $("btnConnectGithub").addEventListener("click", connectGithub);
 $("btnSaveGithubToken").addEventListener("click", saveGithubToken);
 $("btnClearGithubToken").addEventListener("click", clearGithubToken);
@@ -3097,14 +3243,33 @@ $("superwowGuideLink")?.addEventListener("click", async (ev) => {
 });
 
 const dlgAdd = $("dlgAdd");
+async function submitAddFromDialog() {
+  const url = String($("repoUrl").value ?? "").trim();
+  if (url) {
+    dlgAdd.close();
+  }
+  await addRepo();
+}
+
 $("btnAddOpen").addEventListener("click", () => {
   applyAddDialogContext();
-  dlgAdd.showModal();
+  openAddDialog();
 });
 $("btnAdd").addEventListener("click", async (ev) => {
   ev.preventDefault();
-  const ok = await addRepo();
-  if (ok) dlgAdd.close();
+  await submitAddFromDialog();
+});
+$("repoUrl").addEventListener("keydown", async (ev) => {
+  if (ev.key !== "Enter") return;
+  ev.preventDefault();
+  await submitAddFromDialog();
+});
+
+$("projectSearchInput").addEventListener("input", (ev) => {
+  const target = ev.target;
+  if (!(target instanceof HTMLInputElement)) return;
+  state.projectSearchQuery = target.value;
+  render();
 });
 
 $("btnCopyLog").addEventListener("click", copyLogToClipboard);
@@ -3214,6 +3379,7 @@ if (tableScroller instanceof HTMLElement) {
 loadSettings();
 ensureThemedSelect($("mode"));
 ensureThemedSelect($("instanceSettingsLaunchMethod"));
+ensureThemedSelect($("optTheme"));
 renderAddPresets();
 renderBusy();
 renderLog();
