@@ -1,57 +1,62 @@
-# Wuddle - WoW DLL Mods Manager
+# Wuddle
 
-Wuddle is a desktop app that simplifies WoW DLL mods management, primarily for the Vanilla 1.12.1 client. 
+Wuddle is a desktop WoW launcher/manager focused on Vanilla-era clients (1.12.x), with support for:
 
-A user-friendly app for installing DLL mods and keeping them up-to-date (checks for new Releases), Wuddle will also install companion addons if they're bundled with the DLL mod's download asset.
-> [!WARNING]
-> Please scroll down and read the Important Note before downloading.
+- DLL mod management
+- Git-based addon management (clone/pull workflow)
+- Multi-instance profiles
+- One-click game launch per instance
 
-<img width="1120" height="805" alt="image" src="https://github.com/user-attachments/assets/698f2f7b-0c4b-49be-8aa3-177431fad1de" />
+Current release line: **v2.x**.
 
+## Screenshot
 
-## Features
+<!-- Replace this with your latest screenshot file/path -->
+![Wuddle v2 screenshot](docs/wuddle-v2-screenshot.png)
+
+## What’s New In v2
+
+- Wuddle evolved from a DLL updater into a **WIP launcher + manager**
+- Added **Addon management** with Git clone/pull updates and branch selection
+- Added **Home tab** with update overview and launcher actions
+- Added **PLAY flow** with per-instance launch methods (Auto/Lutris/Wine/Custom)
+- Added **VanillaFixes-aware launch/install workflow**
+- Added **multi-instance profile switching** and profile settings UI
+- Added **theme system** (including retro/WoW-inspired themes)
+- Added improved **search/filtering** for tracked mods/addons
+- Added more robust **conflict handling** on addon install/update
+
+## Core Features
 
 - **Multi-forge support:** GitHub, Codeberg, Gitea, GitLab
-- **Quick Add** Provides easy installation of commonly used Vanilla 1.12 mods
-- **Custom Git URL support:** Add any DLL mods from the aforementioned git forges not included in the Quick Add section
-- **Companion Addons:** Installs companion addons when bundled in mod zip (e.g. Interact, UnitXP_SP3)
-- **Multi-instance/profile:** Add multiple WoW installs, each with its own tracked mod list
-- **Manage `dlls.txt`:** Wuddle will update `dlls.txt` when adding, removing, or enabling/disabling mods
-- **GitHub Token:** Optional GitHub auth token support to reduce anonymous API rate-limit issues
+- **DLL mod management:** install, update, reinstall/repair, remove
+- **Addon git-sync mode:** track addon repos with clone/pull and branch selection
+- **Quick Add catalog:** common Vanilla client mods with curated metadata
+- **Companion addon links/info:** surfaced directly in quick-add entries
+- **`dlls.txt` management:** enable/disable + sync behavior for DLL mods
+- **Multi-instance profiles:** each profile has its own tracked mods/addons + launch config
+- **GitHub auth token (optional):** helps avoid anonymous API limits
+- **Logs panel:** operational visibility and copyable logs
 
-# Important Note (Anti-virus + SuperWoW)  
-SuperWoW is known to cause false-positives in most anti-virus software.
+## Important Note (Anti-virus + SuperWoW)
 
-Wuddle will show a warning before adding SuperWoW from Quick Add so users know to expect a false-positive appearing in their anti-virus software.  
-This is not tied to the Quick Add or Wuddle itself, but rather an unavoidable issue for the time being, until SuperWoW stops triggering false-positives.
+SuperWoW is known to trigger false-positives in many antivirus products.
 
-While Wuddle itself is not a malicious app of any kind, the actions it performs (downloading/removing/moving .dll files) appears suspicious from a malware scanner's perspective. 
-I don't think I can ever make it not get at least a few false-positives or appearing suspicious to malware scanners.
-Wuddle itself shouldn't trigger any warnings in Windows Defender unless SuperWoW is installed through it.  
-This will make Defender or any other anti-virus software pinpoint Wuddle.exe as the culprit, since Wuddle is downloading and installing the client mod to your WoW directory.
+Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is installed through Wuddle, antivirus tools may attribute the detection to `Wuddle.exe` because Wuddle performs the download/install action.
 
-For transparency, here are VirusTotal + Hybrid-Analysis scan results for the latest version (v1.0.6):
-- Windows: Wuddle.exe
-  - [VirusTotal Scan Results](https://www.virustotal.com/gui/file/b80eea0d8b1d10025cdfa5ceb718ab42da5b60682c5e6208618faf10cf2c320a/detection)
-  
-- Linux: wuddle-gui_1.0.6_amd64.appimage
-  - [VirusTotal Scan Results](https://www.virustotal.com/gui/file/5fb985a1b954509f498e84f784d569f5ed2f8a06fa49a31049885b996ee825bb/detection)
+## Supported Build Outputs
 
-- Hybrid-Analysis (Windows + Linux): [Scan Results](https://hybrid-analysis.com/file-collection/698f55aacef48b40b400f75b#)
-
-## Supported Builds
-
-- Linux: AppImage
-- Windows: portable ZIP (`Wuddle.exe`, no installer)
+- Linux: AppImage, portable `.tar.gz`, `.deb`, `.rpm`
+- Windows: portable `.zip` (`Wuddle.exe`, no installer)
 
 ## Credits / Inspiration
 
-Wuddle is its own implementation, but several workflows and UX ideas were inspired by existing community projects:
+Wuddle is its own implementation, but parts of the workflow and UX were inspired by:
 
-- **GitAddonsManager** (WobLight)  - Big inspiration for solving multi-toc addons scenarios
-  Git-based addon update workflow, `.toc`-driven addon folder handling, and branch-focused addon management ideas.  
+- **GitAddonsManager** (WobLight)  
+  Git addon update workflows, `.toc`-driven addon deployment ideas, and branch-oriented addon management.  
   https://gitlab.com/woblight/GitAddonsManager
 
-- **WoWRetroLauncher** (Parquelle)  - Vaguely inspired the UI redesign idea seen in Wuddle's v2.0 release.
-  Reference for retro launcher visual direction and layout experimentation.  
+- **WoWRetroLauncher** (Parquelle)  
+  Visual inspiration for retro launcher styling and layout exploration.  
   https://github.com/Parquelle/WoWRetroLauncher
