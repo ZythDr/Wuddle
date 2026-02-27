@@ -9,9 +9,9 @@ use url::Url;
 
 use crate::model::LatestRelease;
 
+pub mod git_sync;
 pub mod gitea;
 pub mod github;
-pub mod git_sync;
 pub mod gitlab;
 
 const RELEASE_CACHE_TTL: Duration = Duration::from_secs(45);

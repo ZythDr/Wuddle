@@ -17,6 +17,8 @@ const OPT_XATTR_KEY = "wuddle.opt.xattr";
 const OPT_CLOCK12_KEY = "wuddle.opt.clock12";
 const OPT_THEME_KEY = "wuddle.opt.theme";
 const OPT_FRIZ_FONT_KEY = "wuddle.opt.frizfont";
+const OPT_AUTOCHECK_KEY = "wuddle.opt.autocheck";
+const OPT_AUTOCHECK_MINUTES_KEY = "wuddle.opt.autocheck.minutes";
 const LOG_WRAP_KEY = "wuddle.log.wrap";
 const LOG_AUTOSCROLL_KEY = "wuddle.log.autoscroll";
 const LOG_LEVEL_KEY = "wuddle.log.level";
@@ -26,6 +28,11 @@ const WUDDLE_RELEASES_API_URL = "https://api.github.com/repos/ZythDr/Wuddle/rele
 const MAX_PARALLEL_UPDATES = 5;
 const DEFAULT_THEME_ID = "cata";
 const DEFAULT_USE_FRIZ_FONT = true;
+const DEFAULT_AUTO_CHECK_ENABLED = false;
+const DEFAULT_AUTO_CHECK_MINUTES = 30;
+const MIN_AUTO_CHECK_MINUTES = 1;
+const MAX_AUTO_CHECK_MINUTES = 240;
+const SELF_UPDATE_POLL_MINUTES = 30;
 const SUPPORTED_THEMES = new Set(["cata", "obsidian", "emerald", "ashen", "wowui"]);
 
 const state = {
@@ -51,6 +58,12 @@ const state = {
   clock12: false,
   theme: DEFAULT_THEME_ID,
   useFrizFont: DEFAULT_USE_FRIZ_FONT,
+  autoCheckEnabled: DEFAULT_AUTO_CHECK_ENABLED,
+  autoCheckMinutes: DEFAULT_AUTO_CHECK_MINUTES,
+  autoCheckTimerId: null,
+  lastUpdateNotifyKey: "",
+  lastSelfUpdateNotifyVersion: "",
+  nextSelfUpdatePollAt: 0,
   logLines: [],
   logLevel: "all",
   logQuery: "",
@@ -67,6 +80,9 @@ const state = {
   aboutLoaded: false,
   aboutRefreshedAt: null,
   aboutLatestVersion: null,
+  aboutSelfUpdate: null,
+  aboutSelfUpdateBusy: false,
+  launchDiagnostics: null,
 };
 
 const themedSelectBindings = new WeakMap();
@@ -593,6 +609,14 @@ function closeThemedSelectMenus(except = null) {
   });
 }
 
+function themedSelectPortalFor(select) {
+  if (!(select instanceof HTMLElement)) return document.body;
+  const dialog = select.closest("dialog");
+  if (dialog instanceof HTMLDialogElement && dialog.open) return dialog;
+  if (dialog instanceof HTMLElement) return dialog;
+  return document.body;
+}
+
 function closeThemedSelectMenu(select) {
   const binding = themedSelectBindings.get(select);
   if (!binding) return;
@@ -704,8 +728,9 @@ function ensureThemedSelect(select, extraClass = "") {
       if (select.disabled) return;
       const willOpen = !menu.classList.contains("open");
       closeThemedSelectMenus(menu);
-      if (willOpen && binding.pop.parentElement !== document.body) {
-        document.body.appendChild(binding.pop);
+      const portal = themedSelectPortalFor(select);
+      if (willOpen && binding.pop.parentElement !== portal) {
+        portal.appendChild(binding.pop);
       }
       menu.classList.toggle("open", willOpen);
       binding.pop.classList.toggle("open", willOpen);
@@ -1205,12 +1230,286 @@ function renderAboutInfo() {
     latestEl.title = "Latest release version unavailable.";
   }
   $("aboutPackageName").textContent = aboutValue(info.packageName, "Unknown");
+  renderAboutUpdateAction();
+}
+
+function renderAboutUpdateAction() {
+  const btn = $("btnAboutUpdate");
+  if (!btn) return;
+
+  const updateInfo = state.aboutSelfUpdate;
+  if (state.aboutSelfUpdateBusy) {
+    btn.disabled = true;
+    btn.classList.remove("primary");
+    btn.textContent = "Updating…";
+    btn.title = "Downloading and staging update…";
+    return;
+  }
+
+  if (!updateInfo || !updateInfo.supported) {
+    btn.disabled = true;
+    btn.classList.remove("primary");
+    btn.textContent = "Self-update unavailable";
+    btn.title =
+      updateInfo?.message ||
+      "In-app updates are currently available only in Windows portable launcher builds.";
+    return;
+  }
+
+  if (updateInfo.updateAvailable) {
+    const latest = String(updateInfo.latestVersion || "").trim();
+    btn.disabled = false;
+    btn.classList.add("primary");
+    btn.textContent = latest ? `Update to ${latest}` : "Update Wuddle";
+    btn.title = "Download latest release and restart Wuddle.";
+    return;
+  }
+
+  if (!updateInfo.latestVersion) {
+    btn.disabled = true;
+    btn.classList.remove("primary");
+    btn.textContent = "Update check failed";
+    btn.title = updateInfo.message || "Could not determine latest version.";
+    return;
+  }
+
+  btn.disabled = true;
+  btn.classList.remove("primary");
+  btn.textContent = "Up to date";
+  btn.title = updateInfo.message || "No newer release detected.";
 }
 
 function updateCounts() {
   const mods = reposForView("mods").filter((repo) => canUpdateRepo(repo)).length;
   const addons = reposForView("addons").filter((repo) => canUpdateRepo(repo)).length;
   return { mods, addons, total: mods + addons };
+}
+
+function normalizeAutoCheckMinutes(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return DEFAULT_AUTO_CHECK_MINUTES;
+  return Math.max(
+    MIN_AUTO_CHECK_MINUTES,
+    Math.min(MAX_AUTO_CHECK_MINUTES, Math.floor(num)),
+  );
+}
+
+function renderAutoCheckSettings() {
+  const enabled = !!state.autoCheckEnabled;
+  const input = $("optAutoCheckMinutes");
+  $("optAutoCheck").checked = enabled;
+  input.value = String(normalizeAutoCheckMinutes(state.autoCheckMinutes));
+  input.disabled = !enabled;
+}
+
+function clearAutoCheckTimer() {
+  if (state.autoCheckTimerId !== null) {
+    window.clearTimeout(state.autoCheckTimerId);
+    state.autoCheckTimerId = null;
+  }
+}
+
+function scheduleAutoCheckTimer() {
+  clearAutoCheckTimer();
+  if (!state.autoCheckEnabled) return;
+  const delayMs = normalizeAutoCheckMinutes(state.autoCheckMinutes) * 60 * 1000;
+  state.autoCheckTimerId = window.setTimeout(async () => {
+    state.autoCheckTimerId = null;
+    await refreshAll({ forceCheck: true, notify: true, source: "auto" });
+    scheduleAutoCheckTimer();
+  }, delayMs);
+}
+
+function showToast(message, { kind = "info", actionLabel = "", onAction = null } = {}) {
+  const host = $("toastHost");
+  if (!(host instanceof HTMLElement)) return;
+
+  const item = document.createElement("div");
+  item.className = `toast toast-${kind}`;
+  const AUTO_HIDE_MS = 6000;
+  const LEAVE_MS = 180;
+  let remainingMs = AUTO_HIDE_MS;
+  let hideTimerId = null;
+  let leaveTimerId = null;
+  let startedAtMs = 0;
+
+  const clearTimers = () => {
+    if (hideTimerId !== null) {
+      window.clearTimeout(hideTimerId);
+      hideTimerId = null;
+    }
+    if (leaveTimerId !== null) {
+      window.clearTimeout(leaveTimerId);
+      leaveTimerId = null;
+    }
+  };
+
+  const dismiss = () => {
+    clearTimers();
+    item.remove();
+  };
+
+  const startLeaving = () => {
+    if (item.classList.contains("is-leaving")) return;
+    clearTimers();
+    item.classList.add("is-leaving");
+    leaveTimerId = window.setTimeout(() => item.remove(), LEAVE_MS);
+  };
+
+  const startHideTimer = () => {
+    if (item.classList.contains("is-leaving")) return;
+    if (hideTimerId !== null) return;
+    startedAtMs = Date.now();
+    hideTimerId = window.setTimeout(startLeaving, Math.max(0, remainingMs));
+  };
+
+  const pauseHideTimer = () => {
+    if (hideTimerId === null) return;
+    const elapsed = Date.now() - startedAtMs;
+    remainingMs = Math.max(120, remainingMs - elapsed);
+    window.clearTimeout(hideTimerId);
+    hideTimerId = null;
+  };
+
+  const resumeHideTimer = () => {
+    if (item.classList.contains("is-leaving")) return;
+    startHideTimer();
+  };
+
+  const text = document.createElement("div");
+  text.className = "toast-text";
+  text.textContent = String(message || "").trim();
+  item.appendChild(text);
+
+  if (actionLabel && typeof onAction === "function") {
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "toast-action";
+    action.textContent = actionLabel;
+    action.addEventListener("click", () => {
+      try {
+        onAction();
+      } finally {
+        dismiss();
+      }
+    });
+    item.appendChild(action);
+  }
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "toast-close";
+  close.setAttribute("aria-label", "Dismiss notification");
+  close.textContent = "✕";
+  close.addEventListener("click", dismiss);
+  item.appendChild(close);
+
+  item.addEventListener("mouseenter", pauseHideTimer);
+  item.addEventListener("mouseleave", resumeHideTimer);
+  item.addEventListener("focusin", pauseHideTimer);
+  item.addEventListener("focusout", resumeHideTimer);
+
+  host.appendChild(item);
+  while (host.childElementCount > 4) {
+    const oldest = host.firstElementChild;
+    if (oldest instanceof HTMLElement) {
+      oldest.remove();
+    } else {
+      break;
+    }
+  }
+  startHideTimer();
+}
+
+function openRelevantUpdatesView(counts = updateCounts()) {
+  const mods = Number(counts?.mods || 0);
+  const addons = Number(counts?.addons || 0);
+
+  if (mods > 0 && addons === 0) {
+    setProjectView("mods");
+    showProjectsPanel();
+    setFilter("updates");
+    return;
+  }
+  if (addons > 0 && mods === 0) {
+    setProjectView("addons");
+    showProjectsPanel();
+    setFilter("updates");
+    return;
+  }
+
+  setTab("home");
+}
+
+function maybeNotifyProjectUpdates(source, notify) {
+  if (!notify) return;
+  const updates = state.repos.filter((repo) => canUpdateRepo(repo));
+  const counts = updateCounts();
+
+  if (source === "manual") {
+    if (!updates.length) {
+      state.lastUpdateNotifyKey = "";
+      showToast("No updates available.", { kind: "info" });
+      return;
+    }
+
+    const noun = counts.total === 1 ? "update" : "updates";
+    showToast(`${counts.total} ${noun} available. Mods: ${counts.mods}, Addons: ${counts.addons}.`, {
+      kind: "info",
+      actionLabel: "Open",
+      onAction: () => openRelevantUpdatesView(counts),
+    });
+    return;
+  }
+
+  if (!updates.length) {
+    state.lastUpdateNotifyKey = "";
+    return;
+  }
+
+  const ids = updates.map((repo) => repo.id).sort((a, b) => a - b);
+  const key = `${state.activeProfileId}:${ids.join(",")}`;
+  if (key === state.lastUpdateNotifyKey) return;
+  state.lastUpdateNotifyKey = key;
+
+  const prefix =
+    source === "startup"
+      ? "Updates detected."
+      : source === "auto"
+        ? "New updates available."
+        : "Updates available.";
+  showToast(`${prefix} Mods: ${counts.mods}, Addons: ${counts.addons}.`, {
+    kind: "info",
+    actionLabel: "Open",
+    onAction: () => openRelevantUpdatesView(counts),
+  });
+}
+
+async function maybePollSelfUpdateInfo({ force = false, notify = false } = {}) {
+  const now = Date.now();
+  if (!force && now < state.nextSelfUpdatePollAt) return;
+  state.nextSelfUpdatePollAt = now + SELF_UPDATE_POLL_MINUTES * 60 * 1000;
+
+  try {
+    const info = await safeInvoke("wuddle_self_update_info", {}, { timeoutMs: 12000 });
+    state.aboutSelfUpdate = info && typeof info === "object" ? info : null;
+    const latest = String(state.aboutSelfUpdate?.latestVersion || "").trim();
+    if (latest) state.aboutLatestVersion = latest;
+    if (state.tab === "about") renderAboutInfo();
+
+    if (!notify) return;
+    if (!state.aboutSelfUpdate?.supported || !state.aboutSelfUpdate?.updateAvailable || !latest) return;
+    if (state.lastSelfUpdateNotifyVersion === latest) return;
+    state.lastSelfUpdateNotifyVersion = latest;
+
+    showToast(`Wuddle ${latest} is available.`, {
+      kind: "warn",
+      actionLabel: "Update",
+      onAction: () => setTab("about"),
+    });
+  } catch (_) {
+    // Silent by design to avoid repeated noisy errors on background polling.
+  }
 }
 
 function openAddDialogFor(view) {
@@ -1383,19 +1682,78 @@ async function refreshAboutInfo({ force = false } = {}) {
     const info = await safeInvoke("wuddle_about_info", {}, { timeoutMs: 4000 });
     state.aboutInfo = info && typeof info === "object" ? info : {};
     try {
+      const updateInfo = await safeInvoke("wuddle_self_update_info", {}, { timeoutMs: 12000 });
+      state.aboutSelfUpdate = updateInfo && typeof updateInfo === "object" ? updateInfo : null;
+      state.aboutLatestVersion = String(state.aboutSelfUpdate?.latestVersion || "").trim() || null;
+    } catch (selfUpdateErr) {
+      state.aboutSelfUpdate = null;
       state.aboutLatestVersion = await fetchLatestWuddleReleaseTag();
-    } catch (latestErr) {
-      state.aboutLatestVersion = null;
-      log(`ERROR latest version check: ${latestErr.message || latestErr}`);
+      log(`ERROR self-update info: ${selfUpdateErr.message || selfUpdateErr}`);
     }
-    state.aboutLoaded = true;
-    state.aboutRefreshedAt = new Date();
-    renderAboutInfo();
-    const latestHint = state.aboutLatestVersion ? "" : " Latest version unavailable.";
-    setAboutStatus(`Detected at ${formatTime(state.aboutRefreshedAt)}.${latestHint}`, "status-ok");
   } catch (e) {
     setAboutStatus(`Could not load application details: ${e.message}`, "status-warn");
     log(`ERROR about: ${e.message}`);
+    return;
+  }
+
+  try {
+    if (!state.aboutLatestVersion) {
+      state.aboutLatestVersion = await fetchLatestWuddleReleaseTag();
+    }
+  } catch (latestErr) {
+    if (!state.aboutLatestVersion) {
+      state.aboutLatestVersion = null;
+    }
+    log(`ERROR latest version check: ${latestErr.message || latestErr}`);
+  }
+
+  state.aboutLoaded = true;
+  state.aboutRefreshedAt = new Date();
+  renderAboutInfo();
+  const latestHint = state.aboutLatestVersion ? "" : " Latest version unavailable.";
+  const updaterHint =
+    state.aboutSelfUpdate && state.aboutSelfUpdate.message
+      ? ` ${state.aboutSelfUpdate.message}`
+      : "";
+  setAboutStatus(
+    `Detected at ${formatTime(state.aboutRefreshedAt)}.${latestHint}${updaterHint}`,
+    "status-ok",
+  );
+}
+
+async function updateWuddleInPlace() {
+  const updateInfo = state.aboutSelfUpdate;
+  if (!updateInfo?.supported) {
+    log("Self-update is unavailable for this build.");
+    return;
+  }
+  if (!updateInfo.updateAvailable) {
+    log("Wuddle is already up to date.");
+    return;
+  }
+
+  const latest = String(updateInfo.latestVersion || "").trim() || "latest";
+  const proceed = window.confirm(
+    `Wuddle will download and stage ${latest}, then restart via launcher.\n\nContinue?`,
+  );
+  if (!proceed) {
+    log("Cancelled self-update.");
+    return;
+  }
+
+  state.aboutSelfUpdateBusy = true;
+  renderAboutUpdateAction();
+  try {
+    const result = await safeInvoke("wuddle_self_update_apply", {}, { timeoutMs: 180000 });
+    await logOperationResult(result);
+    log("Restarting Wuddle to finish update…");
+    await safeInvoke("wuddle_self_update_restart", {}, { timeoutMs: 5000 });
+  } catch (e) {
+    log(`ERROR self-update: ${e.message}`);
+    await refreshAboutInfo({ force: true });
+  } finally {
+    state.aboutSelfUpdateBusy = false;
+    renderAboutUpdateAction();
   }
 }
 
@@ -1482,16 +1840,27 @@ function loadSettings() {
   const savedTheme = normalizeThemeId(localStorage.getItem(OPT_THEME_KEY));
   const rawFriz = localStorage.getItem(OPT_FRIZ_FONT_KEY);
   const useFrizFont = rawFriz === null ? DEFAULT_USE_FRIZ_FONT : rawFriz === "true";
+  const rawAutoCheck = localStorage.getItem(OPT_AUTOCHECK_KEY);
+  const autoCheckEnabled =
+    rawAutoCheck === null ? DEFAULT_AUTO_CHECK_ENABLED : rawAutoCheck === "true";
+  const autoCheckMinutes = normalizeAutoCheckMinutes(
+    localStorage.getItem(OPT_AUTOCHECK_MINUTES_KEY),
+  );
   $("optSymlinks").checked = symlinks;
   $("optXattr").checked = xattr;
   $("optClock12").checked = clock12;
   $("optTheme").value = savedTheme;
   $("optFrizFont").checked = useFrizFont;
+  $("optAutoCheck").checked = autoCheckEnabled;
+  $("optAutoCheckMinutes").value = String(autoCheckMinutes);
   state.clock12 = clock12;
   state.theme = savedTheme;
   state.useFrizFont = useFrizFont;
+  state.autoCheckEnabled = autoCheckEnabled;
+  state.autoCheckMinutes = autoCheckMinutes;
   setTheme(savedTheme);
   setUiFontStyle(useFrizFont);
+  renderAutoCheckSettings();
 
   const savedTab = localStorage.getItem(TAB_KEY) || "home";
   setTab(new Set(["home", "projects", "options", "logs", "about"]).has(savedTab) ? savedTab : "home");
@@ -1508,19 +1877,28 @@ function loadSettings() {
   renderProfileTabs();
   renderInstanceList();
   persistProfiles();
+  scheduleAutoCheckTimer();
 }
 
 function saveOptionFlags() {
   localStorage.setItem(OPT_SYMLINKS_KEY, $("optSymlinks").checked ? "true" : "false");
   localStorage.setItem(OPT_XATTR_KEY, $("optXattr").checked ? "true" : "false");
   localStorage.setItem(OPT_CLOCK12_KEY, $("optClock12").checked ? "true" : "false");
+  const autoCheckEnabled = !!$("optAutoCheck").checked;
+  const autoCheckMinutes = normalizeAutoCheckMinutes($("optAutoCheckMinutes").value);
   const selectedTheme = normalizeThemeId($("optTheme")?.value);
   const useFrizFont = !!$("optFrizFont")?.checked;
+  localStorage.setItem(OPT_AUTOCHECK_KEY, autoCheckEnabled ? "true" : "false");
+  localStorage.setItem(OPT_AUTOCHECK_MINUTES_KEY, String(autoCheckMinutes));
   localStorage.setItem(OPT_THEME_KEY, selectedTheme);
   localStorage.setItem(OPT_FRIZ_FONT_KEY, useFrizFont ? "true" : "false");
   setTheme(selectedTheme);
   setUiFontStyle(useFrizFont);
   state.clock12 = $("optClock12").checked;
+  state.autoCheckEnabled = autoCheckEnabled;
+  state.autoCheckMinutes = autoCheckMinutes;
+  renderAutoCheckSettings();
+  scheduleAutoCheckTimer();
   renderLastChecked();
   render();
   renderLog();
@@ -1908,6 +2286,53 @@ function repoStatus(repo) {
   return { kind: "good", text: "Up to date" };
 }
 
+function classifyFetchErrorHint(errorText) {
+  const error = String(errorText || "").trim();
+  const lower = error.toLowerCase();
+  if (!lower) {
+    return "Check Logs for details.";
+  }
+  if (
+    /rate[\s-]?limit|http\s*403|http\s*429|forbidden|bad credentials|requires authentication/.test(
+      lower,
+    )
+  ) {
+    return "GitHub API/auth issue. Open Settings > GitHub Authentication and save a valid token.";
+  }
+  if (/tls|ssl|certificate|connect remote|no tls stream/.test(lower)) {
+    return "Network/TLS connection issue while contacting remote. Check internet/proxy/firewall.";
+  }
+  if (/timed out|timeout|deadline exceeded/.test(lower)) {
+    return "Request timed out. Try again or reduce concurrent network load.";
+  }
+  if (/could not resolve|dns|name or service not known|no such host/.test(lower)) {
+    return "DNS/host resolution failed. Verify URL and network DNS.";
+  }
+  if (/not found|http\s*404/.test(lower)) {
+    return "Repository/release not found. URL may be wrong or private.";
+  }
+  return "Check Logs for detailed error output.";
+}
+
+function formatRepoStatusTooltip(repo, plan) {
+  if (!repo.enabled) {
+    return "Project is disabled in Wuddle. Enable it to include it in update/install operations.";
+  }
+  if (!plan) {
+    return "No update data yet. Click “Check for updates”.";
+  }
+  if (plan.error) {
+    return `Fetch error: ${plan.error}\n\nHint: ${classifyFetchErrorHint(plan.error)}`;
+  }
+  if (plan.repair_needed) {
+    return "Installed files look incomplete or mismatched. Use “Reinstall / Repair”.";
+  }
+  if (plan.has_update) {
+    return `Update available: ${versionLabel(plan.current)} → ${versionLabel(plan.latest)}.`;
+  }
+  return `Up to date at ${versionLabel(plan.latest)}.`;
+}
+
 function displayForge(repo) {
   let host = (repo?.host || "").toLowerCase();
   if (!host) {
@@ -1999,7 +2424,10 @@ function updateDisabledReason(repo) {
   if (!repo.enabled) return "Project is disabled.";
   const plan = getPlanForRepo(repo.id);
   if (!plan) return "No update data yet.";
-  if (plan.error) return "Update is unavailable because release fetch failed.";
+  if (plan.error) {
+    return `Update unavailable: fetch failed. ${classifyFetchErrorHint(plan.error)}`;
+  }
+  if (plan.repair_needed) return "Use Reinstall / Repair from the actions menu.";
   if (!plan.has_update) return "No update available.";
   return "";
 }
@@ -2761,7 +3189,9 @@ async function loadRepos() {
   );
 }
 
-async function checkUpdates() {
+async function checkUpdates(options = {}) {
+  const notify = !!options.notify;
+  const source = String(options.source || "refresh");
   const prevByRepo = new Map(state.plans.map((p) => [p.repo_id, p]));
   const wowDir = readWowDir() || null;
   const next = await safeInvoke("wuddle_check_updates", { wowDir }, { timeoutMs: 30000 });
@@ -2807,10 +3237,14 @@ async function checkUpdates() {
       log(`${label}: fetch recovered.`);
     }
   }
+
+  maybeNotifyProjectUpdates(source, notify);
 }
 
 async function refreshAll(options = {}) {
   const forceCheck = !!options.forceCheck;
+  const notify = !!options.notify;
+  const source = String(options.source || "refresh");
   if (state.refreshInFlight) {
     return;
   }
@@ -2834,7 +3268,8 @@ async function refreshAll(options = {}) {
       const shouldCheckUpdates = forceCheck || hasGithubAuthToken() || allowInitial;
 
       if (shouldCheckUpdates) {
-        await checkUpdates();
+        await checkUpdates({ notify, source });
+        await maybePollSelfUpdateInfo({ force: forceCheck || source === "startup", notify });
         state.initialAutoCheckDone = true;
         state.loggedNoTokenAutoSkip = false;
       } else if (!state.loggedNoTokenAutoSkip) {
@@ -2930,7 +3365,7 @@ async function handleUpdateAction() {
     await updateAll();
     return;
   }
-  await refreshAll({ forceCheck: true });
+  await refreshAll({ forceCheck: true, notify: true, source: "manual" });
 }
 
 async function addRepo(urlOverride = null, modeOverride = null, label = "") {
@@ -3150,7 +3585,9 @@ $("tabLogs").addEventListener("click", () => setTab("logs"));
 $("tabAbout").addEventListener("click", () => setTab("about"));
 
 $("homeBtnUpdateAll").addEventListener("click", updateAll);
-$("homeBtnRefreshOnly").addEventListener("click", () => refreshAll({ forceCheck: true }));
+$("homeBtnRefreshOnly").addEventListener("click", () =>
+  refreshAll({ forceCheck: true, notify: true, source: "manual" }),
+);
 $("homeBtnPlay").addEventListener("click", launchGameFromHome);
 $("homeBtnAddMod").addEventListener("click", () => {
   const menu = $("homeAddMenu");
@@ -3222,11 +3659,16 @@ $("optXattr").addEventListener("change", saveOptionFlags);
 $("optClock12").addEventListener("change", saveOptionFlags);
 $("optTheme").addEventListener("change", saveOptionFlags);
 $("optFrizFont").addEventListener("change", saveOptionFlags);
+$("optAutoCheck").addEventListener("change", saveOptionFlags);
+$("optAutoCheckMinutes").addEventListener("change", saveOptionFlags);
 $("btnConnectGithub").addEventListener("click", connectGithub);
 $("btnSaveGithubToken").addEventListener("click", saveGithubToken);
 $("btnClearGithubToken").addEventListener("click", clearGithubToken);
 $("btnAboutRefresh").addEventListener("click", () => {
   void refreshAboutInfo({ force: true });
+});
+$("btnAboutUpdate").addEventListener("click", () => {
+  void updateWuddleInPlace();
 });
 $("btnAboutGithub").addEventListener("click", async () => {
   await openUrl(WUDDLE_REPO_URL);
@@ -3387,4 +3829,4 @@ renderGithubAuth(null);
 renderAboutInfo();
 void refreshGithubAuthStatus();
 log("Ready.");
-refreshAll();
+refreshAll({ notify: true, source: "startup" });

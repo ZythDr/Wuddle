@@ -12,6 +12,8 @@ use tauri::Manager;
 
 use wuddle_engine::{Engine, InstallMode, InstallOptions};
 
+mod self_update;
+
 #[derive(Serialize)]
 struct RepoRow {
     id: i64,
@@ -56,6 +58,15 @@ struct AboutInfo {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct LaunchDiagnostics {
+    ready: bool,
+    message: String,
+    hint: Option<String>,
+    target_executable: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct OperationResult {
     message: String,
     steps: Vec<String>,
@@ -83,6 +94,7 @@ const KEYCHAIN_TIMEOUT_MS: u64 = 2500;
 
 static ACTIVE_PROFILE_ID: OnceLock<Mutex<String>> = OnceLock::new();
 static KEYCHAIN_SYNC_ATTEMPTED: OnceLock<Mutex<bool>> = OnceLock::new();
+static LEGACY_PORTABLE_MIGRATION_ATTEMPTED: OnceLock<Mutex<bool>> = OnceLock::new();
 
 fn active_profile_state() -> &'static Mutex<String> {
     ACTIVE_PROFILE_ID.get_or_init(|| Mutex::new(DEFAULT_PROFILE_ID.to_string()))
@@ -90,6 +102,10 @@ fn active_profile_state() -> &'static Mutex<String> {
 
 fn keychain_sync_attempted_state() -> &'static Mutex<bool> {
     KEYCHAIN_SYNC_ATTEMPTED.get_or_init(|| Mutex::new(false))
+}
+
+fn legacy_portable_migration_attempted_state() -> &'static Mutex<bool> {
+    LEGACY_PORTABLE_MIGRATION_ATTEMPTED.get_or_init(|| Mutex::new(false))
 }
 
 fn normalize_profile_id(value: &str) -> String {
@@ -124,12 +140,20 @@ fn app_dir() -> Result<PathBuf, String> {
     let dir = if portable_mode_enabled() {
         portable_app_dir()?
     } else {
-        dirs::data_dir()
-            .ok_or_else(|| "no data_dir".to_string())?
-            .join("wuddle")
+        let dir = standard_app_dir()?;
+        if let Err(err) = migrate_legacy_portable_dbs_once(&dir) {
+            eprintln!("wuddle: portable data migration skipped: {}", err);
+        }
+        dir
     };
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
+}
+
+fn standard_app_dir() -> Result<PathBuf, String> {
+    Ok(dirs::data_dir()
+        .ok_or_else(|| "no data_dir".to_string())?
+        .join("wuddle"))
 }
 
 fn portable_mode_enabled() -> bool {
@@ -150,19 +174,111 @@ fn portable_mode_enabled() -> bool {
 }
 
 fn portable_mode_flag_path() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| "no executable parent dir".to_string())?;
-    Ok(dir.join("wuddle-portable.flag"))
+    Ok(portable_root_dir()?.join("wuddle-portable.flag"))
 }
 
 fn portable_app_dir() -> Result<PathBuf, String> {
+    Ok(portable_root_dir()?.join("wuddle-data"))
+}
+
+fn portable_root_dir() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = exe
+    let exe_dir = exe
         .parent()
-        .ok_or_else(|| "no executable parent dir".to_string())?;
-    Ok(dir.join("wuddle-data"))
+        .ok_or_else(|| "no executable parent dir".to_string())?
+        .to_path_buf();
+
+    let Some(version_dir) = exe_dir.parent() else {
+        return Ok(exe_dir);
+    };
+    let Some(maybe_versions) = version_dir.file_name().and_then(|s| s.to_str()) else {
+        return Ok(exe_dir);
+    };
+    if !maybe_versions.eq_ignore_ascii_case("versions") {
+        return Ok(exe_dir);
+    }
+
+    let root = version_dir
+        .parent()
+        .ok_or_else(|| "no launcher root dir".to_string())?;
+    Ok(root.to_path_buf())
+}
+
+fn is_sqlite_payload(name: &str) -> bool {
+    name == "wuddle.sqlite"
+        || (name.starts_with("wuddle-") && name.ends_with(".sqlite"))
+        || name == "wuddle.sqlite-wal"
+        || name == "wuddle.sqlite-shm"
+        || (name.starts_with("wuddle-") && name.ends_with(".sqlite-wal"))
+        || (name.starts_with("wuddle-") && name.ends_with(".sqlite-shm"))
+}
+
+fn migrate_legacy_portable_dbs_once(target_dir: &Path) -> Result<(), String> {
+    let already_attempted = match legacy_portable_migration_attempted_state().lock() {
+        Ok(guard) => *guard,
+        Err(_) => true,
+    };
+    if already_attempted {
+        return Ok(());
+    }
+    if let Ok(mut guard) = legacy_portable_migration_attempted_state().lock() {
+        *guard = true;
+    }
+    migrate_legacy_portable_dbs(target_dir)
+}
+
+fn migrate_legacy_portable_dbs(target_dir: &Path) -> Result<(), String> {
+    let legacy_dir = portable_app_dir()?;
+    if legacy_dir == target_dir {
+        return Ok(());
+    }
+    if !legacy_dir.exists() || !legacy_dir.is_dir() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(target_dir).map_err(|e| e.to_string())?;
+
+    let mut copied = 0usize;
+    let entries = fs::read_dir(&legacy_dir).map_err(|e| e.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let src = entry.path();
+        if !src.is_file() {
+            continue;
+        }
+        let Some(file_name_os) = src.file_name() else {
+            continue;
+        };
+        let file_name = file_name_os.to_string_lossy();
+        if !is_sqlite_payload(&file_name) {
+            continue;
+        }
+
+        let dst = target_dir.join(file_name_os);
+        if dst.exists() {
+            continue;
+        }
+
+        fs::copy(&src, &dst).map_err(|e| {
+            format!(
+                "failed to copy {} -> {} ({})",
+                src.display(),
+                dst.display(),
+                e
+            )
+        })?;
+        copied += 1;
+    }
+
+    if copied > 0 {
+        eprintln!(
+            "wuddle: migrated {} legacy portable data file(s) to {}",
+            copied,
+            target_dir.display()
+        );
+    }
+
+    Ok(())
 }
 
 fn profile_db_path(profile_id: &str) -> Result<PathBuf, String> {
@@ -607,7 +723,10 @@ async fn wuddle_update_repo(
             repo.name,
             repo.mode.as_str()
         ));
-        steps.push(format!("{}/{}: source: {}", repo.owner, repo.name, repo.url));
+        steps.push(format!(
+            "{}/{}: source: {}",
+            repo.owner, repo.name, repo.url
+        ));
         if repo.mode.as_str() == "addon_git" {
             let branch = repo
                 .git_branch
@@ -635,10 +754,7 @@ async fn wuddle_update_repo(
         match updated {
             Some(p) => {
                 if p.mode.as_str() == "addon_git" {
-                    steps.push(format!(
-                        "{}/{}: repository sync complete.",
-                        p.owner, p.name
-                    ));
+                    steps.push(format!("{}/{}: repository sync complete.", p.owner, p.name));
                 } else {
                     if !p.asset_name.is_empty() {
                         steps.push(format!(
@@ -705,7 +821,10 @@ async fn wuddle_reinstall_repo(
             repo.name,
             repo.mode.as_str()
         ));
-        steps.push(format!("{}/{}: source: {}", repo.owner, repo.name, repo.url));
+        steps.push(format!(
+            "{}/{}: source: {}",
+            repo.owner, repo.name, repo.url
+        ));
 
         let plan = tauri::async_runtime::block_on(async {
             eng.reinstall_repo(id, Path::new(&wowDir), None, opts)
@@ -906,6 +1025,21 @@ fn wuddle_about_info() -> AboutInfo {
     }
 }
 
+#[tauri::command]
+async fn wuddle_self_update_info() -> Result<self_update::SelfUpdateInfo, String> {
+    run_blocking(|| self_update::update_info(env!("CARGO_PKG_VERSION"))).await
+}
+
+#[tauri::command]
+async fn wuddle_self_update_apply() -> Result<OperationResult, String> {
+    run_blocking(|| self_update::apply_update(env!("CARGO_PKG_VERSION"))).await
+}
+
+#[tauri::command]
+fn wuddle_self_update_restart() -> Result<(), String> {
+    self_update::restart_after_update()
+}
+
 fn first_existing_file(dir: &Path, names: &[&str]) -> Option<PathBuf> {
     names
         .iter()
@@ -952,30 +1086,15 @@ fn spawn_launch_command(
         .map_err(|e| format!("Failed to launch {}: {}", program, e))
 }
 
-#[tauri::command]
-#[allow(non_snake_case)]
-fn wuddle_launch_game(wowDir: String, launch: Option<LaunchConfig>) -> Result<String, String> {
-    let trimmed = wowDir.trim();
-    if trimmed.is_empty() {
-        return Err("WoW directory is empty.".to_string());
-    }
-
-    let wow_path = PathBuf::from(trimmed);
-    if !wow_path.exists() {
-        return Err(format!("WoW directory does not exist: {}", wow_path.display()));
-    }
-    if !wow_path.is_dir() {
-        return Err(format!("WoW path is not a directory: {}", wow_path.display()));
-    }
-
-    let launch_cfg = launch.unwrap_or_default();
+fn resolve_launch_target(wow_path: &Path, launch_cfg: &LaunchConfig) -> Result<PathBuf, String> {
     let explicit_exe = launch_cfg
         .executable_path
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);
-    let target = if let Some(raw) = explicit_exe {
+
+    if let Some(raw) = explicit_exe {
         let candidate = if raw.is_absolute() {
             raw
         } else {
@@ -993,17 +1112,97 @@ fn wuddle_launch_game(wowDir: String, launch: Option<LaunchConfig>) -> Result<St
                 candidate.display()
             ));
         }
-        candidate
-    } else {
-        first_existing_file(&wow_path, &["VanillaFixes.exe", "vanillafixes.exe"])
-            .or_else(|| first_existing_file(&wow_path, &["Wow.exe", "wow.exe", "WoW.exe"]))
-            .ok_or_else(|| {
-                format!(
-                    "No launcher found in {} (expected VanillaFixes.exe or Wow.exe).",
-                    wow_path.display()
-                )
-            })?
-    };
+        return Ok(candidate);
+    }
+
+    first_existing_file(wow_path, &["VanillaFixes.exe", "vanillafixes.exe"])
+        .or_else(|| first_existing_file(wow_path, &["Wow.exe", "wow.exe", "WoW.exe"]))
+        .ok_or_else(|| {
+            format!(
+                "No launcher found in {} (expected VanillaFixes.exe or Wow.exe).",
+                wow_path.display()
+            )
+        })
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn wuddle_launch_diagnostics(wowDir: String, launch: Option<LaunchConfig>) -> LaunchDiagnostics {
+    let trimmed = wowDir.trim();
+    if trimmed.is_empty() {
+        return LaunchDiagnostics {
+            ready: false,
+            message: "WoW path is empty.".to_string(),
+            hint: Some("Open Settings and configure this instance path.".to_string()),
+            target_executable: None,
+        };
+    }
+
+    let wow_path = PathBuf::from(trimmed);
+    if !wow_path.exists() {
+        return LaunchDiagnostics {
+            ready: false,
+            message: format!("WoW path does not exist: {}", wow_path.display()),
+            hint: Some("Open Settings and choose the correct game executable path.".to_string()),
+            target_executable: None,
+        };
+    }
+    if !wow_path.is_dir() {
+        return LaunchDiagnostics {
+            ready: false,
+            message: format!("WoW path is not a directory: {}", wow_path.display()),
+            hint: Some(
+                "Set WoW path to the game executable (Wow.exe/VanillaFixes.exe) or the game folder."
+                    .to_string(),
+            ),
+            target_executable: None,
+        };
+    }
+
+    let launch_cfg = launch.unwrap_or_default();
+    match resolve_launch_target(&wow_path, &launch_cfg) {
+        Ok(target) => LaunchDiagnostics {
+            ready: true,
+            message: format!("Ready to launch: {}", target.display()),
+            hint: None,
+            target_executable: Some(target.display().to_string()),
+        },
+        Err(err) => LaunchDiagnostics {
+            ready: false,
+            message: err,
+            hint: Some(
+                "This usually means the selected path is not a valid WoW install folder. Check instance Settings."
+                    .to_string(),
+            ),
+            target_executable: None,
+        },
+    }
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn wuddle_launch_game(wowDir: String, launch: Option<LaunchConfig>) -> Result<String, String> {
+    let trimmed = wowDir.trim();
+    if trimmed.is_empty() {
+        return Err("WoW directory is empty.".to_string());
+    }
+
+    let wow_path = PathBuf::from(trimmed);
+    if !wow_path.exists() {
+        return Err(format!(
+            "WoW directory does not exist: {}",
+            wow_path.display()
+        ));
+    }
+    if !wow_path.is_dir() {
+        return Err(format!(
+            "WoW path is not a directory: {}",
+            wow_path.display()
+        ));
+    }
+
+    let launch_cfg = launch.unwrap_or_default();
+    let target = resolve_launch_target(&wow_path, &launch_cfg)?;
     let target_name = target
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -1031,7 +1230,9 @@ fn wuddle_launch_game(wowDir: String, launch: Option<LaunchConfig>) -> Result<St
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| "Lutris launch target is empty (expected e.g. lutris:rungameid/2).".to_string())?;
+            .ok_or_else(|| {
+                "Lutris launch target is empty (expected e.g. lutris:rungameid/2).".to_string()
+            })?;
         let mut args = vec![target_arg.to_string()];
         args.extend(parse_arg_string(
             launch_cfg.custom_args.as_deref().unwrap_or(""),
@@ -1098,19 +1299,45 @@ fn wuddle_launch_game(wowDir: String, launch: Option<LaunchConfig>) -> Result<St
 
     #[cfg(target_os = "macos")]
     {
-        if spawn_launch_command("wine", &vec![target.to_string_lossy().to_string()], &cwd, env_map).is_ok() {
+        if spawn_launch_command(
+            "wine",
+            &vec![target.to_string_lossy().to_string()],
+            &cwd,
+            env_map,
+        )
+        .is_ok()
+        {
             return Ok(format!("Launched {} via wine.", target_name));
         }
-        spawn_launch_command("open", &vec![target.to_string_lossy().to_string()], &cwd, env_map)?;
+        spawn_launch_command(
+            "open",
+            &vec![target.to_string_lossy().to_string()],
+            &cwd,
+            env_map,
+        )?;
         return Ok(format!("Launched {} via open.", target_name));
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        if spawn_launch_command("wine", &vec![target.to_string_lossy().to_string()], &cwd, env_map).is_ok() {
+        if spawn_launch_command(
+            "wine",
+            &vec![target.to_string_lossy().to_string()],
+            &cwd,
+            env_map,
+        )
+        .is_ok()
+        {
             return Ok(format!("Launched {} via wine.", target_name));
         }
-        if spawn_launch_command("xdg-open", &vec![target.to_string_lossy().to_string()], &cwd, env_map).is_ok() {
+        if spawn_launch_command(
+            "xdg-open",
+            &vec![target.to_string_lossy().to_string()],
+            &cwd,
+            env_map,
+        )
+        .is_ok()
+        {
             return Ok(format!("Launched {} via system handler.", target_name));
         }
         return Err(format!(
@@ -1197,6 +1424,10 @@ pub fn run() {
             wuddle_github_auth_set_token,
             wuddle_github_auth_clear_token,
             wuddle_about_info,
+            wuddle_self_update_info,
+            wuddle_self_update_apply,
+            wuddle_self_update_restart,
+            wuddle_launch_diagnostics,
             wuddle_launch_game,
             wuddle_open_directory
         ])

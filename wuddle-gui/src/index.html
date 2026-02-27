@@ -196,7 +196,23 @@
               <input id="optFrizFont" type="checkbox" />
               <span>Use Friz Quadrata font</span>
             </label>
+            <label class="check">
+              <input id="optAutoCheck" type="checkbox" />
+              <span>Automatically check for updates</span>
+            </label>
           </div>
+          <label class="field options-block">
+            Auto-check interval (minutes)
+            <input
+              id="optAutoCheckMinutes"
+              type="number"
+              min="1"
+              max="240"
+              step="1"
+              inputmode="numeric"
+              placeholder="30"
+            />
+          </label>
           <label class="field options-block">
             Theme
             <select id="optTheme">
@@ -297,6 +313,7 @@
         </div>
         <div class="row tight">
           <button id="btnAboutRefresh" class="btn" type="button">Refresh details</button>
+          <button id="btnAboutUpdate" class="btn" type="button" disabled>Up to date</button>
           <button id="btnAboutGithub" class="btn" type="button">Open Wuddle on GitHub</button>
         </div>
       </div>
@@ -564,6 +581,8 @@
         </div>
       </form>
     </dialog>
+
+    <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="false"></div>
 
     <script type="module" src="./main.js"></script>
   </body>

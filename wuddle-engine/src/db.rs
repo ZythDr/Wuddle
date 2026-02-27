@@ -107,10 +107,7 @@ impl Db {
             Ok(())
         };
 
-        ensure(
-            "git_branch",
-            "ALTER TABLE repos ADD COLUMN git_branch TEXT",
-        )?;
+        ensure("git_branch", "ALTER TABLE repos ADD COLUMN git_branch TEXT")?;
         ensure(
             "enabled",
             "ALTER TABLE repos ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",

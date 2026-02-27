@@ -58,10 +58,9 @@ fn git_url_candidates(url: &str) -> Vec<String> {
 
     let base = trimmed.trim_end_matches('/').to_string();
     let mut out = Vec::new();
-    let add_dot_git = (base.starts_with("https://")
-        || base.starts_with("http://")
-        || base.starts_with("git@"))
-        && !base.ends_with(".git");
+    let add_dot_git =
+        (base.starts_with("https://") || base.starts_with("http://") || base.starts_with("git@"))
+            && !base.ends_with(".git");
     if add_dot_git {
         out.push(format!("{base}.git"));
     }
@@ -186,17 +185,15 @@ fn choose_remote_head_with_url(
     }
 
     if let Some((candidate, e)) = last_err {
-        anyhow::bail!(
-            "connect remote {} (last tried {}): {}",
-            url,
-            candidate,
-            e
-        );
+        anyhow::bail!("connect remote {} (last tried {}): {}", url, candidate, e);
     }
     anyhow::bail!("connect remote {}", url);
 }
 
-fn choose_remote_head_for_branch(url: &str, preferred_branch: Option<&str>) -> Result<GitHeadState> {
+fn choose_remote_head_for_branch(
+    url: &str,
+    preferred_branch: Option<&str>,
+) -> Result<GitHeadState> {
     choose_remote_head_with_url(url, preferred_branch).map(|(state, _)| state)
 }
 
@@ -204,11 +201,7 @@ fn remote_branches_for_url(url: &str) -> Result<Vec<String>> {
     let refs = remote_refs_for_url(url)?;
     let mut branches = refs
         .into_iter()
-        .filter_map(|r| {
-            r.name
-                .strip_prefix("refs/heads/")
-                .map(|s| s.to_string())
-        })
+        .filter_map(|r| r.name.strip_prefix("refs/heads/").map(|s| s.to_string()))
         .collect::<Vec<_>>();
     branches.sort_by_key(|b| b.to_ascii_lowercase());
     branches.dedup_by(|a, b| a.eq_ignore_ascii_case(b));

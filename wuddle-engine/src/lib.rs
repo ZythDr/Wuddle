@@ -3,11 +3,11 @@ use git2::Repository;
 use reqwest::Client;
 use std::{
     collections::HashSet,
-    future::Future,
     fs,
+    future::Future,
     io::Read,
-    pin::Pin,
     path::{Component, Path, PathBuf},
+    pin::Pin,
     sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -24,8 +24,8 @@ pub use install::InstallOptions;
 pub use model::{InstallMode, Repo};
 
 use crate::forge::detect_repo;
-use crate::forge::ForgeKind;
 use crate::forge::git_sync;
+use crate::forge::ForgeKind;
 use crate::model::{LatestRelease, ReleaseAsset};
 
 #[derive(Debug, Clone)]
@@ -530,7 +530,11 @@ impl Engine {
         Ok(imported)
     }
 
-    fn build_git_addon_plan_for_repo(&self, r: &Repo, wow_dir: Option<&Path>) -> Result<UpdatePlan> {
+    fn build_git_addon_plan_for_repo(
+        &self,
+        r: &Repo,
+        wow_dir: Option<&Path>,
+    ) -> Result<UpdatePlan> {
         let wow_dir = match wow_dir {
             Some(p) => p,
             None => {
@@ -573,10 +577,7 @@ impl Engine {
             .map(|h| h.short_oid.clone())
             .or_else(|| Self::normalized_current_version(r));
         let missing_targets = self.has_missing_targets(r.id, Some(wow_dir))?;
-        let installed_matches = local
-            .as_ref()
-            .map(|h| h.oid == remote.oid)
-            .unwrap_or(false);
+        let installed_matches = local.as_ref().map(|h| h.oid == remote.oid).unwrap_or(false);
         let needs_sync = !installed_matches || missing_targets;
         let repair_needed = missing_targets && current.is_some();
 
@@ -671,10 +672,7 @@ impl Engine {
             .map(|h| h.short_oid.clone())
             .or_else(|| Self::normalized_current_version(r));
         let missing_targets = self.has_missing_targets(r.id, Some(wow_dir))?;
-        let installed_matches = local
-            .as_ref()
-            .map(|h| h.oid == remote.oid)
-            .unwrap_or(false);
+        let installed_matches = local.as_ref().map(|h| h.oid == remote.oid).unwrap_or(false);
         let needs_sync = !installed_matches || missing_targets;
         let repair_needed = missing_targets && current.is_some();
 
@@ -863,7 +861,9 @@ impl Engine {
         Box::pin(async move {
             match repos {
                 [] => Ok(Vec::new()),
-                [repo] => Ok(vec![self.build_update_plan_for_repo(repo, true, wow_dir).await?]),
+                [repo] => Ok(vec![
+                    self.build_update_plan_for_repo(repo, true, wow_dir).await?,
+                ]),
                 _ => {
                     let mid = repos.len() / 2;
                     let (left, right) = repos.split_at(mid);
@@ -1337,10 +1337,7 @@ impl Engine {
 
         let mut out = Vec::<(String, PathBuf)>::new();
         for addon_name in addon_folder_names {
-            let dst = wow_dir
-                .join("Interface")
-                .join("AddOns")
-                .join(addon_name);
+            let dst = wow_dir.join("Interface").join("AddOns").join(addon_name);
 
             if tracked_paths.contains(&dst) {
                 continue;
@@ -1514,7 +1511,8 @@ impl Engine {
             .map(|b| b.trim().to_string())
             .filter(|b| !b.is_empty())
             .unwrap_or_else(|| "master".to_string());
-        self.db.set_repo_git_branch(repo_id, Some(normalized.as_str()))?;
+        self.db
+            .set_repo_git_branch(repo_id, Some(normalized.as_str()))?;
         Ok(())
     }
 

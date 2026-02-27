@@ -70,8 +70,8 @@
   --topbar-shadow-inset: rgba(255, 188, 116, 0.12);
   --topbar-shadow-drop: rgba(0, 0, 0, 0.28);
 
-  --card-grad-top: rgba(40, 29, 22, 0.30);
-  --card-grad-bottom: rgba(13, 12, 19, 0.92);
+  --card-grad-top: #2a1d14;
+  --card-grad-bottom: #0d0c13;
 
   --control-idle-top: rgba(76, 54, 40, 0.58);
   --control-idle-bottom: rgba(43, 31, 24, 0.64);
@@ -96,12 +96,12 @@
   --row-hover: rgba(206, 137, 66, 0.08);
   --menu-hover: rgba(206, 137, 66, 0.16);
   --menu-active: rgba(236, 174, 101, 0.25);
-  --menu-pop-top: rgba(48, 34, 26, 0.96);
-  --menu-pop-bottom: rgba(20, 15, 22, 0.98);
-  --table-head-top: rgba(57, 39, 29, 0.72);
-  --table-head-bottom: rgba(26, 20, 28, 0.95);
-  --footer-top: rgba(51, 35, 26, 0.48);
-  --footer-bottom: rgba(16, 14, 22, 0.95);
+  --menu-pop-top: #30221a;
+  --menu-pop-bottom: #140f16;
+  --table-head-top: #39271d;
+  --table-head-bottom: #1a141c;
+  --footer-top: #33231a;
+  --footer-bottom: #100e16;
   --repo-link-underline: rgba(226, 163, 94, 0.5);
 
   --col-current: 116px;
@@ -126,6 +126,102 @@ body {
 html[data-theme] { color-scheme: dark; }
 html[data-font-style="default"] { --font-ui: var(--font-ui-default); }
 html[data-font-style="friz"] { --font-ui: var(--font-ui-friz); }
+
+.toast-host {
+  position: fixed;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 86px);
+  left: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(50vw, 760px);
+  max-width: calc(100vw - 28px);
+  z-index: 7000;
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--btnBorder);
+  background: linear-gradient(180deg, var(--menu-pop-top), var(--menu-pop-bottom));
+  color: var(--text);
+  box-shadow:
+    0 8px 22px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.toast-info {
+  border-left: 3px solid var(--info-color);
+}
+
+.toast-warn {
+  border-left: 3px solid var(--warn);
+}
+
+.toast-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toast-action {
+  border: 1px solid var(--btnBorder);
+  background: linear-gradient(180deg, var(--btn-idle-top), var(--btn-idle-bottom));
+  color: var(--button-text);
+  padding: 4px 8px;
+  cursor: pointer;
+  font: inherit;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.toast-close {
+  border: none;
+  background: transparent;
+  color: #ef4444;
+  font-size: 40px;
+  font-weight: 400;
+  line-height: 1;
+  padding: 0;
+  min-width: 34px;
+  width: 34px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-family: var(--font-ui-default);
+  overflow: visible;
+  transform: translateY(-1px) scale(1.08);
+  transform-origin: center;
+}
+
+.toast-action:hover,
+.toast-close:hover {
+  background: transparent;
+}
+
+.toast-action:hover {
+  background: linear-gradient(180deg, var(--btn-hover-top), var(--btn-hover-bottom));
+}
+
+.toast-close:hover {
+  color: #f87171;
+}
+
+.toast.is-leaving {
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
 
 /* Friz-only visual/metric overrides; default mode stays pre-Friz exact. */
 html[data-font-style="friz"] body,
@@ -210,8 +306,8 @@ html[data-theme="obsidian"] {
   --topbar-grad-bottom: rgba(115, 174, 229, 0.02);
   --topbar-shadow-inset: rgba(156, 204, 247, 0.14);
 
-  --card-grad-top: rgba(20, 34, 52, 0.46);
-  --card-grad-bottom: rgba(11, 17, 28, 0.94);
+  --card-grad-top: #142234;
+  --card-grad-bottom: #0b111c;
   --control-idle-top: rgba(38, 63, 90, 0.62);
   --control-idle-bottom: rgba(22, 38, 56, 0.68);
   --tab-idle-top: rgba(38, 63, 90, 0.72);
@@ -234,12 +330,12 @@ html[data-theme="obsidian"] {
   --row-hover: rgba(92, 150, 202, 0.12);
   --menu-hover: rgba(92, 150, 202, 0.2);
   --menu-active: rgba(133, 190, 235, 0.24);
-  --menu-pop-top: rgba(34, 54, 78, 0.96);
-  --menu-pop-bottom: rgba(15, 24, 36, 0.98);
-  --table-head-top: rgba(42, 67, 94, 0.78);
-  --table-head-bottom: rgba(17, 28, 44, 0.95);
-  --footer-top: rgba(36, 57, 81, 0.5);
-  --footer-bottom: rgba(12, 20, 31, 0.95);
+  --menu-pop-top: #22364e;
+  --menu-pop-bottom: #0f1824;
+  --table-head-top: #2a435e;
+  --table-head-bottom: #111c2c;
+  --footer-top: #243951;
+  --footer-bottom: #0c141f;
   --repo-link-underline: rgba(124, 184, 255, 0.5);
 }
 
@@ -280,8 +376,8 @@ html[data-theme="emerald"] {
   --topbar-grad-bottom: rgba(126, 213, 160, 0.01);
   --topbar-shadow-inset: rgba(170, 243, 203, 0.12);
 
-  --card-grad-top: rgba(24, 44, 34, 0.42);
-  --card-grad-bottom: rgba(11, 20, 17, 0.94);
+  --card-grad-top: #182c22;
+  --card-grad-bottom: #0b1411;
   --control-idle-top: rgba(40, 71, 55, 0.62);
   --control-idle-bottom: rgba(24, 44, 34, 0.68);
   --tab-idle-top: rgba(40, 71, 55, 0.74);
@@ -304,12 +400,12 @@ html[data-theme="emerald"] {
   --row-hover: rgba(82, 165, 123, 0.12);
   --menu-hover: rgba(82, 165, 123, 0.2);
   --menu-active: rgba(123, 206, 163, 0.24);
-  --menu-pop-top: rgba(35, 61, 47, 0.96);
-  --menu-pop-bottom: rgba(14, 25, 20, 0.98);
-  --table-head-top: rgba(41, 72, 56, 0.78);
-  --table-head-bottom: rgba(14, 26, 21, 0.95);
-  --footer-top: rgba(35, 64, 49, 0.5);
-  --footer-bottom: rgba(10, 19, 15, 0.95);
+  --menu-pop-top: #233d2f;
+  --menu-pop-bottom: #0e1914;
+  --table-head-top: #294838;
+  --table-head-bottom: #0e1a15;
+  --footer-top: #234031;
+  --footer-bottom: #0a130f;
   --repo-link-underline: rgba(117, 216, 168, 0.5);
 }
 
@@ -350,8 +446,8 @@ html[data-theme="ashen"] {
   --topbar-grad-bottom: rgba(228, 124, 114, 0.02);
   --topbar-shadow-inset: rgba(255, 176, 166, 0.12);
 
-  --card-grad-top: rgba(55, 32, 34, 0.44);
-  --card-grad-bottom: rgba(18, 12, 14, 0.94);
+  --card-grad-top: #372022;
+  --card-grad-bottom: #120c0e;
   --control-idle-top: rgba(92, 49, 46, 0.62);
   --control-idle-bottom: rgba(58, 31, 32, 0.68);
   --tab-idle-top: rgba(92, 49, 46, 0.74);
@@ -374,12 +470,12 @@ html[data-theme="ashen"] {
   --row-hover: rgba(196, 103, 95, 0.12);
   --menu-hover: rgba(196, 103, 95, 0.22);
   --menu-active: rgba(229, 139, 131, 0.24);
-  --menu-pop-top: rgba(66, 39, 40, 0.96);
-  --menu-pop-bottom: rgba(24, 15, 17, 0.98);
-  --table-head-top: rgba(73, 43, 45, 0.78);
-  --table-head-bottom: rgba(25, 15, 18, 0.95);
-  --footer-top: rgba(66, 39, 40, 0.5);
-  --footer-bottom: rgba(21, 14, 16, 0.95);
+  --menu-pop-top: #422728;
+  --menu-pop-bottom: #180f11;
+  --table-head-top: #492b2d;
+  --table-head-bottom: #190f12;
+  --footer-top: #422728;
+  --footer-bottom: #150e10;
   --repo-link-underline: rgba(243, 159, 149, 0.5);
 }
 
@@ -421,8 +517,8 @@ html[data-theme="wowui"] {
   --topbar-grad-bottom: rgba(57, 61, 68, 0.08);
   --topbar-shadow-inset: rgba(233, 198, 114, 0.16);
 
-  --card-grad-top: rgba(62, 67, 74, 0.34);
-  --card-grad-bottom: rgba(18, 20, 24, 0.94);
+  --card-grad-top: #3e434a;
+  --card-grad-bottom: #121418;
   --control-idle-top: rgba(138, 28, 28, 0.80);
   --control-idle-bottom: rgba(83, 16, 16, 0.88);
   --tab-idle-top: rgba(138, 28, 28, 0.82);
@@ -445,12 +541,12 @@ html[data-theme="wowui"] {
   --row-hover: rgba(167, 41, 35, 0.14);
   --menu-hover: rgba(184, 46, 39, 0.24);
   --menu-active: rgba(209, 78, 56, 0.30);
-  --menu-pop-top: rgba(97, 18, 18, 0.95);
-  --menu-pop-bottom: rgba(49, 10, 10, 0.98);
-  --table-head-top: rgba(79, 83, 90, 0.84);
-  --table-head-bottom: rgba(32, 36, 42, 0.96);
-  --footer-top: rgba(74, 78, 84, 0.52);
-  --footer-bottom: rgba(23, 26, 31, 0.96);
+  --menu-pop-top: #611212;
+  --menu-pop-bottom: #310a0a;
+  --table-head-top: #4f535a;
+  --table-head-bottom: #20242a;
+  --footer-top: #4a4e54;
+  --footer-bottom: #171a1f;
   --repo-link-underline: rgba(229, 194, 108, 0.56);
 }
 
@@ -1683,6 +1779,7 @@ dialog.dialog {
   border: none;
   padding: 0;
   background: transparent;
+  position: relative;
 }
 
 dialog.dialog::backdrop {
@@ -1692,13 +1789,18 @@ dialog.dialog::backdrop {
 .dialog-inner {
   width: min(760px, calc(100vw - 40px));
   max-height: min(92vh, 920px);
-  background: var(--card);
+  background-color: var(--card);
+  background-image: linear-gradient(180deg, var(--card-grad-top), var(--card-grad-bottom));
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 18px;
   padding: 16px;
   box-shadow: 0 20px 70px rgba(0,0,0,0.45);
   overflow: auto;
+}
+
+dialog.dialog > .select-menu-pop {
+  z-index: 24000;
 }
 
 #dlgAdd .dialog-inner {
@@ -2532,6 +2634,10 @@ html[data-font-style="friz"] .home-play-btn {
 }
 
 @media (max-width: 860px) {
+  .toast-host {
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 116px);
+  }
+
   .thead { display: none; }
 
   .trow {

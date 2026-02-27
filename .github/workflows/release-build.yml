@@ -38,6 +38,7 @@ jobs:
         with:
           workspaces: |
             wuddle-gui/src-tauri -> target
+            wuddle-launcher -> target
 
       - name: Install Linux Build Dependencies
         run: |
@@ -163,6 +164,7 @@ jobs:
         with:
           workspaces: |
             wuddle-gui/src-tauri -> target
+            wuddle-launcher -> target
 
       - name: Install JS Dependencies
         run: npm ci
@@ -173,6 +175,9 @@ jobs:
       - name: Build Windows Executable (no installer)
         run: npx tauri build --no-bundle
 
+      - name: Build Windows Launcher
+        run: cargo build --manifest-path ../wuddle-launcher/Cargo.toml --release
+
       - name: Prepare Portable ZIP
         shell: pwsh
         run: |
@@ -180,16 +185,22 @@ jobs:
           $tag = $tag -replace '/', '-'
           $portableZip = "wuddle-$tag-windows-portable.zip"
           $portableDir = "portable"
+          $versionDir = "$portableDir/versions/$tag"
           New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
-          Copy-Item "src-tauri/target/release/wuddle-gui.exe" "$portableDir/Wuddle.exe" -Force
-          New-Item -ItemType File -Path "$portableDir/wuddle-portable.flag" -Force | Out-Null
+          New-Item -ItemType Directory -Path $versionDir -Force | Out-Null
+          Copy-Item "../wuddle-launcher/target/release/wuddle-launcher.exe" "$portableDir/Wuddle.exe" -Force
+          Copy-Item "src-tauri/target/release/wuddle-gui.exe" "$versionDir/Wuddle-bin.exe" -Force
+          @{ current = $tag } | ConvertTo-Json | Set-Content "$portableDir/current.json"
           @"
-          Wuddle Portable
-          ===============
+          Wuddle (Windows ZIP)
+          ====================
 
-          - Run Wuddle.exe
-          - This package runs in portable mode because wuddle-portable.flag is present.
-          - App data is stored next to the exe in ./wuddle-data
+          - Run Wuddle.exe (launcher)
+          - The launcher reads current.json and starts versions/<current>/Wuddle-bin.exe
+          - New releases can be unpacked into this same folder; the launcher stays stable.
+          - App data is stored in your normal user data directory (AppData/Roaming/wuddle)
+          - Optional: create a file named wuddle-portable.flag next to Wuddle.exe to force portable mode.
+          - In portable mode, app data is stored next to the exe in ./wuddle-data
           - GitHub token is session-only in portable mode (not stored in system keychain)
           "@ | Set-Content "$portableDir/README-PORTABLE.txt"
           Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZip -Force
@@ -202,7 +213,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Publish GitHub Release (main tags only)
+    name: Publish GitHub Release (stable + pre-release)
     needs: [build-linux, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -214,18 +225,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate Tag Belongs To main
+      - name: Classify tag (main=stable, v2-dev=pre-release)
         id: tag_guard
         run: |
           set -euo pipefail
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags origin +refs/heads/v2-dev:refs/remotes/origin/v2-dev || true
           TAG_SHA="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
+
           if git merge-base --is-ancestor "${TAG_SHA}" origin/main; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "Tag ${GITHUB_REF_NAME} is on main; publishing release."
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+            echo "Tag ${GITHUB_REF_NAME} is on main; publishing stable release."
+          elif git show-ref --verify --quiet refs/remotes/origin/v2-dev && git merge-base --is-ancestor "${TAG_SHA}" origin/v2-dev; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "channel=prerelease" >> "$GITHUB_OUTPUT"
+            echo "Tag ${GITHUB_REF_NAME} is on v2-dev; publishing pre-release."
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "Tag ${GITHUB_REF_NAME} is not on main; skipping release publish."
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "channel=skip" >> "$GITHUB_OUTPUT"
+            echo "Tag ${GITHUB_REF_NAME} is not on main or v2-dev; skipping release publish."
           fi
 
       - name: Download Linux Artifacts
@@ -277,6 +299,7 @@ jobs:
         if: steps.tag_guard.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ steps.tag_guard.outputs.prerelease }}
           body_path: dist/RELEASE_BODY.md
           generate_release_notes: true
           files: |

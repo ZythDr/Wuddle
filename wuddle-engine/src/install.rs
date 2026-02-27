@@ -578,7 +578,9 @@ fn walk_dir(root: &Path, cb: &mut dyn FnMut(&Path)) {
         if p.is_dir() {
             if p.file_name()
                 .and_then(|s| s.to_str())
-                .map(|name| name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".wuddle"))
+                .map(|name| {
+                    name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".wuddle")
+                })
                 .unwrap_or(false)
             {
                 continue;
