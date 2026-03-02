@@ -13,6 +13,16 @@ pub struct InstallEntry {
     pub path: String,
     /// "dll" | "addon" | "raw"
     pub kind: String,
+    /// SHA-256 hex digest recorded at install time (None for pre-migration rows).
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddonInstallOwner {
+    pub repo_id: i64,
+    pub owner: String,
+    pub name: String,
+    pub manifest_path: String,
 }
 
 pub struct Db {
@@ -27,6 +37,7 @@ impl Db {
             r#"
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
+            PRAGMA foreign_keys=ON;
             "#,
         )?;
         let db = Self { conn };
@@ -35,60 +46,80 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        // repos: tracked projects
-        self.conn.execute_batch(
-            r#"
-            PRAGMA foreign_keys=ON;
+        const SCHEMA_VERSION: i32 = 2;
 
-            CREATE TABLE IF NOT EXISTS repos (
-              id            INTEGER PRIMARY KEY AUTOINCREMENT,
-              url           TEXT NOT NULL,
-              forge         TEXT NOT NULL,
-              host          TEXT NOT NULL,
-              owner         TEXT NOT NULL,
-              name          TEXT NOT NULL,
-              mode          TEXT NOT NULL,
-              enabled       INTEGER NOT NULL DEFAULT 1,
-              git_branch    TEXT,
-              asset_regex   TEXT,
-              last_version  TEXT,
-              etag          TEXT,
-              installed_asset_id   TEXT,
-              installed_asset_name TEXT,
-              installed_asset_size INTEGER,
-              installed_asset_url  TEXT
-            );
+        let current: i32 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_repos_unique
-              ON repos(host, owner, name);
+        if current >= SCHEMA_VERSION {
+            return Ok(());
+        }
 
-            -- installs: what we installed last time for a repo
-            CREATE TABLE IF NOT EXISTS installs (
-              repo_id INTEGER NOT NULL,
-              path    TEXT NOT NULL,
-              kind    TEXT NOT NULL,
-              PRIMARY KEY(repo_id, path),
-              FOREIGN KEY(repo_id) REFERENCES repos(id) ON DELETE CASCADE
-            );
+        // v0 → v1: create all tables, apply backward-compatible column additions
+        // for DBs that predate this migration system, and run data fixups.
+        if current < 1 {
+            self.conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS repos (
+                  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                  url           TEXT NOT NULL,
+                  forge         TEXT NOT NULL,
+                  host          TEXT NOT NULL,
+                  owner         TEXT NOT NULL,
+                  name          TEXT NOT NULL,
+                  mode          TEXT NOT NULL,
+                  enabled       INTEGER NOT NULL DEFAULT 1,
+                  git_branch    TEXT,
+                  asset_regex   TEXT,
+                  last_version  TEXT,
+                  etag          TEXT,
+                  installed_asset_id   TEXT,
+                  installed_asset_name TEXT,
+                  installed_asset_size INTEGER,
+                  installed_asset_url  TEXT
+                );
 
-            CREATE INDEX IF NOT EXISTS idx_installs_repo
-              ON installs(repo_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_repos_unique
+                  ON repos(host, owner, name);
 
-            CREATE TABLE IF NOT EXISTS rate_limits (
-              host        TEXT PRIMARY KEY,
-              reset_epoch INTEGER NOT NULL
-            );
-            "#,
-        )?;
+                CREATE TABLE IF NOT EXISTS installs (
+                  repo_id INTEGER NOT NULL,
+                  path    TEXT NOT NULL,
+                  kind    TEXT NOT NULL,
+                  PRIMARY KEY(repo_id, path),
+                  FOREIGN KEY(repo_id) REFERENCES repos(id) ON DELETE CASCADE
+                );
 
-        // Backward-compatible schema upgrades for existing DBs.
-        self.ensure_repo_columns()?;
-        self.conn
-            .execute("UPDATE repos SET enabled=1 WHERE enabled IS NULL", [])?;
-        self.conn.execute(
-            "UPDATE repos SET git_branch='master' WHERE mode='addon_git' AND (git_branch IS NULL OR TRIM(git_branch)='')",
-            [],
-        )?;
+                CREATE INDEX IF NOT EXISTS idx_installs_repo
+                  ON installs(repo_id);
+
+                CREATE TABLE IF NOT EXISTS rate_limits (
+                  host        TEXT PRIMARY KEY,
+                  reset_epoch INTEGER NOT NULL
+                );
+                "#,
+            )?;
+
+            // Add columns missing from DBs created before they were introduced.
+            self.ensure_repo_columns()?;
+
+            self.conn
+                .execute("UPDATE repos SET enabled=1 WHERE enabled IS NULL", [])?;
+            self.conn.execute(
+                "UPDATE repos SET git_branch='master' WHERE mode='addon_git' AND (git_branch IS NULL OR TRIM(git_branch)='')",
+                [],
+            )?;
+
+            self.conn.execute_batch("PRAGMA user_version = 1")?;
+        }
+
+        // v1 → v2: add sha256 column to installs for file integrity checking.
+        if current < 2 {
+            self.conn
+                .execute_batch("ALTER TABLE installs ADD COLUMN sha256 TEXT")?;
+            self.conn.execute_batch("PRAGMA user_version = 2")?;
+        }
 
         Ok(())
     }
@@ -107,10 +138,7 @@ impl Db {
             Ok(())
         };
 
-        ensure(
-            "git_branch",
-            "ALTER TABLE repos ADD COLUMN git_branch TEXT",
-        )?;
+        ensure("git_branch", "ALTER TABLE repos ADD COLUMN git_branch TEXT")?;
         ensure(
             "enabled",
             "ALTER TABLE repos ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
@@ -353,7 +381,7 @@ impl Db {
     pub fn list_installs(&self, repo_id: i64) -> Result<Vec<InstallEntry>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT path, kind
+            SELECT path, kind, sha256
             FROM installs
             WHERE repo_id=?1
             ORDER BY kind, path
@@ -364,12 +392,79 @@ impl Db {
             Ok(InstallEntry {
                 path: row.get(0)?,
                 kind: row.get(1)?,
+                sha256: row.get(2)?,
             })
         })?;
 
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn add_install_with_hash(
+        &self,
+        repo_id: i64,
+        path: &str,
+        kind: &str,
+        sha256: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO installs(repo_id, path, kind, sha256)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![repo_id, path, kind, sha256],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_install_sha256(&self, repo_id: i64, path: &str, sha256: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            r#"UPDATE installs SET sha256=?1 WHERE repo_id=?2 AND path=?3"#,
+            params![sha256, repo_id, path],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_install(&self, repo_id: i64, path: &str) -> Result<()> {
+        self.conn.execute(
+            r#"DELETE FROM installs WHERE repo_id=?1 AND path=?2"#,
+            params![repo_id, path],
+        )?;
+        Ok(())
+    }
+
+    pub fn find_addon_install_owners(
+        &self,
+        path: &str,
+        exclude_repo_id: Option<i64>,
+    ) -> Result<Vec<AddonInstallOwner>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT r.id, r.owner, r.name, i.path
+            FROM installs i
+            JOIN repos r ON r.id = i.repo_id
+            WHERE i.kind='addon'
+              AND LOWER(i.path)=LOWER(?1)
+              AND (?2 IS NULL OR r.id <> ?2)
+            ORDER BY r.owner, r.name
+            "#,
+        )?;
+
+        let rows = stmt.query_map(params![path, exclude_repo_id], |row| {
+            Ok(AddonInstallOwner {
+                repo_id: row.get(0)?,
+                owner: row.get(1)?,
+                name: row.get(2)?,
+                manifest_path: row.get(3)?,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
         }
         Ok(out)
     }

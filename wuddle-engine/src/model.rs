@@ -61,7 +61,7 @@ pub struct Repo {
     pub git_branch: Option<String>, // only used by addon_git mode (None = remote default HEAD)
     pub asset_regex: Option<String>, // optional override for picking asset
     pub last_version: Option<String>, // tag_name last installed
-    pub etag: Option<String>,        // for conditional GET (if supported)
+    pub etag: Option<String>,       // for conditional GET (if supported)
     pub installed_asset_id: Option<String>,
     pub installed_asset_name: Option<String>,
     pub installed_asset_size: Option<i64>,

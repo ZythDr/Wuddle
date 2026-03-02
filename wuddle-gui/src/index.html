@@ -55,6 +55,7 @@
     </header>
 
     <section id="panelHome" class="card panel hidden">
+      <div id="homeArtworkLayer" class="home-artwork-layer" aria-hidden="true"></div>
       <div class="home-grid">
         <section class="settings-card home-card home-card-main">
           <div class="row space-between align-center home-head">
@@ -95,6 +96,93 @@
           </div>
 
         </section>
+
+        <section id="homeTurtleSection" class="settings-card home-card home-turtle-card hidden">
+          <div class="home-turtle-grid">
+            <div class="home-turtle-col">
+              <div class="settings-head home-turtle-subhead">Official Links</div>
+              <div class="home-turtle-links">
+                <button
+                  id="homeBtnTurtleHomepage"
+                  class="btn home-turtle-link"
+                  type="button"
+                  title="Open in browser: https://turtlecraft.gg/"
+                >
+                  Homepage
+                </button>
+                <button
+                  id="homeBtnTurtleDatabase"
+                  class="btn home-turtle-link"
+                  type="button"
+                  title="Open in browser: https://database.turtlecraft.gg/"
+                >
+                  Database
+                </button>
+                <button
+                  id="homeBtnTurtleForum"
+                  class="btn home-turtle-link"
+                  type="button"
+                  title="Open in browser: https://forum.turtlecraft.gg/"
+                >
+                  Forum
+                </button>
+                <button
+                  id="homeBtnTurtleTalentCalc"
+                  class="btn home-turtle-link"
+                  type="button"
+                  title="Open in browser: https://talents.turtlecraft.gg/"
+                >
+                  Talent Calculator
+                </button>
+                <button
+                  id="homeBtnTurtleDiscord"
+                  class="btn home-turtle-link"
+                  type="button"
+                  title="Open in browser: https://discord.gg/turtlewow"
+                >
+                  Join Discord
+                </button>
+              </div>
+            </div>
+            <div class="home-turtle-col">
+              <div class="settings-head home-turtle-subhead">Useful Community Links</div>
+              <div class="home-turtle-links">
+                <button
+                  id="homeBtnTurtleAddons"
+                  class="btn home-turtle-link"
+                  type="button"
+                  title="Open in browser: https://turtle-wow.fandom.com/wiki/Addons#Full_Addons_List"
+                >
+                  AddOns
+                </button>
+                <button
+                  id="homeBtnTurtleTimers"
+                  class="btn home-turtle-link"
+                  type="button"
+                  title="Open in browser: https://turtletimers.com/"
+                >
+                  Turtletimers
+                </button>
+                <button
+                  id="homeBtnRetroCroMods"
+                  class="btn home-turtle-link"
+                  type="button"
+                  title="Open in browser: https://github.com/RetroCro/TurtleWoW-Mods"
+                >
+                  RetroCro Mods Guide
+                </button>
+                <button
+                  id="homeBtnWowAuctions"
+                  class="btn home-turtle-link"
+                  type="button"
+                  title="Open in browser: https://www.wowauctions.net/"
+                >
+                  Wowauctions
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
 
       <div class="project-footer home-footer">
@@ -129,8 +217,18 @@
               autocomplete="off"
               spellcheck="false"
             />
+            <button
+              id="projectSearchClear"
+              class="project-search-clear"
+              type="button"
+              aria-label="Clear search"
+              title="Clear search"
+            >
+              ✕
+            </button>
           </div>
-          <button id="btnAddOpen" class="btn">＋ Add New Mod</button>
+          <button id="btnRescanAddons" class="btn icon hidden" type="button" title="Rescan Interface/AddOns">⟲</button>
+          <button id="btnAddOpen" class="btn">＋ Add</button>
         </div>
       </div>
 
@@ -163,16 +261,51 @@
     <section id="panelOptions" class="card panel hidden">
       <div class="options-grid">
         <section class="settings-card">
-          <div class="settings-head">Instances</div>
-          <div class="hint">Each instance has its own tracked mod/addon list. Click a card to edit details.</div>
-          <div id="instanceList" class="instance-list options-block"></div>
-          <div class="row tight options-block">
+          <div class="settings-head-row">
+            <div>
+              <div class="settings-head">Instances</div>
+              <div class="hint">Each instance has its own tracked mod/addon list. Click a card to edit details.</div>
+            </div>
             <button id="btnAddInstance" class="btn">+ Add Instance</button>
           </div>
+          <div id="instanceList" class="instance-list options-block"></div>
         </section>
 
         <section class="settings-card">
           <div class="settings-head">Behavior</div>
+          <div class="options-block auto-check-block">
+            <label class="check">
+              <input id="optAutoCheck" type="checkbox" />
+              <span>Automatically check for updates</span>
+            </label>
+            <label id="optAutoCheckInline" class="auto-check-inline" for="optAutoCheckMinutes">
+              <span>Every:</span>
+              <input
+                id="optAutoCheckMinutes"
+                type="number"
+                min="1"
+                max="240"
+                step="1"
+                inputmode="numeric"
+                placeholder="60"
+              />
+              <span>minutes</span>
+            </label>
+          </div>
+          <div class="options-block auto-check-block">
+            <label class="auto-check-inline" for="optCacheKeep">
+              <span>Cached mod versions to keep:</span>
+              <input
+                id="optCacheKeep"
+                type="number"
+                min="0"
+                max="10"
+                step="1"
+                inputmode="numeric"
+                placeholder="3"
+              />
+            </label>
+          </div>
           <div class="row options-block checks">
             <label class="check">
               <input id="optSymlinks" type="checkbox" />
@@ -197,16 +330,27 @@
               <span>Use Friz Quadrata font</span>
             </label>
           </div>
-          <label class="field options-block">
-            Theme
-            <select id="optTheme">
-              <option value="cata">Cata Ember (Default)</option>
-              <option value="obsidian">Obsidian Blue</option>
-              <option value="emerald">Emerald Night</option>
-              <option value="ashen">Ashen Crimson</option>
-              <option value="wowui">WoW Interface</option>
-            </select>
-          </label>
+          <div class="field options-block">
+            <div class="label">Theme</div>
+            <div id="themePicker" class="theme-picker" role="radiogroup" aria-label="Theme">
+              <button class="theme-swatch" type="button" role="radio" data-theme="cata" aria-label="Cata Ember (Default)">
+                <span class="theme-swatch-name">Cata Ember</span>
+              </button>
+              <button class="theme-swatch" type="button" role="radio" data-theme="obsidian" aria-label="Obsidian Blue">
+                <span class="theme-swatch-name">Obsidian Blue</span>
+              </button>
+              <button class="theme-swatch" type="button" role="radio" data-theme="emerald" aria-label="Emerald Night">
+                <span class="theme-swatch-name">Emerald Night</span>
+              </button>
+              <button class="theme-swatch" type="button" role="radio" data-theme="ashen" aria-label="Ashen Crimson">
+                <span class="theme-swatch-name">Ashen Crimson</span>
+              </button>
+              <button class="theme-swatch" type="button" role="radio" data-theme="wowui" aria-label="WoW Interface">
+                <span class="theme-swatch-name">WoW Interface</span>
+              </button>
+            </div>
+            <input id="optTheme" type="hidden" value="cata" />
+          </div>
         </section>
 
         <section class="settings-card auth-block">
@@ -297,6 +441,7 @@
         </div>
         <div class="row tight">
           <button id="btnAboutRefresh" class="btn" type="button">Refresh details</button>
+          <button id="btnAboutUpdate" class="btn" type="button" disabled>Up to date</button>
           <button id="btnAboutGithub" class="btn" type="button">Open Wuddle on GitHub</button>
         </div>
       </div>
@@ -410,6 +555,48 @@
       </form>
     </dialog>
 
+    <!-- Addon conflict modal -->
+    <dialog id="dlgAddonConflict" class="dialog">
+      <form method="dialog" class="dialog-inner">
+        <div class="dialog-head">
+          <div>
+            <div class="dialog-title">Addon folder conflict detected</div>
+            <div class="hint">
+              Another tracked addon already owns one or more target folders for this install.
+            </div>
+          </div>
+          <button class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
+        </div>
+
+        <div class="addon-conflict-compare">
+          <div class="addon-conflict-card">
+            <div class="addon-conflict-card-label">From (existing)</div>
+            <div id="addonConflictFromTitle" class="addon-conflict-card-title"></div>
+            <div id="addonConflictFromMeta" class="addon-conflict-card-meta"></div>
+          </div>
+          <div class="addon-conflict-card">
+            <div class="addon-conflict-card-label">To (incoming)</div>
+            <div id="addonConflictToTitle" class="addon-conflict-card-title"></div>
+            <div id="addonConflictToMeta" class="addon-conflict-card-meta"></div>
+          </div>
+        </div>
+
+        <div class="field addon-conflict-targets">
+          <div class="label">Conflicting targets</div>
+          <ul id="addonConflictList" class="conflict-list"></ul>
+        </div>
+
+        <div class="hint risk-note">
+          Choose <strong>Replace and install</strong> to delete old conflicting addon files and continue with this install.
+        </div>
+
+        <div class="dialog-actions">
+          <button class="btn ghost" value="cancel">Keep existing files</button>
+          <button class="btn danger" value="ok">Replace and install</button>
+        </div>
+      </form>
+    </dialog>
+
     <!-- Remove modal -->
     <dialog id="dlgRemove" class="dialog">
       <form method="dialog" class="dialog-inner">
@@ -479,10 +666,19 @@
 
         <input id="instanceSettingsId" type="hidden" />
 
-        <label class="field">
-          <div class="label">Name</div>
-          <input id="instanceSettingsName" placeholder="WoW1" />
-        </label>
+        <div class="row align-end instance-name-row">
+          <label class="field grow instance-name-field">
+            <div class="label">Name</div>
+            <input id="instanceSettingsName" placeholder="WoW1" />
+          </label>
+          <label
+            class="check instance-turtles-check"
+            title="Enables Turtle WoW related features throughout Wuddle's interface"
+          >
+            <input id="instanceSettingsLikeTurtles" type="checkbox" />
+            <span>I like turtles!</span>
+          </label>
+        </div>
 
         <div class="row align-end instance-path-row">
           <label class="field grow instance-path-field">
@@ -564,6 +760,8 @@
         </div>
       </form>
     </dialog>
+
+    <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="false"></div>
 
     <script type="module" src="./main.js"></script>
   </body>

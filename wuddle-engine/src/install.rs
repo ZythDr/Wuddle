@@ -11,6 +11,8 @@ pub struct InstallOptions {
     pub use_symlinks: bool,
     pub set_xattr_comment: bool,
     pub replace_addon_conflicts: bool,
+    /// Number of cached release versions to retain per repo (0 = only current).
+    pub cache_keep_versions: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -142,7 +144,8 @@ fn unzip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
 
     for i in 0..archive.len() {
         let mut f = archive.by_index(i).context("zip entry")?;
-        let outpath = dest_dir.join(f.mangled_name());
+        let Some(entry_path) = f.enclosed_name() else { continue; };
+        let outpath = dest_dir.join(entry_path);
 
         if f.is_dir() {
             fs::create_dir_all(&outpath).with_context(|| format!("mkdir {:?}", outpath))?;
@@ -578,7 +581,9 @@ fn walk_dir(root: &Path, cb: &mut dyn FnMut(&Path)) {
         if p.is_dir() {
             if p.file_name()
                 .and_then(|s| s.to_str())
-                .map(|name| name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".wuddle"))
+                .map(|name| {
+                    name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".wuddle")
+                })
                 .unwrap_or(false)
             {
                 continue;
