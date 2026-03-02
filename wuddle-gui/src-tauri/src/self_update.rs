@@ -174,6 +174,17 @@ pub fn apply_update(current_version: &str) -> Result<OperationResult, String> {
         write_current_pointer(&root, &target_version)?;
         steps.push(format!("Switched current.json to {}", target_version));
 
+        match prune_old_versions(&root, 2) {
+            Ok(removed) => {
+                for name in &removed {
+                    steps.push(format!("Removed old version: {}", name));
+                }
+            }
+            Err(e) => {
+                steps.push(format!("Version cleanup skipped: {}", e));
+            }
+        }
+
         Ok(OperationResult {
             message: format!(
                 "Staged Wuddle {} successfully. Restarting will apply the update.",
@@ -500,4 +511,41 @@ fn extract_windows_payload_from_zip(
 fn write_current_pointer(root: &Path, version: &str) -> Result<(), String> {
     let content = serde_json::json!({ "current": version }).to_string();
     write_atomic(&root.join("current.json"), content.as_bytes())
+}
+
+/// Remove old version directories, keeping the `keep` highest versions.
+/// Returns the names of removed version folders.
+#[cfg(target_os = "windows")]
+fn prune_old_versions(root: &Path, keep: usize) -> Result<Vec<String>, String> {
+    let versions_dir = root.join("versions");
+    if !versions_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries: Vec<(Vec<u64>, String)> = Vec::new();
+    let read_dir = fs::read_dir(&versions_dir).map_err(|e| e.to_string())?;
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            let key = parse_version_key(name);
+            if !key.is_empty() {
+                entries.push((key, name.to_string()));
+            }
+        }
+    }
+
+    // Sort descending by version number.
+    entries.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut removed = Vec::new();
+    for (_key, name) in entries.into_iter().skip(keep) {
+        let dir = versions_dir.join(&name);
+        if fs::remove_dir_all(&dir).is_ok() {
+            removed.push(name);
+        }
+    }
+    Ok(removed)
 }

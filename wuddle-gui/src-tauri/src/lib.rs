@@ -10,7 +10,7 @@ use std::{
 };
 use tauri::Manager;
 
-use wuddle_engine::{Engine, InstallMode, InstallOptions};
+use wuddle_engine::{AddonProbeResult, Engine, InstallMode, InstallOptions};
 
 mod self_update;
 
@@ -37,8 +37,33 @@ struct PlanRow {
     asset_name: String,
     has_update: bool,
     repair_needed: bool,
+    externally_modified: bool,
     not_modified: bool,
     error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AddonProbeOwnerRow {
+    repo_id: i64,
+    owner: String,
+    name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AddonProbeConflictRow {
+    addon_name: String,
+    target_path: String,
+    owners: Vec<AddonProbeOwnerRow>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AddonProbeResultRow {
+    addon_names: Vec<String>,
+    conflicts: Vec<AddonProbeConflictRow>,
+    resolved_branch: String,
 }
 
 #[derive(Serialize)]
@@ -483,11 +508,13 @@ fn install_options(
     use_symlinks: Option<bool>,
     set_xattr_comment: Option<bool>,
     replace_addon_conflicts: Option<bool>,
+    cache_keep_versions: Option<u32>,
 ) -> InstallOptions {
     InstallOptions {
         use_symlinks: use_symlinks.unwrap_or(false),
         set_xattr_comment: set_xattr_comment.unwrap_or(false),
         replace_addon_conflicts: replace_addon_conflicts.unwrap_or(false),
+        cache_keep_versions: cache_keep_versions.unwrap_or(3) as usize,
     }
 }
 
@@ -570,6 +597,53 @@ async fn wuddle_add_repo(url: String, mode: String) -> Result<i64, String> {
         let eng = engine()?;
         let mode = InstallMode::from_str(&mode).ok_or("Invalid mode")?;
         eng.add_repo(&url, mode, None).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn wuddle_probe_addon_repo(
+    url: String,
+    wowDir: String,
+    branch: Option<String>,
+) -> Result<AddonProbeResultRow, String> {
+    let wow_dir = normalize_wow_dir(wowDir)?;
+    let branch = branch.map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
+
+    // Engine (rusqlite::Connection) is Send but !Sync due to internal RefCell usage, so we
+    // can't hold &Engine across an .await point in a Send future. Instead we run the entire
+    // operation — both the blocking engine open and the async probe — inside spawn_blocking
+    // with its own block_on. This avoids the Sync constraint while keeping correct behaviour.
+    run_blocking(move || {
+        let eng = engine()?;
+        let probed: AddonProbeResult = tauri::async_runtime::block_on(async {
+            eng.probe_addon_repo_conflicts(&url, Path::new(&wow_dir), branch.as_deref())
+                .await
+                .map_err(|e| e.to_string())
+        })?;
+
+        Ok(AddonProbeResultRow {
+            addon_names: probed.addon_names,
+            conflicts: probed
+                .conflicts
+                .into_iter()
+                .map(|c| AddonProbeConflictRow {
+                    addon_name: c.addon_name,
+                    target_path: c.target_path,
+                    owners: c
+                        .owners
+                        .into_iter()
+                        .map(|o| AddonProbeOwnerRow {
+                            repo_id: o.repo_id,
+                            owner: o.owner,
+                            name: o.name,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            resolved_branch: probed.resolved_branch,
+        })
     })
     .await
 }
@@ -660,6 +734,7 @@ async fn wuddle_check_updates(wowDir: Option<String>) -> Result<Vec<PlanRow>, St
                 asset_name: p.asset_name,
                 has_update: !p.asset_url.is_empty(),
                 repair_needed: p.repair_needed,
+                externally_modified: p.externally_modified,
                 not_modified: p.not_modified,
                 error: p.error,
             })
@@ -675,9 +750,10 @@ async fn wuddle_update_all(
     useSymlinks: Option<bool>,
     setXattrComment: Option<bool>,
     replaceAddonConflicts: Option<bool>,
+    cacheKeepVersions: Option<u32>,
 ) -> Result<String, String> {
     let wowDir = normalize_wow_dir(wowDir)?;
-    let opts = install_options(useSymlinks, setXattrComment, replaceAddonConflicts);
+    let opts = install_options(useSymlinks, setXattrComment, replaceAddonConflicts, cacheKeepVersions);
 
     run_blocking(move || {
         let plans = tauri::async_runtime::block_on(async {
@@ -709,9 +785,10 @@ async fn wuddle_update_repo(
     useSymlinks: Option<bool>,
     setXattrComment: Option<bool>,
     replaceAddonConflicts: Option<bool>,
+    cacheKeepVersions: Option<u32>,
 ) -> Result<OperationResult, String> {
     let wowDir = normalize_wow_dir(wowDir)?;
-    let opts = install_options(useSymlinks, setXattrComment, replaceAddonConflicts);
+    let opts = install_options(useSymlinks, setXattrComment, replaceAddonConflicts, cacheKeepVersions);
 
     run_blocking(move || {
         let eng = engine()?;
@@ -807,9 +884,10 @@ async fn wuddle_reinstall_repo(
     useSymlinks: Option<bool>,
     setXattrComment: Option<bool>,
     replaceAddonConflicts: Option<bool>,
+    cacheKeepVersions: Option<u32>,
 ) -> Result<OperationResult, String> {
     let wowDir = normalize_wow_dir(wowDir)?;
-    let opts = install_options(useSymlinks, setXattrComment, replaceAddonConflicts);
+    let opts = install_options(useSymlinks, setXattrComment, replaceAddonConflicts, cacheKeepVersions);
 
     run_blocking(move || {
         let eng = engine()?;
@@ -1410,6 +1488,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             wuddle_list_repos,
             wuddle_add_repo,
+            wuddle_probe_addon_repo,
             wuddle_remove_repo,
             wuddle_set_repo_enabled,
             wuddle_check_updates,

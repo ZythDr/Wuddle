@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
                 use_symlinks: symlink_targets,
                 set_xattr_comment,
                 replace_addon_conflicts: false,
+                cache_keep_versions: 3,
             };
             let plans = engine.apply_updates(&wow_dir, raw_dest_ref, opts).await?;
             let mut updated = 0;

@@ -1,6 +1,6 @@
 [package]
 name = "wuddle-gui"
-version = "2.1.0"
+version = "2.3.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -27,4 +27,4 @@ tauri-plugin-dialog = "2"
 keyring = { version = "3", features = ["windows-native", "linux-native-sync-persistent", "crypto-rust"] }
 dirs = "5"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
-zip = "0.6"
+zip = "2"

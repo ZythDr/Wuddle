@@ -2,13 +2,13 @@ use anyhow::{Context, Result};
 use git2::Repository;
 use reqwest::Client;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     future::Future,
     io::Read,
     path::{Component, Path, PathBuf},
     pin::Pin,
-    sync::{Mutex, OnceLock},
+    sync::{LazyLock, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use url::Url;
@@ -49,6 +49,7 @@ pub struct UpdatePlan {
     pub asset_sha256: Option<String>,
 
     pub repair_needed: bool,
+    pub externally_modified: bool,
     pub not_modified: bool,
     pub applied: bool,
     pub error: Option<String>,
@@ -59,7 +60,44 @@ pub struct Engine {
     client: Client,
 }
 
+#[derive(Debug, Clone)]
+pub struct AddonProbeOwner {
+    pub repo_id: i64,
+    pub owner: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddonProbeConflict {
+    pub addon_name: String,
+    pub target_path: String,
+    pub owners: Vec<AddonProbeOwner>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddonProbeResult {
+    pub addon_names: Vec<String>,
+    pub conflicts: Vec<AddonProbeConflict>,
+    pub resolved_branch: String,
+}
+
+#[derive(Debug, Clone)]
+struct AddonInstallConflict {
+    addon_name: String,
+    target_path: PathBuf,
+    owners: Vec<db::AddonInstallOwner>,
+}
+
 static GITHUB_TOKEN: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+static RE_GITHUB_RESET: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"reset (\d+)").unwrap());
+
+static RE_VERSION_FROM_ASSET: LazyLock<regex::Regex> = LazyLock::new(|| {
+    // Suffix character class deliberately excludes '.' to avoid consuming file
+    // extensions (e.g. "2.1-1.tar.gz" should match "2.1-1", not "2.1-1.tar.gz").
+    regex::Regex::new(r"(?i)\bv?\d+(?:[._]\d+){1,3}(?:[-+][0-9A-Za-z-]+)?\b").unwrap()
+});
 
 fn github_token_state() -> &'static Mutex<Option<String>> {
     GITHUB_TOKEN.get_or_init(|| Mutex::new(None))
@@ -142,6 +180,69 @@ impl Engine {
         self.db.add_repo(&repo)
     }
 
+    pub async fn probe_addon_repo_conflicts(
+        &self,
+        url: &str,
+        wow_dir: &Path,
+        preferred_branch: Option<&str>,
+    ) -> Result<AddonProbeResult> {
+        let preferred_branch = preferred_branch
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .unwrap_or("master");
+
+        let probe_dir = tempfile::tempdir().context("create addon probe dir")?;
+        let synced = git_sync::sync_repo(url, probe_dir.path(), Some(preferred_branch))
+            .with_context(|| format!("git sync {}", url))?;
+
+        let mut detected = install::detect_addons_in_tree(probe_dir.path());
+        detected.sort_by_key(|(src, name)| (src.components().count(), name.clone()));
+
+        let mut addon_names = Vec::<String>::new();
+        let mut seen_names = HashSet::<String>::new();
+        for (_, addon_name) in detected {
+            let key = addon_name.to_lowercase();
+            if seen_names.insert(key) {
+                addon_names.push(addon_name);
+            }
+        }
+        if addon_names.is_empty() {
+            anyhow::bail!(
+                "No addon .toc files found in synced repo. Expected at least one addon folder."
+            );
+        }
+
+        let mut conflicts = Vec::<AddonProbeConflict>::new();
+        for addon_name in &addon_names {
+            let target_path = wow_dir.join("Interface").join("AddOns").join(addon_name);
+            let manifest_path = Self::to_manifest_path(&target_path, wow_dir);
+            let owners = self.db.find_addon_install_owners(&manifest_path, None)?;
+            let has_local_conflict = Self::path_has_conflicting_content(&target_path);
+            if owners.is_empty() && !has_local_conflict {
+                continue;
+            }
+
+            conflicts.push(AddonProbeConflict {
+                addon_name: addon_name.clone(),
+                target_path: target_path.display().to_string(),
+                owners: owners
+                    .into_iter()
+                    .map(|o| AddonProbeOwner {
+                        repo_id: o.repo_id,
+                        owner: o.owner,
+                        name: o.name,
+                    })
+                    .collect(),
+            });
+        }
+
+        Ok(AddonProbeResult {
+            addon_names,
+            conflicts,
+            resolved_branch: synced.branch,
+        })
+    }
+
     fn blank_plan(r: &Repo) -> UpdatePlan {
         let current = Self::normalized_current_version(r);
         UpdatePlan {
@@ -160,6 +261,7 @@ impl Engine {
             asset_size: None,
             asset_sha256: None,
             repair_needed: false,
+            externally_modified: false,
             not_modified: false,
             applied: false,
             error: None,
@@ -174,8 +276,7 @@ impl Engine {
     }
 
     fn parse_github_reset_epoch(msg: &str) -> Option<i64> {
-        let re = regex::Regex::new(r"reset (\d+)").ok()?;
-        let caps = re.captures(msg)?;
+        let caps = RE_GITHUB_RESET.captures(msg)?;
         caps.get(1)?.as_str().parse::<i64>().ok()
     }
 
@@ -238,8 +339,7 @@ impl Engine {
 
     fn version_from_asset_name(asset_name: &str) -> Option<String> {
         // Extract semver-like fragments, e.g. "SuperWoW 1.5.1.zip" -> "1.5.1"
-        let re = regex::Regex::new(r"(?i)\bv?\d+(?:[._]\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?\b").ok()?;
-        let m = re.find(asset_name)?;
+        let m = RE_VERSION_FROM_ASSET.find(asset_name)?;
         let mut v = m.as_str().trim().to_string();
         if v.is_empty() {
             return None;
@@ -306,6 +406,48 @@ impl Engine {
             }
         }
         Ok(false)
+    }
+
+    fn is_mod_mode(mode: &InstallMode) -> bool {
+        matches!(
+            mode,
+            InstallMode::Dll | InstallMode::Mixed | InstallMode::Raw | InstallMode::Auto
+        )
+    }
+
+    /// Check whether any tracked file for this repo was modified externally.
+    /// Returns `true` on the first hash mismatch. Skips addon dirs and entries
+    /// without a stored hash (pre-migration installs).
+    fn check_files_modified(&self, repo_id: i64, wow_dir: Option<&Path>) -> bool {
+        let wow_dir = match wow_dir {
+            Some(p) => p,
+            None => return false,
+        };
+        let entries = match self.db.list_installs(repo_id) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        for e in entries {
+            let stored = match e.sha256.as_deref() {
+                Some(h) if !h.is_empty() => h,
+                _ => continue,
+            };
+            if e.kind == "addon" {
+                continue;
+            }
+            let full = match Self::resolve_install_path(&e.path, Some(wow_dir)) {
+                Some(p) => p,
+                None => continue,
+            };
+            if !full.is_file() {
+                continue;
+            }
+            match util::sha256_file_hex(&full) {
+                Ok(ref actual) if actual != stored => return true,
+                _ => {}
+            }
+        }
+        false
     }
 
     fn addon_git_worktree_dir(&self, repo_id: i64, wow_dir: &Path, repo: &Repo) -> PathBuf {
@@ -601,6 +743,7 @@ impl Engine {
             asset_size: None,
             asset_sha256: None,
             repair_needed,
+            externally_modified: false,
             not_modified: false,
             applied: false,
             error: None,
@@ -696,6 +839,7 @@ impl Engine {
             asset_size: None,
             asset_sha256: None,
             repair_needed,
+            externally_modified: false,
             not_modified: false,
             applied: false,
             error: None,
@@ -784,6 +928,11 @@ impl Engine {
                 let mut p = Self::blank_plan(r);
                 p.not_modified = true;
                 p.repair_needed = can_repair;
+                p.externally_modified = if Self::is_mod_mode(&r.mode) {
+                    self.check_files_modified(r.id, wow_dir)
+                } else {
+                    false
+                };
                 p.asset_id = r.installed_asset_id.clone().unwrap_or_default();
                 p.asset_name = r.installed_asset_name.clone().unwrap_or_default();
                 p.asset_size = r.installed_asset_size.and_then(|n| u64::try_from(n).ok());
@@ -843,6 +992,11 @@ impl Engine {
             asset_size: asset.size,
             asset_sha256: asset.sha256.clone(),
             repair_needed,
+            externally_modified: if Self::is_mod_mode(&r.mode) {
+                self.check_files_modified(r.id, wow_dir)
+            } else {
+                false
+            },
             not_modified: false,
             applied: false,
             error: None,
@@ -1260,6 +1414,31 @@ impl Engine {
         Ok(())
     }
 
+    /// Hash each installed file and store the digest in the DB for integrity checking.
+    /// Only hashes regular files (not addon directories). Failures are non-fatal.
+    fn hash_and_store_installs(
+        &self,
+        repo_id: i64,
+        wow_dir: &Path,
+        records: &[install::InstallRecord],
+    ) {
+        for rec in records {
+            if rec.kind == "addon" {
+                continue;
+            }
+            if !rec.path.is_file() {
+                continue;
+            }
+            let manifest_path = Self::to_manifest_path(&rec.path, wow_dir);
+            match util::sha256_file_hex(&rec.path) {
+                Ok(digest) => {
+                    let _ = self.db.set_install_sha256(repo_id, &manifest_path, Some(&digest));
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
     fn cleanup_stale_addon_installs(
         &self,
         repo_id: i64,
@@ -1326,7 +1505,7 @@ impl Engine {
         repo_id: i64,
         wow_dir: &Path,
         addon_folder_names: &[String],
-    ) -> Result<Vec<(String, PathBuf)>> {
+    ) -> Result<Vec<AddonInstallConflict>> {
         let tracked_paths: HashSet<PathBuf> = self
             .db
             .list_installs(repo_id)?
@@ -1335,28 +1514,105 @@ impl Engine {
             .filter_map(|entry| Self::resolve_install_path(&entry.path, Some(wow_dir)))
             .collect();
 
-        let mut out = Vec::<(String, PathBuf)>::new();
+        let mut out = Vec::<AddonInstallConflict>::new();
         for addon_name in addon_folder_names {
             let dst = wow_dir.join("Interface").join("AddOns").join(addon_name);
+            let manifest_path = Self::to_manifest_path(&dst, wow_dir);
+            let owners = self
+                .db
+                .find_addon_install_owners(&manifest_path, Some(repo_id))?;
 
             if tracked_paths.contains(&dst) {
                 continue;
             }
-            if !Self::path_has_conflicting_content(&dst) {
+            // GAM-style safety:
+            // 1) if another tracked repo already owns this addon folder target, conflict
+            // 2) if destination exists locally and is non-empty/present, conflict
+            if owners.is_empty() && !Self::path_has_conflicting_content(&dst) {
                 continue;
             }
-            out.push((addon_name.clone(), dst));
+            out.push(AddonInstallConflict {
+                addon_name: addon_name.clone(),
+                target_path: dst,
+                owners,
+            });
         }
         Ok(out)
     }
 
-    fn format_addon_conflict_message(conflicts: &[(String, PathBuf)]) -> String {
+    fn format_addon_conflict_message(conflicts: &[AddonInstallConflict]) -> String {
         let details = conflicts
             .iter()
-            .map(|(name, path)| format!("{} ({})", name, path.display()))
+            .map(|conflict| {
+                let owner_text = if conflict.owners.is_empty() {
+                    "local files already exist".to_string()
+                } else {
+                    let labels = conflict
+                        .owners
+                        .iter()
+                        .map(|o| format!("{}/{}", o.owner, o.name))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("already tracked by {}", labels)
+                };
+                format!(
+                    "{} ({}) [{}]",
+                    conflict.addon_name,
+                    conflict.target_path.display(),
+                    owner_text
+                )
+            })
             .collect::<Vec<_>>()
             .join("; ");
         format!("ADDON_CONFLICT: Existing addon files were found for: {}. Confirm replacement to delete those folders and continue.", details)
+    }
+
+    fn clear_conflicting_addon_tracking(
+        &self,
+        current_repo_id: i64,
+        wow_dir: &Path,
+        conflicts: &[AddonInstallConflict],
+    ) -> Result<()> {
+        let mut by_repo = HashMap::<i64, HashSet<String>>::new();
+        for conflict in conflicts {
+            for owner in &conflict.owners {
+                if owner.repo_id == current_repo_id {
+                    continue;
+                }
+                by_repo
+                    .entry(owner.repo_id)
+                    .or_default()
+                    .insert(owner.manifest_path.clone());
+            }
+        }
+
+        for (repo_id, manifest_paths) in by_repo {
+            for path in manifest_paths {
+                self.db.remove_install(repo_id, &path)?;
+            }
+
+            let remaining_installs = self.db.list_installs(repo_id)?;
+            let has_addon_installs = remaining_installs.iter().any(|entry| entry.kind == "addon");
+            if !has_addon_installs {
+                // If this was an addon_git repo and no addon installs remain after conflict
+                // replacement, remove it from tracking entirely so duplicate forks cannot
+                // coexist in the tracked addons list.
+                let should_remove_repo = self
+                    .db
+                    .get_repo(repo_id)
+                    .ok()
+                    .map(|r| matches!(r.mode, InstallMode::AddonGit))
+                    .unwrap_or(false);
+                if should_remove_repo {
+                    let _ = self.remove_repo(repo_id, Some(wow_dir), true)?;
+                } else {
+                    self.db
+                        .set_installed_asset_state(repo_id, None, None, None, None, None)?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn resolve_install_path(path: &str, wow_dir: Option<&Path>) -> Option<PathBuf> {
@@ -1575,7 +1831,7 @@ impl Engine {
             let mut plan = self
                 .build_update_plan_for_repo(&r, true, Some(wow_dir))
                 .await?;
-            if r.enabled && !plan.asset_url.is_empty() {
+            if r.enabled && !plan.asset_url.is_empty() && !plan.externally_modified {
                 match self.apply_one(&plan, wow_dir, raw_dest, opts).await {
                     Ok(()) => {
                         plan.applied = true;
@@ -1662,9 +1918,10 @@ impl Engine {
                 if !opts.replace_addon_conflicts {
                     anyhow::bail!(Self::format_addon_conflict_message(&conflicts));
                 }
-                for (_, path) in &conflicts {
-                    let _ = Self::remove_any_target(path)?;
+                for conflict in &conflicts {
+                    let _ = Self::remove_any_target(&conflict.target_path)?;
                 }
+                self.clear_conflicting_addon_tracking(plan.repo_id, wow_dir, &conflicts)?;
             }
 
             // Remove previously deployed addon directories for this repo before redeploy.
@@ -1712,6 +1969,7 @@ impl Engine {
             }
 
             self.persist_installs(plan.repo_id, wow_dir, &records)?;
+            self.hash_and_store_installs(plan.repo_id, wow_dir, &records);
             self.db.set_installed_asset_state(
                 plan.repo_id,
                 Some(&synced.short_oid),
@@ -1797,6 +2055,7 @@ impl Engine {
         // (e.g. suffix variants like "-tbc"/"-wotlk" collapsing into one canonical addon folder).
         self.cleanup_stale_addon_installs(plan.repo_id, wow_dir, &records)?;
         self.persist_installs(plan.repo_id, wow_dir, &records)?;
+        self.hash_and_store_installs(plan.repo_id, wow_dir, &records);
         self.db.set_installed_asset_state(
             plan.repo_id,
             Some(&plan.latest),
@@ -1805,7 +2064,74 @@ impl Engine {
             Self::size_u64_to_i64(plan.asset_size),
             Some(&plan.asset_url),
         )?;
+
+        self.prune_release_cache(plan, opts.cache_keep_versions);
+
         Ok(())
+    }
+
+    /// Remove old cached release versions for a repo, keeping the `keep_versions`
+    /// most recent plus the currently-installed version. Non-fatal on any error.
+    fn prune_release_cache(&self, plan: &UpdatePlan, keep_versions: usize) {
+        let repo = match self.db.get_repo(plan.repo_id) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let repo_cache = match util::cache_dir() {
+            Ok(c) => c
+                .join("releases")
+                .join(Self::sanitize_for_fs(&plan.forge))
+                .join(Self::sanitize_for_fs(&plan.host))
+                .join(Self::sanitize_for_fs(&plan.owner))
+                .join(Self::sanitize_for_fs(&plan.name)),
+            Err(_) => return,
+        };
+
+        if !repo_cache.is_dir() {
+            return;
+        }
+
+        let current_version = repo
+            .last_version
+            .as_deref()
+            .map(|v| Self::sanitize_for_fs(v));
+
+        // Collect version subdirectories with modification time for sorting.
+        let mut versions: Vec<(String, std::time::SystemTime)> = Vec::new();
+        let entries = match fs::read_dir(&repo_cache) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                let mtime = path
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                versions.push((name.to_string(), mtime));
+            }
+        }
+
+        // Sort newest first by modification time.
+        versions.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let mut kept = 0usize;
+        for (name, _) in &versions {
+            let is_current = current_version.as_deref() == Some(name.as_str());
+            if is_current || kept < keep_versions {
+                if !is_current {
+                    kept += 1;
+                }
+                continue;
+            }
+            let dir = repo_cache.join(name);
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     /// Force reinstall a repo even if already "up to date".
@@ -1861,6 +2187,7 @@ impl Engine {
             asset_size: asset.size,
             asset_sha256: asset.sha256.clone(),
             repair_needed: false,
+            externally_modified: false,
             not_modified: false,
             applied: false,
             error: None,
@@ -1869,5 +2196,99 @@ impl Engine {
         self.apply_one(&plan, wow_dir, raw_dest, opts).await?;
         plan.applied = true;
         Ok(plan)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Engine;
+
+    // ── version_from_asset_name ──────────────────────────────────────────────
+
+    #[test]
+    fn version_plain_semver() {
+        assert_eq!(
+            Engine::version_from_asset_name("SuperWoW 1.5.1.zip"),
+            Some("1.5.1".into())
+        );
+    }
+
+    #[test]
+    fn version_hyphen_prefix() {
+        assert_eq!(
+            Engine::version_from_asset_name("nampower-0.9.7.zip"),
+            Some("0.9.7".into())
+        );
+    }
+
+    #[test]
+    fn version_hyphen_prefix_with_v() {
+        assert_eq!(
+            Engine::version_from_asset_name("VanillaFixes-v2.1.4.zip"),
+            Some("v2.1.4".into())
+        );
+    }
+
+    #[test]
+    fn version_underscores_converted_to_dots() {
+        // Underscores between digit groups are normalised to dots when the
+        // version is preceded by a word boundary (e.g. a dash or space).
+        assert_eq!(
+            Engine::version_from_asset_name("UnitXP_SP3-1_0_3.zip"),
+            Some("1.0.3".into())
+        );
+    }
+
+    #[test]
+    fn version_four_part() {
+        assert_eq!(
+            Engine::version_from_asset_name("mod-1.2.3.4.zip"),
+            Some("1.2.3.4".into())
+        );
+    }
+
+    #[test]
+    fn version_with_build_tag() {
+        // The optional [-+tag] suffix is captured but dots in it are excluded
+        // from the character class, so file extensions aren't consumed.
+        assert_eq!(
+            Engine::version_from_asset_name("dxvk-gplasync-2.1-1.tar.gz"),
+            Some("2.1-1".into())
+        );
+    }
+
+    #[test]
+    fn version_no_version_in_name() {
+        assert_eq!(Engine::version_from_asset_name("README.md"), None);
+        assert_eq!(Engine::version_from_asset_name("install.sh"), None);
+    }
+
+    #[test]
+    fn version_empty_string() {
+        assert_eq!(Engine::version_from_asset_name(""), None);
+    }
+
+    // ── parse_github_reset_epoch ─────────────────────────────────────────────
+
+    #[test]
+    fn reset_epoch_extracted() {
+        assert_eq!(
+            Engine::parse_github_reset_epoch("rate limit: reset 1234567890"),
+            Some(1234567890)
+        );
+    }
+
+    #[test]
+    fn reset_epoch_large_value() {
+        assert_eq!(
+            Engine::parse_github_reset_epoch("reset 9876543210"),
+            Some(9876543210)
+        );
+    }
+
+    #[test]
+    fn reset_epoch_no_match() {
+        assert_eq!(Engine::parse_github_reset_epoch("no epoch here"), None);
+        assert_eq!(Engine::parse_github_reset_epoch(""), None);
     }
 }
