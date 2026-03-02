@@ -40,11 +40,6 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - Added improved **search/filtering** for tracked mods/addons
 - Added more robust **conflict handling** on addon install/update ([GitAddonsManager](https://gitlab.com/woblight/GitAddonsManager) inspired)
 
-## Release Channels
-
-- **Stable releases:** tags on `main` (`vX.Y.Z`) publish normal GitHub Releases.
-- **Development pre-releases:** tags on `v2-dev` (`vX.Y.Z-dev.N` recommended) publish GitHub **pre-releases** with full build assets.
-- **Branch pushes to `v2-dev`:** CI still builds artifacts and uploads them to the Actions run as downloadable artifacts.
 
 ## Credits / Inspiration
 
