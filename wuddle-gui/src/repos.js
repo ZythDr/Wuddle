@@ -1005,7 +1005,7 @@ export async function openUrl(url) {
     return;
   }
   try {
-    await safeInvoke("plugin:opener|open_url", { url: target });
+    await safeInvoke("wuddle_open_url", { url: target });
   } catch (err) {
     log(`ERROR open url: ${err?.message || String(err)}`);
   }
@@ -1708,6 +1708,7 @@ export function focusAddDialogUrlInput() {
 export function openAddDialog() {
   const dlg = $("dlgAdd");
   if (!dlg) return;
+  renderAddPresets();
   if (!dlg.open) {
     dlg.showModal();
   }

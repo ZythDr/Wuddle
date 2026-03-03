@@ -28,18 +28,6 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **GitHub auth token (optional):** helps avoid anonymous API limits
 - **Logs panel:** operational visibility and copyable logs
 
-
-### What's New In v2.3
-
-- **Mod file integrity checking:** Wuddle now detects when mod files have been modified outside the app. Modified mods show a warning badge and are skipped during bulk updates — click the download button to restore to the latest version.
-- **Automatic cache cleanup:** old cached mod versions are pruned after each install. Configurable in Options (0–10 versions to keep, default 3). The launcher also cleans up old `Wuddle-bin.exe` versions on self-update.
-- **Addon conflict detection:** adding an addon that shares folders with an already-tracked repo now shows a conflict dialog before proceeding.
-- **Auto-check for updates:** optional background polling with configurable interval.
-- **Turtle WoW home section:** curated official and community links, toggled per instance.
-- **Visual theme picker:** color swatches replace the old dropdown.
-- **Zip security fix:** path traversal vulnerability patched during extraction.
-
-
 ### What's New In v2
 
 - Wuddle evolved from a DLL updater into a **WIP launcher + manager**
@@ -51,6 +39,16 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - Added **themes** (including a WoW UI inspired theme which is horrible, i wouldn't recommend it)
 - Added improved **search/filtering** for tracked mods/addons
 - Added more robust **conflict handling** on addon install/update ([GitAddonsManager](https://gitlab.com/woblight/GitAddonsManager) inspired)
+
+### What's New In v2.3
+
+- **Mod file integrity checking:** Wuddle now detects when mod files have been modified outside the app. Modified mods show a warning badge and are skipped during bulk updates — click the download button to restore to the latest version.
+- **Automatic cache cleanup:** old cached mod versions are pruned after each install. Configurable in Options (0–10 versions to keep, default 3). The launcher also cleans up old `Wuddle-bin.exe` versions on self-update.
+- **Addon conflict detection:** adding an addon that shares folders with an already-tracked repo now shows a conflict dialog before proceeding.
+- **Auto-check for updates:** optional background polling with configurable interval.
+- **Turtle WoW home section:** curated official and community links, toggled per instance.
+- **Visual theme picker:** color swatches replace the old dropdown.
+- **Zip security fix:** path traversal vulnerability patched during extraction.
 
 ## Credits / Inspiration
 

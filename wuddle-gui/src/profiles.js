@@ -27,8 +27,9 @@ export function normalizeProjectView(value) {
 }
 
 export function normalizeAutoCheckMinutes(value) {
+  if (value === null || value === undefined || value === "") return DEFAULT_AUTO_CHECK_MINUTES;
   const num = Number(value);
-  if (!Number.isFinite(num)) return DEFAULT_AUTO_CHECK_MINUTES;
+  if (!Number.isFinite(num) || num <= 0) return DEFAULT_AUTO_CHECK_MINUTES;
   return Math.max(MIN_AUTO_CHECK_MINUTES, Math.min(MAX_AUTO_CHECK_MINUTES, Math.floor(num)));
 }
 
