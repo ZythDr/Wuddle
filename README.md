@@ -12,9 +12,9 @@ Wuddle is a desktop WoW launcher/manager primarily focusing Vanilla clients, wit
 
 <img width="1099" height="904" alt="image" src="https://github.com/user-attachments/assets/b827cd42-7b6c-47b2-b85b-01b75f171665" />
 
-# Important Note (Anti-virus + SuperWoW)  
-SuperWoW is known to trigger false-positives in many antivirus products.  
-Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is installed through Wuddle, antivirus tools may attribute the detection to `Wuddle.exe` because Wuddle performs the download/install action.  
+# Important Note (Anti-virus + SuperWoW)
+SuperWoW is known to trigger false-positives in many antivirus products.
+Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is installed through Wuddle, antivirus tools may attribute the detection to `Wuddle.exe` because Wuddle performs the download/install action.
 
 ### Core Features
 
@@ -28,7 +28,7 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **GitHub auth token (optional):** helps avoid anonymous API limits
 - **Logs panel:** operational visibility and copyable logs
 
-### What’s New In v2
+### What's New In v2
 
 - Wuddle evolved from a DLL updater into a **WIP launcher + manager**
 - Added **Addon management** with Git clone/pull updates and branch selection
@@ -40,15 +40,24 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - Added improved **search/filtering** for tracked mods/addons
 - Added more robust **conflict handling** on addon install/update ([GitAddonsManager](https://gitlab.com/woblight/GitAddonsManager) inspired)
 
+### What's New In v2.3
+
+- **Mod file integrity checking:** Wuddle now detects when mod files have been modified outside the app. Modified mods show a warning badge and are skipped during bulk updates — click the download button to restore to the latest version.
+- **Automatic cache cleanup:** old cached mod versions are pruned after each install. Configurable in Options (0–10 versions to keep, default 3). The launcher also cleans up old `Wuddle-bin.exe` versions on self-update.
+- **Addon conflict detection:** adding an addon that shares folders with an already-tracked repo now shows a conflict dialog before proceeding.
+- **Auto-check for updates:** optional background polling with configurable interval.
+- **Turtle WoW home section:** curated official and community links, toggled per instance.
+- **Visual theme picker:** color swatches replace the old dropdown.
+- **Zip security fix:** path traversal vulnerability patched during extraction.
 
 ## Credits / Inspiration
 
 Wuddle is its own implementation, but parts of the functionality and UX were inspired by:
 
-- **GitAddonsManager** (WobLight)  
-  Git addon update workflows, `.toc`-driven addon deployment ideas, and branch-oriented addon management.  
+- **GitAddonsManager** (WobLight)
+  Git addon update workflows, `.toc`-driven addon deployment ideas, and branch-oriented addon management.
   https://gitlab.com/woblight/GitAddonsManager
 
-- **WoWRetroLauncher** (Parquelle)  
-  Sparked the idea for Wuddle's themes.  
+- **WoWRetroLauncher** (Parquelle)
+  Sparked the idea for Wuddle's themes.
   https://github.com/Parquelle/WoWRetroLauncher
