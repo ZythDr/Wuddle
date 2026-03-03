@@ -1426,6 +1426,55 @@ fn wuddle_launch_game(wowDir: String, launch: Option<LaunchConfig>) -> Result<St
 }
 
 #[tauri::command]
+fn wuddle_open_url(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("URL is empty.".to_string());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // On Linux (especially AppImage), the bundled environment can break
+        // xdg-open. Strip AppImage-specific env vars so the system browser
+        // launches correctly.
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(trimmed);
+        for key in &[
+            "LD_LIBRARY_PATH",
+            "LD_PRELOAD",
+            "APPDIR",
+            "APPIMAGE",
+            "ARGV0",
+            "OWD",
+            "GDK_BACKEND",
+        ] {
+            cmd.env_remove(key);
+        }
+        cmd.spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to open URL: {}", e))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(trimmed)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to open URL: {}", e))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", trimmed])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to open URL: {}", e))
+    }
+}
+
+#[tauri::command]
 fn wuddle_open_directory(path: String) -> Result<(), String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -1458,6 +1507,17 @@ fn wuddle_open_directory(path: String) -> Result<(), String> {
     let mut cmd = {
         let mut c = Command::new("xdg-open");
         c.arg(&path_buf);
+        for key in &[
+            "LD_LIBRARY_PATH",
+            "LD_PRELOAD",
+            "APPDIR",
+            "APPIMAGE",
+            "ARGV0",
+            "OWD",
+            "GDK_BACKEND",
+        ] {
+            c.env_remove(key);
+        }
         c
     };
 
@@ -1508,6 +1568,7 @@ pub fn run() {
             wuddle_self_update_restart,
             wuddle_launch_diagnostics,
             wuddle_launch_game,
+            wuddle_open_url,
             wuddle_open_directory
         ])
         .run(tauri::generate_context!())
