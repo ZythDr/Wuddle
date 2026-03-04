@@ -2,74 +2,75 @@
 
 All notable changes to Wuddle are documented in this file.
 
-## v2.0.0 (v2-dev snapshot)
+## v2.4.0
 
-### Core direction
-- Shifted Wuddle toward a launcher + manager model while keeping DLL mod workflows intact.
-- Added profile/instance-aware navigation with dedicated Home, Mods, and Addons views.
-- Unified app behavior around per-instance state and explicit update actions.
+- **Tweaks tab:** Patch WoW.exe with quality-of-life improvements directly from Wuddle, powered by [vanilla-tweaks by brndd](https://github.com/brndd/vanilla-tweaks)
+  - Widescreen FoV, Farclip, Frilldistance, Nameplate Distance, Camera Skip Fix, Max Camera Distance, Sound in Background, Sound Channels, Quickloot, Large Address Aware
+- **Read Current:** read actual tweak values from an existing WoW.exe
+- **Reset to Default:** one-click restore to recommended tweak settings
+- **Automatic WoW.exe backup** before the first patch, with one-click restore
+- **Per-profile tweak settings:** each instance remembers its own configuration
 
-### UI / UX
-- Major visual overhaul toward a launcher-style interface.
-- Reworked top navigation:
-  - Home / Mods / Addons view tabs.
-  - Profile switcher dropdown in top bar.
-  - Icon-based utility tabs/buttons for settings/logs/about.
-- Added Home view with:
-  - Update overview for mods + addons.
-  - Context actions (Add new, Check for updates, Update all).
-  - PLAY button integration.
-- Added/updated multiple interaction quality improvements:
-  - Better busy indicator behavior.
-  - Reduced UI lock-ups during background operations.
-  - Consistent dropdown styling across dialogs and tables.
-  - Fixed dropdown z-index/stacking behavior (including branch dropdowns).
-  - Improved row/header layering and clipping behavior in project tables.
-  - Adjusted typography and branding (including LifeCraft title font).
+## v2.3.3
 
-### Mods management
-- Expanded curated Quick Add list and card UX.
-- Added richer warning flow for SuperWoW false-positive AV behavior.
-- Improved remove/confirm flows and conflict handling.
-- Improved status badges, filters, and footer actions.
-- Added clearer operation logging for add/update/reinstall actions.
+- Renamed product from "wuddle-gui" to "Wuddle" in About page, desktop entries, and package bundles
+- Fixed About page displaying "wuddle-gui" instead of "Wuddle"
+- Updated app description to "All-in-one manager and launcher for World of Warcraft"
 
-### Addons management (new)
-- Added real addon git-sync mode (`addon_git`) using clone/fetch/pull workflows.
-- Added addon branch support:
-  - Per-addon branch selector in Addons view.
-  - Branch listing and selection persistence.
-- Added import path for existing local git-based addons into Wuddle tracking.
-- Added conflict detection/confirmation flow for existing addon directories.
+## v2.3.2
 
-### Addon folder detection / deployment
-- Implemented `.toc`-driven addon root detection for deployment into `Interface/AddOns`.
-- Added TOC suffix normalization and canonicalization behavior for expansion/channel variants.
-- Improved handling of multi-TOC repos and reduced duplicate target folder creation.
-- Added cleanup for stale tracked addon targets when canonical target set changes.
+- Relocated busy spinner next to title, increased size
+- Enlarged title text, reduced topbar padding
+- Turtle WoW links: adaptive column layout based on section height
+- Options grid: always side-by-side layout
+- Profile picker: hidden when only one instance exists
+- AV false-positive warning tags on VanillaFixes and UnitXP_SP3 presets
+- Search clears when switching between Mods/Addons views
+- Added "Ignore Error" menu item for errored repos with "Ignored" badge
+- Removed subtitle text from header
 
-### Launcher behavior
-- Added instance-level launch configuration model:
-  - Auto launch behavior.
-  - Optional Lutris target flow.
-  - Wine/custom command support hooks.
-  - Optional working directory + environment override fields.
-- Added PLAY action plumbing in app for selected instance context.
+## v2.3.1
 
-### Logging / observability
-- Added structured per-operation step logs surfaced in GUI logs:
-  - Source URL/mode/branch context.
-  - Asset/sync steps where relevant.
-  - Target installation paths (addon/dll/raw installs).
-- Improved error visibility for addon conflicts and retry/cancel paths.
+- Fixed Quick Add presets showing "Add instance first" despite having an active instance
+- Fixed auto-check interval defaulting to 1 minute instead of 60 on fresh installs
+- Enabled auto-check for updates by default
+- Fixed links not opening on Linux AppImage (AppImage env var cleanup before xdg-open)
+- Fixed busy spinner using hardcoded blue instead of theme primary color
 
-### Build / release workflow
-- Introduced/adjusted branch-based development workflow (`v2-dev` line).
-- Updated app version metadata to `2.0.0` for GUI/package/build config.
-- Improved project metadata and documentation around credits/inspiration.
+## v2.3.0
 
-### Credits / attribution
-- Added explicit attribution comments for logic inspired by:
-  - GitAddonsManager (addon TOC/suffix and git-addon workflow ideas).
-  - WoWRetroLauncher (UI direction inspiration).
+- Mod file integrity checking: detects externally modified mods via SHA-256, shows warning badge, skips in bulk updates
+- Automatic cache cleanup: configurable versions to keep (0-10, default 3)
+- Addon conflict detection dialog when repos share addon folders
+- Auto-check for updates with configurable interval
+- Turtle WoW home section with curated community links
+- Visual theme picker with color swatches
+- Codebase modularization: main.js split into focused ES modules
+- Zip path traversal security fix
 
+## v2.1.0
+
+- Visual themes (including WoW UI inspired theme)
+- Search UX improvements with clear button
+- Add/install flow polish
+- GitHub auth health monitoring
+
+## v2.0.0
+
+- Evolved from DLL updater into launcher + manager
+- Addon management with Git clone/pull and branch selection
+- Home tab with update overview and PLAY button
+- Per-instance launch methods (Auto/Lutris/Wine/Custom)
+- VanillaFixes support in Quick Add
+- Multi-instance profile switching
+- Conflict handling on addon install/update
+
+## v1.1.0
+
+- External link handling fixes
+- VanillaFixes support
+- Enhanced About version info
+
+## v1.0.8
+
+- Initial stable release

@@ -18,6 +18,7 @@
         <button id="tabHome" class="btn view-btn" type="button">Home</button>
         <button id="btnViewMods" class="btn view-btn active" type="button">Mods</button>
         <button id="btnViewAddons" class="btn view-btn" type="button">Addons</button>
+        <button id="tabTweaks" class="btn view-btn" type="button">Tweaks</button>
       </div>
 
       <div class="actions">
@@ -433,6 +434,163 @@
       <pre id="log" class="log log-panel"></pre>
     </section>
 
+    <section id="panelTweaks" class="card panel hidden">
+      <div class="row space-between align-center">
+        <div>
+          <div class="section-title">Tweaks</div>
+          <div class="hint">Patch WoW.exe with quality-of-life improvements. Based on <button id="btnTweaksAttribution" class="tweak-attribution-link" type="button">vanilla-tweaks by brndd</button>.</div>
+        </div>
+        <div class="row tight">
+          <button id="btnReadTweaks" class="btn" type="button" disabled>Read Current</button>
+          <button id="btnResetTweaks" class="btn" type="button">Reset to Default</button>
+          <button id="btnRestoreTweaks" class="btn" type="button" disabled title="Restore WoW.exe from the original backup">Restore</button>
+          <button id="btnApplyTweaks" class="btn primary" type="button" disabled title="Apply tweaks to WoW.exe — WoW will force close if it is running">Apply</button>
+        </div>
+      </div>
+
+      <div id="tweaksNoDir" class="hint tweak-no-dir">Select a WoW directory in Options to enable tweaks.</div>
+
+      <div id="tweaksGrid" class="tweaks-grid hidden">
+        <section class="settings-card">
+          <div class="settings-head">Rendering</div>
+          <div class="tweak-list">
+            <div class="tweak-item">
+              <div class="tweak-row">
+                <label class="tweak-check">
+                  <input id="tweakFovEnabled" type="checkbox" checked />
+                  <div class="tweak-label">
+                    <div class="tweak-name">Widescreen FoV</div>
+                    <div class="tweak-desc">Wider field of view for widescreen monitors (~110 degrees).</div>
+                    <div class="tweak-default">Vanilla 1.12 default: 1.5708 (~90°)</div>
+                  </div>
+                </label>
+                <input id="tweakFovValue" type="range" class="tweak-slider" min="1.0" max="2.5" step="0.025" value="1.925" />
+                <span id="tweakFovDisplay" class="tweak-value-display">1.925 (~110°)</span>
+              </div>
+            </div>
+            <div class="tweak-item">
+              <div class="tweak-row">
+                <label class="tweak-check">
+                  <input id="tweakFarclipEnabled" type="checkbox" checked />
+                  <div class="tweak-label">
+                    <div class="tweak-name">Farclip (Terrain Distance) *</div>
+                    <div class="tweak-desc">Maximum terrain render distance.</div>
+                    <div class="tweak-default">Vanilla 1.12 default: 777 (Recommended: 777-3000)</div>
+                  </div>
+                </label>
+                <input id="tweakFarclipValue" type="range" class="tweak-slider" min="777" max="10000" step="100" value="1000" />
+                <span id="tweakFarclipDisplay" class="tweak-value-display">1000</span>
+              </div>
+            </div>
+            <div class="tweak-item">
+              <div class="tweak-row">
+                <label class="tweak-check">
+                  <input id="tweakFrilldistanceEnabled" type="checkbox" checked />
+                  <div class="tweak-label">
+                    <div class="tweak-name">Frilldistance (Grass Distance) *</div>
+                    <div class="tweak-desc">Grass and foliage render distance.</div>
+                    <div class="tweak-default">Vanilla 1.12 default: 70 (Recommended: 100-300)</div>
+                  </div>
+                </label>
+                <input id="tweakFrilldistanceValue" type="range" class="tweak-slider" min="70" max="1000" step="10" value="300" />
+                <span id="tweakFrilldistanceDisplay" class="tweak-value-display">300</span>
+              </div>
+            </div>
+            <div class="tweak-item">
+              <div class="tweak-row">
+                <label class="tweak-check">
+                  <input id="tweakNameplateEnabled" type="checkbox" checked />
+                  <div class="tweak-label">
+                    <div class="tweak-name">Nameplate Distance</div>
+                    <div class="tweak-desc">Maximum distance for visible nameplates (yards).</div>
+                    <div class="tweak-default">Vanilla 1.12 default: 20 (Classic default: 41)</div>
+                  </div>
+                </label>
+                <input id="tweakNameplateValue" type="range" class="tweak-slider" min="20" max="80" step="1" value="41" />
+                <span id="tweakNameplateDisplay" class="tweak-value-display">41</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-card">
+          <div class="settings-head">Camera</div>
+          <div class="tweak-list">
+            <label class="tweak-row">
+              <input id="tweakCameraSkipFix" type="checkbox" checked />
+              <div class="tweak-label">
+                <div class="tweak-name">Camera Skip Fix</div>
+                <div class="tweak-desc">Fixes the camera skip/jitter glitch when rotating.</div>
+              </div>
+            </label>
+            <div class="tweak-item">
+              <div class="tweak-row">
+                <label class="tweak-check">
+                  <input id="tweakMaxCameraEnabled" type="checkbox" checked />
+                  <div class="tweak-label">
+                    <div class="tweak-name">Max Camera Distance</div>
+                    <div class="tweak-desc">Override maximum camera zoom-out distance.</div>
+                    <div class="tweak-default">Vanilla 1.12 default: 50</div>
+                  </div>
+                </label>
+                <input id="tweakMaxCameraValue" type="number" class="tweak-number" min="10" max="200" step="1" value="50" />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-card">
+          <div class="settings-head">Audio</div>
+          <div class="tweak-list">
+            <label class="tweak-row">
+              <input id="tweakSoundBackground" type="checkbox" checked />
+              <div class="tweak-label">
+                <div class="tweak-name">Sound in Background</div>
+                <div class="tweak-desc">Keep playing sounds when the game window is not focused.</div>
+              </div>
+            </label>
+            <div class="tweak-item">
+              <div class="tweak-row">
+                <label class="tweak-check">
+                  <input id="tweakSoundChannelsEnabled" type="checkbox" checked />
+                  <div class="tweak-label">
+                    <div class="tweak-name">Sound Channels</div>
+                    <div class="tweak-desc">Number of simultaneous sound channels.</div>
+                    <div class="tweak-default">Vanilla 1.12 default: 12</div>
+                  </div>
+                </label>
+                <input id="tweakSoundChannelsValue" type="number" class="tweak-number" min="1" max="999" step="1" value="64" />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-card">
+          <div class="settings-head">System</div>
+          <div class="tweak-list">
+            <div class="tweak-item">
+              <label class="tweak-row">
+                <input id="tweakQuickloot" type="checkbox" checked />
+                <div class="tweak-label">
+                  <div class="tweak-name">Quickloot (Reverse)</div>
+                  <div class="tweak-desc">Auto-loot by default; hold Shift for manual loot window.</div>
+                  <div class="tweak-default">Disable if you intend to use SuperWoW/SuperAPI's autoloot feature</div>
+                </div>
+              </label>
+            </div>
+            <label class="tweak-row">
+              <input id="tweakLargeAddress" type="checkbox" checked />
+              <div class="tweak-label">
+                <div class="tweak-name">Large Address Aware</div>
+                <div class="tweak-desc">Allow WoW.exe to use up to 4 GB of memory (recommended).</div>
+              </div>
+            </label>
+          </div>
+        </section>
+      </div>
+      <div class="tweak-footnote">* Raising this option too high can result in a severe loss of FPS/performance.</div>
+    </section>
+
     <section id="panelAbout" class="card panel hidden">
       <div class="row space-between align-center">
         <div>
@@ -461,6 +619,17 @@
             <div class="about-row">
               <div class="about-key">Package name</div>
               <div id="aboutPackageName" class="about-value about-mono">—</div>
+            </div>
+          </div>
+        </section>
+        <section class="settings-card">
+          <div class="settings-head">Credits</div>
+          <div class="about-list">
+            <div class="about-row">
+              <div class="about-key">Tweaks engine</div>
+              <div class="about-value">
+                <button class="about-link-btn" id="btnAboutVanillaTweaks" type="button">vanilla-tweaks by brndd (MIT)</button>
+              </div>
             </div>
           </div>
         </section>

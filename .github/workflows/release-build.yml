@@ -272,17 +272,32 @@ jobs:
           PREV_TAG="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
           NOTES_FILE="dist/RELEASE_BODY.md"
 
+          # Extract the matching section from CHANGELOG.md (between ## vX.Y.Z headers)
+          VERSION="${TAG#v}"
+          CHANGELOG_SECTION=""
+          if [ -f CHANGELOG.md ]; then
+            CHANGELOG_SECTION="$(awk -v ver="## v${VERSION}" '
+              $0 == ver { found=1; next }
+              found && /^## / { exit }
+              found { print }
+            ' CHANGELOG.md | sed '/./,$!d' | sed -e :a -e '/^\s*$/{ $d; N; ba; }')"
+          fi
+
           {
             echo "## What's New"
             echo
-            if [ -n "${PREV_TAG}" ]; then
+            if [ -n "${CHANGELOG_SECTION}" ]; then
+              echo "${CHANGELOG_SECTION}"
+            elif [ -n "${PREV_TAG}" ]; then
               git log --no-merges --pretty='- %s' "${PREV_TAG}..${TAG}" | head -n 20
-              echo
-              echo "_Changes since ${PREV_TAG}_"
             else
               git log --no-merges --pretty='- %s' -n 20
-              echo
-              echo "_Initial release summary_"
+            fi
+            echo
+            if [ -n "${PREV_TAG}" ]; then
+              echo "_Changes since ${PREV_TAG}_"
+            else
+              echo "_Initial release_"
             fi
             echo
             echo "---"

@@ -1,6 +1,6 @@
 // Repo management: keys, conflicts, presets, filtering, sorting, rendering, operations
 
-import { state, MAX_PARALLEL_UPDATES } from "./state.js";
+import { state, MAX_PARALLEL_UPDATES, IGNORED_ERRORS_KEY } from "./state.js";
 import { CURATED_MOD_PRESETS, PRESET_CATEGORY_CLASS } from "./presets.js";
 import { safeInvoke } from "./commands.js";
 import { $, formatTime } from "./utils.js";
@@ -51,6 +51,17 @@ export function addonNameFromUrl(url) {
   } catch (_) {
     return "";
   }
+}
+
+export function loadIgnoredErrors() {
+  try {
+    const raw = localStorage.getItem(IGNORED_ERRORS_KEY);
+    if (raw) state.ignoredErrorRepoIds = new Set(JSON.parse(raw));
+  } catch (_) {}
+}
+
+function persistIgnoredErrors() {
+  localStorage.setItem(IGNORED_ERRORS_KEY, JSON.stringify([...state.ignoredErrorRepoIds]));
 }
 
 export function parseRepoUrlInfo(url) {
@@ -1459,6 +1470,7 @@ export function renderRepos() {
         } else {
           state.ignoredErrorRepoIds.add(r.id);
         }
+        persistIgnoredErrors();
         render();
       });
       menu.appendChild(ignore);
