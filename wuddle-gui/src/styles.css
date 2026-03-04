@@ -603,7 +603,7 @@ body {
   position: relative;
   z-index: 420;
   margin: 0;
-  padding: 18px 8px 12px;
+  padding: 12px 8px 10px;
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
@@ -624,7 +624,7 @@ body {
 }
 
 .title .appname {
-  font-size: 42px;
+  font-size: 52px;
   font-weight: 400;
   letter-spacing: -0.02em;
   line-height: 1;
@@ -634,16 +634,6 @@ body {
     0 2px 10px rgba(255, 171, 83, 0.12),
     0 1px 0 rgba(255, 255, 255, 0.06);
 }
-.title .subtitle {
-  margin-top: 0;
-  padding-left: 12px;
-  border-left: 1px solid rgba(196, 136, 73, 0.38);
-  color: var(--subtitle-color);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1;
-}
-
 .actions {
   margin-left: auto;
   display: flex;
@@ -731,10 +721,10 @@ body {
 }
 
 .busy-indicator {
-  width: 18px;
-  height: 18px;
+  width: 30px;
+  height: 30px;
   border-radius: 999px;
-  border: 2px solid color-mix(in srgb, var(--primary) 22%, transparent);
+  border: 3.5px solid color-mix(in srgb, var(--primary) 22%, transparent);
   border-top-color: var(--primary);
   animation: wuddle-spin 0.8s linear infinite;
 }
@@ -2412,8 +2402,13 @@ dialog.dialog > .select-menu-pop {
 .options-grid {
   margin-top: 14px;
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: 12px;
+}
+
+.options-grid > .settings-card:first-child,
+.options-grid > .settings-card:last-child {
+  grid-column: 1 / -1;
 }
 
 .settings-card {
@@ -2678,7 +2673,7 @@ dialog.dialog > .select-menu-pop {
 .home-turtle-links {
   display: grid;
   grid-auto-flow: column;
-  grid-template-rows: repeat(3, auto);
+  grid-template-rows: repeat(var(--link-rows, 3), auto);
   grid-auto-columns: min(250px, calc(50% - 4px));
   justify-content: center;
   gap: 8px;
@@ -3033,15 +3028,6 @@ html[data-font-style="friz"] .home-play-btn {
 }
 
 @media (min-width: 1024px) {
-  .options-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .options-grid > .settings-card:first-child,
-  .options-grid > .settings-card:last-child {
-    grid-column: 1 / -1;
-  }
-
   .about-grid {
     grid-template-columns: 1fr 1fr;
   }
@@ -3077,11 +3063,6 @@ html[data-font-style="friz"] .home-play-btn {
     gap: 4px;
   }
 
-  .title .subtitle {
-    border-left: none;
-    padding-left: 0;
-    font-size: 12px;
-  }
 
   .actions {
     margin-left: 0;

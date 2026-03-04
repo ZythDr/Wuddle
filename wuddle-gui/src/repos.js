@@ -123,6 +123,17 @@ export function syncProjectViewFromActiveProfile() {
 
 export function setProjectView(view, { persist = true } = {}) {
   const normalized = normalizeProjectView(view);
+  if (normalized !== state.projectView) {
+    state.projectSearchQuery = "";
+    const input = $("projectSearchInput");
+    if (input) input.value = "";
+    if (
+      (normalized === "addons" && state.filter === "disabled") ||
+      (normalized === "mods" && state.filter === "ignored")
+    ) {
+      state.filter = "all";
+    }
+  }
   state.projectView = normalized;
   const profile = activeProfile();
   if (persist && profile) {
@@ -424,7 +435,10 @@ export function repoStatus(repo) {
 
   const plan = getPlanForRepo(repo.id);
   if (!plan) return { kind: "muted", text: "Unknown" };
-  if (plan.error) return { kind: "bad", text: "Fetch error" };
+  if (plan.error && !state.ignoredErrorRepoIds.has(repo.id))
+    return { kind: "bad", text: "Fetch error" };
+  if (plan.error && state.ignoredErrorRepoIds.has(repo.id))
+    return { kind: "muted", text: "Ignored" };
 
   if (plan.externally_modified) return { kind: "warn", text: "Modified" };
   if (plan.repair_needed) return { kind: "warn", text: "Repair needed" };
@@ -592,6 +606,7 @@ export function statusRank(repo) {
   if (st.text === "Update available") return 1;
   if (st.text === "Repair needed") return 2;
   if (st.text === "Disabled") return 3;
+  if (st.text === "Ignored") return 3;
   return 4;
 }
 
@@ -604,7 +619,8 @@ export function matchesFilter(repo) {
   if (state.filter === "disabled") return !repo.enabled;
   const plan = getPlanForRepo(repo.id);
   if (state.filter === "updates") return !!plan?.has_update;
-  if (state.filter === "errors") return !!plan?.error;
+  if (state.filter === "errors") return !!plan?.error && !state.ignoredErrorRepoIds.has(repo.id);
+  if (state.filter === "ignored") return !!plan?.error && state.ignoredErrorRepoIds.has(repo.id);
   return true;
 }
 
@@ -687,13 +703,19 @@ export function getProjectSummary() {
     const plan = getPlanForRepo(repo.id);
     return repo.enabled && !!plan?.has_update && !plan?.error;
   }).length;
-  const errors = viewRepos.filter((repo) => !!getPlanForRepo(repo.id)?.error).length;
+  const errors = viewRepos.filter((repo) => {
+    const p = getPlanForRepo(repo.id);
+    return !!p?.error && !state.ignoredErrorRepoIds.has(repo.id);
+  }).length;
+  const ignored = viewRepos.filter((repo) => {
+    return !!getPlanForRepo(repo.id)?.error && state.ignoredErrorRepoIds.has(repo.id);
+  }).length;
   const rateLimited = viewRepos.some((repo) => {
     const error = getPlanForRepo(repo.id)?.error || "";
     return /rate[\s-]?limit|http 403|http 429/i.test(error);
   });
 
-  return { total, enabled, disabled, updates, errors, rateLimited };
+  return { total, enabled, disabled, updates, errors, ignored, rateLimited };
 }
 
 export function getUpdateActionState() {
@@ -845,14 +867,23 @@ export function renderProjectSearch() {
 
 export function renderFilterButtons() {
   const summary = getProjectSummary();
+  const isAddons = state.projectView === "addons";
   const labels = {
     all: `All (${summary.total})`,
     updates: `Updates (${summary.updates})`,
     errors: `Errors (${summary.errors})`,
-    disabled: `Disabled (${summary.disabled})`,
   };
+  const fourthKey = isAddons ? "ignored" : "disabled";
+  const fourthLabel = isAddons
+    ? `Ignored (${summary.ignored})`
+    : `Disabled (${summary.disabled})`;
   document.querySelectorAll(".filter-btn[data-filter]").forEach((btn) => {
-    const key = btn.getAttribute("data-filter");
+    let key = btn.getAttribute("data-filter");
+    if (key === "disabled" || key === "ignored") {
+      btn.setAttribute("data-filter", fourthKey);
+      key = fourthKey;
+      btn.textContent = fourthLabel;
+    }
     btn.classList.toggle("active", key === state.filter);
     if (key && Object.prototype.hasOwnProperty.call(labels, key)) {
       btn.textContent = labels[key];
@@ -1414,6 +1445,24 @@ export function renderRepos() {
     });
 
     menu.appendChild(reinstall);
+    if (plan?.error) {
+      const isIgnored = state.ignoredErrorRepoIds.has(r.id);
+      const ignore = document.createElement("button");
+      ignore.className = "menu-item";
+      ignore.textContent = isIgnored ? "Unignore Error" : "Ignore Error";
+      ignore.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        state.openMenuRepoId = null;
+        if (isIgnored) {
+          state.ignoredErrorRepoIds.delete(r.id);
+        } else {
+          state.ignoredErrorRepoIds.add(r.id);
+        }
+        render();
+      });
+      menu.appendChild(ignore);
+    }
     if (!isAddonRepo(r)) {
       const toggle = document.createElement("button");
       toggle.className = "menu-item";
@@ -1657,7 +1706,7 @@ export function applyAddDialogContext() {
 }
 
 export function setFilter(filter) {
-  const allowed = new Set(["all", "updates", "errors", "disabled"]);
+  const allowed = new Set(["all", "updates", "errors", "disabled", "ignored"]);
   state.filter = allowed.has(filter) ? filter : "all";
   render();
 }

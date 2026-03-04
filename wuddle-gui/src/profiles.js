@@ -371,6 +371,15 @@ export function renderProfileTabs() {
   if (!host) return;
   host.innerHTML = "";
 
+  const divider = $("profilePickerDivider");
+  if (state.profiles.length <= 1) {
+    host.classList.add("hidden");
+    if (divider) divider.classList.add("hidden");
+    return;
+  }
+  host.classList.remove("hidden");
+  if (divider) divider.classList.remove("hidden");
+
   const menu = document.createElement("div");
   menu.id = "profilePicker";
   menu.className = "profile-menu";
