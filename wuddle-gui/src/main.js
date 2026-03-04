@@ -98,6 +98,7 @@ import {
   closeActionsMenu,
   positionOpenMenu,
   confirmRemove,
+  loadIgnoredErrors,
 } from "./repos.js";
 
 import {
@@ -119,6 +120,7 @@ import {
 
 import { renderHome, launchGameFromHome, setHomeCallbacks } from "./home.js";
 import { bindTurtleListeners, observeTurtleResize } from "./turtle.js";
+import { renderTweaks, bindTweaksListeners } from "./tweaks.js";
 
 // ============================================================================
 // render() — top-level coordinator (stays here to break the repos ↔ home cycle)
@@ -163,6 +165,7 @@ function setTab(tab) {
   else if (tab === "options") state.tab = "options";
   else if (tab === "logs") state.tab = "logs";
   else if (tab === "about") state.tab = "about";
+  else if (tab === "tweaks") state.tab = "tweaks";
   else state.tab = "projects";
   localStorage.setItem(TAB_KEY, state.tab);
 
@@ -171,11 +174,13 @@ function setTab(tab) {
   $("panelOptions").classList.toggle("hidden", state.tab !== "options");
   $("panelLogs").classList.toggle("hidden", state.tab !== "logs");
   $("panelAbout").classList.toggle("hidden", state.tab !== "about");
+  $("panelTweaks").classList.toggle("hidden", state.tab !== "tweaks");
 
   $("tabHome").classList.toggle("active", state.tab === "home");
   $("tabOptions").classList.toggle("active", state.tab === "options");
   $("tabLogs").classList.toggle("active", state.tab === "logs");
   $("tabAbout").classList.toggle("active", state.tab === "about");
+  $("tabTweaks").classList.toggle("active", state.tab === "tweaks");
   renderProfileTabs();
   renderProjectViewButtons();
 
@@ -186,6 +191,8 @@ function setTab(tab) {
     renderHome();
   } else if (state.tab === "about") {
     void refreshAboutInfo();
+  } else if (state.tab === "tweaks") {
+    renderTweaks();
   } else if (state.tab === "projects") {
     render();
   } else if (state.tab === "logs" && state.logDirty) {
@@ -247,6 +254,7 @@ function loadSettings() {
   state.projectViewByProfile = readProjectViewByProfile();
   syncProjectViewFromActiveProfile();
 
+  loadIgnoredErrors();
   const symlinks = localStorage.getItem(OPT_SYMLINKS_KEY) === "true";
   const xattr = localStorage.getItem(OPT_XATTR_KEY) === "true";
   const clock12 = localStorage.getItem(OPT_CLOCK12_KEY) === "true";
@@ -288,7 +296,7 @@ function loadSettings() {
   renderAutoCheckSettings();
 
   const savedTab = localStorage.getItem(TAB_KEY) || "home";
-  setTab(new Set(["home", "projects", "options", "logs", "about"]).has(savedTab) ? savedTab : "home");
+  setTab(new Set(["home", "projects", "options", "logs", "about", "tweaks"]).has(savedTab) ? savedTab : "home");
 
   const logWrap = localStorage.getItem(LOG_WRAP_KEY) === "true";
   const logAutoScrollRaw = localStorage.getItem(LOG_AUTOSCROLL_KEY);
@@ -369,6 +377,7 @@ $("tabHome").addEventListener("click", () => setTab("home"));
 $("tabOptions").addEventListener("click", () => setTab("options"));
 $("tabLogs").addEventListener("click", () => setTab("logs"));
 $("tabAbout").addEventListener("click", () => setTab("about"));
+$("tabTweaks").addEventListener("click", () => setTab("tweaks"));
 
 $("homeBtnUpdateAll").addEventListener("click", updateAll);
 $("homeBtnRefreshOnly").addEventListener("click", () =>
@@ -387,6 +396,7 @@ $("homeBtnAddAddon").addEventListener("click", () => {
 });
 bindTurtleListeners();
 observeTurtleResize();
+bindTweaksListeners();
 $("btnRescanAddons").addEventListener("click", async () => {
   await rescanAddonDirectory();
 });

@@ -13,6 +13,7 @@ use tauri::Manager;
 use wuddle_engine::{AddonProbeResult, Engine, InstallMode, InstallOptions};
 
 mod self_update;
+mod tweaks;
 
 #[derive(Serialize)]
 struct RepoRow {
@@ -1526,6 +1527,42 @@ fn wuddle_open_directory(path: String) -> Result<(), String> {
         .map_err(|e| format!("Failed to open directory {}: {}", path_buf.display(), e))
 }
 
+#[tauri::command]
+fn wuddle_apply_tweaks(wow_dir: String, opts: tweaks::TweakOptions) -> Result<String, String> {
+    let dir = PathBuf::from(wow_dir.trim());
+    if !dir.is_dir() {
+        return Err("Invalid WoW directory.".into());
+    }
+    tweaks::apply_tweaks(&dir, &opts)
+}
+
+#[tauri::command]
+fn wuddle_restore_tweaks_backup(wow_dir: String) -> Result<String, String> {
+    let dir = PathBuf::from(wow_dir.trim());
+    if !dir.is_dir() {
+        return Err("Invalid WoW directory.".into());
+    }
+    tweaks::restore_backup(&dir)
+}
+
+#[tauri::command]
+fn wuddle_has_tweaks_backup(wow_dir: String) -> Result<bool, String> {
+    let dir = PathBuf::from(wow_dir.trim());
+    if !dir.is_dir() {
+        return Err("Invalid WoW directory.".into());
+    }
+    Ok(tweaks::has_backup(&dir))
+}
+
+#[tauri::command]
+fn wuddle_read_tweaks(wow_dir: String) -> Result<tweaks::ReadTweakValues, String> {
+    let dir = PathBuf::from(wow_dir.trim());
+    if !dir.is_dir() {
+        return Err("Invalid WoW directory.".into());
+    }
+    tweaks::read_tweaks(&dir)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -1569,7 +1606,11 @@ pub fn run() {
             wuddle_launch_diagnostics,
             wuddle_launch_game,
             wuddle_open_url,
-            wuddle_open_directory
+            wuddle_open_directory,
+            wuddle_apply_tweaks,
+            wuddle_restore_tweaks_backup,
+            wuddle_has_tweaks_backup,
+            wuddle_read_tweaks
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

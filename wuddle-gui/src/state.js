@@ -11,6 +11,7 @@ export const OPT_FRIZ_FONT_KEY = "wuddle.opt.frizfont";
 export const OPT_AUTOCHECK_KEY = "wuddle.opt.autocheck";
 export const OPT_AUTOCHECK_MINUTES_KEY = "wuddle.opt.autocheck.minutes";
 export const OPT_CACHE_KEEP_KEY = "wuddle.opt.cache.keep.versions";
+export const IGNORED_ERRORS_KEY = "wuddle.ignored.errors";
 export const LOG_WRAP_KEY = "wuddle.log.wrap";
 export const LOG_AUTOSCROLL_KEY = "wuddle.log.autoscroll";
 export const LOG_LEVEL_KEY = "wuddle.log.level";

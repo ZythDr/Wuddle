@@ -45,10 +45,32 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **Mod file integrity checking:** Wuddle now detects when mod files have been modified outside the app. Modified mods show a warning badge and are skipped during bulk updates — click the download button to restore to the latest version.
 - **Automatic cache cleanup:** old cached mod versions are pruned after each install. Configurable in Options (0–10 versions to keep, default 3). The launcher also cleans up old `Wuddle-bin.exe` versions on self-update.
 - **Addon conflict detection:** adding an addon that shares folders with an already-tracked repo now shows a conflict dialog before proceeding.
-- **Auto-check for updates:** optional background polling with configurable interval.
-- **Turtle WoW home section:** curated official and community links, toggled per instance.
+- **Auto-check for updates:** optional background polling with configurable interval (enabled by default).
+- **Turtle WoW home section:** curated official and community links, toggled per instance. Adaptive column layout.
 - **Visual theme picker:** color swatches replace the old dropdown.
+- **Ignore errored repos:** right-click menu item to dismiss errored mods/addons with an "Ignored" badge.
+- **AV false-positive tags:** VanillaFixes and UnitXP_SP3 presets now display antivirus warnings.
+- **UI polish:** relocated spinner, enlarged title, profile picker hidden when only one instance exists, search clears on tab switch.
+- **Linux fixes:** links now open correctly in AppImage builds; spinner uses theme color.
 - **Zip security fix:** path traversal vulnerability patched during extraction.
+- **Product rename:** app now displays as "Wuddle" everywhere (About page, desktop entries, bundles).
+
+### What's New In v2.4
+
+- **Tweaks tab (vanilla-tweaks integration):** Patch WoW.exe directly from Wuddle with quality-of-life improvements based on [vanilla-tweaks by brndd](https://github.com/brndd/vanilla-tweaks). Includes:
+  - **Widescreen FoV** — wider field of view for widescreen monitors (with degree display)
+  - **Farclip / Frilldistance** — adjustable terrain and grass render distances
+  - **Nameplate Distance** — extended nameplate visibility range
+  - **Camera Skip Fix** — eliminates camera skip/jitter when rotating
+  - **Max Camera Distance** — configurable zoom-out limit
+  - **Sound in Background** — keep game audio when alt-tabbed
+  - **Sound Channels** — increase simultaneous audio channels
+  - **Quickloot (Reverse)** — auto-loot by default, hold Shift for manual
+  - **Large Address Aware** — allow WoW.exe to use up to 4 GB of memory
+- **Read Current:** extract and display actual tweak values from WoW.exe
+- **Reset to Default:** one-click restore to recommended settings
+- **Automatic backup:** WoW.exe.bak is created before the first patch; one-click restore available
+- **Per-profile tweak settings:** each instance remembers its own tweak configuration
 
 ## Credits / Inspiration
 
@@ -61,3 +83,7 @@ Wuddle is its own implementation, but parts of the functionality and UX were ins
 - **WoWRetroLauncher** (Parquelle)
   Sparked the idea for Wuddle's themes.
   https://github.com/Parquelle/WoWRetroLauncher
+
+- **vanilla-tweaks** (brndd)
+  WoW.exe binary patching logic for the Tweaks tab (FoV, farclip, quickloot, camera fixes, etc.).
+  https://github.com/brndd/vanilla-tweaks
