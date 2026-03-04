@@ -11,7 +11,7 @@
     <header class="topbar">
       <div class="title">
         <div class="appname">Wuddle</div>
-        <div class="subtitle">Apparently a launcher now?</div>
+        <div id="busyIndicator" class="busy-indicator hidden" title="Working" aria-label="Working"></div>
       </div>
 
       <div class="tabs view-tabs-center" role="group" aria-label="Project view">
@@ -21,10 +21,9 @@
       </div>
 
       <div class="actions">
-        <div id="busyIndicator" class="busy-indicator hidden" title="Working" aria-label="Working"></div>
         <div class="tabs top-tabs">
           <div id="profilePickerHost" class="profile-picker-host"></div>
-          <div class="tabs-divider" aria-hidden="true"></div>
+          <div id="profilePickerDivider" class="tabs-divider" aria-hidden="true"></div>
           <button id="tabOptions" class="tab-btn tab-icon-btn" title="Options" aria-label="Options">
             <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">
               <path

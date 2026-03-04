@@ -118,7 +118,7 @@ import {
 } from "./about.js";
 
 import { renderHome, launchGameFromHome, setHomeCallbacks } from "./home.js";
-import { bindTurtleListeners } from "./turtle.js";
+import { bindTurtleListeners, observeTurtleResize } from "./turtle.js";
 
 // ============================================================================
 // render() — top-level coordinator (stays here to break the repos ↔ home cycle)
@@ -386,6 +386,7 @@ $("homeBtnAddAddon").addEventListener("click", () => {
   openAddDialogFor("addons");
 });
 bindTurtleListeners();
+observeTurtleResize();
 $("btnRescanAddons").addEventListener("click", async () => {
   await rescanAddonDirectory();
 });

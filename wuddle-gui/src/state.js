@@ -89,5 +89,6 @@ export const state = {
   aboutSelfUpdate: null,
   aboutSelfUpdateBusy: false,
   launchDiagnostics: null,
+  ignoredErrorRepoIds: new Set(),
 };
 

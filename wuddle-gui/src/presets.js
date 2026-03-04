@@ -8,6 +8,8 @@ export const CURATED_MOD_PRESETS = [
       "A client modification for World of Warcraft 1.6.1-1.12.1 to eliminate stutter and animation lag.",
     longDescription:
       "A client modification for World of Warcraft 1.6.1-1.12.1 to eliminate stutter and animation lag.\nVanillaFixes also acts as a launcher (start game via VanillaFixes.exe instead of Wow.exe) and DLL mod loader which loads DLL files listed in dlls.txt found in the WoW install directory.",
+    warning:
+      "VanillaFixes may trigger antivirus false-positive alerts on Windows.",
     categories: ["Performance"],
     recommended: true,
   },
@@ -32,6 +34,8 @@ export const CURATED_MOD_PRESETS = [
       "Adds camera offset, proper nameplates, improved tab-targeting, LoS/distance checks, and more.",
     longDescription:
       "Adds optional camera offset, proper nameplates (showing only with LoS), improved tab-targeting keybind behavior, LoS and distance checks in Lua, screenshot format options, network tweaks, background notifications, and additional QoL features.",
+    warning:
+      "UnitXP_SP3 may trigger antivirus false-positive alerts on Windows.",
     categories: ["QoL", "API"],
     recommended: true,
   },
