@@ -1099,7 +1099,7 @@ async fn wuddle_github_auth_clear_token() -> Result<(), String> {
 fn wuddle_about_info() -> AboutInfo {
     AboutInfo {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
-        package_name: env!("CARGO_PKG_NAME").to_string(),
+        package_name: "Wuddle".to_string(),
     }
 }
 
