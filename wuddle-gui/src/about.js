@@ -140,8 +140,11 @@ export async function updateWuddleInPlace() {
   }
 
   const latest = String(updateInfo.latestVersion || "").trim() || "latest";
+  const restartNote = updateInfo.launcherLayout
+    ? "then restart via launcher"
+    : "then restart";
   const proceed = window.confirm(
-    `Wuddle will download and stage ${latest}, then restart via launcher.\n\nContinue?`,
+    `Wuddle will download and stage ${latest}, ${restartNote}.\n\nContinue?`,
   );
   if (!proceed) {
     log("Cancelled self-update.");

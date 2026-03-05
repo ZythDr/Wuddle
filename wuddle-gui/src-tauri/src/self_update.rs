@@ -1,14 +1,23 @@
 use serde::{Deserialize, Serialize};
-#[cfg(target_os = "windows")]
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use std::{
     fs,
-    io::{Cursor, Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(target_os = "windows")]
+use std::{
+    io::{Cursor, Read, Write},
+    path::Path,
+};
 #[cfg(target_os = "windows")]
 use zip::ZipArchive;
+
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 
 use crate::OperationResult;
 
@@ -23,7 +32,6 @@ pub struct SelfUpdateInfo {
     pub message: String,
 }
 
-#[cfg(target_os = "windows")]
 #[derive(Debug, Deserialize)]
 struct GithubReleaseAsset {
     name: String,
@@ -33,14 +41,62 @@ struct GithubReleaseAsset {
 #[derive(Debug, Deserialize)]
 struct GithubRelease {
     tag_name: String,
-    #[cfg(target_os = "windows")]
     assets: Vec<GithubReleaseAsset>,
 }
 
 const WUDDLE_RELEASE_API_URL: &str = "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
 
 pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        let appimage = is_appimage();
+        let supported = appimage.is_some();
+
+        let release = match fetch_latest_release_meta() {
+            Ok(v) => v,
+            Err(err) => {
+                return Ok(SelfUpdateInfo {
+                    supported,
+                    launcher_layout: false,
+                    current_version: current_version.to_string(),
+                    latest_version: None,
+                    update_available: false,
+                    message: format!("Latest version check failed: {}", err),
+                });
+            }
+        };
+
+        let latest_version = normalize_release_tag(&release.tag_name);
+        let latest_version = if latest_version.is_empty() {
+            None
+        } else {
+            Some(latest_version)
+        };
+        let update_available = supported
+            && latest_version
+                .as_deref()
+                .map(|latest| is_version_newer(latest, current_version))
+                .unwrap_or(false);
+
+        let message = if !supported {
+            "Self-update is available only for AppImage builds on Linux.".to_string()
+        } else if update_available {
+            "A newer version is available.".to_string()
+        } else {
+            "No newer version detected.".to_string()
+        };
+
+        return Ok(SelfUpdateInfo {
+            supported,
+            launcher_layout: false,
+            current_version: current_version.to_string(),
+            latest_version,
+            update_available,
+            message,
+        });
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let latest_version = fetch_latest_release_meta()
             .ok()
@@ -52,8 +108,7 @@ pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
             current_version: current_version.to_string(),
             latest_version,
             update_available: false,
-            message: "In-app update is currently available only for Windows launcher builds."
-                .to_string(),
+            message: "In-app update is not available on this platform.".to_string(),
         });
     }
 
@@ -111,12 +166,72 @@ pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
 }
 
 pub fn apply_update(current_version: &str) -> Result<OperationResult, String> {
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        let mut steps = Vec::new();
+        let current_version = current_version.to_string();
+
+        let appimage_path = is_appimage()
+            .ok_or_else(|| "Not running as an AppImage. Self-update is unavailable.".to_string())?;
+        steps.push(format!("AppImage path: {}", appimage_path.display()));
+
+        cleanup_stale_appimage_temps(&appimage_path);
+
+        steps.push("Checking latest release metadata…".to_string());
+        let release = fetch_latest_release_meta()?;
+        let latest_version = normalize_release_tag(&release.tag_name);
+        if latest_version.is_empty() {
+            return Err("Latest release tag is empty.".to_string());
+        }
+        if !is_version_newer(&latest_version, &current_version) {
+            return Ok(OperationResult {
+                message: format!("Already up to date ({current_version})."),
+                steps,
+            });
+        }
+
+        let asset = select_linux_appimage_asset(&release)
+            .ok_or_else(|| "No Linux AppImage asset found in latest release.".to_string())?;
+        steps.push(format!("Selected asset: {}", asset.name));
+        steps.push(format!("Downloading {}", asset.browser_download_url));
+
+        let bytes = download_bytes(&asset.browser_download_url)?;
+        steps.push(format!("Downloaded {} bytes.", bytes.len()));
+
+        // Write to a temp file next to the current AppImage (same filesystem for atomic rename)
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let tmp_path = appimage_path.with_extension(format!("tmp-{}", stamp));
+
+        fs::write(&tmp_path, &bytes)
+            .map_err(|e| format!("Failed to write temp file: {e}"))?;
+
+        // chmod +x
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(&tmp_path, perms)
+            .map_err(|e| format!("Failed to set executable permission: {e}"))?;
+        steps.push("Set executable permission on temp file.".to_string());
+
+        // Atomic rename over the original
+        fs::rename(&tmp_path, &appimage_path)
+            .map_err(|e| format!("Failed to replace AppImage: {e}"))?;
+        steps.push(format!("Replaced {}", appimage_path.display()));
+
+        return Ok(OperationResult {
+            message: format!(
+                "Updated Wuddle to {} successfully. Restart to apply.",
+                latest_version
+            ),
+            steps,
+        });
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = current_version;
-        return Err(
-            "In-app update is currently available only for Windows launcher builds.".to_string(),
-        );
+        return Err("In-app update is not available on this platform.".to_string());
     }
 
     #[cfg(target_os = "windows")]
@@ -197,12 +312,26 @@ pub fn apply_update(current_version: &str) -> Result<OperationResult, String> {
 }
 
 pub fn restart_after_update() -> Result<(), String> {
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
-        return Err(
-            "In-app update restart is currently available only for Windows launcher builds."
-                .to_string(),
-        );
+        let appimage_path = is_appimage()
+            .ok_or_else(|| "Not running as an AppImage; cannot restart.".to_string())?;
+
+        Command::new(&appimage_path)
+            .spawn()
+            .map_err(|e| format!("Failed to relaunch AppImage: {e}"))?;
+
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::process::exit(0);
+        });
+
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        return Err("In-app update restart is not available on this platform.".to_string());
     }
 
     #[cfg(target_os = "windows")]
@@ -284,7 +413,6 @@ fn sanitize_version_folder_name(raw: &str) -> String {
     }
 }
 
-#[cfg(target_os = "windows")]
 fn parse_version_key(raw: &str) -> Vec<u64> {
     let trimmed = normalize_release_tag(raw);
     trimmed
@@ -294,7 +422,6 @@ fn parse_version_key(raw: &str) -> Vec<u64> {
         .collect()
 }
 
-#[cfg(target_os = "windows")]
 fn is_version_newer(latest: &str, current: &str) -> bool {
     let a = parse_version_key(latest);
     let b = parse_version_key(current);
@@ -374,7 +501,54 @@ fn select_windows_portable_asset(release: &GithubRelease) -> Option<&GithubRelea
         })
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(target_os = "linux")]
+fn is_appimage() -> Option<PathBuf> {
+    let path = std::env::var("APPIMAGE").ok()?;
+    let path = PathBuf::from(path);
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn select_linux_appimage_asset(release: &GithubRelease) -> Option<&GithubReleaseAsset> {
+    // Primary: exact name "Wuddle.AppImage"
+    release
+        .assets
+        .iter()
+        .find(|a| a.name.eq_ignore_ascii_case("Wuddle.AppImage"))
+        .or_else(|| {
+            // Fallback: any .AppImage file (handles older releases with versioned names)
+            release
+                .assets
+                .iter()
+                .find(|a| a.name.to_ascii_lowercase().ends_with(".appimage"))
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_stale_appimage_temps(appimage_path: &std::path::Path) {
+    let Some(parent) = appimage_path.parent() else {
+        return;
+    };
+    let Some(stem) = appimage_path.file_stem().and_then(|s| s.to_str()) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(stem) && name.contains(".tmp-") {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
