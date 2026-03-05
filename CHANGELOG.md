@@ -2,6 +2,10 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.4.3
+
+- **Fix external links in AppImage:** Switched from env-var blacklist to whitelist approach for `xdg-open`, fixing links silently failing to open in browser
+
 ## v2.4.2
 
 - **Linux AppImage self-update:** In-app update support for Linux AppImage builds — download, replace, and restart automatically from the About page
