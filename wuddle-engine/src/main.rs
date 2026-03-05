@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Check { wow_dir } => {
-            let plans = engine.check_updates_with_wow(wow_dir.as_deref()).await?;
+            let plans = engine.check_updates_with_wow(wow_dir.as_deref(), wuddle_engine::CheckMode::Force).await?;
             for p in plans {
                 if let Some(err) = p.error.as_deref() {
                     println!("{}/{}: error ({})", p.owner, p.name, err);

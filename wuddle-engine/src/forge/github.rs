@@ -8,6 +8,7 @@ use crate::model::{LatestRelease, ReleaseAsset};
 struct GhRelease {
     tag_name: String,
     name: Option<String>,
+    published_at: Option<String>,
     assets: Vec<GhAsset>,
 }
 
@@ -22,10 +23,6 @@ struct GhAsset {
 }
 
 pub struct GitHub;
-
-fn compact_body(body: &str) -> String {
-    body.replace('\n', " ").trim().chars().take(220).collect()
-}
 
 fn parse_sha256_digest(raw: Option<&str>) -> Option<String> {
     let digest = raw?.trim();
@@ -87,31 +84,31 @@ impl GitHub {
         }
 
         if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
-            let remaining = resp
-                .headers()
-                .get("x-ratelimit-remaining")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("?")
-                .to_string();
-            let reset = resp
-                .headers()
-                .get("x-ratelimit-reset")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("?")
-                .to_string();
-            let body = compact_body(&resp.text().await.unwrap_or_default());
-            anyhow::bail!(
-                "GitHub API rate-limited or forbidden (HTTP {}, remaining {}, reset {}). {} Add a GitHub token in Wuddle settings to raise limits.",
-                status,
-                remaining,
-                reset,
-                body
-            );
+            let body = resp.text().await.unwrap_or_default().to_ascii_lowercase();
+            let has_token = crate::github_token().is_some();
+            let message = if body.contains("rate limit") {
+                if has_token {
+                    "GitHub API rate limit exceeded. Your token may be invalid or expired — try re-saving it in Options."
+                } else {
+                    "GitHub API rate limit exceeded. Add a GitHub token in Options to raise the limit."
+                }
+            } else if body.contains("bad credentials") || body.contains("requires authentication") {
+                "GitHub authentication failed. Your token may be invalid or expired — try re-saving it in Options."
+            } else {
+                if has_token {
+                    "GitHub denied the request (HTTP 403). Your token may lack permissions or be expired."
+                } else {
+                    "GitHub denied the request (HTTP 403). Add a GitHub token in Options to authenticate."
+                }
+            };
+            anyhow::bail!("{}", message);
         }
 
         if !status.is_success() {
-            let body = compact_body(&resp.text().await.unwrap_or_default());
-            anyhow::bail!("GitHub API error HTTP {}: {}", status, body);
+            anyhow::bail!(
+                "GitHub API error (HTTP {}). The request could not be completed.",
+                status
+            );
         }
 
         let gh: GhRelease = resp.json().await.context("invalid github json")?;
@@ -135,6 +132,7 @@ impl GitHub {
                 tag: gh.tag_name,
                 name: gh.name,
                 assets,
+                published_at: gh.published_at.as_deref().and_then(super::parse_rfc3339_unix),
             }),
             false,
         ))

@@ -9,6 +9,7 @@ use crate::model::{LatestRelease, ReleaseAsset};
 struct GitLabRelease {
     tag_name: String,
     name: Option<String>,
+    released_at: Option<String>,
     assets: GitLabAssets,
 }
 
@@ -83,6 +84,7 @@ pub async fn latest_release(
             tag: rel.tag_name,
             name: rel.name,
             assets,
+            published_at: rel.released_at.as_deref().and_then(super::parse_rfc3339_unix),
         }),
         false,
     ))

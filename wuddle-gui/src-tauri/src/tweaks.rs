@@ -90,7 +90,9 @@ pub fn apply_tweaks(wow_dir: &Path, opts: &TweakOptions) -> Result<String, Strin
             .map_err(|e| format!("Failed to create backup: {e}"))?;
     }
 
-    let mut buf = fs::read(&exe_path).map_err(|e| format!("Failed to read WoW.exe: {e}"))?;
+    // Always start from the clean backup so unchecked tweaks revert to original values
+    // and re-applying with different settings works without a manual restore first.
+    let mut buf = fs::read(&backup_path).map_err(|e| format!("Failed to read WoW.exe.bak: {e}"))?;
 
     let mut applied: Vec<&str> = Vec::new();
 

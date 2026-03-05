@@ -114,6 +114,7 @@ import {
 import {
   renderAboutInfo,
   refreshAboutInfo,
+  maybePollSelfUpdateInfo,
   updateWuddleInPlace,
   setAboutCallbacks,
 } from "./about.js";
@@ -381,7 +382,7 @@ $("tabTweaks").addEventListener("click", () => setTab("tweaks"));
 
 $("homeBtnUpdateAll").addEventListener("click", updateAll);
 $("homeBtnRefreshOnly").addEventListener("click", () =>
-  refreshAll({ forceCheck: true, notify: true, source: "manual" }),
+  refreshAll({ forceCheck: true, notify: true, source: "manual", checkMode: "manual" }),
 );
 $("homeBtnPlay").addEventListener("click", launchGameFromHome);
 $("homeBtnAddMod").addEventListener("click", () => {
@@ -493,6 +494,9 @@ $("btnAboutUpdate").addEventListener("click", () => {
 });
 $("btnAboutGithub").addEventListener("click", async () => {
   await openUrl(WUDDLE_REPO_URL);
+});
+$("btnAboutGitAddonsManager").addEventListener("click", async () => {
+  await openUrl("https://gitlab.com/woblight/GitAddonsManager");
 });
 $("aboutLatestVersion").addEventListener("click", async (ev) => {
   ev.preventDefault();
@@ -664,3 +668,4 @@ renderAboutInfo();
 void refreshGithubAuthStatus();
 log("Ready.");
 refreshAll({ notify: true, source: "startup" });
+void maybePollSelfUpdateInfo({ notify: true });

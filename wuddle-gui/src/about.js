@@ -1,5 +1,5 @@
 // About tab: info display, self-update, version polling
-import { state, WUDDLE_RELEASES_API_URL, SELF_UPDATE_POLL_MINUTES } from "./state.js";
+import { state, SELF_UPDATE_POLL_MINUTES } from "./state.js";
 import { $, formatTime } from "./utils.js";
 import { safeInvoke } from "./commands.js";
 import { log, logOperationResult } from "./logs.js";
@@ -87,29 +87,6 @@ export function renderAboutUpdateAction() {
   btn.title = updateInfo.message || "No newer release detected.";
 }
 
-export async function fetchLatestWuddleReleaseTag() {
-  const ctrl = new AbortController();
-  const timer = window.setTimeout(() => ctrl.abort(), 4500);
-  try {
-    const resp = await fetch(WUDDLE_RELEASES_API_URL, {
-      method: "GET",
-      headers: { Accept: "application/vnd.github+json" },
-      signal: ctrl.signal,
-    });
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}`);
-    }
-    const data = await resp.json();
-    const tag = String(data?.tag_name || "").trim();
-    if (!tag) {
-      throw new Error("Latest release tag not found");
-    }
-    return tag;
-  } finally {
-    window.clearTimeout(timer);
-  }
-}
-
 export async function refreshAboutInfo({ force = false } = {}) {
   if (state.aboutLoaded && !force && state.aboutLatestVersion) {
     renderAboutInfo();
@@ -129,24 +106,12 @@ export async function refreshAboutInfo({ force = false } = {}) {
       state.aboutLatestVersion = String(state.aboutSelfUpdate?.latestVersion || "").trim() || null;
     } catch (selfUpdateErr) {
       state.aboutSelfUpdate = null;
-      state.aboutLatestVersion = await fetchLatestWuddleReleaseTag();
       log(`ERROR self-update info: ${selfUpdateErr.message || selfUpdateErr}`);
     }
   } catch (e) {
     setAboutStatus(`Could not load application details: ${e.message}`, "status-warn");
     log(`ERROR about: ${e.message}`);
     return;
-  }
-
-  try {
-    if (!state.aboutLatestVersion) {
-      state.aboutLatestVersion = await fetchLatestWuddleReleaseTag();
-    }
-  } catch (latestErr) {
-    if (!state.aboutLatestVersion) {
-      state.aboutLatestVersion = null;
-    }
-    log(`ERROR latest version check: ${latestErr.message || latestErr}`);
   }
 
   state.aboutLoaded = true;
@@ -199,9 +164,9 @@ export async function updateWuddleInPlace() {
   }
 }
 
-export async function maybePollSelfUpdateInfo({ force = false, notify = false } = {}) {
+export async function maybePollSelfUpdateInfo({ notify = false } = {}) {
   const now = Date.now();
-  if (!force && now < state.nextSelfUpdatePollAt) return;
+  if (now < state.nextSelfUpdatePollAt) return;
   state.nextSelfUpdatePollAt = now + SELF_UPDATE_POLL_MINUTES * 60 * 1000;
 
   try {

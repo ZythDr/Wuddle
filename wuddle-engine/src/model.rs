@@ -66,6 +66,7 @@ pub struct Repo {
     pub installed_asset_name: Option<String>,
     pub installed_asset_size: Option<i64>,
     pub installed_asset_url: Option<String>,
+    pub published_at_unix: Option<i64>, // latest release timestamp for adaptive frequency
 }
 
 #[allow(dead_code)]
@@ -74,6 +75,7 @@ pub struct LatestRelease {
     pub tag: String,
     pub name: Option<String>,
     pub assets: Vec<ReleaseAsset>,
+    pub published_at: Option<i64>, // unix epoch seconds from forge API
 }
 
 #[allow(dead_code)]

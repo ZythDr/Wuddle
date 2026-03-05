@@ -55,6 +55,83 @@ pub struct UpdatePlan {
     pub error: Option<String>,
 }
 
+/// Controls how aggressively the engine checks for updates.
+/// When no GitHub token is configured, adaptive frequency skips repos
+/// whose latest release is old (stable/dormant) to conserve API quota.
+#[derive(Debug, Clone, Copy)]
+pub enum CheckMode {
+    /// User clicked "Check for updates". Skips stable/dormant repos (no token).
+    Manual,
+    /// Auto-check timer fired. Cycle-based modulo skipping (no token).
+    Auto { cycle: u32 },
+    /// Always check everything (startup, post-install, token save, etc.).
+    Force,
+}
+
+impl CheckMode {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "manual" => CheckMode::Manual,
+            "force" => CheckMode::Force,
+            other => {
+                if let Some(n) = other.strip_prefix("auto:") {
+                    if let Ok(cycle) = n.parse::<u32>() {
+                        return CheckMode::Auto { cycle };
+                    }
+                }
+                CheckMode::Force
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RepoActivity {
+    Active,
+    Stable,
+    Dormant,
+}
+
+fn classify_repo_activity(published_at_unix: i64, now_unix: i64) -> RepoActivity {
+    let age_days = now_unix.saturating_sub(published_at_unix) / 86400;
+    if age_days < 30 {
+        RepoActivity::Active
+    } else if age_days < 90 {
+        RepoActivity::Stable
+    } else {
+        RepoActivity::Dormant
+    }
+}
+
+/// Returns true if this repo should be skipped to conserve API quota.
+fn should_skip_adaptive(
+    check_mode: CheckMode,
+    published_at_unix: Option<i64>,
+    now_unix: i64,
+    has_token: bool,
+) -> bool {
+    if has_token {
+        return false;
+    }
+    if matches!(check_mode, CheckMode::Force) {
+        return false;
+    }
+    let pub_at = match published_at_unix {
+        Some(v) => v,
+        None => return false, // unknown = always check
+    };
+    let activity = classify_repo_activity(pub_at, now_unix);
+    match check_mode {
+        CheckMode::Manual => matches!(activity, RepoActivity::Stable | RepoActivity::Dormant),
+        CheckMode::Auto { cycle } => match activity {
+            RepoActivity::Active => false,
+            RepoActivity::Stable => cycle % 2 != 0,
+            RepoActivity::Dormant => cycle % 4 != 0,
+        },
+        CheckMode::Force => false,
+    }
+}
+
 pub struct Engine {
     db: Db,
     client: Client,
@@ -175,6 +252,7 @@ impl Engine {
             installed_asset_name: None,
             installed_asset_size: None,
             installed_asset_url: None,
+            published_at_unix: None,
         };
 
         self.db.add_repo(&repo)
@@ -649,6 +727,7 @@ impl Engine {
                 installed_asset_name: Some(format!("git:{}", branch)),
                 installed_asset_size: None,
                 installed_asset_url: Some(det.canonical_url.clone()),
+                published_at_unix: None,
             };
             let repo_id = self.db.add_repo(&tracked)?;
 
@@ -851,9 +930,17 @@ impl Engine {
         r: &Repo,
         use_cached_etag: bool,
         wow_dir: Option<&Path>,
+        check_mode: CheckMode,
     ) -> Result<UpdatePlan> {
         if !r.enabled {
             return Ok(Self::blank_plan(r));
+        }
+
+        // Adaptive update frequency: skip repos with old releases to conserve API quota.
+        if should_skip_adaptive(check_mode, r.published_at_unix, Self::now_unix(), Self::has_github_token()) {
+            let mut p = Self::blank_plan(r);
+            p.not_modified = true;
+            return Ok(p);
         }
 
         if matches!(r.mode, InstallMode::AddonGit) {
@@ -945,7 +1032,12 @@ impl Engine {
             }
 
             match rel_opt {
-                Some(x) => break x,
+                Some(x) => {
+                    if let Some(pub_at) = x.published_at {
+                        let _ = self.db.set_published_at(r.id, Some(pub_at));
+                    }
+                    break x;
+                }
                 None => {
                     let mut p = Self::blank_plan(r);
                     p.latest = "none".to_string();
@@ -1004,26 +1096,27 @@ impl Engine {
     }
 
     pub async fn check_updates(&self) -> Result<Vec<UpdatePlan>> {
-        self.check_updates_with_wow(None).await
+        self.check_updates_with_wow(None, CheckMode::Force).await
     }
 
     fn check_updates_parallel<'a>(
         &'a self,
         repos: &'a [Repo],
         wow_dir: Option<&'a Path>,
+        check_mode: CheckMode,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<UpdatePlan>>> + 'a>> {
         Box::pin(async move {
             match repos {
                 [] => Ok(Vec::new()),
                 [repo] => Ok(vec![
-                    self.build_update_plan_for_repo(repo, true, wow_dir).await?,
+                    self.build_update_plan_for_repo(repo, true, wow_dir, check_mode).await?,
                 ]),
                 _ => {
                     let mid = repos.len() / 2;
                     let (left, right) = repos.split_at(mid);
                     let (lres, rres) = tokio::join!(
-                        self.check_updates_parallel(left, wow_dir),
-                        self.check_updates_parallel(right, wow_dir)
+                        self.check_updates_parallel(left, wow_dir, check_mode),
+                        self.check_updates_parallel(right, wow_dir, check_mode)
                     );
                     let mut plans = lres?;
                     plans.extend(rres?);
@@ -1037,6 +1130,7 @@ impl Engine {
         &self,
         repos: &[Repo],
         wow_dir: Option<&Path>,
+        check_mode: CheckMode,
     ) -> Result<Vec<UpdatePlan>> {
         let mut plans = Vec::with_capacity(repos.len());
 
@@ -1044,21 +1138,21 @@ impl Engine {
         for chunk in repos.chunks(4) {
             match chunk {
                 [r1] => {
-                    plans.push(self.build_update_plan_for_repo(r1, true, wow_dir).await?);
+                    plans.push(self.build_update_plan_for_repo(r1, true, wow_dir, check_mode).await?);
                 }
                 [r1, r2] => {
                     let (p1, p2) = tokio::join!(
-                        self.build_update_plan_for_repo(r1, true, wow_dir),
-                        self.build_update_plan_for_repo(r2, true, wow_dir)
+                        self.build_update_plan_for_repo(r1, true, wow_dir, check_mode),
+                        self.build_update_plan_for_repo(r2, true, wow_dir, check_mode)
                     );
                     plans.push(p1?);
                     plans.push(p2?);
                 }
                 [r1, r2, r3] => {
                     let (p1, p2, p3) = tokio::join!(
-                        self.build_update_plan_for_repo(r1, true, wow_dir),
-                        self.build_update_plan_for_repo(r2, true, wow_dir),
-                        self.build_update_plan_for_repo(r3, true, wow_dir)
+                        self.build_update_plan_for_repo(r1, true, wow_dir, check_mode),
+                        self.build_update_plan_for_repo(r2, true, wow_dir, check_mode),
+                        self.build_update_plan_for_repo(r3, true, wow_dir, check_mode)
                     );
                     plans.push(p1?);
                     plans.push(p2?);
@@ -1066,10 +1160,10 @@ impl Engine {
                 }
                 [r1, r2, r3, r4] => {
                     let (p1, p2, p3, p4) = tokio::join!(
-                        self.build_update_plan_for_repo(r1, true, wow_dir),
-                        self.build_update_plan_for_repo(r2, true, wow_dir),
-                        self.build_update_plan_for_repo(r3, true, wow_dir),
-                        self.build_update_plan_for_repo(r4, true, wow_dir)
+                        self.build_update_plan_for_repo(r1, true, wow_dir, check_mode),
+                        self.build_update_plan_for_repo(r2, true, wow_dir, check_mode),
+                        self.build_update_plan_for_repo(r3, true, wow_dir, check_mode),
+                        self.build_update_plan_for_repo(r4, true, wow_dir, check_mode)
                     );
                     plans.push(p1?);
                     plans.push(p2?);
@@ -1083,7 +1177,7 @@ impl Engine {
         Ok(plans)
     }
 
-    pub async fn check_updates_with_wow(&self, wow_dir: Option<&Path>) -> Result<Vec<UpdatePlan>> {
+    pub async fn check_updates_with_wow(&self, wow_dir: Option<&Path>, check_mode: CheckMode) -> Result<Vec<UpdatePlan>> {
         if let Some(wow_dir) = wow_dir {
             let _ = self.import_existing_addon_git_repos(wow_dir);
         }
@@ -1100,8 +1194,8 @@ impl Engine {
         }
 
         let (git_plans, release_plans) = tokio::join!(
-            self.check_updates_parallel(&git_repos, wow_dir),
-            self.check_updates_batched(&release_repos, wow_dir)
+            self.check_updates_parallel(&git_repos, wow_dir, check_mode),
+            self.check_updates_batched(&release_repos, wow_dir, check_mode)
         );
 
         let mut plans = Vec::with_capacity(git_repos.len() + release_repos.len());
@@ -1829,7 +1923,7 @@ impl Engine {
 
         for r in repos {
             let mut plan = self
-                .build_update_plan_for_repo(&r, true, Some(wow_dir))
+                .build_update_plan_for_repo(&r, true, Some(wow_dir), CheckMode::Force)
                 .await?;
             if r.enabled && !plan.asset_url.is_empty() && !plan.externally_modified {
                 match self.apply_one(&plan, wow_dir, raw_dest, opts).await {
@@ -1856,7 +1950,7 @@ impl Engine {
     ) -> Result<Option<UpdatePlan>> {
         let repo = self.db.get_repo(repo_id)?;
         let mut plan = self
-            .build_update_plan_for_repo(&repo, true, Some(wow_dir))
+            .build_update_plan_for_repo(&repo, true, Some(wow_dir), CheckMode::Force)
             .await?;
 
         if let Some(err) = plan.error.clone() {

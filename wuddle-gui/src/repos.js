@@ -17,7 +17,6 @@ import {
   normalizeProjectView,
   persistProjectViewByProfile,
 } from "./profiles.js";
-import { maybePollSelfUpdateInfo } from "./about.js";
 
 // ============================================================================
 // Repo Identity / Key
@@ -1802,9 +1801,10 @@ async function loadReposLocal() {
 export async function checkUpdates(options = {}) {
   const notify = !!options.notify;
   const source = String(options.source || "refresh");
+  const checkMode = options.checkMode || "force";
   const prevByRepo = new Map(state.plans.map((p) => [p.repo_id, p]));
   const wowDir = readWowDir() || null;
-  const next = await safeInvoke("wuddle_check_updates", { wowDir }, { timeoutMs: 30000 });
+  const next = await safeInvoke("wuddle_check_updates", { wowDir, checkMode }, { timeoutMs: 30000 });
   const checkedAt = new Date();
 
   state.plans = next.map((plan) => {
@@ -1855,6 +1855,7 @@ export async function refreshAll(options = {}) {
   const forceCheck = !!options.forceCheck;
   const notify = !!options.notify;
   const source = String(options.source || "refresh");
+  const checkMode = options.checkMode || "force";
   if (state.refreshInFlight) {
     return;
   }
@@ -1879,8 +1880,7 @@ export async function refreshAll(options = {}) {
       const shouldCheckUpdates = forceCheck || hasToken || allowInitial;
 
       if (shouldCheckUpdates) {
-        await checkUpdates({ notify, source });
-        await maybePollSelfUpdateInfo({ force: forceCheck || source === "startup", notify });
+        await checkUpdates({ notify, source, checkMode });
         state.initialAutoCheckDone = true;
         state.loggedNoTokenAutoSkip = false;
       } else if (!state.loggedNoTokenAutoSkip) {
@@ -1976,7 +1976,7 @@ export async function handleUpdateAction() {
     await updateAll();
     return;
   }
-  await refreshAll({ forceCheck: true, notify: true, source: "manual" });
+  await refreshAll({ forceCheck: true, notify: true, source: "manual", checkMode: "manual" });
 }
 
 export async function addRepo(urlOverride = null, modeOverride = null, label = "") {

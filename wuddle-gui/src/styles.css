@@ -3031,13 +3031,9 @@ html[data-font-style="friz"] .home-play-btn {
   border-color: rgba(59,130,246,0.45);
 }
 
-@media (min-width: 1024px) {
+@media (min-width: 860px) {
   .about-grid {
     grid-template-columns: 1fr 1fr;
-  }
-
-  .about-grid > .settings-card:last-child {
-    grid-column: 1 / -1;
   }
 }
 
