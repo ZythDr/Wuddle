@@ -1471,6 +1471,48 @@ fn wuddle_launch_game(wowDir: String, launch: Option<LaunchConfig>) -> Result<St
     }
 }
 
+/// Build an `xdg-open` Command with a clean environment so that AppImage's
+/// bundled libraries and env vars don't prevent the system browser / file
+/// manager from launching.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn clean_xdg_open(arg: &str) -> Command {
+    let mut cmd = Command::new("xdg-open");
+    cmd.arg(arg);
+    cmd.env_clear();
+    for key in &[
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "XDG_SESSION_TYPE",
+        "XDG_CURRENT_DESKTOP",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "LANG",
+        "LC_ALL",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
+    }
+    let clean_path = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|p| !p.contains("/tmp/.mount_"))
+        .collect::<Vec<_>>()
+        .join(":");
+    cmd.env(
+        "PATH",
+        if clean_path.is_empty() {
+            "/usr/bin:/bin".to_string()
+        } else {
+            clean_path
+        },
+    );
+    cmd
+}
+
 #[tauri::command]
 fn wuddle_open_url(url: String) -> Result<(), String> {
     let trimmed = url.trim();
@@ -1480,23 +1522,8 @@ fn wuddle_open_url(url: String) -> Result<(), String> {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        // On Linux (especially AppImage), the bundled environment can break
-        // xdg-open. Strip AppImage-specific env vars so the system browser
-        // launches correctly.
-        let mut cmd = Command::new("xdg-open");
-        cmd.arg(trimmed);
-        for key in &[
-            "LD_LIBRARY_PATH",
-            "LD_PRELOAD",
-            "APPDIR",
-            "APPIMAGE",
-            "ARGV0",
-            "OWD",
-            "GDK_BACKEND",
-        ] {
-            cmd.env_remove(key);
-        }
-        cmd.spawn()
+        clean_xdg_open(trimmed)
+            .spawn()
             .map(|_| ())
             .map_err(|e| format!("Failed to open URL: {}", e))
     }
@@ -1550,22 +1577,7 @@ fn wuddle_open_directory(path: String) -> Result<(), String> {
     };
 
     #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = {
-        let mut c = Command::new("xdg-open");
-        c.arg(&path_buf);
-        for key in &[
-            "LD_LIBRARY_PATH",
-            "LD_PRELOAD",
-            "APPDIR",
-            "APPIMAGE",
-            "ARGV0",
-            "OWD",
-            "GDK_BACKEND",
-        ] {
-            c.env_remove(key);
-        }
-        c
-    };
+    let mut cmd = clean_xdg_open(trimmed);
 
     cmd.spawn()
         .map(|_| ())
