@@ -1,9 +1,10 @@
-// About tab: info display, self-update, version polling
+// About tab: info display, self-update, version polling, changelog
 import { state, SELF_UPDATE_POLL_MINUTES } from "./state.js";
-import { $, formatTime } from "./utils.js";
+import { $, formatTime, escapeHtml } from "./utils.js";
 import { safeInvoke } from "./commands.js";
 import { log, logOperationResult } from "./logs.js";
 import { showToast } from "./ui.js";
+import { openUrl } from "./repos.js";
 
 let _setTab = (_tab) => {};
 export function setAboutCallbacks(cbs) {
@@ -190,5 +191,86 @@ export async function maybePollSelfUpdateInfo({ notify = false } = {}) {
     });
   } catch (_) {
     // Silent by design to avoid repeated noisy errors on background polling.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Changelog viewer
+// ---------------------------------------------------------------------------
+
+/** Convert simple changelog markdown to HTML. */
+function changelogToHtml(md) {
+  const lines = md.split("\n");
+  let html = "";
+  let inList = false;
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+
+    if (line.startsWith("# ") && !line.startsWith("## ")) {
+      if (inList) { html += "</ul>"; inList = false; }
+      html += `<h1>${escapeHtml(line.slice(2))}</h1>`;
+      continue;
+    }
+    if (line.startsWith("## ")) {
+      if (inList) { html += "</ul>"; inList = false; }
+      html += `<h2>${escapeHtml(line.slice(3))}</h2>`;
+      continue;
+    }
+    if (line.startsWith("- ")) {
+      if (!inList) { html += "<ul>"; inList = true; }
+      html += `<li>${inlineFormat(line.slice(2))}</li>`;
+      continue;
+    }
+    if (line.startsWith("  - ")) {
+      if (!inList) { html += "<ul>"; inList = true; }
+      html += `<li class="nested">${inlineFormat(line.slice(4))}</li>`;
+      continue;
+    }
+    if (line.trim() === "") {
+      if (inList) { html += "</ul>"; inList = false; }
+      continue;
+    }
+    if (inList) { html += "</ul>"; inList = false; }
+    html += `<p>${inlineFormat(line)}</p>`;
+  }
+  if (inList) html += "</ul>";
+  return html;
+}
+
+/** Apply inline markdown formatting (bold, links) with HTML escaping. */
+function inlineFormat(text) {
+  let out = escapeHtml(text);
+  // **bold**
+  out = out.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  // [text](url)
+  out = out.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
+    '<a href="#" class="changelog-link" data-href="$2">$1</a>',
+  );
+  return out;
+}
+
+export async function showChangelog() {
+  const dlg = $("dlgChangelog");
+  const content = $("changelogContent");
+  if (!dlg || !content) return;
+
+  content.innerHTML = '<p class="hint">Loading changelog…</p>';
+  dlg.showModal();
+
+  try {
+    const md = await safeInvoke("wuddle_fetch_changelog", {}, { timeoutMs: 15000 });
+    content.innerHTML = changelogToHtml(md);
+
+    // Wire up links to open via system browser.
+    content.querySelectorAll(".changelog-link").forEach((a) => {
+      a.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        void openUrl(a.dataset.href);
+      });
+    });
+  } catch (err) {
+    content.innerHTML = `<p class="hint">Failed to load changelog: ${escapeHtml(err?.message || String(err))}</p>`;
   }
 }

@@ -117,6 +117,7 @@ import {
   maybePollSelfUpdateInfo,
   updateWuddleInPlace,
   setAboutCallbacks,
+  showChangelog,
 } from "./about.js";
 
 import { renderHome, launchGameFromHome, setHomeCallbacks } from "./home.js";
@@ -492,6 +493,9 @@ $("btnAboutRefresh").addEventListener("click", () => {
 $("btnAboutUpdate").addEventListener("click", () => {
   void updateWuddleInPlace();
 });
+$("btnAboutChangelog").addEventListener("click", () => {
+  void showChangelog();
+});
 $("btnAboutGithub").addEventListener("click", async () => {
   await openUrl(WUDDLE_REPO_URL);
 });
@@ -594,6 +598,7 @@ bindDialogOutsideToClose($("dlgAddonConflict"));
 bindDialogOutsideToClose($("dlgRemove"));
 bindDialogOutsideToClose($("dlgRemoveInstance"));
 bindDialogOutsideToClose($("dlgInstanceSettings"));
+bindDialogOutsideToClose($("dlgChangelog"));
 
 document.addEventListener("click", (ev) => {
   if (state.openMenuRepoId === null) return;

@@ -2,9 +2,11 @@
 
 All notable changes to Wuddle are documented in this file.
 
-## v2.4.3
+## v2.4.4
 
-- **Fix external links in AppImage:** Switched from env-var blacklist to whitelist approach for `xdg-open`, fixing links silently failing to open in browser
+- **In-app changelog viewer:** View the latest changelog from within Wuddle via the About page — fetched live from GitHub so older versions can see what's new
+- **Fix external links in AppImage:** Comprehensive env-var cleanup for `xdg-open` so links open reliably across all desktop environments (KDE, GNOME, XFCE, etc.)
+- **Removed .deb and .rpm builds:** Linux releases now ship as AppImage and portable tar.gz only
 
 ## v2.4.2
 
