@@ -46,7 +46,7 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        const SCHEMA_VERSION: i32 = 2;
+        const SCHEMA_VERSION: i32 = 3;
 
         let current: i32 = self
             .conn
@@ -121,6 +121,13 @@ impl Db {
             self.conn.execute_batch("PRAGMA user_version = 2")?;
         }
 
+        // v2 → v3: add published_at_unix for adaptive update frequency.
+        if current < 3 {
+            self.conn
+                .execute_batch("ALTER TABLE repos ADD COLUMN published_at_unix INTEGER")?;
+            self.conn.execute_batch("PRAGMA user_version = 3")?;
+        }
+
         Ok(())
     }
 
@@ -169,11 +176,13 @@ impl Db {
             r#"
             INSERT INTO repos(
               url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
-              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url
+              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
+              published_at_unix
             )
             VALUES (
               ?1,  ?2,   ?3,   ?4,    ?5,   ?6,   ?7,      ?8,         ?9,         ?10,         ?11,
-              ?12,               ?13,                 ?14,                  ?15
+              ?12,               ?13,                 ?14,                  ?15,
+              ?16
             )
             "#,
             params![
@@ -191,7 +200,8 @@ impl Db {
                 repo.installed_asset_id,
                 repo.installed_asset_name,
                 repo.installed_asset_size,
-                repo.installed_asset_url
+                repo.installed_asset_url,
+                repo.published_at_unix
             ],
         );
 
@@ -224,7 +234,8 @@ impl Db {
             r#"
             SELECT
               id, url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
-              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url
+              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
+              published_at_unix
             FROM repos
             ORDER BY host, owner, name
             "#,
@@ -249,6 +260,7 @@ impl Db {
                 installed_asset_name: row.get(13)?,
                 installed_asset_size: row.get(14)?,
                 installed_asset_url: row.get(15)?,
+                published_at_unix: row.get(16)?,
             })
         })?;
 
@@ -264,7 +276,8 @@ impl Db {
             r#"
             SELECT
               id, url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
-              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url
+              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
+              published_at_unix
             FROM repos
             WHERE id=?1
             "#,
@@ -289,6 +302,7 @@ impl Db {
                 installed_asset_name: row.get(13)?,
                 installed_asset_size: row.get(14)?,
                 installed_asset_url: row.get(15)?,
+                published_at_unix: row.get(16)?,
             })
         })?;
 
@@ -346,6 +360,14 @@ impl Db {
             WHERE id=?6
             "#,
             params![version, asset_id, asset_name, asset_size, asset_url, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_published_at(&self, id: i64, published_at_unix: Option<i64>) -> Result<()> {
+        self.conn.execute(
+            r#"UPDATE repos SET published_at_unix=?1 WHERE id=?2"#,
+            params![published_at_unix, id],
         )?;
         Ok(())
     }

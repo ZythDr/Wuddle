@@ -9,6 +9,7 @@ use crate::model::{LatestRelease, ReleaseAsset};
 struct GiteaRelease {
     tag_name: String,
     name: Option<String>,
+    published_at: Option<String>,
     assets: Vec<GiteaAsset>,
 }
 
@@ -71,6 +72,7 @@ pub async fn latest_release(
             tag: rel.tag_name,
             name: rel.name,
             assets,
+            published_at: rel.published_at.as_deref().and_then(super::parse_rfc3339_unix),
         }),
         false,
     ))

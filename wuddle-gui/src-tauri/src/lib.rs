@@ -73,6 +73,7 @@ struct GithubAuthStatus {
     keychain_available: bool,
     token_stored: bool,
     env_token_present: bool,
+    portable_mode: bool,
 }
 
 #[derive(Serialize)]
@@ -375,9 +376,41 @@ fn env_token_present() -> bool {
     env_token().is_some()
 }
 
+fn token_file_path() -> Result<PathBuf, String> {
+    Ok(app_dir()?.join(".github_token"))
+}
+
+fn read_file_token() -> Result<Option<String>, String> {
+    let path = token_file_path()?;
+    match fs::read_to_string(&path) {
+        Ok(s) => {
+            let t = s.trim().to_string();
+            Ok(if t.is_empty() { None } else { Some(t) })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn write_file_token(token: &str) -> Result<(), String> {
+    let path = token_file_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&path, token.trim()).map_err(|e| e.to_string())
+}
+
+fn clear_file_token() -> Result<(), String> {
+    let path = token_file_path()?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn read_keychain_token() -> Result<Option<String>, String> {
     if portable_mode_enabled() {
-        return Ok(None);
+        return read_file_token();
     }
     keychain_call_with_timeout("reading token", || {
         let entry = keychain_entry(KEYCHAIN_ACCOUNT_GITHUB_TOKEN)?;
@@ -398,7 +431,7 @@ fn read_keychain_token() -> Result<Option<String>, String> {
 
 fn keychain_probe_available() -> Result<(), String> {
     if portable_mode_enabled() {
-        return Err("system keychain disabled in portable mode".to_string());
+        return Ok(()); // file-based storage is always available
     }
     keychain_call_with_timeout("probing keychain", || {
         let probe = format!("wuddle-probe-{}", std::process::id());
@@ -415,7 +448,7 @@ fn keychain_probe_available() -> Result<(), String> {
 
 fn set_keychain_token(token: String) -> Result<(), String> {
     if portable_mode_enabled() {
-        return Err("system keychain disabled in portable mode".to_string());
+        return write_file_token(&token);
     }
     keychain_call_with_timeout("saving token", move || {
         let entry = keychain_entry(KEYCHAIN_ACCOUNT_GITHUB_TOKEN)?;
@@ -425,7 +458,7 @@ fn set_keychain_token(token: String) -> Result<(), String> {
 
 fn clear_keychain_token() -> Result<(), String> {
     if portable_mode_enabled() {
-        return Ok(());
+        return clear_file_token();
     }
     keychain_call_with_timeout("clearing token", || {
         let entry = keychain_entry(KEYCHAIN_ACCOUNT_GITHUB_TOKEN)?;
@@ -709,8 +742,12 @@ async fn wuddle_set_repo_enabled(
 
 #[tauri::command]
 #[allow(non_snake_case)]
-async fn wuddle_check_updates(wowDir: Option<String>) -> Result<Vec<PlanRow>, String> {
+async fn wuddle_check_updates(
+    wowDir: Option<String>,
+    checkMode: Option<String>,
+) -> Result<Vec<PlanRow>, String> {
     let wow_dir = normalize_optional_wow_dir(wowDir);
+    let mode = wuddle_engine::CheckMode::from_str(checkMode.as_deref().unwrap_or("force"));
 
     run_blocking(move || {
         let plans = tauri::async_runtime::block_on(async {
@@ -719,7 +756,7 @@ async fn wuddle_check_updates(wowDir: Option<String>) -> Result<Vec<PlanRow>, St
             if let Some(wow_dir) = wow_path {
                 let _ = eng.import_existing_addon_git_repos(wow_dir);
             }
-            eng.check_updates_with_wow(wow_path)
+            eng.check_updates_with_wow(wow_path, mode)
                 .await
                 .map_err(|e| e.to_string())
         })?;
@@ -1026,11 +1063,18 @@ async fn wuddle_github_auth_status() -> Result<GithubAuthStatus, String> {
     run_blocking(|| {
         let env_token_present = env_token_present();
         if portable_mode_enabled() {
-            wuddle_engine::set_github_token(None);
+            // In portable mode, use file-based token storage
+            let file_token = read_file_token().unwrap_or(None);
+            if let Some(ref token) = file_token {
+                wuddle_engine::set_github_token(Some(token.clone()));
+            } else {
+                wuddle_engine::set_github_token(None);
+            }
             return Ok(GithubAuthStatus {
-                keychain_available: false,
-                token_stored: false,
+                keychain_available: true, // file storage is always available
+                token_stored: file_token.is_some(),
                 env_token_present,
+                portable_mode: true,
             });
         }
 
@@ -1053,6 +1097,7 @@ async fn wuddle_github_auth_status() -> Result<GithubAuthStatus, String> {
             keychain_available,
             token_stored,
             env_token_present,
+            portable_mode: false,
         })
     })
     .await

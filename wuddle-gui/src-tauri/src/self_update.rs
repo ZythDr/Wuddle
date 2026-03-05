@@ -1,7 +1,4 @@
-use serde::Serialize;
-
-#[cfg(target_os = "windows")]
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
 use std::{
     fs,
@@ -33,24 +30,27 @@ struct GithubReleaseAsset {
     browser_download_url: String,
 }
 
-#[cfg(target_os = "windows")]
 #[derive(Debug, Deserialize)]
 struct GithubRelease {
     tag_name: String,
+    #[cfg(target_os = "windows")]
     assets: Vec<GithubReleaseAsset>,
 }
 
-#[cfg(target_os = "windows")]
 const WUDDLE_RELEASE_API_URL: &str = "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
 
 pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
     #[cfg(not(target_os = "windows"))]
     {
+        let latest_version = fetch_latest_release_meta()
+            .ok()
+            .map(|r| normalize_release_tag(&r.tag_name))
+            .filter(|v| !v.is_empty());
         return Ok(SelfUpdateInfo {
             supported: false,
             launcher_layout: false,
             current_version: current_version.to_string(),
-            latest_version: None,
+            latest_version,
             update_available: false,
             message: "In-app update is currently available only for Windows launcher builds."
                 .to_string(),
@@ -135,6 +135,7 @@ pub fn apply_update(current_version: &str) -> Result<OperationResult, String> {
             );
         }
 
+        cleanup_stale_update_files(&root);
         steps.push(format!("Detected launcher root: {}", root.display()));
         steps.push("Checking latest release metadata…".to_string());
         let release = fetch_latest_release_meta()?;
@@ -264,7 +265,6 @@ fn is_versioned_runtime_layout(root: &Path, exe_path: &Path) -> bool {
     name.eq_ignore_ascii_case("versions")
 }
 
-#[cfg(target_os = "windows")]
 fn normalize_release_tag(raw: &str) -> String {
     raw.trim().trim_start_matches(['v', 'V']).trim().to_string()
 }
@@ -312,7 +312,6 @@ fn is_version_newer(latest: &str, current: &str) -> bool {
     false
 }
 
-#[cfg(target_os = "windows")]
 fn github_api_token() -> Option<String> {
     if let Some(token) = crate::env_token() {
         return Some(token);
@@ -320,7 +319,6 @@ fn github_api_token() -> Option<String> {
     crate::read_keychain_token().ok().flatten()
 }
 
-#[cfg(target_os = "windows")]
 fn fetch_latest_release_meta() -> Result<GithubRelease, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
@@ -343,8 +341,20 @@ fn fetch_latest_release_meta() -> Result<GithubRelease, String> {
         .map_err(|e| format!("fetch release metadata: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().unwrap_or_default();
-        return Err(format!("release metadata HTTP {}: {}", status, body));
+        let code = status.as_u16();
+        let message = if code == 403 || code == 429 {
+            let body = resp.text().unwrap_or_default().to_ascii_lowercase();
+            if body.contains("rate limit") {
+                "GitHub API rate limit exceeded. Add a GitHub token in Options to raise the limit."
+            } else {
+                "GitHub denied the request. Your token may be invalid or expired."
+            }
+        } else if code == 401 {
+            "GitHub authentication failed. Your token may be invalid or expired."
+        } else {
+            "Could not fetch release information from GitHub."
+        };
+        return Err(format!("{} (HTTP {})", message, code));
     }
     resp.json::<GithubRelease>()
         .map_err(|e| format!("parse release metadata: {e}"))
@@ -411,9 +421,54 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         file.flush().map_err(|e| e.to_string())?;
     }
     if path.exists() {
-        fs::remove_file(path).map_err(|e| e.to_string())?;
+        if fs::remove_file(path).is_err() {
+            // File likely locked (running exe on Windows) — rename it out of the way.
+            // Windows allows renaming a running exe, just not deleting it.
+            let old = path.with_extension(format!("old-{}", stamp));
+            fs::rename(path, &old)
+                .map_err(|e| format!("failed to move locked file {}: {}", path.display(), e))?;
+        }
     }
     fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+/// Remove stale `.tmp-*` and `.old-*` files left by previous update attempts.
+#[cfg(target_os = "windows")]
+fn cleanup_stale_update_files(root: &Path) {
+    let dirs_to_clean = [root.to_path_buf(), root.join("versions")];
+    for dir in &dirs_to_clean {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let dominated = name.contains(".tmp-") || name.contains(".old-");
+            let relevant = name.starts_with("Wuddle") || name.starts_with("wuddle");
+            if dominated && relevant {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        // Also clean inside version subdirectories
+        if dir.ends_with("versions") {
+            if let Ok(subdirs) = fs::read_dir(dir) {
+                for subdir in subdirs.flatten() {
+                    if !subdir.path().is_dir() {
+                        continue;
+                    }
+                    if let Ok(files) = fs::read_dir(subdir.path()) {
+                        for file in files.flatten() {
+                            let n = file.file_name();
+                            let n = n.to_string_lossy();
+                            if (n.contains(".tmp-") || n.contains(".old-")) && n.starts_with("Wuddle") {
+                                let _ = fs::remove_file(file.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]

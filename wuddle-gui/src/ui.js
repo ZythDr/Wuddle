@@ -1,4 +1,5 @@
 import { state, SUPPORTED_THEMES, DEFAULT_THEME_ID } from "./state.js";
+import { maybePollSelfUpdateInfo } from "./about.js";
 import { $ } from "./utils.js";
 
 const themedSelectBindings = new WeakMap();
@@ -326,7 +327,14 @@ export function scheduleAutoCheckTimer() {
   const delayMs = normalized * 60 * 1000;
   state.autoCheckTimerId = window.setTimeout(async () => {
     state.autoCheckTimerId = null;
-    await _refreshAll({ forceCheck: true, notify: true, source: "auto" });
+    state.autoCheckCycle = (state.autoCheckCycle || 0) + 1;
+    await _refreshAll({
+      forceCheck: true,
+      notify: true,
+      source: "auto",
+      checkMode: `auto:${state.autoCheckCycle}`,
+    });
+    await maybePollSelfUpdateInfo({ notify: true });
     scheduleAutoCheckTimer();
   }, delayMs);
 }

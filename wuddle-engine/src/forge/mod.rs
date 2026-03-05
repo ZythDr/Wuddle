@@ -276,6 +276,42 @@ fn apply_if_none_match(
     req
 }
 
+/// Parse a subset of ISO 8601 / RFC 3339 timestamps to Unix epoch seconds.
+/// Handles: "2024-01-15T10:30:00Z", "2024-01-15T10:30:00+00:00", fractional seconds.
+pub(crate) fn parse_rfc3339_unix(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.len() < 20 {
+        return None;
+    }
+    let b = s.as_bytes();
+
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    if *b.get(4)? != b'-' { return None; }
+    let month: i64 = s.get(5..7)?.parse().ok()?;
+    if *b.get(7)? != b'-' { return None; }
+    let day: i64 = s.get(8..10)?.parse().ok()?;
+    if *b.get(10)? != b'T' { return None; }
+    let hour: i64 = s.get(11..13)?.parse().ok()?;
+    if *b.get(13)? != b':' { return None; }
+    let min: i64 = s.get(14..16)?.parse().ok()?;
+    if *b.get(16)? != b':' { return None; }
+    let sec: i64 = s.get(17..19)?.parse().ok()?;
+
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) { return None; }
+    if hour > 23 || min > 59 || sec > 60 { return None; }
+
+    // Civil date to Unix days (Howard Hinnant algorithm)
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400) as u64;
+    let m = if month <= 2 { month + 9 } else { month - 3 } as u64;
+    let doy = (153 * m + 2) / 5 + day as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe as i64 - 719468;
+
+    Some(days * 86400 + hour * 3600 + min * 60 + sec)
+}
+
 /// Common handler for 304.
 fn handle_304(
     status: StatusCode,

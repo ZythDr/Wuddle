@@ -2,6 +2,18 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.4.1
+
+- **Adaptive update frequency:** Mods are classified by release age (Active/Stable/Dormant) and less frequently updated mods are checked less often to conserve GitHub API requests — only active when no GitHub token is configured
+- **Self-update restart fix (Windows):** Fixed self-update failing when the running executable is locked, using atomic rename instead of delete
+- **Cross-platform latest version display:** About page now shows the latest Wuddle release version on all platforms, not just Windows
+- **Template error messages:** GitHub API errors no longer expose raw response bodies; friendly messages guide users to add/re-save their token
+- **Self-update poll interval:** Reduced from every 30 minutes to every 60 minutes
+- **Windows portable token persistence:** GitHub token is saved to a local file in portable mode so it persists across updates
+- **Tweaks reliability fix:** Tweaks are now applied from a clean backup copy to avoid compounding patches
+- **About page layout:** Fixed grid alignment and added GitAddonsManager credit
+- **RaidRes community link:** Added RaidRes button to Turtle WoW community links
+
 ## v2.4.0
 
 - **Tweaks tab:** Patch WoW.exe with quality-of-life improvements directly from Wuddle, powered by [vanilla-tweaks by brndd](https://github.com/brndd/vanilla-tweaks)

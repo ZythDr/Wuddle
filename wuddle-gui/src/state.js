@@ -35,7 +35,7 @@ export const DEFAULT_AUTO_CHECK_MINUTES = 60;
 export const DEFAULT_CACHE_KEEP_VERSIONS = 3;
 export const MIN_AUTO_CHECK_MINUTES = 1;
 export const MAX_AUTO_CHECK_MINUTES = 240;
-export const SELF_UPDATE_POLL_MINUTES = 30;
+export const SELF_UPDATE_POLL_MINUTES = 60;
 export const SUPPORTED_THEMES = new Set(["cata", "obsidian", "emerald", "ashen", "wowui"]);
 
 export const state = {
@@ -65,6 +65,7 @@ export const state = {
   autoCheckMinutes: DEFAULT_AUTO_CHECK_MINUTES,
   cacheKeepVersions: DEFAULT_CACHE_KEEP_VERSIONS,
   autoCheckTimerId: null,
+  autoCheckCycle: 0,
   lastUpdateNotifyKey: "",
   lastSelfUpdateNotifyVersion: "",
   nextSelfUpdatePollAt: 0,

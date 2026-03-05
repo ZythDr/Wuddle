@@ -77,4 +77,7 @@ export function bindTurtleListeners() {
   $("homeBtnWowAuctions").addEventListener("click", async () => {
     await openUrl(WOWAUCTIONS_URL);
   });
+  $("homeBtnRaidRes").addEventListener("click", async () => {
+    await openUrl("https://raidres.top/");
+  });
 }

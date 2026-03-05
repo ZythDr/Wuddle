@@ -68,11 +68,15 @@ export function renderGithubAuth(status) {
     return;
   }
 
+  const portableMode = !!status?.portableMode;
   hint.textContent = "Optional: add a GitHub token to avoid anonymous API rate limits.";
   if (tokenStored) {
-    badge.textContent = "Keychain token";
+    badge.textContent = portableMode ? "Saved locally" : "Keychain token";
     badge.classList.add("ok");
-    setGithubAuthStatus("Token saved in system keychain.", "status-ok");
+    setGithubAuthStatus(
+      portableMode ? "Token saved locally (portable mode)." : "Token saved in system keychain.",
+      "status-ok",
+    );
     state.loggedNoTokenAutoSkip = false;
   } else if (envTokenPresent) {
     badge.textContent = "Env token";
