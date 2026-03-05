@@ -2030,6 +2030,68 @@ dialog.dialog > .select-menu-pop {
   }
 }
 
+.dialog-wide {
+  width: min(860px, calc(100vw - 40px));
+}
+
+/* ---- Changelog dialog ---- */
+.changelog-content {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-soft);
+  max-height: min(65vh, 600px);
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.changelog-content h1 {
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--text);
+  margin: 0 0 8px 0;
+}
+
+.changelog-content h2 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--primary);
+  margin: 20px 0 6px 0;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.changelog-content h2:first-child {
+  margin-top: 0;
+}
+
+.changelog-content ul {
+  margin: 4px 0 8px 0;
+  padding-left: 20px;
+}
+
+.changelog-content li {
+  margin-bottom: 3px;
+}
+
+.changelog-content li.nested {
+  margin-left: 16px;
+  list-style-type: circle;
+}
+
+.changelog-content strong {
+  color: var(--text);
+}
+
+.changelog-content .changelog-link {
+  color: var(--primary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.changelog-content .changelog-link:hover {
+  color: var(--text);
+}
+
 .dialog-head {
   display: flex;
   align-items: flex-start;

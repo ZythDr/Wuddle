@@ -607,6 +607,7 @@
         </div>
         <div class="row tight">
           <button id="btnAboutRefresh" class="btn" type="button">Refresh details</button>
+          <button id="btnAboutChangelog" class="btn" type="button">Changelog</button>
           <button id="btnAboutUpdate" class="btn" type="button" disabled>Up to date</button>
           <button id="btnAboutGithub" class="btn" type="button">Open Wuddle on GitHub</button>
         </div>
@@ -940,6 +941,23 @@
         <div class="dialog-actions">
           <button id="btnInstanceSettingsCancel" class="btn ghost" value="cancel">Cancel</button>
           <button id="btnInstanceSettingsSave" class="btn primary" value="ok">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Changelog modal -->
+    <dialog id="dlgChangelog" class="dialog">
+      <form method="dialog" class="dialog-inner dialog-wide">
+        <div class="dialog-head">
+          <div>
+            <div class="dialog-title">Changelog</div>
+            <div class="hint">What's new in Wuddle</div>
+          </div>
+          <button class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
+        </div>
+        <div id="changelogContent" class="changelog-content"></div>
+        <div class="dialog-actions">
+          <button class="btn primary" value="ok">Close</button>
         </div>
       </form>
     </dialog>

@@ -1471,45 +1471,56 @@ fn wuddle_launch_game(wowDir: String, launch: Option<LaunchConfig>) -> Result<St
     }
 }
 
-/// Build an `xdg-open` Command with a clean environment so that AppImage's
-/// bundled libraries and env vars don't prevent the system browser / file
-/// manager from launching.
+/// Build an `xdg-open` Command with AppImage-injected env vars stripped so
+/// the system browser / file manager launches correctly. Uses a blacklist
+/// rather than a whitelist because xdg-open and the programs it delegates to
+/// (kfmclient, gio, etc.) need many DE-specific vars that are hard to enumerate.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn clean_xdg_open(arg: &str) -> Command {
     let mut cmd = Command::new("xdg-open");
     cmd.arg(arg);
-    cmd.env_clear();
+    // Remove all env vars that the AppImage runtime injects.
     for key in &[
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "DISPLAY",
-        "WAYLAND_DISPLAY",
-        "XDG_RUNTIME_DIR",
-        "XDG_SESSION_TYPE",
-        "XDG_CURRENT_DESKTOP",
-        "DBUS_SESSION_BUS_ADDRESS",
-        "LANG",
-        "LC_ALL",
+        // AppImage runtime vars
+        "APPDIR",
+        "APPIMAGE",
+        "ARGV0",
+        "OWD",
+        // Library paths pointing into the AppImage mount
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        // GIO/GStreamer/Qt module paths bundled in the AppImage
+        "GIO_MODULE_DIR",
+        "GST_PLUGIN_PATH",
+        "GST_PLUGIN_SYSTEM_PATH",
+        "QT_PLUGIN_PATH",
+        // Python paths (some AppImages bundle Python)
+        "PYTHONPATH",
+        "PYTHONHOME",
+        // We set this ourselves for the Wayland/X11 fallback
+        "GDK_BACKEND",
     ] {
-        if let Ok(val) = std::env::var(key) {
-            cmd.env(key, val);
-        }
+        cmd.env_remove(key);
     }
+    // Clean PATH so AppImage internal dirs don't shadow system binaries.
     let clean_path = std::env::var("PATH")
         .unwrap_or_default()
         .split(':')
         .filter(|p| !p.contains("/tmp/.mount_"))
         .collect::<Vec<_>>()
         .join(":");
-    cmd.env(
-        "PATH",
-        if clean_path.is_empty() {
-            "/usr/bin:/bin".to_string()
+    if !clean_path.is_empty() {
+        cmd.env("PATH", clean_path);
+    }
+    // Restore XDG_DATA_DIRS to system default if it was modified by AppImage.
+    if let Ok(dirs) = std::env::var("XDG_DATA_DIRS") {
+        let clean: Vec<&str> = dirs.split(':').filter(|p| !p.contains("/tmp/.mount_")).collect();
+        if !clean.is_empty() {
+            cmd.env("XDG_DATA_DIRS", clean.join(":"));
         } else {
-            clean_path
-        },
-    );
+            cmd.env_remove("XDG_DATA_DIRS");
+        }
+    }
     cmd
 }
 
@@ -1620,6 +1631,36 @@ fn wuddle_read_tweaks(wow_dir: String) -> Result<tweaks::ReadTweakValues, String
     tweaks::read_tweaks(&dir)
 }
 
+const CHANGELOG_EMBEDDED: &str = include_str!("../../../CHANGELOG.md");
+
+#[tauri::command]
+async fn wuddle_fetch_changelog() -> Result<String, String> {
+    run_blocking(|| {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("build http client: {e}"))?;
+
+        let resp = client
+            .get("https://raw.githubusercontent.com/ZythDr/Wuddle/main/CHANGELOG.md")
+            .header(
+                "User-Agent",
+                format!("Wuddle/{}", env!("CARGO_PKG_VERSION")),
+            )
+            .send()
+            .map_err(|e| format!("fetch changelog: {e}"))?;
+
+        if resp.status().is_success() {
+            resp.text()
+                .map_err(|e| format!("read changelog body: {e}"))
+        } else {
+            // Fallback to embedded copy on any HTTP error.
+            Ok(CHANGELOG_EMBEDDED.to_string())
+        }
+    })
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -1667,7 +1708,8 @@ pub fn run() {
             wuddle_apply_tweaks,
             wuddle_restore_tweaks_backup,
             wuddle_has_tweaks_backup,
-            wuddle_read_tweaks
+            wuddle_read_tweaks,
+            wuddle_fetch_changelog
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
