@@ -10,6 +10,8 @@ import {
   TURTLE_TALENT_CALC_URL,
   TURTLE_DISCORD_URL,
   WOWAUCTIONS_URL,
+  TURTLE_ARMORY_URL,
+  TURTLOGS_URL,
 } from "./state.js";
 
 import { $ } from "./utils.js";
@@ -77,7 +79,13 @@ export function bindTurtleListeners() {
   $("homeBtnWowAuctions").addEventListener("click", async () => {
     await openUrl(WOWAUCTIONS_URL);
   });
+  $("homeBtnTurtleArmory").addEventListener("click", async () => {
+    await openUrl(TURTLE_ARMORY_URL);
+  });
   $("homeBtnRaidRes").addEventListener("click", async () => {
     await openUrl("https://raidres.top/");
+  });
+  $("homeBtnTurtleLogs").addEventListener("click", async () => {
+    await openUrl(TURTLOGS_URL);
   });
 }

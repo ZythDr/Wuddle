@@ -10,7 +10,7 @@ export const OPT_THEME_KEY = "wuddle.opt.theme";
 export const OPT_FRIZ_FONT_KEY = "wuddle.opt.frizfont";
 export const OPT_AUTOCHECK_KEY = "wuddle.opt.autocheck";
 export const OPT_AUTOCHECK_MINUTES_KEY = "wuddle.opt.autocheck.minutes";
-export const OPT_CACHE_KEEP_KEY = "wuddle.opt.cache.keep.versions";
+export const OPT_DESKTOP_NOTIFY_KEY = "wuddle.opt.desktop.notify";
 export const IGNORED_ERRORS_KEY = "wuddle.ignored.errors";
 export const LOG_WRAP_KEY = "wuddle.log.wrap";
 export const LOG_AUTOSCROLL_KEY = "wuddle.log.autoscroll";
@@ -27,12 +27,14 @@ export const RETROCRO_MODS_URL = "https://github.com/RetroCro/TurtleWoW-Mods";
 export const TURTLE_TALENT_CALC_URL = "https://talents.turtlecraft.gg/";
 export const TURTLE_DISCORD_URL = "https://discord.gg/turtlewow";
 export const WOWAUCTIONS_URL = "https://www.wowauctions.net/";
+export const TURTLE_ARMORY_URL = "https://turtlecraft.gg/armory";
+export const TURTLOGS_URL = "https://www.turtlogs.com/";
 export const MAX_PARALLEL_UPDATES = 5;
 export const DEFAULT_THEME_ID = "cata";
 export const DEFAULT_USE_FRIZ_FONT = true;
 export const DEFAULT_AUTO_CHECK_ENABLED = true;
 export const DEFAULT_AUTO_CHECK_MINUTES = 60;
-export const DEFAULT_CACHE_KEEP_VERSIONS = 3;
+export const DEFAULT_DESKTOP_NOTIFY = false;
 export const MIN_AUTO_CHECK_MINUTES = 1;
 export const MAX_AUTO_CHECK_MINUTES = 240;
 export const SELF_UPDATE_POLL_MINUTES = 60;
@@ -63,7 +65,8 @@ export const state = {
   useFrizFont: DEFAULT_USE_FRIZ_FONT,
   autoCheckEnabled: DEFAULT_AUTO_CHECK_ENABLED,
   autoCheckMinutes: DEFAULT_AUTO_CHECK_MINUTES,
-  cacheKeepVersions: DEFAULT_CACHE_KEEP_VERSIONS,
+  cacheKeepVersions: 1,
+  desktopNotifyEnabled: DEFAULT_DESKTOP_NOTIFY,
   autoCheckTimerId: null,
   autoCheckCycle: 0,
   lastUpdateNotifyKey: "",
