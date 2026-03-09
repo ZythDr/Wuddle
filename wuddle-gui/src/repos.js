@@ -831,6 +831,14 @@ export function maybeNotifyProjectUpdates(source, notify) {
     onAction: () => openRelevantUpdatesView(counts),
   });
 
+  if (state.desktopNotifyEnabled && typeof Notification !== "undefined" && Notification.permission === "granted") {
+    try {
+      new Notification("Wuddle", {
+        body: `${counts.total} update${counts.total === 1 ? "" : "s"} available. Mods: ${counts.mods}, Addons: ${counts.addons}.`,
+      });
+    } catch (_) {}
+  }
+
   const modifiedMods = state.plans.filter((p) => p.externally_modified);
   if (modifiedMods.length > 0) {
     const names = modifiedMods
@@ -1519,10 +1527,13 @@ export function renderAddPresets() {
   for (const preset of CURATED_MOD_PRESETS) {
     const installed = !preset.placeholder && isPresetInstalled(preset);
     const expanded = isPresetExpanded(preset);
-    const longDescription = String(preset.longDescription || "").trim();
-    const shortDescription = String(preset.description || "").trim();
+    const description = String(preset.description || "").trim();
     const warning = String(preset.warning || "").trim();
-    const canExpand = !preset.placeholder && !!longDescription && longDescription !== shortDescription;
+    const hasExpandedContent = !preset.placeholder && (
+      (Array.isArray(preset.expandedNotes) && preset.expandedNotes.length > 0) ||
+      (Array.isArray(preset.companionLinks) && preset.companionLinks.length > 0)
+    );
+    const canExpand = hasExpandedContent;
     const card = document.createElement("div");
     card.className = `preset-card${preset.placeholder ? " placeholder" : ""}${installed ? " installed" : ""}${expanded ? " expanded" : ""}${canExpand ? " can-expand" : ""}`;
     if (canExpand) {
@@ -1592,7 +1603,7 @@ export function renderAddPresets() {
     desc.className = "preset-desc";
     const descText = document.createElement("div");
     descText.className = "preset-desc-text";
-    descText.textContent = expanded && longDescription ? longDescription : shortDescription;
+    descText.textContent = description;
     desc.appendChild(descText);
 
     const companionLinks = Array.isArray(preset.companionLinks)

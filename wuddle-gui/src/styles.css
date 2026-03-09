@@ -2238,7 +2238,8 @@ dialog.dialog > .select-menu-pop {
   align-items: start;
 }
 
-.preset-card.can-expand {
+.preset-card.can-expand .preset-title-link,
+.preset-card.can-expand .preset-title {
   cursor: pointer;
 }
 
@@ -2293,13 +2294,6 @@ dialog.dialog > .select-menu-pop {
   display: flex;
   flex-direction: column;
   gap: 3px;
-}
-
-.preset-desc-text {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
 }
 
 .preset-desc-links {
@@ -2419,10 +2413,6 @@ dialog.dialog > .select-menu-pop {
   cursor: default;
 }
 
-.preset-card.expanded .preset-desc-text {
-  -webkit-line-clamp: unset;
-  overflow: visible;
-}
 
 .log {
   margin: 10px 0 0;

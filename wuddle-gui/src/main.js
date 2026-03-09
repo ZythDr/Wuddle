@@ -13,10 +13,10 @@ import {
   OPT_FRIZ_FONT_KEY,
   OPT_AUTOCHECK_KEY,
   OPT_AUTOCHECK_MINUTES_KEY,
-  OPT_CACHE_KEEP_KEY,
+  OPT_DESKTOP_NOTIFY_KEY,
   DEFAULT_USE_FRIZ_FONT,
   DEFAULT_AUTO_CHECK_ENABLED,
-  DEFAULT_CACHE_KEEP_VERSIONS,
+  DEFAULT_DESKTOP_NOTIFY,
   LOG_WRAP_KEY,
   LOG_AUTOSCROLL_KEY,
   LOG_LEVEL_KEY,
@@ -269,10 +269,8 @@ function loadSettings() {
   const autoCheckMinutes = normalizeAutoCheckMinutes(
     localStorage.getItem(OPT_AUTOCHECK_MINUTES_KEY),
   );
-  const rawCacheKeep = localStorage.getItem(OPT_CACHE_KEEP_KEY);
-  const cacheKeepVersions = rawCacheKeep !== null
-    ? Math.max(0, Math.min(10, parseInt(rawCacheKeep, 10) || DEFAULT_CACHE_KEEP_VERSIONS))
-    : DEFAULT_CACHE_KEEP_VERSIONS;
+  const rawDesktopNotify = localStorage.getItem(OPT_DESKTOP_NOTIFY_KEY);
+  const desktopNotifyEnabled = rawDesktopNotify === null ? DEFAULT_DESKTOP_NOTIFY : rawDesktopNotify === "true";
   $("optSymlinks").checked = symlinks;
   $("optXattr").checked = xattr;
   $("optClock12").checked = clock12;
@@ -288,11 +286,8 @@ function loadSettings() {
   state.useFrizFont = useFrizFont;
   state.autoCheckEnabled = autoCheckEnabled;
   state.autoCheckMinutes = autoCheckMinutes;
-  state.cacheKeepVersions = cacheKeepVersions;
-  const cacheKeepInput = $("optCacheKeep");
-  if (cacheKeepInput instanceof HTMLInputElement) {
-    cacheKeepInput.value = String(cacheKeepVersions);
-  }
+  state.desktopNotifyEnabled = desktopNotifyEnabled;
+  $("optDesktopNotify").checked = desktopNotifyEnabled;
   setTheme(savedTheme);
   setUiFontStyle(useFrizFont);
   renderAutoCheckSettings();
@@ -329,8 +324,11 @@ function saveOptionFlags() {
   const useFrizFont = !!$("optFrizFont")?.checked;
   localStorage.setItem(OPT_AUTOCHECK_KEY, autoCheckEnabled ? "true" : "false");
   localStorage.setItem(OPT_AUTOCHECK_MINUTES_KEY, String(autoCheckMinutes));
-  const cacheKeep = Math.max(0, Math.min(10, parseInt($("optCacheKeep")?.value, 10) || DEFAULT_CACHE_KEEP_VERSIONS));
-  localStorage.setItem(OPT_CACHE_KEEP_KEY, String(cacheKeep));
+  const desktopNotify = !!$("optDesktopNotify")?.checked;
+  localStorage.setItem(OPT_DESKTOP_NOTIFY_KEY, desktopNotify ? "true" : "false");
+  if (desktopNotify && typeof Notification !== "undefined" && Notification.permission === "default") {
+    Notification.requestPermission();
+  }
   localStorage.setItem(OPT_THEME_KEY, selectedTheme);
   localStorage.setItem(OPT_FRIZ_FONT_KEY, useFrizFont ? "true" : "false");
   setTheme(selectedTheme);
@@ -338,7 +336,7 @@ function saveOptionFlags() {
   state.clock12 = $("optClock12").checked;
   state.autoCheckEnabled = autoCheckEnabled;
   state.autoCheckMinutes = autoCheckMinutes;
-  state.cacheKeepVersions = cacheKeep;
+  state.desktopNotifyEnabled = desktopNotify;
   renderAutoCheckSettings();
   scheduleAutoCheckTimer();
   renderLastChecked();
@@ -473,7 +471,7 @@ $("optClock12").addEventListener("change", saveOptionFlags);
 $("optFrizFont").addEventListener("change", saveOptionFlags);
 $("optAutoCheck").addEventListener("change", saveOptionFlags);
 $("optAutoCheckMinutes").addEventListener("change", saveOptionFlags);
-$("optCacheKeep").addEventListener("change", saveOptionFlags);
+$("optDesktopNotify").addEventListener("change", saveOptionFlags);
 $("themePicker")?.addEventListener("click", (ev) => {
   const target = ev.target;
   if (!(target instanceof Element)) return;

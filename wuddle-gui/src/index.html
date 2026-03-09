@@ -142,6 +142,14 @@
                 >
                   Join Discord
                 </button>
+                <button
+                  id="homeBtnTurtleArmory"
+                  class="btn home-turtle-link"
+                  type="button"
+                  title="Open in browser: https://turtlecraft.gg/armory"
+                >
+                  Armory
+                </button>
               </div>
             </div>
             <div class="home-turtle-col">
@@ -186,6 +194,14 @@
                   title="Open in browser: https://raidres.top/"
                 >
                   RaidRes
+                </button>
+                <button
+                  id="homeBtnTurtleLogs"
+                  class="btn home-turtle-link"
+                  type="button"
+                  title="Open in browser: https://www.turtlogs.com/"
+                >
+                  Turtlogs
                 </button>
               </div>
             </div>
@@ -301,21 +317,11 @@
               <span>minutes</span>
             </label>
           </div>
-          <div class="options-block auto-check-block">
-            <label class="auto-check-inline" for="optCacheKeep">
-              <span>Cached mod versions to keep:</span>
-              <input
-                id="optCacheKeep"
-                type="number"
-                min="0"
-                max="10"
-                step="1"
-                inputmode="numeric"
-                placeholder="3"
-              />
-            </label>
-          </div>
           <div class="row options-block checks">
+            <label class="check">
+              <input id="optDesktopNotify" type="checkbox" />
+              <span>Desktop notifications for updates</span>
+            </label>
             <label class="check">
               <input id="optSymlinks" type="checkbox" />
               <span>Use symlink installs when possible</span>
@@ -637,7 +643,7 @@
             <div class="about-row">
               <div class="about-key">Addon management</div>
               <div class="about-value">
-                <button class="about-link-btn" id="btnAboutGitAddonsManager" type="button">GitAddonsManager by WobLight</button>
+                <button class="about-link-btn" id="btnAboutGitAddonsManager" type="button">GitAddonsManager by WobLight (GPLv3)</button>
               </div>
             </div>
             <div class="about-row">

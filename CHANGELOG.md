@@ -2,6 +2,14 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.4.5
+
+- **Desktop notifications:** Optional OS-level notifications when mod/addon updates are found — enable via the new toggle in Settings
+- **Turtle WoW links:** Added Armory (official) and Turtlogs (community) buttons to the Home page
+- **Quick Add improvements:** Mod descriptions now always show in full instead of requiring click-to-expand; cleaned up wording throughout
+- **Simplified cache setting:** Removed the "cached versions to keep" option — Wuddle now always keeps one previous version
+- **GPLv3 label:** Added license label to GitAddonsManager credit in About page
+
 ## v2.4.4
 
 - **In-app changelog viewer:** View the latest changelog from within Wuddle via the About page — fetched live from GitHub so older versions can see what's new

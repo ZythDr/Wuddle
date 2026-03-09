@@ -1,4 +1,4 @@
-import { state, WOW_KEY, PROFILES_KEY, ACTIVE_PROFILE_KEY, PROJECT_VIEW_BY_PROFILE_KEY, DEFAULT_AUTO_CHECK_MINUTES, MIN_AUTO_CHECK_MINUTES, MAX_AUTO_CHECK_MINUTES, DEFAULT_CACHE_KEEP_VERSIONS } from "./state.js";
+import { state, WOW_KEY, PROFILES_KEY, ACTIVE_PROFILE_KEY, PROJECT_VIEW_BY_PROFILE_KEY, DEFAULT_AUTO_CHECK_MINUTES, MIN_AUTO_CHECK_MINUTES, MAX_AUTO_CHECK_MINUTES } from "./state.js";
 import { $ } from "./utils.js";
 import { log } from "./logs.js";
 import { safeInvoke } from "./commands.js";
@@ -239,12 +239,11 @@ export function currentWowDirStrict() {
 }
 
 export function installOptions(overrides = {}) {
-  const rawKeep = parseInt($("optCacheKeep")?.value, 10);
   return {
     useSymlinks: $("optSymlinks").checked,
     setXattrComment: $("optXattr").checked,
     replaceAddonConflicts: false,
-    cacheKeepVersions: Number.isFinite(rawKeep) ? Math.max(0, Math.min(10, rawKeep)) : DEFAULT_CACHE_KEEP_VERSIONS,
+    cacheKeepVersions: state.cacheKeepVersions,
     ...overrides,
   };
 }
