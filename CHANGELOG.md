@@ -2,6 +2,14 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.4.6
+
+- **Auto-clear WDB cache:** Per-instance toggle to delete the WDB folder before each launch — fixes stale server-cache bugs common on Turtle WoW
+- **Collapsible advanced launch options:** Working directory and environment variable fields are now tucked inside a collapsible "Advanced" section
+- **Improved desktop notifications:** Switched from browser Notification API to Tauri notification plugin for reliable cross-platform support
+- **Assets-pending detection:** Self-update now shows a "building…" state when a new release exists but CI hasn't finished uploading assets yet
+- **Hotfix release detection:** Suffixed version tags (e.g. `v2.4.6-fix`) are now correctly detected as updates
+
 ## v2.4.5
 
 - **Desktop notifications:** Optional OS-level notifications when mod/addon updates are found — enable via the new toggle in Settings

@@ -326,9 +326,6 @@ function saveOptionFlags() {
   localStorage.setItem(OPT_AUTOCHECK_MINUTES_KEY, String(autoCheckMinutes));
   const desktopNotify = !!$("optDesktopNotify")?.checked;
   localStorage.setItem(OPT_DESKTOP_NOTIFY_KEY, desktopNotify ? "true" : "false");
-  if (desktopNotify && typeof Notification !== "undefined" && Notification.permission === "default") {
-    Notification.requestPermission();
-  }
   localStorage.setItem(OPT_THEME_KEY, selectedTheme);
   localStorage.setItem(OPT_FRIZ_FONT_KEY, useFrizFont ? "true" : "false");
   setTheme(selectedTheme);

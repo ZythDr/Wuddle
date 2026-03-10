@@ -2180,9 +2180,36 @@ dialog.dialog > .select-menu-pop {
   border-radius: 0 !important;
 }
 
+#dlgInstanceSettings .instance-path-row + .check {
+  margin-top: 14px;
+}
+
 #dlgInstanceSettings .instance-launch-group + .check,
 #dlgInstanceSettings .check + .field {
   margin-top: 22px;
+}
+
+.instance-advanced {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0 12px;
+}
+
+.instance-advanced[open] {
+  padding-bottom: 12px;
+}
+
+.instance-advanced summary {
+  cursor: pointer;
+  padding: 10px 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  user-select: none;
+}
+
+.instance-advanced .field + .field {
+  margin-top: 10px;
 }
 
 #dlgAdd .field {

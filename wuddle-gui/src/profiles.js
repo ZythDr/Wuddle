@@ -43,6 +43,7 @@ export function defaultLaunchConfig() {
     customArgs: "",
     workingDir: "",
     envText: "",
+    clearWdb: false,
   };
 }
 
@@ -59,6 +60,7 @@ export function normalizeLaunchConfig(raw) {
     customArgs: String(input.customArgs || "").trim(),
     workingDir: String(input.workingDir || "").trim(),
     envText: String(input.envText || "").trim(),
+    clearWdb: !!input.clearWdb,
   };
 }
 
@@ -135,6 +137,7 @@ export function launchPayload(profile) {
     customCommand: launch.customCommand,
     customArgs: launch.customArgs,
     workingDir: launch.workingDir,
+    clearWdb: launch.clearWdb,
     env,
   };
 }
@@ -460,8 +463,13 @@ export function openInstanceSettingsDialog(profile, options = {}) {
   $("instanceSettingsCustomCommand").value = launch.customCommand || "";
   $("instanceSettingsCustomArgs").value = launch.customArgs || "";
   $("instanceSettingsLikeTurtles").checked = profileLikesTurtles(profile);
+  $("instanceSettingsClearWdb").checked = !!launch.clearWdb;
   $("instanceSettingsWorkingDir").value = launch.workingDir || "";
   $("instanceSettingsEnv").value = launch.envText || "";
+  const advancedDetails = $("instanceSettingsAdvanced");
+  if (advancedDetails) {
+    advancedDetails.open = !!(launch.workingDir || launch.envText);
+  }
   $("btnInstanceSettingsOpenPath").disabled = !profileWowDir(profile);
   renderInstanceSettingsLaunchFields(launch.method);
   $("dlgInstanceSettings").showModal();
@@ -485,6 +493,7 @@ export function saveInstanceSettingsFromDialog() {
     customArgs: $("instanceSettingsCustomArgs").value,
     workingDir: $("instanceSettingsWorkingDir").value,
     envText: $("instanceSettingsEnv").value,
+    clearWdb: !!$("instanceSettingsClearWdb")?.checked,
   });
   const likesTurtles = !!$("instanceSettingsLikeTurtles")?.checked;
 

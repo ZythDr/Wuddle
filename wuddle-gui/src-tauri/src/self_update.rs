@@ -29,6 +29,7 @@ pub struct SelfUpdateInfo {
     pub current_version: String,
     pub latest_version: Option<String>,
     pub update_available: bool,
+    pub assets_pending: bool,
     pub message: String,
 }
 
@@ -61,6 +62,7 @@ pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
                     current_version: current_version.to_string(),
                     latest_version: None,
                     update_available: false,
+                    assets_pending: false,
                     message: format!("Latest version check failed: {}", err),
                 });
             }
@@ -72,14 +74,22 @@ pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
         } else {
             Some(latest_version)
         };
-        let update_available = supported
+        let mut update_available = supported
             && latest_version
                 .as_deref()
                 .map(|latest| is_version_newer(latest, current_version))
                 .unwrap_or(false);
 
+        let mut assets_pending = false;
+        if update_available && select_linux_appimage_asset(&release).is_none() {
+            assets_pending = true;
+            update_available = false;
+        }
+
         let message = if !supported {
             "Self-update is available only for AppImage builds on Linux.".to_string()
+        } else if assets_pending {
+            "Update available but release assets are still being built. Try again in a few minutes.".to_string()
         } else if update_available {
             "A newer version is available.".to_string()
         } else {
@@ -92,6 +102,7 @@ pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
             current_version: current_version.to_string(),
             latest_version,
             update_available,
+            assets_pending,
             message,
         });
     }
@@ -108,6 +119,7 @@ pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
             current_version: current_version.to_string(),
             latest_version,
             update_available: false,
+            assets_pending: false,
             message: "In-app update is not available on this platform.".to_string(),
         });
     }
@@ -129,6 +141,7 @@ pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
                     current_version,
                     latest_version: None,
                     update_available: false,
+                    assets_pending: false,
                     message: format!("Latest version check failed: {}", err),
                 });
             }
@@ -140,14 +153,22 @@ pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
         } else {
             Some(latest_version)
         };
-        let update_available = latest_version
+        let mut update_available = latest_version
             .as_deref()
             .map(|latest| launcher_layout && is_version_newer(latest, &current_version))
             .unwrap_or(false);
 
+        let mut assets_pending = false;
+        if update_available && select_windows_portable_asset(&release).is_none() {
+            assets_pending = true;
+            update_available = false;
+        }
+
         let message = if !launcher_layout {
             "Current install is legacy layout. Install latest portable package once to enable in-app updates."
                 .to_string()
+        } else if assets_pending {
+            "Update available but release assets are still being built. Try again in a few minutes.".to_string()
         } else if update_available {
             "A newer version is available.".to_string()
         } else {
@@ -160,6 +181,7 @@ pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
             current_version,
             latest_version,
             update_available,
+            assets_pending,
             message,
         })
     }
@@ -436,7 +458,9 @@ fn is_version_newer(latest: &str, current: &str) -> bool {
             return false;
         }
     }
-    false
+    // Numeric parts equal — treat as newer if the full tag differs
+    // (handles suffixed hotfix tags like "2.4.5-fix" vs "2.4.5")
+    normalize_release_tag(latest) != normalize_release_tag(current)
 }
 
 fn github_api_token() -> Option<String> {

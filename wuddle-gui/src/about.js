@@ -74,6 +74,15 @@ export function renderAboutUpdateAction() {
     return;
   }
 
+  if (updateInfo.assetsPending) {
+    const latest = String(updateInfo.latestVersion || "").trim();
+    btn.disabled = true;
+    btn.classList.remove("primary");
+    btn.textContent = latest ? `${latest} building\u2026` : "Update building\u2026";
+    btn.title = "Release assets are still being built by CI. Click Refresh to check again.";
+    return;
+  }
+
   if (!updateInfo.latestVersion) {
     btn.disabled = true;
     btn.classList.remove("primary");
@@ -123,9 +132,10 @@ export async function refreshAboutInfo({ force = false } = {}) {
     state.aboutSelfUpdate && state.aboutSelfUpdate.message
       ? ` ${state.aboutSelfUpdate.message}`
       : "";
+  const statusKind = state.aboutSelfUpdate?.assetsPending ? "status-warn" : "status-ok";
   setAboutStatus(
     `Detected at ${formatTime(state.aboutRefreshedAt)}.${latestHint}${updaterHint}`,
-    "status-ok",
+    statusKind,
   );
 }
 
