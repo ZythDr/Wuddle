@@ -99,6 +99,7 @@ import {
   positionOpenMenu,
   confirmRemove,
   loadIgnoredErrors,
+  loadIgnoredUpdates,
 } from "./repos.js";
 
 import {
@@ -257,6 +258,7 @@ function loadSettings() {
   syncProjectViewFromActiveProfile();
 
   loadIgnoredErrors();
+  loadIgnoredUpdates();
   const symlinks = localStorage.getItem(OPT_SYMLINKS_KEY) === "true";
   const xattr = localStorage.getItem(OPT_XATTR_KEY) === "true";
   const clock12 = localStorage.getItem(OPT_CLOCK12_KEY) === "true";

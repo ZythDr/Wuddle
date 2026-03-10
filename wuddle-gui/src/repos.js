@@ -1,6 +1,6 @@
 // Repo management: keys, conflicts, presets, filtering, sorting, rendering, operations
 
-import { state, MAX_PARALLEL_UPDATES, IGNORED_ERRORS_KEY } from "./state.js";
+import { state, MAX_PARALLEL_UPDATES, IGNORED_ERRORS_KEY, IGNORED_UPDATES_KEY } from "./state.js";
 import { CURATED_MOD_PRESETS, PRESET_CATEGORY_CLASS } from "./presets.js";
 import { safeInvoke } from "./commands.js";
 import { $, formatTime } from "./utils.js";
@@ -61,6 +61,17 @@ export function loadIgnoredErrors() {
 
 function persistIgnoredErrors() {
   localStorage.setItem(IGNORED_ERRORS_KEY, JSON.stringify([...state.ignoredErrorRepoIds]));
+}
+
+export function loadIgnoredUpdates() {
+  try {
+    const raw = localStorage.getItem(IGNORED_UPDATES_KEY);
+    if (raw) state.ignoredUpdateRepoIds = new Set(JSON.parse(raw));
+  } catch (_) {}
+}
+
+function persistIgnoredUpdates() {
+  localStorage.setItem(IGNORED_UPDATES_KEY, JSON.stringify([...state.ignoredUpdateRepoIds]));
 }
 
 export function parseRepoUrlInfo(url) {
@@ -452,6 +463,8 @@ export function repoStatus(repo) {
 
   if (plan.externally_modified) return { kind: "warn", text: "Modified" };
   if (plan.repair_needed) return { kind: "warn", text: "Repair needed" };
+  if (plan.has_update && state.ignoredUpdateRepoIds.has(repo.id))
+    return { kind: "muted", text: "Ignored" };
   if (plan.has_update) return { kind: "warn", text: "Update available" };
   return { kind: "good", text: "Up to date" };
 }
@@ -580,6 +593,7 @@ export async function setRepoBranch(repo, branch) {
 
 export function canUpdateRepo(repo) {
   if (!repo.enabled) return false;
+  if (state.ignoredUpdateRepoIds.has(repo.id)) return false;
   const plan = getPlanForRepo(repo.id);
   if (!plan) return false;
   if (plan.error) return false;
@@ -630,7 +644,10 @@ export function matchesFilter(repo) {
   const plan = getPlanForRepo(repo.id);
   if (state.filter === "updates") return !!plan?.has_update;
   if (state.filter === "errors") return !!plan?.error && !state.ignoredErrorRepoIds.has(repo.id);
-  if (state.filter === "ignored") return !!plan?.error && state.ignoredErrorRepoIds.has(repo.id);
+  if (state.filter === "ignored") {
+    return (!!plan?.error && state.ignoredErrorRepoIds.has(repo.id))
+      || state.ignoredUpdateRepoIds.has(repo.id);
+  }
   return true;
 }
 
@@ -718,7 +735,8 @@ export function getProjectSummary() {
     return !!p?.error && !state.ignoredErrorRepoIds.has(repo.id);
   }).length;
   const ignored = viewRepos.filter((repo) => {
-    return !!getPlanForRepo(repo.id)?.error && state.ignoredErrorRepoIds.has(repo.id);
+    return (!!getPlanForRepo(repo.id)?.error && state.ignoredErrorRepoIds.has(repo.id))
+      || state.ignoredUpdateRepoIds.has(repo.id);
   }).length;
   const rateLimited = viewRepos.some((repo) => {
     const error = getPlanForRepo(repo.id)?.error || "";
@@ -1487,6 +1505,25 @@ export function renderRepos() {
         render();
       });
       menu.appendChild(ignore);
+    }
+    {
+      const isUpdateIgnored = state.ignoredUpdateRepoIds.has(r.id);
+      const ignoreUpdates = document.createElement("button");
+      ignoreUpdates.className = "menu-item";
+      ignoreUpdates.textContent = isUpdateIgnored ? "Unignore Updates" : "Ignore Updates";
+      ignoreUpdates.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        state.openMenuRepoId = null;
+        if (isUpdateIgnored) {
+          state.ignoredUpdateRepoIds.delete(r.id);
+        } else {
+          state.ignoredUpdateRepoIds.add(r.id);
+        }
+        persistIgnoredUpdates();
+        render();
+      });
+      menu.appendChild(ignoreUpdates);
     }
     if (!isAddonRepo(r)) {
       const toggle = document.createElement("button");
