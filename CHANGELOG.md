@@ -9,6 +9,7 @@ All notable changes to Wuddle are documented in this file.
 - **Improved desktop notifications:** Switched from browser Notification API to Tauri notification plugin for reliable cross-platform support
 - **Assets-pending detection:** Self-update now shows a "building…" state when a new release exists but CI hasn't finished uploading assets yet
 - **Hotfix release detection:** Suffixed version tags (e.g. `v2.4.6-fix`) are now correctly detected as updates
+- **Ignore updates:** Right-click any mod or addon to ignore its updates — ignored repos are skipped by "Update All", excluded from update counts and notifications, and shown with an "Ignored" badge
 
 ## v2.4.5
 
