@@ -879,6 +879,14 @@
           <button id="btnInstanceSettingsOpenPath" class="btn" type="button">Open</button>
         </div>
 
+        <label
+          class="check"
+          title="Deletes the WDB folder (cached server data) before launching the game"
+        >
+          <input id="instanceSettingsClearWdb" type="checkbox" />
+          <span>Auto-clear WDB cache on launch</span>
+        </label>
+
         <label class="field">
           <div class="label">Launch method</div>
           <select id="instanceSettingsLaunchMethod">
@@ -930,19 +938,21 @@
           <div class="hint">Tip: use <code>{exe}</code> in args to inject the detected game executable path.</div>
         </div>
 
-        <label class="field">
-          <div class="label">Working directory override (optional)</div>
-          <input id="instanceSettingsWorkingDir" placeholder="/path/to/working/dir" />
-        </label>
-
-        <label class="field">
-          <div class="label">Environment variables (optional)</div>
-          <textarea
-            id="instanceSettingsEnv"
-            rows="4"
-            placeholder="KEY=VALUE"
-          ></textarea>
-        </label>
+        <details id="instanceSettingsAdvanced" class="instance-advanced">
+          <summary>Advanced</summary>
+          <label class="field">
+            <div class="label">Working directory override</div>
+            <input id="instanceSettingsWorkingDir" placeholder="/path/to/working/dir" />
+          </label>
+          <label class="field">
+            <div class="label">Environment variables</div>
+            <textarea
+              id="instanceSettingsEnv"
+              rows="4"
+              placeholder="KEY=VALUE"
+            ></textarea>
+          </label>
+        </details>
 
         <div class="dialog-actions">
           <button id="btnInstanceSettingsCancel" class="btn ghost" value="cancel">Cancel</button>

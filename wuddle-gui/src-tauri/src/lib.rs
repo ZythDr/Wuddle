@@ -110,6 +110,7 @@ struct LaunchConfig {
     custom_command: Option<String>,
     custom_args: Option<String>,
     working_dir: Option<String>,
+    clear_wdb: Option<bool>,
     env: Option<HashMap<String, String>>,
 }
 
@@ -1326,6 +1327,17 @@ fn wuddle_launch_game(wowDir: String, launch: Option<LaunchConfig>) -> Result<St
     }
 
     let launch_cfg = launch.unwrap_or_default();
+
+    if launch_cfg.clear_wdb.unwrap_or(false) {
+        let wdb_path = wow_path.join("WDB");
+        if wdb_path.is_dir() {
+            match fs::remove_dir_all(&wdb_path) {
+                Ok(_) => eprintln!("Cleared WDB cache: {}", wdb_path.display()),
+                Err(e) => eprintln!("Warning: failed to clear WDB cache: {}", e),
+            }
+        }
+    }
+
     let target = resolve_launch_target(&wow_path, &launch_cfg)?;
     let target_name = target
         .file_name()
@@ -1680,6 +1692,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             wuddle_list_repos,
             wuddle_add_repo,

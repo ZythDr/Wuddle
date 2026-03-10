@@ -831,11 +831,17 @@ export function maybeNotifyProjectUpdates(source, notify) {
     onAction: () => openRelevantUpdatesView(counts),
   });
 
-  if (state.desktopNotifyEnabled && typeof Notification !== "undefined" && Notification.permission === "granted") {
+  if (state.desktopNotifyEnabled) {
     try {
-      new Notification("Wuddle", {
-        body: `${counts.total} update${counts.total === 1 ? "" : "s"} available. Mods: ${counts.mods}, Addons: ${counts.addons}.`,
-      });
+      const np = window.__TAURI__?.notification;
+      if (np) {
+        const body = `${counts.total} update${counts.total === 1 ? "" : "s"} available. Mods: ${counts.mods}, Addons: ${counts.addons}.`;
+        np.isPermissionGranted().then((ok) => {
+          const send = () => np.sendNotification({ title: "Wuddle", body });
+          if (ok) { send(); return; }
+          np.requestPermission().then((p) => { if (p === "granted") send(); });
+        });
+      }
     } catch (_) {}
   }
 
