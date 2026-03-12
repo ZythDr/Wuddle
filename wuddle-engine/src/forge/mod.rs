@@ -98,7 +98,10 @@ pub fn detect_repo(input: &str) -> Result<DetectedRepo> {
     let input = input.trim();
 
     let url = Url::parse(input).context("invalid URL")?;
-    let host = url.host_str().context("URL missing host")?.to_string();
+    let host = url
+        .host_str()
+        .context("URL missing host")?
+        .to_ascii_lowercase();
     let scheme = url.scheme();
 
     // path segments without empty pieces
@@ -177,8 +180,8 @@ pub fn detect_repo(input: &str) -> Result<DetectedRepo> {
                     url.path()
                 );
             }
-            let owner = segs[0].clone();
-            let mut name = segs[1].clone();
+            let owner = segs[0].to_ascii_lowercase();
+            let mut name = segs[1].to_ascii_lowercase();
             if name.ends_with(".git") {
                 name.truncate(name.len() - 4);
             }
@@ -212,6 +215,10 @@ pub fn detect_repo(input: &str) -> Result<DetectedRepo> {
                 if last.ends_with(".git") {
                     last.truncate(last.len() - 4);
                 }
+            }
+            // lowercase for dedup consistency
+            for seg in &mut project_segs {
+                *seg = seg.to_ascii_lowercase();
             }
             let name = project_segs
                 .last()

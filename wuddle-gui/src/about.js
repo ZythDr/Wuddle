@@ -222,6 +222,11 @@ export function changelogToHtml(md) {
       html += `<h1>${escapeHtml(line.slice(2))}</h1>`;
       continue;
     }
+    if (line.startsWith("### ")) {
+      if (inList) { html += "</ul>"; inList = false; }
+      html += `<h3>${inlineFormat(line.slice(4))}</h3>`;
+      continue;
+    }
     if (line.startsWith("## ")) {
       if (inList) { html += "</ul>"; inList = false; }
       html += `<h2>${escapeHtml(line.slice(3))}</h2>`;

@@ -46,7 +46,7 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        const SCHEMA_VERSION: i32 = 3;
+        const SCHEMA_VERSION: i32 = 4;
 
         let current: i32 = self
             .conn
@@ -127,6 +127,85 @@ impl Db {
                 .execute_batch("ALTER TABLE repos ADD COLUMN published_at_unix INTEGER")?;
             self.conn.execute_batch("PRAGMA user_version = 3")?;
         }
+
+        // v3 → v4: normalize host/owner/name to lowercase and deduplicate.
+        // The UNIQUE INDEX was case-sensitive, so mixed-case duplicates could slip
+        // through when the same repo was added from different URL casings.
+        if current < 4 {
+            self.migrate_v4_normalize_repos()?;
+            self.conn.execute_batch("PRAGMA user_version = 4")?;
+        }
+
+        Ok(())
+    }
+
+    fn migrate_v4_normalize_repos(&self) -> Result<()> {
+        // 1. Lowercase all host/owner/name/url values.
+        self.conn.execute_batch(
+            r#"
+            UPDATE repos SET
+              host  = LOWER(host),
+              owner = LOWER(owner),
+              name  = LOWER(name),
+              url   = LOWER(url)
+            "#,
+        )?;
+
+        // 2. Remove duplicates that now collide: keep the row with the highest id
+        //    (most recently added) and migrate its installs from older duplicates.
+        let dupes: Vec<(String, String, String)> = {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT host, owner, name
+                FROM repos
+                GROUP BY host, owner, name
+                HAVING COUNT(*) > 1
+                "#,
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        for (host, owner, name) in &dupes {
+            // Find all IDs for this (host, owner, name), ordered descending.
+            let ids: Vec<i64> = {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id FROM repos WHERE host=?1 AND owner=?2 AND name=?3 ORDER BY id DESC",
+                )?;
+                let rows = stmt.query_map(params![host, owner, name], |row| row.get(0))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            if ids.len() < 2 {
+                continue;
+            }
+            let keep_id = ids[0];
+            for &remove_id in &ids[1..] {
+                // Move installs from the duplicate to the keeper (ignore conflicts).
+                self.conn.execute(
+                    "UPDATE OR IGNORE installs SET repo_id=?1 WHERE repo_id=?2",
+                    params![keep_id, remove_id],
+                )?;
+                // Delete leftover installs that conflicted.
+                self.conn.execute(
+                    "DELETE FROM installs WHERE repo_id=?1",
+                    params![remove_id],
+                )?;
+                // Delete the duplicate repo.
+                self.conn
+                    .execute("DELETE FROM repos WHERE id=?1", params![remove_id])?;
+            }
+        }
+
+        // 3. Recreate the unique index with COLLATE NOCASE for future safety.
+        self.conn.execute_batch(
+            r#"
+            DROP INDEX IF EXISTS idx_repos_unique;
+            CREATE UNIQUE INDEX idx_repos_unique
+              ON repos(host COLLATE NOCASE, owner COLLATE NOCASE, name COLLATE NOCASE);
+            "#,
+        )?;
 
         Ok(())
     }
@@ -456,6 +535,19 @@ impl Db {
             params![repo_id, path],
         )?;
         Ok(())
+    }
+
+    /// Returns all addon install paths (lowercased) currently tracked across all repos.
+    pub fn all_addon_install_paths(&self) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT LOWER(path) FROM installs WHERE kind='addon'",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = HashSet::new();
+        for r in rows {
+            out.insert(r?);
+        }
+        Ok(out)
     }
 
     pub fn find_addon_install_owners(

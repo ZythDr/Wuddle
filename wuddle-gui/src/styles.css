@@ -2322,9 +2322,16 @@ dialog.dialog > .select-menu-pop {
   background: none;
 }
 
-.readme-preview img {
+.readme-preview img,
+.readme-preview video {
   max-width: 100%;
   height: auto;
+  border-radius: 4px;
+}
+
+.readme-preview video {
+  display: block;
+  margin: 8px 0;
 }
 
 .readme-preview a {
@@ -2432,15 +2439,16 @@ dialog.dialog > .select-menu-pop {
 }
 
 .dialog-add-layout > .dialog-inner {
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 auto;
+  min-width: 540px;
 }
 
 /* ---- Side panel (About + Files) ---- */
 
 .repo-side-panel {
   width: 280px;
-  flex-shrink: 0;
+  min-width: 180px;
+  flex-shrink: 10;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border);
@@ -2478,8 +2486,8 @@ dialog.dialog > .select-menu-pop {
   --fade-pad-y: 10px;
 }
 
-/* Hide side panel when viewport is too narrow */
-@media (max-width: 1400px) {
+/* Hide side panel when viewport is too narrow for even the minimum width */
+@media (max-width: 840px) {
   .repo-side-panel {
     display: none !important;
   }

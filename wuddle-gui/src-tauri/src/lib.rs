@@ -617,7 +617,9 @@ async fn wuddle_list_repos(wowDir: Option<String>) -> Result<Vec<RepoRow>, Strin
     run_blocking(move || {
         let eng = engine()?;
         if let Some(ref wow_dir) = wow_dir {
-            let _ = eng.import_existing_addon_git_repos(Path::new(wow_dir));
+            let wow_path = Path::new(wow_dir);
+            let _ = eng.import_existing_addon_git_repos(wow_path);
+            let _ = eng.dedup_addon_repos_by_folder(wow_path);
         }
         let repos = eng.db().list_repos().map_err(|e| e.to_string())?;
 

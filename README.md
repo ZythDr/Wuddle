@@ -28,32 +28,25 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **GitHub auth token (optional):** helps avoid anonymous API limits
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New In v2
+### What's New In v2.5.2
 
-- Wuddle evolved from a DLL updater into a **WIP launcher + manager**
-- Added **Addon management** with Git clone/pull updates and branch selection
-- Added **Home tab** with update overview and launcher actions
-- Added **PLAY button** with per-instance launch methods (Auto/Lutris/Wine/Custom)
-- Added the ability to easily install **VanillaFixes** through the mods tab's quick-add section.
-- Added **multi-instance profile switching** and profile settings UI
-- Added **themes** (including a WoW UI inspired theme which is horrible, i wouldn't recommend it)
-- Added improved **search/filtering** for tracked mods/addons
-- Added more robust **conflict handling** on addon install/update ([GitAddonsManager](https://gitlab.com/woblight/GitAddonsManager) inspired)
+- **Addon deduplication:** Wuddle now prevents duplicate addon entries when multiple instances (or forks) manage the same addon directory. Repos are matched case-insensitively, folder ownership is checked during import, and stale fork entries are automatically cleaned up on startup.
+- **README media support:** Images and videos in repo README previews now display correctly in the Add dialog.
+- **Responsive side panel:** The About/Files panel in the Add dialog shrinks gracefully on narrow windows before the main content area.
+- **Addon-friendly Add dialog:** Clearer subtitle text and contextual placeholder URLs for the addon Add flow.
+- **Changelog rendering fix:** `###` headers now render correctly in the in-app changelog viewer.
 
-### What's New In v2.3
+<details>
+<summary><strong>Previous versions</strong></summary>
 
-- **Mod file integrity checking:** Wuddle now detects when mod files have been modified outside the app. Modified mods show a warning badge and are skipped during bulk updates — click the download button to restore to the latest version.
-- **Automatic cache cleanup:** old cached mod versions are pruned after each install. Configurable in Options (0–10 versions to keep, default 3). The launcher also cleans up old `Wuddle-bin.exe` versions on self-update.
-- **Addon conflict detection:** adding an addon that shares folders with an already-tracked repo now shows a conflict dialog before proceeding.
-- **Auto-check for updates:** optional background polling with configurable interval (enabled by default).
-- **Turtle WoW home section:** curated official and community links, toggled per instance. Adaptive column layout.
-- **Visual theme picker:** color swatches replace the old dropdown.
-- **Ignore errored repos:** right-click menu item to dismiss errored mods/addons with an "Ignored" badge.
-- **AV false-positive tags:** VanillaFixes and UnitXP_SP3 presets now display antivirus warnings.
-- **UI polish:** relocated spinner, enlarged title, profile picker hidden when only one instance exists, search clears on tab switch.
-- **Linux fixes:** links now open correctly in AppImage builds; spinner uses theme color.
-- **Zip security fix:** path traversal vulnerability patched during extraction.
-- **Product rename:** app now displays as "Wuddle" everywhere (About page, desktop entries, bundles).
+### What's New In v2.5
+
+- **Add dialog repo preview:** Pasting a repo URL now shows the README, a file tree (expandable one level), and an About panel (description, stars, forks, language, license) — all fetched live from GitHub/GitLab/Gitea.
+- **Quick Add + README shared frame:** Presets and README share a single content region with a swappable header, reducing clutter.
+- **Advanced mode toggle:** A footer checkbox hides the install mode dropdown by default for a cleaner add flow.
+- **Scroll-aware edge fading:** All scrollable frames now fade at the top/bottom edges to indicate overflow, with theme-aware colors that update on theme switch.
+- **Sticky dialog footers:** Instance Settings, Changelog, Addon Conflict, and SuperWoW Warning dialogs use consistent head/body/foot layouts with non-scrolling footers.
+- **Performance improvements:** Shared HTTP client, targeted branch-dropdown updates (no more UI freeze on 60+ addon repos), consolidated DOM observers, and LRU-capped caches.
 
 ### What's New In v2.4
 
@@ -72,14 +65,34 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **Automatic backup:** WoW.exe.bak is created before the first patch; one-click restore available
 - **Per-profile tweak settings:** each instance remembers its own tweak configuration
 
-### What's New In v2.5
+### What's New In v2.3
 
-- **Add dialog repo preview:** Pasting a repo URL now shows the README, a file tree (expandable one level), and an About panel (description, stars, forks, language, license) — all fetched live from GitHub/GitLab/Gitea.
-- **Quick Add + README shared frame:** Presets and README share a single content region with a swappable header, reducing clutter.
-- **Advanced mode toggle:** A footer checkbox hides the install mode dropdown by default for a cleaner add flow.
-- **Scroll-aware edge fading:** All scrollable frames now fade at the top/bottom edges to indicate overflow, with theme-aware colors that update on theme switch.
-- **Sticky dialog footers:** Instance Settings, Changelog, Addon Conflict, and SuperWoW Warning dialogs use consistent head/body/foot layouts with non-scrolling footers.
-- **Performance improvements:** Shared HTTP client, targeted branch-dropdown updates (no more UI freeze on 60+ addon repos), consolidated DOM observers, and LRU-capped caches.
+- **Mod file integrity checking:** Wuddle now detects when mod files have been modified outside the app. Modified mods show a warning badge and are skipped during bulk updates — click the download button to restore to the latest version.
+- **Automatic cache cleanup:** old cached mod versions are pruned after each install. Configurable in Options (0–10 versions to keep, default 3). The launcher also cleans up old `Wuddle-bin.exe` versions on self-update.
+- **Addon conflict detection:** adding an addon that shares folders with an already-tracked repo now shows a conflict dialog before proceeding.
+- **Auto-check for updates:** optional background polling with configurable interval (enabled by default).
+- **Turtle WoW home section:** curated official and community links, toggled per instance. Adaptive column layout.
+- **Visual theme picker:** color swatches replace the old dropdown.
+- **Ignore errored repos:** right-click menu item to dismiss errored mods/addons with an "Ignored" badge.
+- **AV false-positive tags:** VanillaFixes and UnitXP_SP3 presets now display antivirus warnings.
+- **UI polish:** relocated spinner, enlarged title, profile picker hidden when only one instance exists, search clears on tab switch.
+- **Linux fixes:** links now open correctly in AppImage builds; spinner uses theme color.
+- **Zip security fix:** path traversal vulnerability patched during extraction.
+- **Product rename:** app now displays as "Wuddle" everywhere (About page, desktop entries, bundles).
+
+### What's New In v2
+
+- Wuddle evolved from a DLL updater into a **WIP launcher + manager**
+- Added **Addon management** with Git clone/pull updates and branch selection
+- Added **Home tab** with update overview and launcher actions
+- Added **PLAY button** with per-instance launch methods (Auto/Lutris/Wine/Custom)
+- Added the ability to easily install **VanillaFixes** through the mods tab's quick-add section.
+- Added **multi-instance profile switching** and profile settings UI
+- Added **themes** (including a WoW UI inspired theme which is horrible, i wouldn't recommend it)
+- Added improved **search/filtering** for tracked mods/addons
+- Added more robust **conflict handling** on addon install/update ([GitAddonsManager](https://gitlab.com/woblight/GitAddonsManager) inspired)
+
+</details>
 
 ## Credits / Inspiration
 

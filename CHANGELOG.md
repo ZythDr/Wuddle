@@ -2,6 +2,23 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.5.2
+
+### Addon Deduplication
+- **Case-insensitive repo matching:** Host, owner, and repo name are now normalized to lowercase, preventing duplicate entries when the same repo is added from differently-cased URLs
+- **Folder-level dedup on import:** The addon auto-import scan now checks whether an addon's install folders are already tracked by another repo before importing, preventing duplicate entries from forks that deploy to the same directories
+- **Cross-fork dedup on startup:** On each load, Wuddle verifies that each tracked addon repo matches the actual git remote on disk — stale entries from old forks are automatically cleaned up
+- **DB migration v4:** Existing databases are automatically normalized (lowercase keys, duplicate merging, case-insensitive unique index)
+
+### Add Dialog Improvements
+- **README image and video support:** Images and videos in repo README previews now display correctly — relative URLs are resolved against `raw.githubusercontent.com` for GitHub repos
+- **URL input cleared on open:** The URL field and all preview panels are now reset every time the Add dialog is opened
+- **Responsive side panel:** The About/Files side panel now shrinks before the main dialog content when the window is narrow, with a minimum width of 180px
+- **Addon-friendly text:** The addon Add dialog shows a clearer subtitle and a contextual placeholder URL (BigWigs for addons, nampower for mods)
+
+### Fixes
+- **Changelog h3 headers:** `###` markdown headers in the in-app changelog viewer now render correctly instead of showing as raw text
+
 ## v2.5.1
 
 - **Add dialog: hide Quick Add for addons:** The Add dialog no longer shows the mod Quick Add presets when adding addons — only the URL input and repo preview panels are shown

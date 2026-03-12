@@ -1754,11 +1754,17 @@ export function applyAddDialogContext() {
   }
   if (addHint) {
     addHint.textContent = addons
-      ? "Add a Git repo URL for an addon. Wuddle will clone/pull it for this instance."
+      ? "Paste a Git repository URL below. Wuddle will automatically download and install the addon for you."
       : "Quick-add from the mods listed, or add your own Git repo URL below.";
   }
   if (repoUrlLabel) {
     repoUrlLabel.textContent = addons ? "Addon Repo URL" : "Repo URL";
+  }
+  const repoUrlInput = $("repoUrl");
+  if (repoUrlInput) {
+    repoUrlInput.placeholder = addons
+      ? "(e.g. https://github.com/pepopo978/BigWigs)"
+      : "(e.g. https://gitea.com/avitasia/nampower)";
   }
   if (quickAddField) {
     quickAddField.classList.toggle("hidden", addons);
@@ -2216,27 +2222,53 @@ function sanitizeReadmeHtml(html) {
     .replace(/<clipboard-copy[^>]*>[\s\S]*?<\/clipboard-copy>/gi, "");
 }
 
-/** Make all links in the README preview clickable via system browser. */
+/** Resolve a possibly-relative URL against the current repo context. */
+function resolveReadmeUrl(raw) {
+  if (!raw) return raw;
+  if (raw.startsWith("http://") || raw.startsWith("https://")) return raw;
+  const repoUrl = ($("repoUrl")?.value || "").trim();
+  if (!repoUrl) return raw;
+  try {
+    // Build a raw content base for relative paths (works for GitHub, Gitea, GitLab)
+    const u = new URL(repoUrl);
+    if (u.hostname === "github.com") {
+      const parts = u.pathname.replace(/\.git$/, "").split("/").filter(Boolean);
+      if (parts.length >= 2) {
+        const base = `https://raw.githubusercontent.com/${parts[0]}/${parts[1]}/HEAD/`;
+        return new URL(raw, base).href;
+      }
+    }
+    // Fallback: resolve against the repo page URL
+    return new URL(raw, repoUrl + "/").href;
+  } catch (_) {
+    return raw;
+  }
+}
+
+/** Make links clickable and resolve relative image/video/source URLs. */
 function wireReadmeLinks(container) {
+  // Resolve image sources
+  container.querySelectorAll("img[src]").forEach((img) => {
+    const src = img.getAttribute("src") || "";
+    img.setAttribute("src", resolveReadmeUrl(src));
+  });
+
+  // Resolve video sources
+  container.querySelectorAll("video[src]").forEach((v) => {
+    v.setAttribute("src", resolveReadmeUrl(v.getAttribute("src") || ""));
+  });
+  container.querySelectorAll("video source[src]").forEach((s) => {
+    s.setAttribute("src", resolveReadmeUrl(s.getAttribute("src") || ""));
+  });
+
+  // Wire links to open in system browser
   container.querySelectorAll("a[href]").forEach((a) => {
     const href = a.getAttribute("href") || "";
-    // Skip anchor-only links (internal headings)
     if (href.startsWith("#")) return;
     a.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      // Resolve relative URLs against the repo page
-      let target = href;
-      if (target.startsWith("/") || (!target.startsWith("http://") && !target.startsWith("https://"))) {
-        // Try to build a full URL from the repo context
-        const repoUrl = ($("repoUrl")?.value || "").trim();
-        if (repoUrl) {
-          try {
-            target = new URL(href, repoUrl).href;
-          } catch (_) { /* use as-is */ }
-        }
-      }
-      void openUrl(target);
+      void openUrl(resolveReadmeUrl(href));
     });
   });
 }
@@ -2244,10 +2276,9 @@ function wireReadmeLinks(container) {
 export function openAddDialog() {
   const dlg = $("dlgAdd");
   if (!dlg) return;
+  $("repoUrl").value = "";
   renderAddPresets();
-  if (!$("repoUrl").value.trim()) {
-    hideAllRepoPreviews();
-  }
+  hideAllRepoPreviews();
   if (!dlg.open) {
     dlg.showModal();
   }

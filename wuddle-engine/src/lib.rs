@@ -655,6 +655,10 @@ impl Engine {
             .map(|r| Self::repo_key(&r.host, &r.owner, &r.name))
             .collect::<HashSet<_>>();
 
+        // Track addon folder paths already claimed by any repo, so we skip
+        // importing a different fork that deploys to the same folders.
+        let mut claimed_addon_paths = self.db.all_addon_install_paths()?;
+
         let mut imported = 0usize;
 
         let read_dir = match fs::read_dir(&addons_root) {
@@ -706,6 +710,23 @@ impl Engine {
                 continue;
             }
 
+            // Check if ALL addon folders this repo would deploy are already tracked
+            // by another repo (e.g. a different fork). If so, skip the import to
+            // prevent duplicate entries for the same on-disk addon.
+            let candidate_paths: Vec<String> = detected_addons
+                .iter()
+                .map(|(_src, name)| {
+                    let p = wow_dir.join("Interface").join("AddOns").join(name);
+                    Self::to_manifest_path(&p, wow_dir).to_ascii_lowercase()
+                })
+                .collect();
+            let all_claimed = candidate_paths
+                .iter()
+                .all(|p| claimed_addon_paths.contains(p));
+            if all_claimed {
+                continue;
+            }
+
             let branch = Self::local_repo_branch(&repo).unwrap_or_else(|| "master".to_string());
             let short_oid = Self::local_repo_short_oid(&repo);
             let full_oid = Self::local_repo_oid(&repo);
@@ -742,6 +763,7 @@ impl Engine {
                 let install_path = wow_dir.join("Interface").join("AddOns").join(&addon_name);
                 let manifest = Self::to_manifest_path(&install_path, wow_dir);
                 self.db.add_install(repo_id, &manifest, "addon")?;
+                claimed_addon_paths.insert(manifest.to_ascii_lowercase());
             }
 
             known.insert(key);
@@ -749,6 +771,104 @@ impl Engine {
         }
 
         Ok(imported)
+    }
+
+    /// Remove duplicate addon_git repos that share the same on-disk addon
+    /// folders. Keeps the repo whose git remote matches what's actually
+    /// cloned on disk; removes the other(s).
+    pub fn dedup_addon_repos_by_folder(&self, wow_dir: &Path) -> Result<usize> {
+        let repos = self.db.list_repos()?;
+        let addon_repos: Vec<&Repo> = repos
+            .iter()
+            .filter(|r| matches!(r.mode, InstallMode::AddonGit))
+            .collect();
+        if addon_repos.len() < 2 {
+            return Ok(0);
+        }
+
+        // Map each addon install path → list of repo ids that claim it.
+        let mut path_to_repos: HashMap<String, Vec<i64>> = HashMap::new();
+        for r in &addon_repos {
+            let installs = self.db.list_installs(r.id)?;
+            for entry in installs {
+                if entry.kind != "addon" {
+                    continue;
+                }
+                path_to_repos
+                    .entry(entry.path.to_ascii_lowercase())
+                    .or_default()
+                    .push(r.id);
+            }
+        }
+
+        // Find repo ids that share at least one addon path with another repo.
+        let mut contested_ids = HashSet::<i64>::new();
+        for (_path, ids) in &path_to_repos {
+            if ids.len() > 1 {
+                for id in ids {
+                    contested_ids.insert(*id);
+                }
+            }
+        }
+        if contested_ids.is_empty() {
+            return Ok(0);
+        }
+
+        // For each contested repo, check if its worktree dir exists on disk
+        // and if the actual git remote matches this repo's URL.
+        let mut to_remove = Vec::<i64>::new();
+        let repo_map: HashMap<i64, &Repo> = addon_repos.iter().map(|r| (r.id, *r)).collect();
+
+        for &repo_id in &contested_ids {
+            let r = match repo_map.get(&repo_id) {
+                Some(r) => r,
+                None => continue,
+            };
+            let worktree = self.addon_git_worktree_dir(repo_id, wow_dir, r);
+            if !worktree.is_dir() || !Self::has_local_git_marker(&worktree) {
+                // No local clone → this entry is stale, mark for removal.
+                to_remove.push(repo_id);
+                continue;
+            }
+            let git_repo = match Repository::open(&worktree) {
+                Ok(v) => v,
+                Err(_) => {
+                    to_remove.push(repo_id);
+                    continue;
+                }
+            };
+            let remote_raw = match Self::local_repo_remote_url(&git_repo) {
+                Some(v) => v,
+                None => {
+                    to_remove.push(repo_id);
+                    continue;
+                }
+            };
+            let remote_url = Self::normalize_git_remote_url(&remote_raw);
+            let det = remote_url.as_deref().and_then(|u| detect_repo(u).ok());
+
+            let matches = det
+                .as_ref()
+                .map(|d| {
+                    d.host.eq_ignore_ascii_case(&r.host)
+                        && d.owner.eq_ignore_ascii_case(&r.owner)
+                        && d.name.eq_ignore_ascii_case(&r.name)
+                })
+                .unwrap_or(false);
+
+            if !matches {
+                // On-disk remote doesn't match this DB entry → stale.
+                to_remove.push(repo_id);
+            }
+        }
+
+        let mut removed = 0usize;
+        for repo_id in to_remove {
+            // Only remove tracking, don't delete files (the real repo still owns them).
+            self.db.remove_repo(repo_id)?;
+            removed += 1;
+        }
+        Ok(removed)
     }
 
     fn build_git_addon_plan_for_repo(
@@ -1180,6 +1300,7 @@ impl Engine {
     pub async fn check_updates_with_wow(&self, wow_dir: Option<&Path>, check_mode: CheckMode) -> Result<Vec<UpdatePlan>> {
         if let Some(wow_dir) = wow_dir {
             let _ = self.import_existing_addon_git_repos(wow_dir);
+            let _ = self.dedup_addon_repos_by_folder(wow_dir);
         }
 
         let repos = self.db.list_repos()?;
