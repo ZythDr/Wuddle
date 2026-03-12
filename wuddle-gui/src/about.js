@@ -209,7 +209,7 @@ export async function maybePollSelfUpdateInfo({ notify = false } = {}) {
 // ---------------------------------------------------------------------------
 
 /** Convert simple changelog markdown to HTML. */
-function changelogToHtml(md) {
+export function changelogToHtml(md) {
   const lines = md.split("\n");
   let html = "";
   let inList = false;

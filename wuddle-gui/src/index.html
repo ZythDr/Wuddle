@@ -661,51 +661,79 @@
 
     <!-- Add modal -->
     <dialog id="dlgAdd" class="dialog">
-      <form method="dialog" class="dialog-inner">
-        <div class="dialog-head">
-          <div>
-            <div id="addDialogTitle" class="dialog-title">Add a repo</div>
-            <div id="addDialogHint" class="hint">Quick-add from the mods listed, or add your own Git repo URL below.</div>
+      <div class="dialog-add-layout">
+        <div id="repoSidePanel" class="repo-side-panel hidden">
+          <div id="repoAboutSection" class="repo-side-section repo-about-section hidden">
+            <div class="label">About</div>
+            <div id="repoAbout" class="repo-about"></div>
           </div>
-          <button id="btnAddCloseX" class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
+          <div id="repoTreeSection" class="repo-side-section repo-tree-section scroll-fade hidden">
+            <div class="label">Files</div>
+            <div id="repoTree" class="repo-tree"></div>
+          </div>
         </div>
 
-        <div id="quickAddField" class="field">
-          <div class="label">Quick add (click to expand)</div>
-          <div id="addPresetList" class="preset-list"></div>
-        </div>
+        <form method="dialog" class="dialog-inner dlg-add-inner">
+          <!-- Sticky header -->
+          <div class="dlg-add-header">
+            <div class="dialog-head">
+              <div>
+                <div id="addDialogTitle" class="dialog-title">Add a repo</div>
+                <div id="addDialogHint" class="hint">Quick-add from the mods listed, or add your own Git repo URL below.</div>
+              </div>
+              <button id="btnAddCloseX" class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
+            </div>
 
-        <label class="field">
-          <div id="addRepoUrlLabel" class="label">Repo URL</div>
-          <input id="repoUrl" placeholder="(e.g. https://gitea.com/avitasia/nampower)" />
-        </label>
+            <label class="field">
+              <div id="addRepoUrlLabel" class="label">Addon Repo URL</div>
+              <input id="repoUrl" placeholder="(e.g. https://gitea.com/avitasia/nampower)" />
+            </label>
+          </div>
 
-        <details class="advanced">
-          <summary>Advanced</summary>
-          <label class="field">
-            <div class="label">Mode override (optional)</div>
-            <select id="mode">
-              <option value="auto" selected>auto (recommended)</option>
-              <option value="addon">addon</option>
-              <option value="addon_git">addon_git (clone/pull)</option>
-              <option value="dll">dll</option>
-              <option value="mixed">mixed</option>
-              <option value="raw">raw</option>
-            </select>
-          </label>
-        </details>
+          <!-- Scrollable body -->
+          <div class="dlg-add-body">
+            <div id="contentFrameLabel" class="label">Quick add (click to expand)</div>
+            <div class="dlg-add-content-frame scroll-fade">
+              <div id="quickAddField">
+                <div id="addPresetList" class="preset-list"></div>
+              </div>
 
-        <div class="dialog-actions">
-          <button class="btn ghost" value="cancel">Cancel</button>
-          <button id="btnAdd" class="btn primary" value="ok">Add</button>
-        </div>
-      </form>
+              <div id="readmePreviewWrap" class="readme-preview-wrap hidden">
+                <div id="readmePreview" class="readme-preview"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Sticky footer -->
+          <div class="dlg-add-footer">
+            <div class="dlg-add-footer-left">
+              <input type="checkbox" id="chkAdvanced" class="dlg-add-advanced-chk">
+              <label for="chkAdvanced" class="dlg-add-advanced-label">Advanced</label>
+              <label class="dlg-add-mode">
+                <span class="label">Mode</span>
+                <select id="mode">
+                  <option value="auto" selected>auto</option>
+                  <option value="addon">addon</option>
+                  <option value="addon_git">addon_git</option>
+                  <option value="dll">dll</option>
+                  <option value="mixed">mixed</option>
+                  <option value="raw">raw</option>
+                </select>
+              </label>
+            </div>
+            <div class="dlg-add-footer-actions">
+              <button class="btn ghost" value="cancel">Cancel</button>
+              <button id="btnAdd" class="btn primary" value="ok">Add</button>
+            </div>
+          </div>
+        </form>
+      </div>
     </dialog>
 
     <!-- SuperWoW risk warning modal -->
     <dialog id="dlgSuperwowRisk" class="dialog">
       <form method="dialog" class="dialog-inner">
-        <div class="dialog-head">
+        <div class="dlg-head dialog-head">
           <div>
             <div class="dialog-title">SuperWoW Anti-Virus Warning!</div>
             <div class="hint">
@@ -715,32 +743,36 @@
           <button class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
         </div>
 
-        <div class="field">
-          <div class="hint risk-note">
-            Installing SuperWoW will almost certainly trigger your anti-virus software, and it will likely seem like
-            <code>Wuddle.exe</code> is responsible (since Wuddle is what downloads and installs it). This happens
-            because SuperWoW itself is known to trigger false-positives in many anti-virus products.
+        <div class="dlg-body scroll-fade">
+          <div class="field">
+            <div class="hint risk-note">
+              Installing SuperWoW will almost certainly trigger your anti-virus software, and it will likely seem like
+              <code>Wuddle.exe</code> is responsible (since Wuddle is what downloads and installs it). This happens
+              because SuperWoW itself is known to trigger false-positives in many anti-virus products.
+            </div>
+            <div class="hint risk-note">
+              For this reason, you have three options:
+            </div>
+            <ol class="risk-list">
+              <li>
+                Temporarily disable your anti-virus and add your WoW directory to AV exclusions
+                (Follow step 1 &amp; 2 in
+                <button id="superwowGuideLink" class="inline-link" type="button">Pepopo978's guide</button>), so
+                <code>SuperWoWhook.dll</code> is not removed after install.
+              </li>
+              <li>
+                Allow the false-positive threat for Wuddle/SuperWoW so you do not need to disable AV for future SuperWoW updates.
+              </li>
+              <li>Do not install SuperWoW.</li>
+            </ol>
           </div>
-          <div class="hint risk-note">
-            For this reason, you have three options:
-          </div>
-          <ol class="risk-list">
-            <li>
-              Temporarily disable your anti-virus and add your WoW directory to AV exclusions
-              (Follow step 1 &amp; 2 in
-              <button id="superwowGuideLink" class="inline-link" type="button">Pepopo978's guide</button>), so
-              <code>SuperWoWhook.dll</code> is not removed after install.
-            </li>
-            <li>
-              Allow the false-positive threat for Wuddle/SuperWoW so you do not need to disable AV for future SuperWoW updates.
-            </li>
-            <li>Do not install SuperWoW.</li>
-          </ol>
         </div>
 
-        <div class="dialog-actions">
-          <button class="btn ghost" value="cancel">Cancel</button>
-          <button class="btn warn" value="ok">Continue</button>
+        <div class="dlg-foot">
+          <div class="dialog-actions">
+            <button class="btn ghost" value="cancel">Cancel</button>
+            <button class="btn warn" value="ok">Continue</button>
+          </div>
         </div>
       </form>
     </dialog>
@@ -748,7 +780,7 @@
     <!-- Addon conflict modal -->
     <dialog id="dlgAddonConflict" class="dialog">
       <form method="dialog" class="dialog-inner">
-        <div class="dialog-head">
+        <div class="dlg-head dialog-head">
           <div>
             <div class="dialog-title">Addon folder conflict detected</div>
             <div class="hint">
@@ -758,31 +790,35 @@
           <button class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
         </div>
 
-        <div class="addon-conflict-compare">
-          <div class="addon-conflict-card">
-            <div class="addon-conflict-card-label">From (existing)</div>
-            <div id="addonConflictFromTitle" class="addon-conflict-card-title"></div>
-            <div id="addonConflictFromMeta" class="addon-conflict-card-meta"></div>
+        <div class="dlg-body scroll-fade">
+          <div class="addon-conflict-compare">
+            <div class="addon-conflict-card">
+              <div class="addon-conflict-card-label">From (existing)</div>
+              <div id="addonConflictFromTitle" class="addon-conflict-card-title"></div>
+              <div id="addonConflictFromMeta" class="addon-conflict-card-meta"></div>
+            </div>
+            <div class="addon-conflict-card">
+              <div class="addon-conflict-card-label">To (incoming)</div>
+              <div id="addonConflictToTitle" class="addon-conflict-card-title"></div>
+              <div id="addonConflictToMeta" class="addon-conflict-card-meta"></div>
+            </div>
           </div>
-          <div class="addon-conflict-card">
-            <div class="addon-conflict-card-label">To (incoming)</div>
-            <div id="addonConflictToTitle" class="addon-conflict-card-title"></div>
-            <div id="addonConflictToMeta" class="addon-conflict-card-meta"></div>
+
+          <div class="field addon-conflict-targets">
+            <div class="label">Conflicting targets</div>
+            <ul id="addonConflictList" class="conflict-list"></ul>
+          </div>
+
+          <div class="hint risk-note">
+            Choose <strong>Replace and install</strong> to delete old conflicting addon files and continue with this install.
           </div>
         </div>
 
-        <div class="field addon-conflict-targets">
-          <div class="label">Conflicting targets</div>
-          <ul id="addonConflictList" class="conflict-list"></ul>
-        </div>
-
-        <div class="hint risk-note">
-          Choose <strong>Replace and install</strong> to delete old conflicting addon files and continue with this install.
-        </div>
-
-        <div class="dialog-actions">
-          <button class="btn ghost" value="cancel">Keep existing files</button>
-          <button class="btn danger" value="ok">Replace and install</button>
+        <div class="dlg-foot">
+          <div class="dialog-actions">
+            <button class="btn ghost" value="cancel">Keep existing files</button>
+            <button class="btn danger" value="ok">Replace and install</button>
+          </div>
         </div>
       </form>
     </dialog>
@@ -846,7 +882,7 @@
     <!-- Instance settings modal -->
     <dialog id="dlgInstanceSettings" class="dialog">
       <form method="dialog" class="dialog-inner">
-        <div class="dialog-head">
+        <div class="dlg-head dialog-head">
           <div>
             <div class="dialog-title">Instance Settings</div>
             <div class="hint">Configure name, game executable path, and launch behavior for this instance.</div>
@@ -854,109 +890,113 @@
           <button class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
         </div>
 
-        <input id="instanceSettingsId" type="hidden" />
+        <div class="dlg-body scroll-fade">
+          <input id="instanceSettingsId" type="hidden" />
 
-        <div class="row align-end instance-name-row">
-          <label class="field grow instance-name-field">
-            <div class="label">Name</div>
-            <input id="instanceSettingsName" placeholder="WoW1" />
-          </label>
+          <div class="row align-end instance-name-row">
+            <label class="field grow instance-name-field">
+              <div class="label">Name</div>
+              <input id="instanceSettingsName" placeholder="WoW1" />
+            </label>
+            <label
+              class="check instance-turtles-check"
+              title="Enables Turtle WoW related features throughout Wuddle's interface"
+            >
+              <input id="instanceSettingsLikeTurtles" type="checkbox" />
+              <span>I like turtles!</span>
+            </label>
+          </div>
+
+          <div class="row align-end instance-path-row">
+            <label class="field grow instance-path-field">
+              <div class="label">WoW path</div>
+              <input id="instanceSettingsPath" placeholder="/path/to/Wow.exe (or VanillaFixes.exe)" />
+            </label>
+            <button id="btnInstanceSettingsChoosePath" class="btn" type="button">Choose...</button>
+            <button id="btnInstanceSettingsOpenPath" class="btn" type="button">Open</button>
+          </div>
+
           <label
-            class="check instance-turtles-check"
-            title="Enables Turtle WoW related features throughout Wuddle's interface"
+            class="check"
+            title="Deletes the WDB folder (cached server data) before launching the game"
           >
-            <input id="instanceSettingsLikeTurtles" type="checkbox" />
-            <span>I like turtles!</span>
+            <input id="instanceSettingsClearWdb" type="checkbox" />
+            <span>Auto-clear WDB cache on launch</span>
           </label>
+
+          <label class="field">
+            <div class="label">Launch method</div>
+            <select id="instanceSettingsLaunchMethod">
+              <option value="auto">Auto (VanillaFixes.exe / Wow.exe)</option>
+              <option value="lutris">Lutris</option>
+              <option value="wine">Wine</option>
+              <option value="custom">Custom command</option>
+            </select>
+          </label>
+
+          <div id="instanceSettingsLaunchAuto" class="instance-launch-group hint">
+            Wuddle launches <code>VanillaFixes.exe</code> if present, otherwise <code>Wow.exe</code>.
+          </div>
+
+          <div id="instanceSettingsLaunchLutris" class="instance-launch-group hidden">
+            <label class="field">
+              <div class="label">Lutris target</div>
+              <input
+                id="instanceSettingsLutrisTarget"
+                placeholder="lutris:rungameid/2"
+              />
+            </label>
+            <div class="hint">Example: <code>lutris:rungameid/2</code></div>
+          </div>
+
+          <div id="instanceSettingsLaunchWine" class="instance-launch-group hidden">
+            <label class="field">
+              <div class="label">Wine command</div>
+              <input id="instanceSettingsWineCommand" placeholder="wine" />
+            </label>
+            <label class="field">
+              <div class="label">Extra args (optional)</div>
+              <input id="instanceSettingsWineArgs" placeholder="--some-arg value" />
+            </label>
+          </div>
+
+          <div id="instanceSettingsLaunchCustom" class="instance-launch-group hidden">
+            <label class="field">
+              <div class="label">Custom command</div>
+              <input id="instanceSettingsCustomCommand" placeholder="command" />
+            </label>
+            <label class="field">
+              <div class="label">Arguments (optional)</div>
+              <input
+                id="instanceSettingsCustomArgs"
+                placeholder="--flag value"
+              />
+            </label>
+            <div class="hint">Tip: use <code>{exe}</code> in args to inject the detected game executable path.</div>
+          </div>
+
+          <details id="instanceSettingsAdvanced" class="instance-advanced">
+            <summary>Advanced</summary>
+            <label class="field">
+              <div class="label">Working directory override</div>
+              <input id="instanceSettingsWorkingDir" placeholder="/path/to/working/dir" />
+            </label>
+            <label class="field">
+              <div class="label">Environment variables</div>
+              <textarea
+                id="instanceSettingsEnv"
+                rows="4"
+                placeholder="KEY=VALUE"
+              ></textarea>
+            </label>
+          </details>
         </div>
 
-        <div class="row align-end instance-path-row">
-          <label class="field grow instance-path-field">
-            <div class="label">WoW path</div>
-            <input id="instanceSettingsPath" placeholder="/path/to/Wow.exe (or VanillaFixes.exe)" />
-          </label>
-          <button id="btnInstanceSettingsChoosePath" class="btn" type="button">Choose...</button>
-          <button id="btnInstanceSettingsOpenPath" class="btn" type="button">Open</button>
-        </div>
-
-        <label
-          class="check"
-          title="Deletes the WDB folder (cached server data) before launching the game"
-        >
-          <input id="instanceSettingsClearWdb" type="checkbox" />
-          <span>Auto-clear WDB cache on launch</span>
-        </label>
-
-        <label class="field">
-          <div class="label">Launch method</div>
-          <select id="instanceSettingsLaunchMethod">
-            <option value="auto">Auto (VanillaFixes.exe / Wow.exe)</option>
-            <option value="lutris">Lutris</option>
-            <option value="wine">Wine</option>
-            <option value="custom">Custom command</option>
-          </select>
-        </label>
-
-        <div id="instanceSettingsLaunchAuto" class="instance-launch-group hint">
-          Wuddle launches <code>VanillaFixes.exe</code> if present, otherwise <code>Wow.exe</code>.
-        </div>
-
-        <div id="instanceSettingsLaunchLutris" class="instance-launch-group hidden">
-          <label class="field">
-            <div class="label">Lutris target</div>
-            <input
-              id="instanceSettingsLutrisTarget"
-              placeholder="lutris:rungameid/2"
-            />
-          </label>
-          <div class="hint">Example: <code>lutris:rungameid/2</code></div>
-        </div>
-
-        <div id="instanceSettingsLaunchWine" class="instance-launch-group hidden">
-          <label class="field">
-            <div class="label">Wine command</div>
-            <input id="instanceSettingsWineCommand" placeholder="wine" />
-          </label>
-          <label class="field">
-            <div class="label">Extra args (optional)</div>
-            <input id="instanceSettingsWineArgs" placeholder="--some-arg value" />
-          </label>
-        </div>
-
-        <div id="instanceSettingsLaunchCustom" class="instance-launch-group hidden">
-          <label class="field">
-            <div class="label">Custom command</div>
-            <input id="instanceSettingsCustomCommand" placeholder="command" />
-          </label>
-          <label class="field">
-            <div class="label">Arguments (optional)</div>
-            <input
-              id="instanceSettingsCustomArgs"
-              placeholder="--flag value"
-            />
-          </label>
-          <div class="hint">Tip: use <code>{exe}</code> in args to inject the detected game executable path.</div>
-        </div>
-
-        <details id="instanceSettingsAdvanced" class="instance-advanced">
-          <summary>Advanced</summary>
-          <label class="field">
-            <div class="label">Working directory override</div>
-            <input id="instanceSettingsWorkingDir" placeholder="/path/to/working/dir" />
-          </label>
-          <label class="field">
-            <div class="label">Environment variables</div>
-            <textarea
-              id="instanceSettingsEnv"
-              rows="4"
-              placeholder="KEY=VALUE"
-            ></textarea>
-          </label>
-        </details>
-
-        <div class="dialog-actions">
-          <button id="btnInstanceSettingsCancel" class="btn ghost" value="cancel">Cancel</button>
-          <button id="btnInstanceSettingsSave" class="btn primary" value="ok">Save</button>
+        <div class="dlg-foot">
+          <div class="dialog-actions">
+            <button id="btnInstanceSettingsCancel" class="btn ghost" value="cancel">Cancel</button>
+            <button id="btnInstanceSettingsSave" class="btn primary" value="ok">Save</button>
+          </div>
         </div>
       </form>
     </dialog>
@@ -964,16 +1004,20 @@
     <!-- Changelog modal -->
     <dialog id="dlgChangelog" class="dialog">
       <form method="dialog" class="dialog-inner dialog-wide">
-        <div class="dialog-head">
+        <div class="dlg-head dialog-head">
           <div>
             <div class="dialog-title">Changelog</div>
             <div class="hint">What's new in Wuddle</div>
           </div>
           <button class="btn ghost icon" value="cancel" aria-label="Close">✕</button>
         </div>
-        <div id="changelogContent" class="changelog-content"></div>
-        <div class="dialog-actions">
-          <button class="btn primary" value="ok">Close</button>
+        <div class="dlg-body scroll-fade">
+          <div id="changelogContent" class="changelog-content"></div>
+        </div>
+        <div class="dlg-foot">
+          <div class="dialog-actions">
+            <button class="btn primary" value="ok">Close</button>
+          </div>
         </div>
       </form>
     </dialog>

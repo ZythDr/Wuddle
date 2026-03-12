@@ -33,6 +33,7 @@ export function setTheme(themeId = state.theme) {
   state.theme = next;
   document.documentElement.setAttribute("data-theme", next);
   renderThemePicker();
+  invalidateFadeColors();
 }
 
 export function setUiFontStyle(enabled = state.useFrizFont) {
@@ -129,7 +130,7 @@ export function syncThemedSelect(select) {
   });
 }
 
-function rebuildThemedSelect(select) {
+export function rebuildThemedSelect(select) {
   const binding = themedSelectBindings.get(select);
   if (!binding) return;
   binding.pop.innerHTML = "";
@@ -348,4 +349,124 @@ export function bindDialogOutsideToClose(dlg) {
     if (ev.target !== dlg) return;
     dlg.close();
   });
+}
+
+// ---------------------------------------------------------------------------
+// Scroll-fade: toggle fade-top / fade-bottom based on scroll position
+// ---------------------------------------------------------------------------
+
+const FADE_THRESHOLD = 4;
+const _wiredScrollFade = new WeakSet();
+const _fadeColorCache = new WeakMap();       // el → computed color string
+let _fadeColorGeneration = 0;                // bumped on theme change to invalidate cache
+
+function updateScrollFade(el) {
+  const canScrollUp = el.scrollTop > FADE_THRESHOLD;
+  const canScrollDown = el.scrollTop + el.clientHeight < el.scrollHeight - FADE_THRESHOLD;
+  el.classList.toggle("fade-top", canScrollUp);
+  el.classList.toggle("fade-bottom", canScrollDown);
+}
+
+/** Wire all `.scroll-fade` elements, and observe future ones. */
+export function initScrollFade() {
+  for (const el of document.querySelectorAll(".scroll-fade")) wireScrollFade(el);
+
+  // Single observer: watch for new .scroll-fade nodes AND dialog open attributes
+  const observer = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      // Dialog opened → refresh its fade elements
+      if (m.type === "attributes" && m.attributeName === "open") {
+        const dlg = m.target;
+        if (dlg.hasAttribute("open")) {
+          requestAnimationFrame(() => {
+            for (const el of dlg.querySelectorAll(".scroll-fade")) {
+              syncFadeColor(el);
+              updateScrollFade(el);
+            }
+          });
+        }
+        continue;
+      }
+      // New nodes added → wire any .scroll-fade elements
+      for (const node of m.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        if (node.classList?.contains("scroll-fade")) wireScrollFade(node);
+        else if (node.querySelectorAll) {
+          for (const child of node.querySelectorAll(".scroll-fade")) wireScrollFade(child);
+        }
+      }
+    }
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+  // Also watch dialog open/close attribute changes
+  for (const dlg of document.querySelectorAll("dialog")) {
+    observer.observe(dlg, { attributes: true, attributeFilter: ["open"] });
+  }
+}
+
+const _rgbaRe = /rgba?\(\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/;
+
+function computeEffectiveBg(el) {
+  const layers = [];
+  let node = el;
+  while (node && node !== document.documentElement) {
+    const bg = getComputedStyle(node).backgroundColor;
+    if (bg && bg !== "transparent" && bg !== "rgba(0, 0, 0, 0)") {
+      layers.push(bg);
+      const m = bg.match(_rgbaRe);
+      if (m && (m[4] === undefined || parseFloat(m[4]) >= 1)) break;
+    }
+    node = node.parentElement;
+  }
+  if (!layers.length) return null;
+  let r = 0, g = 0, b = 0;
+  for (let i = layers.length - 1; i >= 0; i--) {
+    const m = layers[i].match(_rgbaRe);
+    if (!m) continue;
+    const a = m[4] !== undefined ? parseFloat(m[4]) : 1;
+    r = r * (1 - a) + parseFloat(m[1]) * a;
+    g = g * (1 - a) + parseFloat(m[2]) * a;
+    b = b * (1 - a) + parseFloat(m[3]) * a;
+  }
+  return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
+}
+
+function wireScrollFade(el) {
+  if (_wiredScrollFade.has(el)) return;
+  _wiredScrollFade.add(el);
+  el.addEventListener("scroll", () => updateScrollFade(el), { passive: true });
+  requestAnimationFrame(() => {
+    syncFadeColor(el);
+    updateScrollFade(el);
+  });
+}
+
+function syncFadeColor(el) {
+  // Use cached value if theme hasn't changed
+  const cached = _fadeColorCache.get(el);
+  if (cached && cached.gen === _fadeColorGeneration) {
+    el.style.setProperty("--fade-color", cached.color);
+    return;
+  }
+  const bg = computeEffectiveBg(el);
+  if (bg) {
+    _fadeColorCache.set(el, { color: bg, gen: _fadeColorGeneration });
+    el.style.setProperty("--fade-color", bg);
+  }
+}
+
+/** Invalidate all fade color caches (called on theme change). */
+export function invalidateFadeColors() {
+  _fadeColorGeneration++;
+  requestAnimationFrame(() => {
+    for (const el of document.querySelectorAll(".scroll-fade")) syncFadeColor(el);
+  });
+}
+
+/** Re-check scroll fade state for an element (call after content changes). */
+export function refreshScrollFade(el) {
+  if (!el?.classList?.contains("scroll-fade")) return;
+  wireScrollFade(el);
+  syncFadeColor(el);
+  updateScrollFade(el);
 }

@@ -2,6 +2,30 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.5.0
+
+### Add Dialog Overhaul
+- **Repo README preview:** Pasting a repo URL in the Add dialog now fetches and displays the repository's README directly in-app
+- **Repo info panel:** Shows repository description, star count, clickable fork count, language, and license alongside the README
+- **File tree panel:** Browse the repository's top-level file/folder structure (expandable one level deep) before adding
+- **Quick Add + README shared frame:** Quick Add presets and README preview share a single bordered content frame with a swappable header label
+- **Advanced mode toggle:** Footer checkbox to show/hide the install mode dropdown, keeping the default flow cleaner
+
+### Scroll Fade Design Language
+- **Scroll-aware edge fading:** Scrollable frames now show a subtle gradient fade at the top/bottom edges to indicate more content — appears only when content overflows in that direction
+- **Theme-aware fade colors:** Fade overlays automatically match the effective background color of their container, with live re-sync on theme change
+- **Applied globally:** Add dialog content frame, dialog bodies, file tree panel, and all dialog scroll regions use the new fade system
+
+### Sticky Dialog Footers
+- **All dialogs restructured:** Instance Settings, Changelog, Addon Conflict, and SuperWoW Warning dialogs now use a consistent head/body/foot flex layout with non-scrolling sticky footers
+
+### Performance
+- **Shared HTTP client:** Backend Tauri commands reuse a single connection-pooled HTTP client instead of creating one per request
+- **Branch dropdown targeted updates:** Loading branch lists for addon repos now updates only the affected dropdown instead of rebuilding the entire repo list — eliminates UI freezes on the Addons tab with many repos
+- **Consolidated MutationObserver:** Single observer handles both DOM additions and dialog open-attribute changes
+- **Cached fade colors:** WeakMap-based cache with generation counter avoids redundant `getComputedStyle` walks on every scroll event
+- **LRU cache limits:** README, repo info, and file tree caches are capped at 30 entries to bound memory usage
+
 ## v2.4.6
 
 - **Auto-clear WDB cache:** Per-instance toggle to delete the WDB folder before each launch — fixes stale server-cache bugs common on Turtle WoW

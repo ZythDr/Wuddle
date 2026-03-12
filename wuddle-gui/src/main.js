@@ -50,6 +50,7 @@ import {
   scheduleAutoCheckTimer,
   bindDialogOutsideToClose,
   setUiCallbacks,
+  initScrollFade,
 } from "./ui.js";
 
 import {
@@ -100,6 +101,7 @@ import {
   confirmRemove,
   loadIgnoredErrors,
   loadIgnoredUpdates,
+  setupReadmePreviewListener,
 } from "./repos.js";
 
 import {
@@ -259,6 +261,8 @@ function loadSettings() {
 
   loadIgnoredErrors();
   loadIgnoredUpdates();
+  setupReadmePreviewListener();
+  initScrollFade();
   const symlinks = localStorage.getItem(OPT_SYMLINKS_KEY) === "true";
   const xattr = localStorage.getItem(OPT_XATTR_KEY) === "true";
   const clock12 = localStorage.getItem(OPT_CLOCK12_KEY) === "true";

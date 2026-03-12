@@ -15,6 +15,18 @@ use wuddle_engine::{AddonProbeResult, Engine, InstallMode, InstallOptions};
 mod self_update;
 mod tweaks;
 
+/// Shared blocking HTTP client — reused across all fetch commands to avoid
+/// repeated TLS/connection-pool setup.  15 s timeout covers most forge APIs.
+fn shared_http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("failed to build shared http client")
+    })
+}
+
 #[derive(Serialize)]
 struct RepoRow {
     id: i64,
@@ -1648,10 +1660,7 @@ const CHANGELOG_EMBEDDED: &str = include_str!("../../../CHANGELOG.md");
 #[tauri::command]
 async fn wuddle_fetch_changelog() -> Result<String, String> {
     run_blocking(|| {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| format!("build http client: {e}"))?;
+        let client = shared_http_client();
 
         let resp = client
             .get("https://raw.githubusercontent.com/ZythDr/Wuddle/main/CHANGELOG.md")
@@ -1671,6 +1680,326 @@ async fn wuddle_fetch_changelog() -> Result<String, String> {
         }
     })
     .await
+}
+
+#[tauri::command]
+async fn wuddle_fetch_repo_readme(url: String) -> Result<String, String> {
+    run_blocking(move || {
+        let parsed = reqwest::Url::parse(url.trim())
+            .map_err(|e| format!("invalid URL: {e}"))?;
+        let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+        let segs: Vec<&str> = parsed
+            .path_segments()
+            .map(|s| s.collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s: &&str| !s.is_empty())
+            .collect();
+        if segs.len() < 2 {
+            return Err("URL must include owner and repo name".into());
+        }
+        let owner = segs[0];
+        let name = segs[1].trim_end_matches(".git");
+
+        let client = shared_http_client();
+        let ua = format!("Wuddle/{}", env!("CARGO_PKG_VERSION"));
+
+        if host == "github.com" {
+            let api_url = format!("https://api.github.com/repos/{owner}/{name}/readme");
+            let mut req = client
+                .get(&api_url)
+                .header("User-Agent", &ua)
+                .header("Accept", "application/vnd.github.html+json");
+            if let Some(token) = wuddle_engine::github_token() {
+                req = req.bearer_auth(token);
+            }
+            let resp = req.send().map_err(|e| format!("github readme: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("README not found (HTTP {})", resp.status()));
+            }
+            resp.text().map_err(|e| format!("read body: {e}"))
+        } else if host == "gitlab.com" {
+            let encoded_path = format!("{owner}/{name}").replace('/', "%2F");
+            let api_url = format!(
+                "https://{host}/api/v4/projects/{encoded_path}/repository/files/README.md/raw?ref=HEAD"
+            );
+            let resp = client
+                .get(&api_url)
+                .header("User-Agent", &ua)
+                .send()
+                .map_err(|e| format!("gitlab readme: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("README not found (HTTP {})", resp.status()));
+            }
+            let md = resp.text().map_err(|e| format!("read body: {e}"))?;
+            Ok(format!("<!--md-->{md}"))
+        } else {
+            // Gitea / Codeberg / other Gitea-compatible hosts
+            let api_url =
+                format!("https://{host}/api/v1/repos/{owner}/{name}/raw/README.md");
+            let resp = client
+                .get(&api_url)
+                .header("User-Agent", &ua)
+                .send()
+                .map_err(|e| format!("gitea readme: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("README not found (HTTP {})", resp.status()));
+            }
+            let md = resp.text().map_err(|e| format!("read body: {e}"))?;
+            Ok(format!("<!--md-->{md}"))
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+async fn wuddle_fetch_repo_info(url: String) -> Result<String, String> {
+    run_blocking(move || {
+        let parsed = reqwest::Url::parse(url.trim())
+            .map_err(|e| format!("invalid URL: {e}"))?;
+        let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+        let segs: Vec<&str> = parsed
+            .path_segments()
+            .map(|s| s.collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s: &&str| !s.is_empty())
+            .collect();
+        if segs.len() < 2 {
+            return Err("URL must include owner and repo name".into());
+        }
+        let owner = segs[0];
+        let name = segs[1].trim_end_matches(".git");
+
+        let client = shared_http_client();
+        let ua = format!("Wuddle/{}", env!("CARGO_PKG_VERSION"));
+
+        if host == "github.com" {
+            let api_url = format!("https://api.github.com/repos/{owner}/{name}");
+            let mut req = client
+                .get(&api_url)
+                .header("User-Agent", &ua)
+                .header("Accept", "application/vnd.github+json");
+            if let Some(token) = wuddle_engine::github_token() {
+                req = req.bearer_auth(token);
+            }
+            let resp = req.send().map_err(|e| format!("github repo info: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("repo info not found (HTTP {})", resp.status()));
+            }
+            let data: serde_json::Value =
+                resp.json().map_err(|e| format!("parse json: {e}"))?;
+            let result = serde_json::json!({
+                "description": data["description"].as_str().unwrap_or(""),
+                "stars": data["stargazers_count"].as_u64().unwrap_or(0),
+                "forks": data["forks_count"].as_u64().unwrap_or(0),
+                "language": data["language"].as_str().unwrap_or(""),
+                "license": data["license"]["spdx_id"].as_str().unwrap_or(""),
+                "forksUrl": format!("https://github.com/{owner}/{name}/forks"),
+            });
+            Ok(result.to_string())
+        } else if host == "gitlab.com" {
+            let encoded_path = format!("{owner}/{name}").replace('/', "%2F");
+            let api_url =
+                format!("https://{host}/api/v4/projects/{encoded_path}");
+            let resp = client
+                .get(&api_url)
+                .header("User-Agent", &ua)
+                .send()
+                .map_err(|e| format!("gitlab repo info: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("repo info not found (HTTP {})", resp.status()));
+            }
+            let data: serde_json::Value =
+                resp.json().map_err(|e| format!("parse json: {e}"))?;
+            let result = serde_json::json!({
+                "description": data["description"].as_str().unwrap_or(""),
+                "stars": data["star_count"].as_u64().unwrap_or(0),
+                "forks": data["forks_count"].as_u64().unwrap_or(0),
+                "language": "",
+                "license": "",
+                "forksUrl": format!("https://{host}/{owner}/{name}/-/forks"),
+            });
+            Ok(result.to_string())
+        } else {
+            // Gitea / Codeberg
+            let api_url =
+                format!("https://{host}/api/v1/repos/{owner}/{name}");
+            let resp = client
+                .get(&api_url)
+                .header("User-Agent", &ua)
+                .send()
+                .map_err(|e| format!("gitea repo info: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("repo info not found (HTTP {})", resp.status()));
+            }
+            let data: serde_json::Value =
+                resp.json().map_err(|e| format!("parse json: {e}"))?;
+            let result = serde_json::json!({
+                "description": data["description"].as_str().unwrap_or(""),
+                "stars": data["stars_count"].as_u64().unwrap_or(0),
+                "forks": data["forks_count"].as_u64().unwrap_or(0),
+                "language": data["language"].as_str().unwrap_or(""),
+                "license": "",
+                "forksUrl": format!("https://{host}/{owner}/{name}/forks"),
+            });
+            Ok(result.to_string())
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+async fn wuddle_fetch_repo_tree(url: String) -> Result<String, String> {
+    run_blocking(move || {
+        let parsed = reqwest::Url::parse(url.trim())
+            .map_err(|e| format!("invalid URL: {e}"))?;
+        let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+        let segs: Vec<&str> = parsed
+            .path_segments()
+            .map(|s| s.collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s: &&str| !s.is_empty())
+            .collect();
+        if segs.len() < 2 {
+            return Err("URL must include owner and repo name".into());
+        }
+        let owner = segs[0];
+        let name = segs[1].trim_end_matches(".git");
+
+        let client = shared_http_client();
+        let ua = format!("Wuddle/{}", env!("CARGO_PKG_VERSION"));
+
+        // Fetch top-level contents only (children loaded on demand)
+        let entries = fetch_contents_list(&client, &ua, &host, owner, name, "")?;
+        let result: Vec<serde_json::Value> = entries
+            .iter()
+            .filter_map(|e| {
+                let ename = e["name"].as_str().unwrap_or("");
+                if ename.is_empty() { return None; }
+                Some(serde_json::json!({
+                    "name": ename,
+                    "type": normalize_entry_type(e["type"].as_str().unwrap_or("file")),
+                }))
+            })
+            .collect();
+        serde_json::to_string(&result).map_err(|e| format!("serialize: {e}"))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn wuddle_fetch_repo_contents(url: String, path: String) -> Result<String, String> {
+    run_blocking(move || {
+        let parsed = reqwest::Url::parse(url.trim())
+            .map_err(|e| format!("invalid URL: {e}"))?;
+        let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+        let segs: Vec<&str> = parsed
+            .path_segments()
+            .map(|s| s.collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s: &&str| !s.is_empty())
+            .collect();
+        if segs.len() < 2 {
+            return Err("URL must include owner and repo name".into());
+        }
+        let owner = segs[0];
+        let name = segs[1].trim_end_matches(".git");
+
+        let client = shared_http_client();
+        let ua = format!("Wuddle/{}", env!("CARGO_PKG_VERSION"));
+
+        let entries = fetch_contents_list(&client, &ua, &host, owner, name, &path)?;
+        let result: Vec<serde_json::Value> = entries
+            .iter()
+            .filter_map(|e| {
+                let ename = e["name"].as_str().unwrap_or("");
+                if ename.is_empty() { return None; }
+                Some(serde_json::json!({
+                    "name": ename,
+                    "type": normalize_entry_type(e["type"].as_str().unwrap_or("file")),
+                }))
+            })
+            .collect();
+        serde_json::to_string(&result).map_err(|e| format!("serialize: {e}"))
+    })
+    .await
+}
+
+/// Normalize entry type across forges (GitHub uses "dir"/"file", GitLab uses "tree"/"blob").
+fn normalize_entry_type(t: &str) -> &str {
+    match t {
+        "tree" | "dir" => "dir",
+        _ => "file",
+    }
+}
+
+/// Fetch directory contents from the appropriate forge API.
+fn fetch_contents_list(
+    client: &reqwest::blocking::Client,
+    ua: &str,
+    host: &str,
+    owner: &str,
+    name: &str,
+    path: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let path_suffix = if path.is_empty() {
+        String::new()
+    } else {
+        format!("/{path}")
+    };
+
+    if host == "github.com" {
+        let api_url =
+            format!("https://api.github.com/repos/{owner}/{name}/contents{path_suffix}");
+        let mut req = client
+            .get(&api_url)
+            .header("User-Agent", ua)
+            .header("Accept", "application/vnd.github+json");
+        if let Some(token) = wuddle_engine::github_token() {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().map_err(|e| format!("github contents: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("contents not found (HTTP {})", resp.status()));
+        }
+        let entries: Vec<serde_json::Value> =
+            resp.json().map_err(|e| format!("parse json: {e}"))?;
+        Ok(entries)
+    } else if host == "gitlab.com" {
+        let encoded_path = format!("{owner}/{name}").replace('/', "%2F");
+        let api_url = format!(
+            "https://{host}/api/v4/projects/{encoded_path}/repository/tree?per_page=50&path={path}"
+        );
+        let resp = client
+            .get(&api_url)
+            .header("User-Agent", ua)
+            .send()
+            .map_err(|e| format!("gitlab tree: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("tree not found (HTTP {})", resp.status()));
+        }
+        let entries: Vec<serde_json::Value> =
+            resp.json().map_err(|e| format!("parse json: {e}"))?;
+        Ok(entries)
+    } else {
+        // Gitea / Codeberg
+        let api_url =
+            format!("https://{host}/api/v1/repos/{owner}/{name}/contents{path_suffix}");
+        let resp = client
+            .get(&api_url)
+            .header("User-Agent", ua)
+            .send()
+            .map_err(|e| format!("gitea contents: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("contents not found (HTTP {})", resp.status()));
+        }
+        let entries: Vec<serde_json::Value> =
+            resp.json().map_err(|e| format!("parse json: {e}"))?;
+        Ok(entries)
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1722,7 +2051,11 @@ pub fn run() {
             wuddle_restore_tweaks_backup,
             wuddle_has_tweaks_backup,
             wuddle_read_tweaks,
-            wuddle_fetch_changelog
+            wuddle_fetch_changelog,
+            wuddle_fetch_repo_readme,
+            wuddle_fetch_repo_info,
+            wuddle_fetch_repo_tree,
+            wuddle_fetch_repo_contents
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

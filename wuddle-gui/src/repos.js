@@ -5,7 +5,8 @@ import { CURATED_MOD_PRESETS, PRESET_CATEGORY_CLASS } from "./presets.js";
 import { safeInvoke } from "./commands.js";
 import { $, formatTime } from "./utils.js";
 import { log } from "./logs.js";
-import { withBusy, ensureThemedSelect, syncThemedSelect, showToast } from "./ui.js";
+import { withBusy, ensureThemedSelect, syncThemedSelect, rebuildThemedSelect, showToast, refreshScrollFade } from "./ui.js";
+import { changelogToHtml } from "./about.js";
 import {
   setBackendActiveProfile,
   activeProfile,
@@ -564,7 +565,24 @@ export async function loadRepoBranches(repo) {
   try {
     const branches = await safeInvoke("wuddle_list_repo_branches", { id: repo.id }, { timeoutMs: 20000 });
     state.branchOptionsByRepoId.set(repo.id, Array.isArray(branches) ? branches : []);
-    render();
+
+    // Targeted update: refresh only this repo's branch <select> instead of
+    // rebuilding the entire list (avoids 67× full re-renders on first load).
+    const select = document.querySelector(`select.branch-select[data-repo-id="${repo.id}"]`);
+    if (select) {
+      const options = branchOptionsForRepo(repo);
+      const selected = select.value;
+      select.innerHTML = "";
+      for (const opt of options) {
+        const el = document.createElement("option");
+        el.value = opt.value;
+        el.textContent = opt.label;
+        if (opt.value === selected) el.selected = true;
+        select.appendChild(el);
+      }
+      select.disabled = false;
+      rebuildThemedSelect(select);
+    }
   } catch (e) {
     log(`ERROR branches ${repo.owner}/${repo.name}: ${e.message}`);
   } finally {
@@ -1369,6 +1387,7 @@ export function renderRepos() {
       currentCell.className = "branch-cell";
       const select = document.createElement("select");
       select.className = "branch-select";
+      select.dataset.repoId = String(r.id);
       const options = branchOptionsForRepo(r);
       const selected = String(r.gitBranch || "").trim() || "master";
       for (const opt of options) {
@@ -1819,10 +1838,401 @@ export function focusAddDialogUrlInput() {
   });
 }
 
+// ============================================================================
+// README preview for Add dialog
+// ============================================================================
+
+const CACHE_MAX = 30;
+function cappedSet(map, key, value) {
+  if (map.size >= CACHE_MAX) { map.delete(map.keys().next().value); }
+  map.set(key, value);
+}
+const _readmeCache = new Map();
+const _repoInfoCache = new Map();
+const _repoTreeCache = new Map();
+let _readmeDebounceTimer = null;
+let _readmeAbortKey = 0;
+
+export function setupReadmePreviewListener() {
+  const input = $("repoUrl");
+  if (!input) return;
+  input.addEventListener("input", () => {
+    clearTimeout(_readmeDebounceTimer);
+    _readmeDebounceTimer = setTimeout(() => {
+      void fetchAllRepoPreviews(input.value);
+    }, 600);
+  });
+}
+
+/** Kick off README, repo info, and file tree fetches in parallel. */
+async function fetchAllRepoPreviews(rawUrl) {
+  const url = String(rawUrl ?? "").trim();
+  const info = parseRepoUrlInfo(url);
+
+  if (!info.host || !info.owner || !info.name) {
+    hideAllRepoPreviews();
+    return;
+  }
+
+  // Fire all three in parallel
+  fetchAndShowReadme(url, info);
+  fetchAndShowRepoInfo(url, info);
+  fetchAndShowRepoTree(url, info);
+}
+
+function hideAllRepoPreviews() {
+  hideReadmePanel();
+  const sidePanel = $("repoSidePanel");
+  if (sidePanel) sidePanel.classList.add("hidden");
+  const aboutSec = $("repoAboutSection");
+  if (aboutSec) {
+    aboutSec.classList.add("hidden");
+    $("repoAbout").innerHTML = "";
+  }
+  const treeSec = $("repoTreeSection");
+  if (treeSec) {
+    treeSec.classList.add("hidden");
+    $("repoTree").innerHTML = "";
+  }
+
+}
+
+/** Show the side panel if at least one section is visible. */
+function updateSidePanelVisibility() {
+  const panel = $("repoSidePanel");
+  if (!panel) return;
+  const aboutVisible = !$("repoAboutSection")?.classList.contains("hidden");
+  const treeVisible = !$("repoTreeSection")?.classList.contains("hidden");
+  if (aboutVisible || treeVisible) {
+    panel.classList.remove("hidden");
+  } else {
+    panel.classList.add("hidden");
+  }
+}
+
+/** Show README wrap and hide Quick Add (they share the same frame). */
+function showReadmePanel() {
+  const wrap = $("readmePreviewWrap");
+  if (wrap) wrap.classList.remove("hidden");
+  const quickAdd = $("quickAddField");
+  if (quickAdd) quickAdd.classList.add("hidden");
+  const lbl = $("contentFrameLabel");
+  if (lbl) lbl.textContent = "README";
+  const frame = wrap?.closest(".scroll-fade");
+  if (frame) requestAnimationFrame(() => refreshScrollFade(frame));
+}
+
+/** Hide README wrap and restore Quick Add. */
+function hideReadmePanel() {
+  const wrap = $("readmePreviewWrap");
+  if (wrap) {
+    wrap.classList.add("hidden");
+    $("readmePreview").innerHTML = "";
+  }
+  const quickAdd = $("quickAddField");
+  if (quickAdd) quickAdd.classList.remove("hidden");
+  const lbl = $("contentFrameLabel");
+  if (lbl) lbl.textContent = "Quick add (click to expand)";
+  const frame = wrap?.closest(".scroll-fade");
+  if (frame) requestAnimationFrame(() => refreshScrollFade(frame));
+}
+
+async function fetchAndShowReadme(url, info) {
+  const wrap = $("readmePreviewWrap");
+  const container = $("readmePreview");
+  if (!wrap || !container) return;
+
+  const cacheKey = `${info.host}|${info.owner}|${info.name}`.toLowerCase();
+  if (_readmeCache.has(cacheKey)) {
+    container.innerHTML = _readmeCache.get(cacheKey);
+    wireReadmeLinks(container);
+    showReadmePanel();
+    return;
+  }
+
+  showReadmePanel();
+  container.innerHTML = '<div class="readme-preview-loading">Loading README\u2026</div>';
+
+  const generation = ++_readmeAbortKey;
+
+  try {
+    const html = await safeInvoke("wuddle_fetch_repo_readme", { url }, { timeoutMs: 15000 });
+    if (generation !== _readmeAbortKey) return;
+
+    let rendered;
+    if (html.startsWith("<!--md-->")) {
+      rendered = changelogToHtml(html.slice(9));
+    } else {
+      rendered = sanitizeReadmeHtml(html);
+    }
+
+    cappedSet(_readmeCache, cacheKey, rendered);
+    container.innerHTML = rendered;
+    wireReadmeLinks(container);
+    showReadmePanel();
+
+  } catch (_) {
+    if (generation !== _readmeAbortKey) return;
+    hideReadmePanel();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Repo info (About panel)
+// ---------------------------------------------------------------------------
+
+async function fetchAndShowRepoInfo(url, info) {
+  const section = $("repoAboutSection");
+  const container = $("repoAbout");
+  if (!section || !container) return;
+
+  const cacheKey = `${info.host}|${info.owner}|${info.name}`.toLowerCase();
+  if (_repoInfoCache.has(cacheKey)) {
+    container.innerHTML = _repoInfoCache.get(cacheKey);
+    wireAboutLinks(container);
+    section.classList.remove("hidden");
+    updateSidePanelVisibility();
+    return;
+  }
+
+  container.innerHTML = '<span class="repo-info-loading">Loading\u2026</span>';
+  section.classList.remove("hidden");
+  updateSidePanelVisibility();
+
+  try {
+    const json = await safeInvoke("wuddle_fetch_repo_info", { url }, { timeoutMs: 15000 });
+    const data = JSON.parse(json);
+    const html = renderRepoAbout(data);
+    cappedSet(_repoInfoCache, cacheKey, html);
+    container.innerHTML = html;
+    wireAboutLinks(container);
+  } catch (_) {
+    container.innerHTML = "";
+    section.classList.add("hidden");
+    updateSidePanelVisibility();
+  }
+}
+
+function renderRepoAbout(data) {
+  const desc = data.description
+    ? `<p class="repo-description">${escapeHtml(data.description)}</p>`
+    : '<p class="repo-description empty">No description provided.</p>';
+
+  const stats = [];
+
+  if (typeof data.stars === "number") {
+    stats.push(`<div class="repo-stat"><span class="repo-stat-icon">\u2b50</span>${data.stars.toLocaleString()} star${data.stars !== 1 ? "s" : ""}</div>`);
+  }
+
+  if (typeof data.forks === "number" && data.forksUrl) {
+    stats.push(`<div class="repo-stat"><span class="repo-stat-icon">\ud83c\udf74</span><a href="#" class="repo-forks-link" data-href="${escapeHtml(data.forksUrl)}">${data.forks.toLocaleString()} fork${data.forks !== 1 ? "s" : ""}</a></div>`);
+  }
+
+  if (data.language) {
+    stats.push(`<div class="repo-stat"><span class="repo-stat-icon">\ud83d\udcbb</span>${escapeHtml(data.language)}</div>`);
+  }
+
+  if (data.license) {
+    stats.push(`<div class="repo-stat"><span class="repo-stat-icon">\ud83d\udccb</span>${escapeHtml(data.license)}</div>`);
+  }
+
+  return desc + (stats.length ? `<div class="repo-stats">${stats.join("")}</div>` : "");
+}
+
+function wireAboutLinks(container) {
+  container.querySelectorAll(".repo-forks-link").forEach((a) => {
+    a.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      void openUrl(a.dataset.href);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Repo tree (Files panel)
+// ---------------------------------------------------------------------------
+
+let _treeRepoUrl = "";
+const MAX_TREE_DEPTH = 10;
+
+async function fetchAndShowRepoTree(url, info) {
+  const section = $("repoTreeSection");
+  const container = $("repoTree");
+  if (!section || !container) return;
+
+  _treeRepoUrl = url;
+
+  const cacheKey = `${info.host}|${info.owner}|${info.name}`.toLowerCase();
+  if (_repoTreeCache.has(cacheKey)) {
+    container.innerHTML = "";
+    container.appendChild(_repoTreeCache.get(cacheKey).cloneNode(true));
+    wireTreeToggles(container);
+    section.classList.remove("hidden");
+    updateSidePanelVisibility();
+    return;
+  }
+
+  container.innerHTML = '<span class="repo-info-loading">Loading\u2026</span>';
+  section.classList.remove("hidden");
+  updateSidePanelVisibility();
+
+  try {
+    const json = await safeInvoke("wuddle_fetch_repo_tree", { url }, { timeoutMs: 30000 });
+    const entries = JSON.parse(json);
+    const frag = renderTreeEntries(entries);
+    cappedSet(_repoTreeCache, cacheKey, frag.cloneNode(true));
+    container.innerHTML = "";
+    container.appendChild(frag);
+    wireTreeToggles(container);
+    refreshScrollFade(section);
+  } catch (_) {
+    container.innerHTML = "";
+    section.classList.add("hidden");
+    updateSidePanelVisibility();
+  }
+}
+
+function sortTreeEntries(entries) {
+  return [...entries].sort((a, b) => {
+    if (a.type === "dir" && b.type !== "dir") return -1;
+    if (a.type !== "dir" && b.type === "dir") return 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function renderTreeEntries(entries) {
+  const frag = document.createDocumentFragment();
+  const sorted = sortTreeEntries(entries);
+  for (const entry of sorted) {
+    if (entry.type === "dir") {
+      const details = document.createElement("details");
+      details.className = "tree-dir-details";
+      const summary = document.createElement("summary");
+      summary.className = "tree-entry dir";
+      summary.innerHTML = `<span class="tree-icon">\ud83d\udcc1</span><span class="tree-name">${escapeHtml(entry.name)}</span>`;
+      details.appendChild(summary);
+      // Placeholder for lazy-loaded children
+      const childWrap = document.createElement("div");
+      childWrap.className = "tree-children";
+      childWrap.dataset.path = entry.name;
+      childWrap.dataset.loaded = "false";
+      details.appendChild(childWrap);
+      frag.appendChild(details);
+    } else {
+      const div = document.createElement("div");
+      div.className = "tree-entry file";
+      div.innerHTML = `<span class="tree-icon">\ud83d\udcc4</span><span class="tree-name">${escapeHtml(entry.name)}</span>`;
+      frag.appendChild(div);
+    }
+  }
+  return frag;
+}
+
+/** Wire up toggle events on all <details> in a tree container for lazy loading. */
+function wireTreeToggles(container) {
+  container.querySelectorAll("details.tree-dir-details").forEach((det) => {
+    det.addEventListener("toggle", () => {
+      if (!det.open) return;
+      const childWrap = det.querySelector(".tree-children");
+      if (!childWrap || childWrap.dataset.loaded === "true") return;
+      void loadTreeChildren(childWrap);
+    }, { once: true });
+  });
+}
+
+async function loadTreeChildren(childWrap) {
+  const path = childWrap.dataset.path || "";
+  const depth = (path.match(/\//g) || []).length + 1;
+  if (depth > MAX_TREE_DEPTH) {
+    childWrap.innerHTML = '<span class="repo-info-loading">Max depth reached</span>';
+    childWrap.dataset.loaded = "true";
+    return;
+  }
+
+  childWrap.innerHTML = '<span class="repo-info-loading">Loading\u2026</span>';
+  childWrap.dataset.loaded = "true";
+
+  try {
+    const json = await safeInvoke(
+      "wuddle_fetch_repo_contents",
+      { url: _treeRepoUrl, path },
+      { timeoutMs: 15000 },
+    );
+    const entries = JSON.parse(json);
+    const sorted = sortTreeEntries(entries);
+    childWrap.innerHTML = "";
+    for (const entry of sorted) {
+      if (entry.type === "dir") {
+        const details = document.createElement("details");
+        details.className = "tree-dir-details";
+        const summary = document.createElement("summary");
+        summary.className = "tree-entry dir";
+        summary.innerHTML = `<span class="tree-icon">\ud83d\udcc1</span><span class="tree-name">${escapeHtml(entry.name)}</span>`;
+        details.appendChild(summary);
+        const innerWrap = document.createElement("div");
+        innerWrap.className = "tree-children";
+        innerWrap.dataset.path = `${path}/${entry.name}`;
+        innerWrap.dataset.loaded = "false";
+        details.appendChild(innerWrap);
+        // Wire toggle for this new folder
+        details.addEventListener("toggle", () => {
+          if (!details.open) return;
+          if (innerWrap.dataset.loaded === "true") return;
+          void loadTreeChildren(innerWrap);
+        }, { once: true });
+        childWrap.appendChild(details);
+      } else {
+        const div = document.createElement("div");
+        div.className = "tree-entry file";
+        div.innerHTML = `<span class="tree-icon">\ud83d\udcc4</span><span class="tree-name">${escapeHtml(entry.name)}</span>`;
+        childWrap.appendChild(div);
+      }
+    }
+  } catch (_) {
+    childWrap.innerHTML = '<span class="repo-info-loading">Failed to load</span>';
+  }
+}
+
+function sanitizeReadmeHtml(html) {
+  return html
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
+    .replace(/\s+on\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)/gi, "")
+    // Remove GitHub clipboard-copy buttons
+    .replace(/<clipboard-copy[^>]*>[\s\S]*?<\/clipboard-copy>/gi, "");
+}
+
+/** Make all links in the README preview clickable via system browser. */
+function wireReadmeLinks(container) {
+  container.querySelectorAll("a[href]").forEach((a) => {
+    const href = a.getAttribute("href") || "";
+    // Skip anchor-only links (internal headings)
+    if (href.startsWith("#")) return;
+    a.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      // Resolve relative URLs against the repo page
+      let target = href;
+      if (target.startsWith("/") || (!target.startsWith("http://") && !target.startsWith("https://"))) {
+        // Try to build a full URL from the repo context
+        const repoUrl = ($("repoUrl")?.value || "").trim();
+        if (repoUrl) {
+          try {
+            target = new URL(href, repoUrl).href;
+          } catch (_) { /* use as-is */ }
+        }
+      }
+      void openUrl(target);
+    });
+  });
+}
+
 export function openAddDialog() {
   const dlg = $("dlgAdd");
   if (!dlg) return;
   renderAddPresets();
+  if (!$("repoUrl").value.trim()) {
+    hideAllRepoPreviews();
+  }
   if (!dlg.open) {
     dlg.showModal();
   }

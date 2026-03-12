@@ -836,6 +836,7 @@ body.busy {
   overflow: hidden;
 }
 
+
 #panelOptions,
 #panelAbout {
   overflow: auto;
@@ -1986,6 +1987,7 @@ dialog.dialog {
   padding: 0;
   background: transparent;
   position: relative;
+  overflow: visible;
 }
 
 dialog.dialog::backdrop {
@@ -1993,8 +1995,8 @@ dialog.dialog::backdrop {
 }
 
 .dialog-inner {
-  width: min(760px, calc(100vw - 40px));
-  max-height: min(92vh, 920px);
+  width: min(900px, calc(100vw - 36px));
+  max-height: min(94vh, 1040px);
   background-color: var(--card);
   background-image: linear-gradient(180deg, var(--card-grad-top), var(--card-grad-bottom));
   color: var(--text);
@@ -2002,36 +2004,169 @@ dialog.dialog::backdrop {
   border-radius: 18px;
   padding: 16px;
   box-shadow: 0 20px 70px rgba(0,0,0,0.45);
-  overflow: auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
+
+/* ---- Generic dialog sections ---- */
+.dlg-head { flex-shrink: 0; }
+.dlg-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 16px;
+  margin: 0 -16px;
+  --fade-pad-x: 16px;
+}
+.dlg-foot {
+  flex-shrink: 0;
+}
+
+/* ---- Scroll fade edges ---- */
+.scroll-fade {
+  --fade-size: 28px;
+  --fade-color: var(--card);
+  --fade-pad-x: 0px;
+  --fade-pad-y: 0px;
+  position: relative;
+}
+.scroll-fade::before,
+.scroll-fade::after {
+  content: "";
+  position: sticky;
+  display: block;
+  height: var(--fade-size);
+  margin-left: calc(-1 * var(--fade-pad-x));
+  margin-right: calc(-1 * var(--fade-pad-x));
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  flex-shrink: 0;
+}
+.scroll-fade::before {
+  top: calc(-1 * var(--fade-pad-y));
+  background: linear-gradient(to bottom, var(--fade-color), transparent);
+  margin-top: calc(-1 * var(--fade-pad-y));
+  margin-bottom: calc(-1 * var(--fade-size));
+}
+.scroll-fade::after {
+  bottom: calc(-1 * var(--fade-pad-y));
+  background: linear-gradient(to top, var(--fade-color), transparent);
+  margin-bottom: calc(-1 * var(--fade-pad-y));
+  margin-top: calc(-1 * var(--fade-size));
+}
+.scroll-fade.fade-top::before    { opacity: 1; }
+.scroll-fade.fade-bottom::after  { opacity: 1; }
 
 dialog.dialog > .select-menu-pop {
   z-index: 24000;
 }
 
 #dlgAdd .dialog-inner {
-  width: min(860px, calc(100vw - 36px));
+  width: min(960px, calc(100vw - 36px));
+  max-height: none;
+}
+
+/* Add dialog: sticky header + scrollable body + sticky footer */
+.dlg-add-inner {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dlg-add-header {
+  flex-shrink: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+.dlg-add-header .dialog-head {
+  margin-bottom: 8px;
+}
+
+.dlg-add-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.dlg-add-footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+
+.dlg-add-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dlg-add-advanced-chk {
+  margin: 0;
+  width: 15px;
+  height: 15px;
+}
+
+.dlg-add-advanced-label {
+  font-size: 14px;
+  color: var(--text-soft);
+  cursor: pointer;
+  user-select: none;
+}
+
+.dlg-add-mode {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+}
+
+.dlg-add-advanced-chk:checked ~ .dlg-add-mode { display: flex; }
+
+.dlg-add-mode .label {
+  margin: 0;
+  color: var(--text-soft);
+  white-space: nowrap;
+}
+
+.dlg-add-mode select {
+  width: 120px;
+}
+
+.dlg-add-footer-actions {
+  display: flex;
+  gap: 8px;
 }
 
 #dlgRemove .dialog-inner,
 #dlgRemoveInstance .dialog-inner {
-  width: min(620px, calc(100vw - 40px));
+  width: min(680px, calc(100vw - 36px));
 }
 
 @media (min-width: 1300px) {
   #dlgAdd .dialog-inner {
-    width: min(980px, calc(100vw - 48px));
+    width: min(1080px, calc(100vw - 48px));
   }
 }
 
 @media (min-width: 1650px) {
   #dlgAdd .dialog-inner {
-    width: min(1120px, calc(100vw - 64px));
+    width: min(1240px, calc(100vw - 64px));
   }
 }
 
 .dialog-wide {
-  width: min(860px, calc(100vw - 40px));
+  width: min(960px, calc(100vw - 36px));
 }
 
 /* ---- Changelog dialog ---- */
@@ -2039,9 +2174,6 @@ dialog.dialog > .select-menu-pop {
   font-size: 13px;
   line-height: 1.7;
   color: var(--text-soft);
-  max-height: min(65vh, 600px);
-  overflow-y: auto;
-  padding-right: 6px;
 }
 
 .changelog-content h1 {
@@ -2090,6 +2222,378 @@ dialog.dialog > .select-menu-pop {
 
 .changelog-content .changelog-link:hover {
   color: var(--text);
+}
+
+/* ---- Add dialog content frame (Quick Add / README) ---- */
+
+.dlg-add-body > .label { flex-shrink: 0; }
+
+.dlg-add-content-frame {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.18);
+  padding: 12px 14px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  --fade-pad-x: 14px;
+  --fade-pad-y: 12px;
+}
+
+.dlg-add-content-frame #quickAddField { margin: 0; }
+
+/* ---- README preview in Add dialog ---- */
+
+.readme-preview-wrap {
+  margin: 0;
+}
+
+.readme-preview {
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--text-soft);
+}
+
+/* Hide GitHub anchor permalink icons next to headings */
+.readme-preview .anchor,
+.readme-preview a.heading-link,
+.readme-preview .octicon {
+  display: none !important;
+}
+
+.readme-preview h1 {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 16px 0 8px 0;
+}
+
+.readme-preview h1:first-child,
+.readme-preview h2:first-child {
+  margin-top: 0;
+}
+
+.readme-preview h2 {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 16px 0 6px 0;
+}
+
+.readme-preview h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 14px 0 4px 0;
+}
+
+.readme-preview p {
+  margin: 6px 0;
+}
+
+.readme-preview ul,
+.readme-preview ol {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.readme-preview li {
+  margin: 2px 0;
+}
+
+.readme-preview code {
+  font-size: 14px;
+  padding: 1px 4px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+}
+
+.readme-preview pre {
+  font-size: 14px;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+
+.readme-preview pre code {
+  padding: 0;
+  background: none;
+}
+
+.readme-preview img {
+  max-width: 100%;
+  height: auto;
+}
+
+.readme-preview a {
+  color: var(--link);
+  text-decoration: none;
+  cursor: pointer;
+}
+.readme-preview a:hover {
+  color: var(--linkHover);
+  text-decoration: underline;
+}
+
+.readme-preview blockquote {
+  margin: 6px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--text-soft);
+}
+
+.readme-preview hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+
+.readme-preview table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.readme-preview th,
+.readme-preview td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+}
+.readme-preview th {
+  background: rgba(255, 255, 255, 0.04);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.readme-preview h4 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 12px 0 4px 0;
+}
+
+.readme-preview h5,
+.readme-preview h6 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 10px 0 4px 0;
+}
+
+.readme-preview h1,
+.readme-preview h2 {
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.readme-preview dd {
+  margin-left: 20px;
+}
+
+.readme-preview details {
+  margin: 4px 0;
+}
+
+.readme-preview details summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.readme-preview .highlight pre,
+.readme-preview .snippet-clipboard-content {
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+
+.readme-preview-loading {
+  color: rgba(255, 255, 255, 0.4);
+  font-style: italic;
+  padding: 8px 0;
+}
+
+/* ---- Add dialog flex layout (side panel + main content) ---- */
+
+.dialog-add-layout {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  max-height: min(90vh, 1040px);
+}
+
+/* When side panel is hidden, layout is just the form */
+.dialog-add-layout > .repo-side-panel.hidden {
+  display: none;
+}
+
+.dialog-add-layout > .dialog-inner {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- Side panel (About + Files) ---- */
+
+.repo-side-panel {
+  width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background-color: var(--card);
+  background-image: linear-gradient(180deg, var(--card-grad-top), var(--card-grad-bottom));
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.repo-side-section {
+  padding: 10px 14px;
+}
+
+.repo-side-section + .repo-side-section:not(.hidden) {
+  border-top: 1px solid var(--border);
+}
+
+.repo-side-section > .label {
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+/* About section: always show full content, never scroll */
+.repo-about-section {
+  flex-shrink: 0;
+}
+
+/* Files section: take remaining space, scroll if needed */
+.repo-tree-section {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  --fade-pad-x: 14px;
+  --fade-pad-y: 10px;
+}
+
+/* Hide side panel when viewport is too narrow */
+@media (max-width: 1400px) {
+  .repo-side-panel {
+    display: none !important;
+  }
+}
+
+/* ---- File tree ---- */
+
+.repo-tree {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.tree-entry {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 0;
+  color: var(--text-soft);
+}
+
+.tree-entry.dir > .tree-name {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.tree-icon {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-dir-details {
+  margin: 0;
+}
+
+.tree-dir-details > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.tree-dir-details > summary::-webkit-details-marker,
+.tree-dir-details > summary::marker {
+  display: none;
+  content: "";
+}
+
+.tree-dir-details > summary:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.tree-children {
+  padding-left: 18px;
+}
+
+/* ---- About panel ---- */
+
+.repo-about {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.repo-description {
+  color: var(--text-soft);
+  margin: 0 0 10px 0;
+}
+
+.repo-description.empty {
+  font-style: italic;
+  opacity: 0.5;
+}
+
+.repo-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.repo-stat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.repo-stat-icon {
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.repo-stat a {
+  color: var(--link);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.repo-stat a:hover {
+  color: var(--linkHover);
+  text-decoration: underline;
+}
+
+.repo-info-loading {
+  color: rgba(255, 255, 255, 0.4);
+  font-style: italic;
+  font-size: 13px;
 }
 
 .dialog-head {
@@ -2218,8 +2722,7 @@ dialog.dialog > .select-menu-pop {
 }
 
 #dlgAdd .field + .field,
-#dlgAdd .field + .advanced,
-#dlgAdd .advanced + .dialog-actions {
+#dlgAdd .field + .advanced {
   margin-top: 24px;
 }
 
@@ -2247,7 +2750,6 @@ dialog.dialog > .select-menu-pop {
   max-height: clamp(220px, 36vh, 520px);
   overflow: auto;
   padding: 4px 2px;
-  margin-bottom: 8px;
 }
 
 .preset-card {
@@ -2688,7 +3190,7 @@ dialog.dialog > .select-menu-pop {
   background-position: center center;
   background-size: cover;
   background-repeat: no-repeat;
-  opacity: 0.3; /* 70% transparency */
+  opacity: 0.3;
   filter: var(--home-turtle-image-filter);
 }
 

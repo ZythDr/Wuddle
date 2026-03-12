@@ -72,6 +72,15 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **Automatic backup:** WoW.exe.bak is created before the first patch; one-click restore available
 - **Per-profile tweak settings:** each instance remembers its own tweak configuration
 
+### What's New In v2.5
+
+- **Add dialog repo preview:** Pasting a repo URL now shows the README, a file tree (expandable one level), and an About panel (description, stars, forks, language, license) — all fetched live from GitHub/GitLab/Gitea.
+- **Quick Add + README shared frame:** Presets and README share a single content region with a swappable header, reducing clutter.
+- **Advanced mode toggle:** A footer checkbox hides the install mode dropdown by default for a cleaner add flow.
+- **Scroll-aware edge fading:** All scrollable frames now fade at the top/bottom edges to indicate overflow, with theme-aware colors that update on theme switch.
+- **Sticky dialog footers:** Instance Settings, Changelog, Addon Conflict, and SuperWoW Warning dialogs use consistent head/body/foot layouts with non-scrolling footers.
+- **Performance improvements:** Shared HTTP client, targeted branch-dropdown updates (no more UI freeze on 60+ addon repos), consolidated DOM observers, and LRU-capped caches.
+
 ## Credits / Inspiration
 
 Wuddle is its own implementation, but parts of the functionality and UX were inspired by:
