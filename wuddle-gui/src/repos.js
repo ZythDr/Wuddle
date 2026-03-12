@@ -1588,26 +1588,10 @@ export function renderAddPresets() {
 
   for (const preset of CURATED_MOD_PRESETS) {
     const installed = !preset.placeholder && isPresetInstalled(preset);
-    const expanded = isPresetExpanded(preset);
     const description = String(preset.description || "").trim();
     const warning = String(preset.warning || "").trim();
-    const hasExpandedContent = !preset.placeholder && (
-      (Array.isArray(preset.expandedNotes) && preset.expandedNotes.length > 0) ||
-      (Array.isArray(preset.companionLinks) && preset.companionLinks.length > 0)
-    );
-    const canExpand = hasExpandedContent;
     const card = document.createElement("div");
-    card.className = `preset-card${preset.placeholder ? " placeholder" : ""}${installed ? " installed" : ""}${expanded ? " expanded" : ""}${canExpand ? " can-expand" : ""}`;
-    if (canExpand) {
-      card.addEventListener("click", (ev) => {
-        if (!(ev.target instanceof Element)) return;
-        if (ev.target.closest(".preset-actions")) return;
-        if (ev.target.closest(".preset-title-link")) return;
-        if (ev.target.closest(".preset-inline-link")) return;
-        togglePresetExpanded(preset);
-        renderAddPresets();
-      });
-    }
+    card.className = `preset-card${preset.placeholder ? " placeholder" : ""}${installed ? " installed" : ""} expanded`;
 
     const head = document.createElement("div");
     head.className = "preset-head";
@@ -1672,7 +1656,7 @@ export function renderAddPresets() {
       ? preset.companionLinks
       : [];
 
-    if (expanded && Array.isArray(preset.expandedNotes) && preset.expandedNotes.length > 0) {
+    if (Array.isArray(preset.expandedNotes) && preset.expandedNotes.length > 0) {
       const notes = document.createElement("div");
       notes.className = "preset-desc-notes";
       for (const rawLine of preset.expandedNotes) {
@@ -1778,6 +1762,14 @@ export function applyAddDialogContext() {
   }
   if (quickAddField) {
     quickAddField.classList.toggle("hidden", addons);
+  }
+  const contentFrameLabel = $("contentFrameLabel");
+  const contentFrame = contentFrameLabel?.nextElementSibling;
+  if (contentFrameLabel) {
+    contentFrameLabel.classList.toggle("hidden", addons);
+  }
+  if (contentFrame && addons) {
+    contentFrame.classList.add("hidden");
   }
   if (modeSelect && addons) {
     modeSelect.value = "addon_git";
@@ -1917,24 +1909,37 @@ function showReadmePanel() {
   const quickAdd = $("quickAddField");
   if (quickAdd) quickAdd.classList.add("hidden");
   const lbl = $("contentFrameLabel");
-  if (lbl) lbl.textContent = "README";
+  if (lbl) {
+    lbl.textContent = "README";
+    lbl.classList.remove("hidden");
+  }
   const frame = wrap?.closest(".scroll-fade");
-  if (frame) requestAnimationFrame(() => refreshScrollFade(frame));
+  if (frame) {
+    frame.classList.remove("hidden");
+    requestAnimationFrame(() => refreshScrollFade(frame));
+  }
 }
 
-/** Hide README wrap and restore Quick Add. */
+/** Hide README wrap and restore Quick Add (mods only — addons have no presets). */
 function hideReadmePanel() {
   const wrap = $("readmePreviewWrap");
   if (wrap) {
     wrap.classList.add("hidden");
     $("readmePreview").innerHTML = "";
   }
+  const isAddons = state.projectView === "addons";
   const quickAdd = $("quickAddField");
-  if (quickAdd) quickAdd.classList.remove("hidden");
+  if (quickAdd) quickAdd.classList.toggle("hidden", isAddons);
   const lbl = $("contentFrameLabel");
-  if (lbl) lbl.textContent = "Quick add (click to expand)";
+  if (lbl) {
+    lbl.textContent = isAddons ? "" : "Quick Add";
+    lbl.classList.toggle("hidden", isAddons);
+  }
   const frame = wrap?.closest(".scroll-fade");
-  if (frame) requestAnimationFrame(() => refreshScrollFade(frame));
+  if (frame) {
+    frame.classList.toggle("hidden", isAddons);
+    requestAnimationFrame(() => refreshScrollFade(frame));
+  }
 }
 
 async function fetchAndShowReadme(url, info) {
@@ -2130,6 +2135,7 @@ function renderTreeEntries(entries) {
 
 /** Wire up toggle events on all <details> in a tree container for lazy loading. */
 function wireTreeToggles(container) {
+  const scrollParent = container.closest(".scroll-fade");
   container.querySelectorAll("details.tree-dir-details").forEach((det) => {
     det.addEventListener("toggle", () => {
       if (!det.open) return;
@@ -2137,6 +2143,9 @@ function wireTreeToggles(container) {
       if (!childWrap || childWrap.dataset.loaded === "true") return;
       void loadTreeChildren(childWrap);
     }, { once: true });
+    det.addEventListener("toggle", () => {
+      if (scrollParent) requestAnimationFrame(() => refreshScrollFade(scrollParent));
+    });
   });
 }
 
@@ -2180,6 +2189,10 @@ async function loadTreeChildren(childWrap) {
           if (innerWrap.dataset.loaded === "true") return;
           void loadTreeChildren(innerWrap);
         }, { once: true });
+        const scrollParent = childWrap.closest(".scroll-fade");
+        details.addEventListener("toggle", () => {
+          if (scrollParent) requestAnimationFrame(() => refreshScrollFade(scrollParent));
+        });
         childWrap.appendChild(details);
       } else {
         const div = document.createElement("div");
@@ -2191,6 +2204,8 @@ async function loadTreeChildren(childWrap) {
   } catch (_) {
     childWrap.innerHTML = '<span class="repo-info-loading">Failed to load</span>';
   }
+  const scrollParent = childWrap.closest(".scroll-fade");
+  if (scrollParent) requestAnimationFrame(() => refreshScrollFade(scrollParent));
 }
 
 function sanitizeReadmeHtml(html) {

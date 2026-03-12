@@ -2,6 +2,14 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.5.1
+
+- **Add dialog: hide Quick Add for addons:** The Add dialog no longer shows the mod Quick Add presets when adding addons — only the URL input and repo preview panels are shown
+- **Quick Add always expanded:** Preset cards now display their full descriptions and companion links by default, removing the click-to-expand interaction
+- **Quick Add label simplified:** Header text changed from "Quick add (click to expand)" to "Quick Add"
+- **Scroll fade fix on tree collapse:** Collapsing or expanding folders in the file tree now recalculates scroll fading, preventing stale fade overlays on short lists
+- **Home tab on startup:** Wuddle now always opens on the Home tab instead of restoring the last active tab
+
 ## v2.5.0
 
 ### Add Dialog Overhaul

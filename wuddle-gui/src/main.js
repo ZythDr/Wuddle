@@ -298,8 +298,7 @@ function loadSettings() {
   setUiFontStyle(useFrizFont);
   renderAutoCheckSettings();
 
-  const savedTab = localStorage.getItem(TAB_KEY) || "home";
-  setTab(new Set(["home", "projects", "options", "logs", "about", "tweaks"]).has(savedTab) ? savedTab : "home");
+  setTab("home");
 
   const logWrap = localStorage.getItem(LOG_WRAP_KEY) === "true";
   const logAutoScrollRaw = localStorage.getItem(LOG_AUTOSCROLL_KEY);

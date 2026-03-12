@@ -2767,10 +2767,6 @@ dialog.dialog > .select-menu-pop {
   align-items: start;
 }
 
-.preset-card.can-expand .preset-title-link,
-.preset-card.can-expand .preset-title {
-  cursor: pointer;
-}
 
 .preset-card.placeholder {
   opacity: 0.7;
