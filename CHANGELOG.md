@@ -2,6 +2,14 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.5.5
+
+### GIF Playback Fix
+- **Correct GIF animation speed:** Animated GIFs in README previews now play at their intended frame rate. WebKitGTK doesn't clamp low frame delays like other browsers, causing some GIFs to play extremely fast. Wuddle now detects problematic GIFs and renders them on a canvas with correct timing.
+
+### Search Debounce
+- **Debounced search inputs:** Project search and log search now wait 500ms after the last keystroke before updating results, reducing unnecessary re-renders while still feeling responsive.
+
 ## v2.5.4
 
 ### Desktop Notifications

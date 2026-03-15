@@ -8,6 +8,7 @@ import { log } from "./logs.js";
 import { withBusy, ensureThemedSelect, syncThemedSelect, rebuildThemedSelect, showToast, refreshScrollFade } from "./ui.js";
 import { changelogToHtml } from "./about.js";
 import { highlightCode } from "./vendor/highlight.bundle.js";
+import { replaceGifsWithCanvas } from "./gif-player.js";
 import {
   setBackendActiveProfile,
   activeProfile,
@@ -2292,6 +2293,9 @@ function wireReadmeLinks(container) {
   container.querySelectorAll("video source[src]").forEach((s) => {
     s.setAttribute("src", resolveReadmeUrl(s.getAttribute("src") || ""));
   });
+
+  // Fix GIF playback speed (WebKitGTK doesn't clamp low frame delays)
+  replaceGifsWithCanvas(container);
 
   // Wire links to open in system browser
   container.querySelectorAll("a[href]").forEach((a) => {

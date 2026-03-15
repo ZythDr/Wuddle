@@ -536,14 +536,19 @@ $("repoUrl").addEventListener("keydown", async (ev) => {
   await submitAddFromDialog();
 });
 
+let _searchDebounce = 0;
 $("projectSearchInput").addEventListener("input", (ev) => {
   const target = ev.target;
   if (!(target instanceof HTMLInputElement)) return;
-  state.projectSearchQuery = target.value;
-  render();
+  clearTimeout(_searchDebounce);
+  _searchDebounce = setTimeout(() => {
+    state.projectSearchQuery = target.value;
+    render();
+  }, 500);
 });
 $("projectSearchClear").addEventListener("click", (ev) => {
   ev.preventDefault();
+  clearTimeout(_searchDebounce);
   state.projectSearchQuery = "";
   render();
   const input = $("projectSearchInput");
@@ -563,8 +568,12 @@ $("optLogWrap").addEventListener("change", () => {
 $("optLogAutoscroll").addEventListener("change", () => {
   setLogAutoscroll($("optLogAutoscroll").checked);
 });
+let _logSearchDebounce = 0;
 $("logSearch").addEventListener("input", () => {
-  setLogQuery($("logSearch").value);
+  clearTimeout(_logSearchDebounce);
+  _logSearchDebounce = setTimeout(() => {
+    setLogQuery($("logSearch").value);
+  }, 500);
 });
 $("btnRemoveConfirm").addEventListener("click", async (ev) => {
   ev.preventDefault();

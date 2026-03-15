@@ -28,14 +28,19 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **GitHub auth token (optional):** helps avoid anonymous API limits
 - **Logs panel:** operational visibility and copyable logs
 
+### What's New In v2.5.5
+
+- **Fixed GIF playback speed:** Animated GIFs in README previews now play at their intended frame rate — fixes WebKitGTK playing some GIFs extremely fast.
+- **Debounced search inputs:** Project and log search now wait 500ms after typing stops before updating, reducing unnecessary re-renders.
+
+<details>
+<summary><strong>Previous versions</strong></summary>
+
 ### What's New In v2.5.4
 
 - **Fixed desktop notifications:** Notifications now work reliably on Linux using native D-Bus, with the Wuddle app icon and correct app name.
 - **Notifications on manual check:** "Check for updates" now always sends a desktop notification with the result.
 - **Fixed Lutris launch in AppImage:** All launch modes now clean inherited AppImage/Tauri environment variables and detach the game into its own process group — fixes Lutris failures in AppImage builds and prevents the game from showing Wuddle's taskbar icon.
-
-<details>
-<summary><strong>Previous versions</strong></summary>
 
 ### What's New In v2.5.3
 
