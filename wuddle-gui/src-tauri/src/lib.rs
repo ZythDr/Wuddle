@@ -1272,6 +1272,33 @@ async fn wuddle_github_auth_clear_token() -> Result<(), String> {
     .await
 }
 
+/// Cached path to a temporary copy of the app icon for desktop notifications.
+fn notification_icon_path() -> &'static str {
+    static ICON_PATH: OnceLock<String> = OnceLock::new();
+    ICON_PATH.get_or_init(|| {
+        let icon_bytes = include_bytes!("../icons/128x128.png");
+        let dir = std::env::temp_dir().join("wuddle");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("notification-icon.png");
+        if !path.exists() || fs::metadata(&path).map(|m| m.len()).unwrap_or(0) != icon_bytes.len() as u64 {
+            let _ = fs::write(&path, icon_bytes);
+        }
+        path.to_string_lossy().into_owned()
+    })
+}
+
+#[tauri::command]
+fn wuddle_send_notification(title: String, body: String) -> Result<(), String> {
+    notify_rust::Notification::new()
+        .appname("Wuddle")
+        .summary(&title)
+        .body(&body)
+        .icon(notification_icon_path())
+        .show()
+        .map(|_| ())
+        .map_err(|e| format!("notification: {e}"))
+}
+
 #[tauri::command]
 fn wuddle_about_info() -> AboutInfo {
     AboutInfo {
@@ -2418,7 +2445,6 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             wuddle_list_repos,
             wuddle_add_repo,
@@ -2457,7 +2483,8 @@ pub fn run() {
             wuddle_fetch_repo_file,
             wuddle_read_local_file,
             wuddle_list_repo_installs,
-            wuddle_list_local_files
+            wuddle_list_local_files,
+            wuddle_send_notification
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

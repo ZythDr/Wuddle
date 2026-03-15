@@ -1,6 +1,6 @@
 [package]
 name = "wuddle-gui"
-version = "2.5.3"
+version = "2.5.4"
 description = "All-in-one manager and launcher for World of Warcraft"
 authors = ["you"]
 edition = "2021"
@@ -28,4 +28,4 @@ keyring = { version = "3", features = ["windows-native", "linux-native-sync-pers
 dirs = "5"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
 zip = "2"
-tauri-plugin-notification = "2.3.3"
+notify-rust = "4"

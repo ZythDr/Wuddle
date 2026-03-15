@@ -814,6 +814,11 @@ export function getUpdateActionState() {
 // Notification Helpers
 // ============================================================================
 
+function sendDesktopNotification(body) {
+  if (!state.desktopNotifyEnabled) return;
+  safeInvoke("wuddle_send_notification", { title: "Wuddle", body }).catch(() => {});
+}
+
 export function openRelevantUpdatesView(counts = updateCounts()) {
   const mods = Number(counts?.mods || 0);
   const addons = Number(counts?.addons || 0);
@@ -839,69 +844,41 @@ export function maybeNotifyProjectUpdates(source, notify) {
   const updates = state.repos.filter((repo) => canUpdateRepo(repo));
   const counts = updateCounts();
 
-  if (source === "manual") {
-    if (!updates.length) {
-      state.lastUpdateNotifyKey = "";
-      showToast("No updates available.", { kind: "info" });
-    } else {
-      const noun = counts.total === 1 ? "update" : "updates";
-      showToast(`${counts.total} ${noun} available. Mods: ${counts.mods}, Addons: ${counts.addons}.`, {
-        kind: "info",
-        onAction: () => openRelevantUpdatesView(counts),
-      });
-    }
-
-    const modifiedMods = state.plans.filter((p) => p.externally_modified);
-    if (modifiedMods.length > 0) {
-      const names = modifiedMods.map((p) => p.name).join(", ");
-      showToast(`${modifiedMods.length} mod(s) modified externally: ${names}`, { kind: "warn" });
-    }
-    return;
-  }
-
   if (!updates.length) {
     state.lastUpdateNotifyKey = "";
-    return;
-  }
+    if (source === "manual") {
+      showToast("No updates available.", { kind: "info" });
+      sendDesktopNotification("No updates available.");
+    }
+  } else {
+    const ids = updates.map((repo) => repo.id).sort((a, b) => a - b);
+    const key = `${state.activeProfileId}:${ids.join(",")}`;
+    const isRepeat = key === state.lastUpdateNotifyKey;
+    state.lastUpdateNotifyKey = key;
 
-  const ids = updates.map((repo) => repo.id).sort((a, b) => a - b);
-  const key = `${state.activeProfileId}:${ids.join(",")}`;
-  if (key === state.lastUpdateNotifyKey) return;
-  state.lastUpdateNotifyKey = key;
+    const noun = counts.total === 1 ? "update" : "updates";
+    const prefix =
+      source === "manual"
+        ? `${counts.total} ${noun} available.`
+        : source === "startup"
+          ? "Updates detected."
+          : "New updates available.";
+    showToast(`${prefix} Mods: ${counts.mods}, Addons: ${counts.addons}.`, {
+      kind: "info",
+      onAction: () => openRelevantUpdatesView(counts),
+    });
 
-  const prefix =
-    source === "startup"
-      ? "Updates detected."
-      : source === "auto"
-        ? "New updates available."
-        : "Updates available.";
-  showToast(`${prefix} Mods: ${counts.mods}, Addons: ${counts.addons}.`, {
-    kind: "info",
-    onAction: () => openRelevantUpdatesView(counts),
-  });
-
-  if (state.desktopNotifyEnabled) {
-    try {
-      const np = window.__TAURI__?.notification;
-      if (np) {
-        const body = `${counts.total} update${counts.total === 1 ? "" : "s"} available. Mods: ${counts.mods}, Addons: ${counts.addons}.`;
-        np.isPermissionGranted().then((ok) => {
-          const send = () => np.sendNotification({ title: "Wuddle", body });
-          if (ok) { send(); return; }
-          np.requestPermission().then((p) => { if (p === "granted") send(); });
-        });
-      }
-    } catch (_) {}
+    if (source === "manual" || !isRepeat) {
+      sendDesktopNotification(
+        `${counts.total} ${noun} available. Mods: ${counts.mods}, Addons: ${counts.addons}.`,
+      );
+    }
   }
 
   const modifiedMods = state.plans.filter((p) => p.externally_modified);
   if (modifiedMods.length > 0) {
-    const names = modifiedMods
-      .map((p) => p.name)
-      .join(", ");
-    showToast(`${modifiedMods.length} mod(s) modified externally: ${names}`, {
-      kind: "warn",
-    });
+    const names = modifiedMods.map((p) => p.name).join(", ");
+    showToast(`${modifiedMods.length} mod(s) modified externally: ${names}`, { kind: "warn" });
   }
 }
 

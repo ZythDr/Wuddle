@@ -28,6 +28,14 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **GitHub auth token (optional):** helps avoid anonymous API limits
 - **Logs panel:** operational visibility and copyable logs
 
+### What's New In v2.5.4
+
+- **Fixed desktop notifications:** Notifications now work reliably on Linux using native D-Bus, with the Wuddle app icon and correct app name.
+- **Notifications on manual check:** "Check for updates" now always sends a desktop notification with the result.
+
+<details>
+<summary><strong>Previous versions</strong></summary>
+
 ### What's New In v2.5.3
 
 - **Clickable file preview:** Click any file in the Installed Files or repo file tree to preview its contents directly in Wuddle — works for Lua, XML, TOC, Markdown, CSS, JS, and plain text files.
@@ -35,9 +43,6 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **"Changelog" → "Release Notes":** Renamed and simplified to show only forge release entries. Mods now default to the Release Notes view.
 - **Repo name casing fix:** Display names now match the actual repository casing. Existing repos lowercased by the v2.5.2 migration are automatically corrected on first startup.
 - **Symlink-safe file reading:** Local file previews no longer break when the WoW directory is a symlink.
-
-<details>
-<summary><strong>Previous versions</strong></summary>
 
 ### What's New In v2.5.2
 

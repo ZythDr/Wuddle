@@ -2,6 +2,18 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.5.4
+
+### Desktop Notifications
+- **Fixed desktop notifications:** Notifications stopped working in v2.4.6 when the implementation was switched to the Tauri notification plugin (which doesn't work without a frontend bundler). Now uses `notify-rust` to send notifications directly via D-Bus on Linux, with proper app name and icon
+- **Notification icon:** Desktop notifications now display the Wuddle app icon
+- **Notifications on manual check:** Clicking "Check for updates" now sends a desktop notification for both "updates available" and "no updates available" results (previously only background checks triggered notifications)
+- **Simplified notification logic:** Unified the manual/auto/startup notification paths into a single clean flow with dedup-key tracking for background checks
+
+### Other
+- **AI context file:** Added `CONTEXT.md` documenting project architecture, conventions, pitfalls, and priorities for AI-assisted development
+- **Removed unused Tauri notification plugin:** Dropped `tauri-plugin-notification` crate and its capability permission (replaced by `notify-rust`)
+
 ## v2.5.3
 
 ### Clickable File Preview
