@@ -46,7 +46,7 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        const SCHEMA_VERSION: i32 = 4;
+        const SCHEMA_VERSION: i32 = 6;
 
         let current: i32 = self
             .conn
@@ -136,6 +136,37 @@ impl Db {
             self.conn.execute_batch("PRAGMA user_version = 4")?;
         }
 
+        // v4 → v5: repo owner/name need original casing restored.
+        // v4 lowercased everything; the actual fix runs in the GUI layer (needs
+        // HTTP client) on next startup, then bumps to v6.
+        if current < 5 {
+            self.conn.execute_batch("PRAGMA user_version = 5")?;
+        }
+
+        Ok(())
+    }
+
+    /// Returns true if the DB is at schema v5 (needs casing fix from GUI layer).
+    pub fn needs_casing_fix(&self) -> bool {
+        let ver: i32 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap_or(0);
+        ver == 5
+    }
+
+    /// Mark the casing fix as complete by bumping to v6.
+    pub fn mark_casing_fixed(&self) -> Result<()> {
+        self.conn.execute_batch("PRAGMA user_version = 6")?;
+        Ok(())
+    }
+
+    /// Update owner and name for a repo by id.
+    pub fn update_repo_casing(&self, id: i64, owner: &str, name: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE repos SET owner=?1, name=?2 WHERE id=?3",
+            params![owner, name, id],
+        )?;
         Ok(())
     }
 

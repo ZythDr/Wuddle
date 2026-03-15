@@ -594,6 +594,7 @@ document.querySelectorAll(".filter-btn[data-log-level]").forEach((btn) => {
 });
 
 bindDialogOutsideToClose(dlgAdd);
+bindDialogOutsideToClose($("dlgRepoDetail"));
 bindDialogOutsideToClose($("dlgAddonConflict"));
 bindDialogOutsideToClose($("dlgRemove"));
 bindDialogOutsideToClose($("dlgRemoveInstance"));

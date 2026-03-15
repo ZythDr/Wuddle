@@ -701,6 +701,7 @@
               <div id="readmePreviewWrap" class="readme-preview-wrap hidden">
                 <div id="readmePreview" class="readme-preview"></div>
               </div>
+              <div id="addFilePreview" class="readme-preview hidden"></div>
             </div>
           </div>
 
@@ -727,6 +728,53 @@
             </div>
           </div>
         </form>
+      </div>
+    </dialog>
+
+    <!-- Repo detail modal -->
+    <dialog id="dlgRepoDetail" class="dialog">
+      <div class="dialog-add-layout">
+        <div id="detailSidePanel" class="repo-side-panel hidden">
+          <div id="detailAboutSection" class="repo-side-section repo-about-section hidden">
+            <div class="label">About</div>
+            <div id="detailAbout" class="repo-about"></div>
+          </div>
+          <div id="detailFilesSection" class="repo-side-section repo-tree-section scroll-fade hidden">
+            <div class="label">Installed Files</div>
+            <div id="detailFiles" class="repo-tree"></div>
+          </div>
+        </div>
+
+        <div class="dialog-inner dlg-add-inner">
+          <div class="dlg-detail-header">
+            <div class="dialog-head">
+              <div>
+                <button id="detailTitle" class="detail-title-link"></button>
+                <div id="detailSubtitle" class="hint"></div>
+              </div>
+              <button id="btnDetailCloseX" class="btn ghost icon" aria-label="Close">✕</button>
+            </div>
+          </div>
+
+          <div class="dlg-add-body">
+            <div id="detailFrameLabel" class="label">README</div>
+            <div class="dlg-add-content-frame scroll-fade">
+              <div id="detailReadme" class="readme-preview"></div>
+              <div id="detailChangelog" class="readme-preview hidden"></div>
+              <div id="detailFilePreview" class="readme-preview hidden"></div>
+            </div>
+          </div>
+
+          <div class="dlg-add-footer">
+            <div class="dlg-add-footer-left">
+              <button id="btnDetailOpenForge" class="btn ghost"></button>
+              <button id="btnDetailChangelog" class="btn ghost">Changelog</button>
+            </div>
+            <div class="dlg-add-footer-actions">
+              <button id="btnDetailClose" class="btn ghost">Close</button>
+            </div>
+          </div>
+        </div>
       </div>
     </dialog>
 

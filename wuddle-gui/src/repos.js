@@ -7,6 +7,7 @@ import { $, formatTime } from "./utils.js";
 import { log } from "./logs.js";
 import { withBusy, ensureThemedSelect, syncThemedSelect, rebuildThemedSelect, showToast, refreshScrollFade } from "./ui.js";
 import { changelogToHtml } from "./about.js";
+import { highlightCode } from "./vendor/highlight.bundle.js";
 import {
   setBackendActiveProfile,
   activeProfile,
@@ -529,6 +530,18 @@ export function displayForge(repo) {
     return "codeberg";
   }
   return repo?.forge || "unknown";
+}
+
+// Forge icons from Simple Icons (https://simpleicons.org) — CC0 1.0 / public domain
+const FORGE_ICONS = {
+  github: '<svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>',
+  gitlab: '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="m23.6 9.593-.034-.086L20.3.981a.851.851 0 00-.336-.405.875.875 0 00-1 .054.875.875 0 00-.29.44l-2.206 6.748H7.538L5.332.818a.857.857 0 00-.29-.441.875.875 0 00-1-.054.859.859 0 00-.336.405L.433 9.502l-.032.086a6.066 6.066 0 002.012 7.01l.011.009.03.021 4.976 3.727 2.462 1.863 1.5 1.132a1.009 1.009 0 001.22 0l1.5-1.132 2.461-1.863 5.006-3.749.013-.01a6.068 6.068 0 002.009-7.003z"/></svg>',
+  gitea: '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M4.209 4.603c-.247 0-.525.02-.84.088-.333.07-1.28.283-2.054 1.027C-.403 7.25.035 9.685.089 10.052c.065.446.263 1.687 1.21 2.768 1.749 2.141 5.513 2.092 5.513 2.092s.462 1.103 1.168 2.119c.955 1.263 1.936 2.248 2.89 2.367 2.406 0 7.212-.004 7.212-.004s.458.004 1.08-.394c.535-.324 1.013-.893 1.013-.893s.492-.527 1.18-1.73c.21-.37.385-.729.538-1.068 0 0 2.107-4.471 2.107-8.823-.042-1.318-.367-1.55-.443-1.627-.156-.156-.366-.153-.366-.153s-4.475.252-6.792.306c-.508.011-1.012.023-1.512.027v4.474l-.634-.301c0-1.39-.004-4.17-.004-4.17-1.107.016-3.405-.084-3.405-.084s-5.399-.27-5.987-.324c-.187-.011-.401-.032-.648-.032zm.354 1.832h.111s.271 2.269.6 3.597C5.549 11.147 6.22 13 6.22 13s-.996-.119-1.641-.348c-.99-.324-1.409-.714-1.409-.714s-.73-.511-1.096-1.52C1.444 8.73 2.021 7.7 2.021 7.7s.32-.859 1.47-1.145c.395-.106.863-.12 1.072-.12zm8.33 2.554c.26.003.509.127.509.127l.868.422-.529 1.075a.686.686 0 00-.614.359.685.685 0 00.072.756l-.939 1.924a.69.69 0 00-.66.527.687.687 0 00.347.763.686.686 0 00.867-.206.688.688 0 00-.069-.882l.916-1.874a.667.667 0 00.237-.02.657.657 0 00.271-.137 8.826 8.826 0 011.016.512.761.761 0 01.286.282c.073.21-.073.569-.073.569-.087.29-.702 1.55-.702 1.55a.692.692 0 00-.676.477.681.681 0 101.157-.252c.073-.141.141-.282.214-.431.19-.397.515-1.16.515-1.16.035-.066.218-.394.103-.814-.095-.435-.48-.638-.48-.638-.467-.301-1.116-.58-1.116-.58s0-.156-.042-.27a.688.688 0 00-.148-.241l.516-1.062 2.89 1.401s.48.218.583.619c.073.282-.019.534-.069.657-.24.587-2.1 4.317-2.1 4.317s-.232.554-.748.588a1.065 1.065 0 01-.393-.045l-.202-.08-4.31-2.1s-.417-.218-.49-.596c-.083-.31.104-.691.104-.691l2.073-4.272s.183-.37.466-.497a.855.855 0 01.35-.077z"/></svg>',
+  codeberg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M11.999.747A11.974 11.974 0 000 12.75c0 2.254.635 4.465 1.833 6.376L11.837 6.19c.072-.092.251-.092.323 0l4.178 5.402h-2.992l.065.239h3.113l.882 1.138h-3.674l.103.374h3.86l.777 1.003h-4.358l.135.483h4.593l.695.894h-5.038l.165.589h5.326l.609.785h-5.717l.182.65h6.038l.562.727h-6.397l.183.65h6.717A12.003 12.003 0 0024 12.75 11.977 11.977 0 0011.999.747zm3.654 19.104.182.65h5.326c.173-.204.353-.433.513-.65zm.385 1.377.18.65h3.563c.233-.198.485-.428.712-.65zm.383 1.377.182.648h1.203c.356-.204.685-.412 1.042-.648z"/></svg>',
+};
+
+function forgeIconSvg(forge) {
+  return FORGE_ICONS[forge] || FORGE_ICONS.github;
 }
 
 export function branchOptionsForRepo(repo) {
@@ -1357,11 +1370,11 @@ export function renderRepos() {
     const nameLink = document.createElement("button");
     nameLink.className = "name-link";
     nameLink.textContent = r.name;
-    nameLink.title = `Open ${r.url}`;
-    nameLink.addEventListener("click", async (ev) => {
+    nameLink.title = `View details for ${r.name}`;
+    nameLink.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      await openUrl(r.url);
+      openRepoDetailDialog(r);
     });
 
     const nameSub = document.createElement("div");
@@ -1872,6 +1885,8 @@ async function fetchAllRepoPreviews(rawUrl) {
     return;
   }
 
+  _activeReadmeRepoUrl = url;
+
   // Fire all three in parallel
   fetchAndShowReadme(url, info);
   fetchAndShowRepoInfo(url, info);
@@ -1910,6 +1925,9 @@ function updateSidePanelVisibility() {
 
 /** Show README wrap and hide Quick Add (they share the same frame). */
 function showReadmePanel() {
+  // Dismiss file preview if active
+  const fp = $("addFilePreview");
+  if (fp) { fp.innerHTML = ""; fp.classList.add("hidden"); }
   const wrap = $("readmePreviewWrap");
   if (wrap) wrap.classList.remove("hidden");
   const quickAdd = $("quickAddField");
@@ -1918,6 +1936,8 @@ function showReadmePanel() {
   if (lbl) {
     lbl.textContent = "README";
     lbl.classList.remove("hidden");
+    lbl.classList.remove("frame-label-back");
+    lbl.onclick = null;
   }
   const frame = wrap?.closest(".scroll-fade");
   if (frame) {
@@ -2064,6 +2084,7 @@ function wireAboutLinks(container) {
 // ---------------------------------------------------------------------------
 
 let _treeRepoUrl = "";
+let _treeClickContext = null;
 const MAX_TREE_DEPTH = 10;
 
 async function fetchAndShowRepoTree(url, info) {
@@ -2072,12 +2093,14 @@ async function fetchAndShowRepoTree(url, info) {
   if (!section || !container) return;
 
   _treeRepoUrl = url;
+  _treeClickContext = { type: "remote", repoUrl: url, target: "add" };
 
   const cacheKey = `${info.host}|${info.owner}|${info.name}`.toLowerCase();
   if (_repoTreeCache.has(cacheKey)) {
     container.innerHTML = "";
     container.appendChild(_repoTreeCache.get(cacheKey).cloneNode(true));
     wireTreeToggles(container);
+    wireTreeFileClicks(container, _treeClickContext);
     section.classList.remove("hidden");
     updateSidePanelVisibility();
     return;
@@ -2090,11 +2113,12 @@ async function fetchAndShowRepoTree(url, info) {
   try {
     const json = await safeInvoke("wuddle_fetch_repo_tree", { url }, { timeoutMs: 30000 });
     const entries = JSON.parse(json);
-    const frag = renderTreeEntries(entries);
+    const frag = renderTreeEntries(entries, "", _treeClickContext);
     cappedSet(_repoTreeCache, cacheKey, frag.cloneNode(true));
     container.innerHTML = "";
     container.appendChild(frag);
     wireTreeToggles(container);
+    wireTreeFileClicks(container, _treeClickContext);
     refreshScrollFade(section);
   } catch (_) {
     container.innerHTML = "";
@@ -2111,10 +2135,12 @@ function sortTreeEntries(entries) {
   });
 }
 
-function renderTreeEntries(entries) {
+function renderTreeEntries(entries, parentPath, context) {
   const frag = document.createDocumentFragment();
   const sorted = sortTreeEntries(entries);
+  const prefix = parentPath || "";
   for (const entry of sorted) {
+    const fullPath = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (entry.type === "dir") {
       const details = document.createElement("details");
       details.className = "tree-dir-details";
@@ -2125,7 +2151,7 @@ function renderTreeEntries(entries) {
       // Placeholder for lazy-loaded children
       const childWrap = document.createElement("div");
       childWrap.className = "tree-children";
-      childWrap.dataset.path = entry.name;
+      childWrap.dataset.path = fullPath;
       childWrap.dataset.loaded = "false";
       details.appendChild(childWrap);
       frag.appendChild(details);
@@ -2133,10 +2159,32 @@ function renderTreeEntries(entries) {
       const div = document.createElement("div");
       div.className = "tree-entry file";
       div.innerHTML = `<span class="tree-icon">\ud83d\udcc4</span><span class="tree-name">${escapeHtml(entry.name)}</span>`;
+      if (context) {
+        div.addEventListener("click", () => previewFile(context, fullPath, entry.name));
+      }
       frag.appendChild(div);
     }
   }
   return frag;
+}
+
+/** Wire click handlers on file entries in a tree container. */
+function wireTreeFileClicks(container, context) {
+  if (!context) return;
+  container.querySelectorAll(".tree-entry.file").forEach((el) => {
+    // Find the full path from the closest tree-children parent chain
+    const parts = [];
+    let node = el;
+    while (node) {
+      const parent = node.closest(".tree-children");
+      if (!parent) break;
+      if (parent.dataset.path) parts.unshift(parent.dataset.path);
+      node = parent.parentElement;
+    }
+    const fileName = el.querySelector(".tree-name")?.textContent || "";
+    const fullPath = parts.length ? `${parts[parts.length - 1]}/${fileName}` : fileName;
+    el.addEventListener("click", () => previewFile(context, fullPath, fileName));
+  });
 }
 
 /** Wire up toggle events on all <details> in a tree container for lazy loading. */
@@ -2204,6 +2252,10 @@ async function loadTreeChildren(childWrap) {
         const div = document.createElement("div");
         div.className = "tree-entry file";
         div.innerHTML = `<span class="tree-icon">\ud83d\udcc4</span><span class="tree-name">${escapeHtml(entry.name)}</span>`;
+        if (_treeClickContext) {
+          const filePath = `${path}/${entry.name}`;
+          div.addEventListener("click", () => previewFile(_treeClickContext, filePath, entry.name));
+        }
         childWrap.appendChild(div);
       }
     }
@@ -2222,11 +2274,14 @@ function sanitizeReadmeHtml(html) {
     .replace(/<clipboard-copy[^>]*>[\s\S]*?<\/clipboard-copy>/gi, "");
 }
 
+/** Currently active repo URL for README URL resolution (detail dialog or add dialog). */
+let _activeReadmeRepoUrl = "";
+
 /** Resolve a possibly-relative URL against the current repo context. */
 function resolveReadmeUrl(raw) {
   if (!raw) return raw;
   if (raw.startsWith("http://") || raw.startsWith("https://")) return raw;
-  const repoUrl = ($("repoUrl")?.value || "").trim();
+  const repoUrl = _activeReadmeRepoUrl || ($("repoUrl")?.value || "").trim();
   if (!repoUrl) return raw;
   try {
     // Build a raw content base for relative paths (works for GitHub, Gitea, GitLab)
@@ -2773,4 +2828,478 @@ export async function rescanAddonDirectory() {
       log(`ERROR addon rescan: ${e.message}`);
     }
   });
+}
+
+// ============================================================================
+// Repo Detail Dialog
+// ============================================================================
+
+let _detailAbortKey = 0;
+let _detailShowChangelog = false;
+let _filePreviewActive = false;
+let _filePreviewPrevView = null; // "readme" or "releasenotes"
+const _releaseNotesCache = new Map();
+
+function openRepoDetailDialog(repo) {
+  const dlg = $("dlgRepoDetail");
+  if (!dlg) return;
+
+  // Header — title is a clickable link to the repo URL
+  const titleEl = $("detailTitle");
+  titleEl.textContent = repo.name;
+  titleEl.onclick = (ev) => {
+    ev.preventDefault();
+    openUrl(repo.url);
+  };
+  titleEl.title = `Open ${repo.url}`;
+
+  const forgeLabel = displayForge(repo);
+  $("detailSubtitle").textContent = `${repo.owner} \u2022 ${forgeLabel}`;
+
+  // Footer — forge icon button
+  const forgeName = forgeLabel.charAt(0).toUpperCase() + forgeLabel.slice(1);
+  const openForgeBtn = $("btnDetailOpenForge");
+  openForgeBtn.innerHTML = forgeIconSvg(forgeLabel);
+  openForgeBtn.title = `Open on ${forgeName}`;
+  openForgeBtn.onclick = () => openUrl(repo.url);
+
+  // Footer — "Release Notes" toggle button
+  const isMod = !isAddonRepo(repo);
+  _detailShowChangelog = isMod; // mods default to Release Notes view
+  _filePreviewActive = false;
+  _filePreviewPrevView = null;
+  const clBtn = $("btnDetailChangelog");
+  clBtn.textContent = isMod ? "README" : "Release Notes";
+  clBtn.onclick = () => toggleDetailReleaseNotes();
+
+  // Clear previous content
+  $("detailReadme").innerHTML = "";
+  $("detailChangelog").innerHTML = "";
+  const fpEl = $("detailFilePreview");
+  if (fpEl) { fpEl.innerHTML = ""; fpEl.classList.add("hidden"); }
+  $("detailFrameLabel").onclick = null;
+  $("detailFrameLabel").classList.remove("frame-label-back");
+
+  if (isMod) {
+    $("detailReadme").classList.add("hidden");
+    $("detailChangelog").classList.remove("hidden");
+    $("detailFrameLabel").textContent = "Release Notes";
+  } else {
+    $("detailChangelog").classList.add("hidden");
+    $("detailReadme").classList.remove("hidden");
+    $("detailFrameLabel").textContent = "README";
+  }
+  $("detailAbout").innerHTML = "";
+  $("detailFiles").innerHTML = "";
+  $("detailAboutSection").classList.add("hidden");
+  $("detailFilesSection").classList.add("hidden");
+  $("detailSidePanel").classList.add("hidden");
+
+  // Set repo URL context for README relative URL resolution
+  _activeReadmeRepoUrl = repo.url;
+
+  // Open dialog first so layout is ready for scroll-fade
+  if (!dlg.open) dlg.showModal();
+
+  // Wire close buttons
+  $("btnDetailCloseX").onclick = () => dlg.close();
+  $("btnDetailClose").onclick = () => dlg.close();
+
+  // Fire all fetches in parallel
+  const generation = ++_detailAbortKey;
+  fetchDetailReadme(repo, generation);
+  fetchDetailAbout(repo, generation);
+  fetchDetailFiles(repo, generation);
+  fetchDetailChangelog(repo, generation);
+}
+
+// ---------------------------------------------------------------------------
+// Release Notes toggle
+// ---------------------------------------------------------------------------
+
+function toggleDetailReleaseNotes() {
+  // If file preview is active, close it first
+  if (_filePreviewActive) {
+    hideFilePreview();
+    return;
+  }
+
+  _detailShowChangelog = !_detailShowChangelog;
+  const readme = $("detailReadme");
+  const changelog = $("detailChangelog");
+  const label = $("detailFrameLabel");
+  const btn = $("btnDetailChangelog");
+
+  if (_detailShowChangelog) {
+    readme.classList.add("hidden");
+    changelog.classList.remove("hidden");
+    label.textContent = "Release Notes";
+    label.classList.remove("frame-label-back");
+    label.onclick = null;
+    btn.textContent = "README";
+  } else {
+    changelog.classList.add("hidden");
+    readme.classList.remove("hidden");
+    label.textContent = "README";
+    label.classList.remove("frame-label-back");
+    label.onclick = null;
+    btn.textContent = "Release Notes";
+  }
+
+  // Reset scroll and refresh fade after switching views
+  const frame = readme.closest(".scroll-fade");
+  if (frame) {
+    frame.scrollTop = 0;
+    requestAnimationFrame(() => refreshScrollFade(frame));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// File preview in main content area
+// ---------------------------------------------------------------------------
+
+const MD_EXTENSIONS = new Set(["md", "markdown", "mdown", "mkd"]);
+
+function showFilePreview(target, name, contentHtml) {
+  const isDetail = target === "detail";
+  const previewEl = $(isDetail ? "detailFilePreview" : "addFilePreview");
+  const labelEl = $(isDetail ? "detailFrameLabel" : "contentFrameLabel");
+  if (!previewEl || !labelEl) return;
+
+  if (isDetail) {
+    if (!_filePreviewActive) {
+      _filePreviewPrevView = _detailShowChangelog ? "releasenotes" : "readme";
+    }
+    _filePreviewActive = true;
+    $("detailReadme").classList.add("hidden");
+    $("detailChangelog").classList.add("hidden");
+  } else {
+    const wrap = $("readmePreviewWrap");
+    if (wrap) wrap.classList.add("hidden");
+    const qa = $("quickAddField");
+    if (qa) qa.classList.add("hidden");
+  }
+
+  previewEl.innerHTML = contentHtml;
+  previewEl.classList.remove("hidden");
+
+  labelEl.textContent = `\u2190 ${name}`;
+  labelEl.classList.add("frame-label-back");
+  labelEl.onclick = () => hideFilePreview(target);
+
+  const frame = previewEl.closest(".scroll-fade");
+  if (frame) {
+    frame.scrollTop = 0;
+    requestAnimationFrame(() => refreshScrollFade(frame));
+  }
+}
+
+function hideFilePreview(target) {
+  const isDetail = target === "detail";
+  const previewEl = $(isDetail ? "detailFilePreview" : "addFilePreview");
+  const labelEl = $(isDetail ? "detailFrameLabel" : "contentFrameLabel");
+  if (!previewEl || !labelEl) return;
+
+  previewEl.innerHTML = "";
+  previewEl.classList.add("hidden");
+  labelEl.classList.remove("frame-label-back");
+  labelEl.onclick = null;
+
+  if (isDetail) {
+    _filePreviewActive = false;
+    if (_filePreviewPrevView === "releasenotes") {
+      $("detailChangelog").classList.remove("hidden");
+      labelEl.textContent = "Release Notes";
+    } else {
+      $("detailReadme").classList.remove("hidden");
+      labelEl.textContent = "README";
+    }
+  } else {
+    const wrap = $("readmePreviewWrap");
+    if (wrap && wrap.querySelector(".readme-preview")?.innerHTML) {
+      wrap.classList.remove("hidden");
+      labelEl.textContent = "README";
+    } else {
+      const qa = $("quickAddField");
+      if (qa) qa.classList.remove("hidden");
+      labelEl.textContent = "Quick Add";
+    }
+  }
+
+  const frame = previewEl.closest(".scroll-fade");
+  if (frame) {
+    frame.scrollTop = 0;
+    requestAnimationFrame(() => refreshScrollFade(frame));
+  }
+}
+
+function renderFileContent(name, text) {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  if (MD_EXTENSIONS.has(ext)) {
+    return changelogToHtml(text);
+  }
+  const highlighted = highlightCode(text, name);
+  if (highlighted) {
+    return `<pre class="file-preview-code hljs">${highlighted}</pre>`;
+  }
+  return `<pre class="file-preview-code">${escapeHtml(text)}</pre>`;
+}
+
+async function previewFile(context, path, name) {
+  const target = context.target || "detail";
+  showFilePreview(target, name, '<div class="readme-preview-loading">Loading\u2026</div>');
+  try {
+    let content;
+    if (context.type === "local") {
+      content = await safeInvoke("wuddle_read_local_file", { wowDir: context.wowDir, path }, { timeoutMs: 10000 });
+    } else {
+      content = await safeInvoke("wuddle_fetch_repo_file", { url: context.repoUrl, path }, { timeoutMs: 15000 });
+    }
+    showFilePreview(target, name, renderFileContent(name, content));
+  } catch (e) {
+    const msg = String(e).replace(/^Error:\s*/i, "");
+    showFilePreview(target, name, `<div class="readme-preview-loading">${escapeHtml(msg)}</div>`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Detail fetchers
+// ---------------------------------------------------------------------------
+
+async function fetchDetailReadme(repo, generation) {
+  const container = $("detailReadme");
+  if (!container) return;
+
+  const cacheKey = repoKeyFromUrl(repo.url);
+  if (cacheKey && _readmeCache.has(cacheKey)) {
+    container.innerHTML = _readmeCache.get(cacheKey);
+    wireReadmeLinks(container);
+    return;
+  }
+
+  container.innerHTML = '<div class="readme-preview-loading">Loading README\u2026</div>';
+
+  try {
+    const html = await safeInvoke("wuddle_fetch_repo_readme", { url: repo.url }, { timeoutMs: 15000 });
+    if (generation !== _detailAbortKey) return;
+
+    let rendered;
+    if (html.startsWith("<!--md-->")) {
+      rendered = changelogToHtml(html.slice(9));
+    } else {
+      rendered = sanitizeReadmeHtml(html);
+    }
+
+    if (cacheKey) cappedSet(_readmeCache, cacheKey, rendered);
+    container.innerHTML = rendered;
+    wireReadmeLinks(container);
+  } catch (_) {
+    if (generation !== _detailAbortKey) return;
+    container.innerHTML = '<div class="readme-preview-loading">README not available.</div>';
+  }
+}
+
+async function fetchDetailAbout(repo, generation) {
+  const section = $("detailAboutSection");
+  const container = $("detailAbout");
+  if (!section || !container) return;
+
+  const cacheKey = repoKeyFromUrl(repo.url);
+  if (cacheKey && _repoInfoCache.has(cacheKey)) {
+    container.innerHTML = _repoInfoCache.get(cacheKey);
+    wireAboutLinks(container);
+    section.classList.remove("hidden");
+    updateDetailSidePanelVisibility();
+    return;
+  }
+
+  container.innerHTML = '<span class="repo-info-loading">Loading\u2026</span>';
+  section.classList.remove("hidden");
+  updateDetailSidePanelVisibility();
+
+  try {
+    const json = await safeInvoke("wuddle_fetch_repo_info", { url: repo.url }, { timeoutMs: 15000 });
+    if (generation !== _detailAbortKey) return;
+    const data = JSON.parse(json);
+    const html = renderRepoAbout(data);
+    if (cacheKey) cappedSet(_repoInfoCache, cacheKey, html);
+    container.innerHTML = html;
+    wireAboutLinks(container);
+  } catch (_) {
+    if (generation !== _detailAbortKey) return;
+    container.innerHTML = "";
+    section.classList.add("hidden");
+    updateDetailSidePanelVisibility();
+  }
+}
+
+async function fetchDetailChangelog(repo, generation) {
+  const container = $("detailChangelog");
+  if (!container) return;
+
+  const cacheKey = repoKeyFromUrl(repo.url);
+  if (cacheKey && _releaseNotesCache.has(cacheKey)) {
+    container.innerHTML = _releaseNotesCache.get(cacheKey);
+    return;
+  }
+
+  container.innerHTML = '<div class="readme-preview-loading">Loading release notes\u2026</div>';
+
+  try {
+    const json = await safeInvoke("wuddle_fetch_repo_releases", { url: repo.url }, { timeoutMs: 20000 });
+    if (generation !== _detailAbortKey) return;
+    const releases = JSON.parse(json);
+
+    if (!releases.length) {
+      const html = '<div class="readme-preview-loading">No release notes found.</div>';
+      if (cacheKey) cappedSet(_releaseNotesCache, cacheKey, html);
+      container.innerHTML = html;
+      return;
+    }
+
+    const html = renderReleases(releases);
+    if (cacheKey) cappedSet(_releaseNotesCache, cacheKey, html);
+    container.innerHTML = html;
+  } catch (_) {
+    if (generation !== _detailAbortKey) return;
+    container.innerHTML = '<div class="readme-preview-loading">Could not load release notes.</div>';
+  }
+}
+
+function renderReleases(releases) {
+  let html = "";
+  for (const rel of releases) {
+    const tag = escapeHtml(rel.tag || "");
+    const name = escapeHtml(rel.name || "");
+    const title = name && name !== tag ? `${tag} \u2014 ${name}` : tag;
+
+    let meta = "";
+    if (rel.publishedAt) {
+      try {
+        const d = new Date(rel.publishedAt);
+        meta = d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+      } catch (_) {
+        meta = escapeHtml(rel.publishedAt);
+      }
+    }
+    if (rel.prerelease) {
+      meta += '<span class="release-pre-badge">pre-release</span>';
+    }
+
+    let body = "";
+    if (rel.body && rel.body.trim()) {
+      body = `<div class="release-body">${changelogToHtml(rel.body)}</div>`;
+    }
+
+    html += `<div class="release-entry">`;
+    html += `<div class="release-tag">${title}</div>`;
+    if (meta) html += `<div class="release-meta">${meta}</div>`;
+    html += body;
+    html += `</div>`;
+  }
+  return html;
+}
+
+// ---------------------------------------------------------------------------
+// Detail files with path context
+// ---------------------------------------------------------------------------
+
+async function fetchDetailFiles(repo, generation) {
+  const section = $("detailFilesSection");
+  const container = $("detailFiles");
+  if (!section || !container) return;
+
+  const wowDir = readWowDir();
+  if (!wowDir) {
+    section.classList.add("hidden");
+    updateDetailSidePanelVisibility();
+    return;
+  }
+
+  container.innerHTML = '<span class="repo-info-loading">Loading\u2026</span>';
+  section.classList.remove("hidden");
+  updateDetailSidePanelVisibility();
+
+  try {
+    const installsJson = await safeInvoke("wuddle_list_repo_installs", { id: repo.id }, { timeoutMs: 10000 });
+    if (generation !== _detailAbortKey) return;
+    const installs = JSON.parse(installsJson);
+
+    if (!installs.length) {
+      container.innerHTML = '<span class="repo-info-loading">No installed files found.</span>';
+      refreshScrollFade(section);
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+
+    for (const entry of installs) {
+      if (entry.kind === "addon") {
+        // For addon dirs, fetch local directory contents
+        const parentPath = entry.path.includes("/")
+          ? entry.path.substring(0, entry.path.lastIndexOf("/") + 1)
+          : "";
+        const dirName = entry.path.split("/").pop() || entry.path;
+
+        try {
+          const filesJson = await safeInvoke(
+            "wuddle_list_local_files",
+            { wowDir, basePath: entry.path },
+            { timeoutMs: 5000 },
+          );
+          if (generation !== _detailAbortKey) return;
+          const files = JSON.parse(filesJson);
+
+          const details = document.createElement("details");
+          details.className = "tree-dir-details";
+          details.open = true;
+          const summary = document.createElement("summary");
+          summary.className = "tree-entry dir";
+          summary.innerHTML = `<span class="tree-icon">\ud83d\udcc1</span>${parentPath ? `<span class="tree-path-prefix">${escapeHtml(parentPath)}</span>` : ""}<span class="tree-name">${escapeHtml(dirName)}</span>`;
+          details.appendChild(summary);
+
+          const localCtx = { type: "local", wowDir, target: "detail" };
+          const childWrap = document.createElement("div");
+          childWrap.className = "tree-children";
+          childWrap.appendChild(renderTreeEntries(files, entry.path, localCtx));
+          details.appendChild(childWrap);
+          frag.appendChild(details);
+        } catch (_) {
+          const div = document.createElement("div");
+          div.className = "tree-entry dir";
+          div.innerHTML = `<span class="tree-icon">\ud83d\udcc1</span><span class="tree-name">${escapeHtml(entry.path)}</span>`;
+          frag.appendChild(div);
+        }
+      } else {
+        // For dll/raw files, show with full path
+        const localCtx = { type: "local", wowDir, target: "detail" };
+        const div = document.createElement("div");
+        div.className = "tree-entry file";
+        div.innerHTML = `<span class="tree-icon">\ud83d\udcc4</span><span class="tree-name">${escapeHtml(entry.path)}</span>`;
+        div.addEventListener("click", () => previewFile(localCtx, entry.path, entry.path));
+        frag.appendChild(div);
+      }
+    }
+
+    container.innerHTML = "";
+    container.appendChild(frag);
+    refreshScrollFade(section);
+  } catch (_) {
+    if (generation !== _detailAbortKey) return;
+    container.innerHTML = "";
+    section.classList.add("hidden");
+    updateDetailSidePanelVisibility();
+  }
+}
+
+function updateDetailSidePanelVisibility() {
+  const panel = $("detailSidePanel");
+  if (!panel) return;
+  const aboutVisible = !$("detailAboutSection")?.classList.contains("hidden");
+  const filesVisible = !$("detailFilesSection")?.classList.contains("hidden");
+  if (aboutVisible || filesVisible) {
+    panel.classList.remove("hidden");
+  } else {
+    panel.classList.add("hidden");
+  }
 }

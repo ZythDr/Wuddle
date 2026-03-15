@@ -180,12 +180,16 @@ pub fn detect_repo(input: &str) -> Result<DetectedRepo> {
                     url.path()
                 );
             }
-            let owner = segs[0].to_ascii_lowercase();
-            let mut name = segs[1].to_ascii_lowercase();
-            if name.ends_with(".git") {
+            let owner = segs[0].clone();
+            let mut name = segs[1].clone();
+            if name.to_ascii_lowercase().ends_with(".git") {
                 name.truncate(name.len() - 4);
             }
-            let project_path = format!("{}/{}", owner, name);
+            let project_path = format!(
+                "{}/{}",
+                owner.to_ascii_lowercase(),
+                name.to_ascii_lowercase()
+            );
             let canonical_url = format!("{scheme}://{host}/{project_path}");
             Ok(DetectedRepo {
                 kind,
@@ -212,20 +216,21 @@ pub fn detect_repo(input: &str) -> Result<DetectedRepo> {
             let mut project_segs = segs.clone();
             // strip trailing .git
             if let Some(last) = project_segs.last_mut() {
-                if last.ends_with(".git") {
+                if last.to_ascii_lowercase().ends_with(".git") {
                     last.truncate(last.len() - 4);
                 }
-            }
-            // lowercase for dedup consistency
-            for seg in &mut project_segs {
-                *seg = seg.to_ascii_lowercase();
             }
             let name = project_segs
                 .last()
                 .cloned()
                 .unwrap_or_else(|| "project".into());
             let owner = project_segs[..project_segs.len().saturating_sub(1)].join("/");
-            let project_path = project_segs.join("/");
+            // lowercase for canonical URL / project path dedup
+            let project_path = project_segs
+                .iter()
+                .map(|s| s.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join("/");
             let canonical_url = format!("{scheme}://{host}/{project_path}");
             Ok(DetectedRepo {
                 kind,

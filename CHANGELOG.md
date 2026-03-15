@@ -2,6 +2,26 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.5.3
+
+### Clickable File Preview
+- **Preview any file from the tree:** Click any file in the Installed Files tree (detail dialog) or the repo file tree (add dialog) to preview its contents in the main content area — works for `.lua`, `.xml`, `.toc`, `.md`, `.css`, `.js`, `.txt`, and more
+- **Syntax highlighting:** File previews include language-aware syntax highlighting for Lua, XML/HTML, Markdown, CSS, JavaScript, INI/TOC, and Diff formats, using a VS Code-inspired color theme
+- **Back navigation:** A clickable `← filename` header lets you return to the previous view (README or Release Notes)
+
+### Release Notes Rename
+- **"Changelog" → "Release Notes":** The changelog button in the detail dialog is now labeled "Release Notes" and shows only forge release entries — no more CHANGELOG.md fallback or README extraction
+- **Mods default to Release Notes:** Opening a mod's detail dialog now shows Release Notes by default instead of README (addons still default to README)
+
+### Repo Name Casing Fix
+- **Preserved original casing:** Repo owner and name are no longer lowercased when added — display names now match the actual repository casing on GitHub/GitLab/Gitea
+- **One-time DB migration:** Existing repos that were lowercased by the v2.5.2 dedup migration are automatically corrected by fetching the proper casing from each forge API on first startup
+
+### Other
+- **Remote file fetch:** New backend command to fetch any file by path from GitHub, GitLab, or Gitea repositories (used by file preview in the add dialog)
+- **Local file read:** New backend command to read local text files from the WoW directory with size and binary guards (used by file preview in the detail dialog)
+- **Symlink-safe file reading:** Local file reads no longer break when the WoW directory is a symlink
+
 ## v2.5.2
 
 ### Addon Deduplication

@@ -28,6 +28,17 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **GitHub auth token (optional):** helps avoid anonymous API limits
 - **Logs panel:** operational visibility and copyable logs
 
+### What's New In v2.5.3
+
+- **Clickable file preview:** Click any file in the Installed Files or repo file tree to preview its contents directly in Wuddle — works for Lua, XML, TOC, Markdown, CSS, JS, and plain text files.
+- **Syntax highlighting:** File previews include language-aware highlighting with a VS Code-inspired color theme.
+- **"Changelog" → "Release Notes":** Renamed and simplified to show only forge release entries. Mods now default to the Release Notes view.
+- **Repo name casing fix:** Display names now match the actual repository casing. Existing repos lowercased by the v2.5.2 migration are automatically corrected on first startup.
+- **Symlink-safe file reading:** Local file previews no longer break when the WoW directory is a symlink.
+
+<details>
+<summary><strong>Previous versions</strong></summary>
+
 ### What's New In v2.5.2
 
 - **Addon deduplication:** Wuddle now prevents duplicate addon entries when multiple instances (or forks) manage the same addon directory. Repos are matched case-insensitively, folder ownership is checked during import, and stale fork entries are automatically cleaned up on startup.
@@ -35,9 +46,6 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **Responsive side panel:** The About/Files panel in the Add dialog shrinks gracefully on narrow windows before the main content area.
 - **Addon-friendly Add dialog:** Clearer subtitle text and contextual placeholder URLs for the addon Add flow.
 - **Changelog rendering fix:** `###` headers now render correctly in the in-app changelog viewer.
-
-<details>
-<summary><strong>Previous versions</strong></summary>
 
 ### What's New In v2.5
 

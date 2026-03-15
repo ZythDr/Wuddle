@@ -609,6 +609,121 @@ where
         .map_err(|e| e.to_string())?
 }
 
+/// One-time fix: the v4 migration lowercased all owner/name values.
+/// This fetches the proper casing from each forge API and updates the DB.
+fn fix_repo_casing_from_forges(eng: &Engine) {
+    if !eng.db().needs_casing_fix() {
+        return;
+    }
+
+    let repos = match eng.db().list_repos() {
+        Ok(r) => r,
+        Err(_) => {
+            // Can't read repos — skip fix, will retry next startup
+            return;
+        }
+    };
+
+    let client = shared_http_client();
+    let ua = format!("Wuddle/{}", env!("CARGO_PKG_VERSION"));
+    let gh_token = wuddle_engine::github_token();
+
+    for repo in &repos {
+        let (new_owner, new_name) = match repo.forge.as_str() {
+            "github" => {
+                let api_url =
+                    format!("https://api.github.com/repos/{}/{}", repo.owner, repo.name);
+                let mut req = client
+                    .get(&api_url)
+                    .header("User-Agent", &ua)
+                    .header("Accept", "application/vnd.github+json");
+                if let Some(ref token) = gh_token {
+                    req = req.bearer_auth(token);
+                }
+                match req.send() {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(json) = resp.json::<serde_json::Value>() {
+                            let owner = json["owner"]["login"]
+                                .as_str()
+                                .unwrap_or(&repo.owner)
+                                .to_string();
+                            let name = json["name"]
+                                .as_str()
+                                .unwrap_or(&repo.name)
+                                .to_string();
+                            (owner, name)
+                        } else {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+            "gitea" => {
+                let api_url = format!(
+                    "https://{}/api/v1/repos/{}/{}",
+                    repo.host, repo.owner, repo.name
+                );
+                let req = client.get(&api_url).header("User-Agent", &ua);
+                match req.send() {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(json) = resp.json::<serde_json::Value>() {
+                            let owner = json["owner"]["login"]
+                                .as_str()
+                                .unwrap_or(&repo.owner)
+                                .to_string();
+                            let name = json["name"]
+                                .as_str()
+                                .unwrap_or(&repo.name)
+                                .to_string();
+                            (owner, name)
+                        } else {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+            "gitlab" => {
+                let encoded =
+                    format!("{}/{}", repo.owner, repo.name).replace('/', "%2F");
+                let api_url =
+                    format!("https://{}/api/v4/projects/{}", repo.host, encoded);
+                let req = client.get(&api_url).header("User-Agent", &ua);
+                match req.send() {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(json) = resp.json::<serde_json::Value>() {
+                            // path_with_namespace = "owner/name" or "group/sub/name"
+                            if let Some(full_path) = json["path_with_namespace"].as_str()
+                            {
+                                let parts: Vec<&str> = full_path.rsplitn(2, '/').collect();
+                                if parts.len() == 2 {
+                                    (parts[1].to_string(), parts[0].to_string())
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        };
+
+        if new_owner != repo.owner || new_name != repo.name {
+            let _ = eng.db().update_repo_casing(repo.id, &new_owner, &new_name);
+        }
+    }
+
+    // Mark fix as complete regardless — best effort, don't retry on failures
+    let _ = eng.db().mark_casing_fixed();
+}
+
 #[tauri::command]
 #[allow(non_snake_case)]
 async fn wuddle_list_repos(wowDir: Option<String>) -> Result<Vec<RepoRow>, String> {
@@ -621,6 +736,7 @@ async fn wuddle_list_repos(wowDir: Option<String>) -> Result<Vec<RepoRow>, Strin
             let _ = eng.import_existing_addon_git_repos(wow_path);
             let _ = eng.dedup_addon_repos_by_folder(wow_path);
         }
+        fix_repo_casing_from_forges(&eng);
         let repos = eng.db().list_repos().map_err(|e| e.to_string())?;
 
         Ok(repos
@@ -2004,6 +2120,285 @@ fn fetch_contents_list(
     }
 }
 
+#[tauri::command]
+async fn wuddle_fetch_repo_releases(url: String) -> Result<String, String> {
+    run_blocking(move || {
+        let parsed = reqwest::Url::parse(url.trim())
+            .map_err(|e| format!("invalid URL: {e}"))?;
+        let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+        let segs: Vec<&str> = parsed
+            .path_segments()
+            .map(|s| s.collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s: &&str| !s.is_empty())
+            .collect();
+        if segs.len() < 2 {
+            return Err("URL must include owner and repo name".into());
+        }
+        let owner = segs[0];
+        let name = segs[1].trim_end_matches(".git");
+
+        let client = shared_http_client();
+        let ua = format!("Wuddle/{}", env!("CARGO_PKG_VERSION"));
+
+        let releases: Vec<serde_json::Value> = if host == "github.com" {
+            let api_url =
+                format!("https://api.github.com/repos/{owner}/{name}/releases?per_page=20");
+            let mut req = client
+                .get(&api_url)
+                .header("User-Agent", &ua)
+                .header("Accept", "application/vnd.github+json");
+            if let Some(token) = wuddle_engine::github_token() {
+                req = req.bearer_auth(token);
+            }
+            let resp = req.send().map_err(|e| format!("github releases: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("releases not found (HTTP {})", resp.status()));
+            }
+            let items: Vec<serde_json::Value> =
+                resp.json().map_err(|e| format!("parse json: {e}"))?;
+            items
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "tag": r["tag_name"].as_str().unwrap_or(""),
+                        "name": r["name"].as_str().unwrap_or(""),
+                        "body": r["body"].as_str().unwrap_or(""),
+                        "publishedAt": r["published_at"].as_str().unwrap_or(""),
+                        "prerelease": r["prerelease"].as_bool().unwrap_or(false),
+                    })
+                })
+                .collect()
+        } else if host == "gitlab.com" {
+            let encoded_path = format!("{owner}/{name}").replace('/', "%2F");
+            let api_url = format!(
+                "https://{host}/api/v4/projects/{encoded_path}/releases?per_page=20"
+            );
+            let resp = client
+                .get(&api_url)
+                .header("User-Agent", &ua)
+                .send()
+                .map_err(|e| format!("gitlab releases: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("releases not found (HTTP {})", resp.status()));
+            }
+            let items: Vec<serde_json::Value> =
+                resp.json().map_err(|e| format!("parse json: {e}"))?;
+            items
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "tag": r["tag_name"].as_str().unwrap_or(""),
+                        "name": r["name"].as_str().unwrap_or(""),
+                        "body": r["description"].as_str().unwrap_or(""),
+                        "publishedAt": r["released_at"].as_str().unwrap_or(""),
+                        "prerelease": false,
+                    })
+                })
+                .collect()
+        } else {
+            // Gitea / Codeberg
+            let api_url =
+                format!("https://{host}/api/v1/repos/{owner}/{name}/releases?limit=20");
+            let resp = client
+                .get(&api_url)
+                .header("User-Agent", &ua)
+                .send()
+                .map_err(|e| format!("gitea releases: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("releases not found (HTTP {})", resp.status()));
+            }
+            let items: Vec<serde_json::Value> =
+                resp.json().map_err(|e| format!("parse json: {e}"))?;
+            items
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "tag": r["tag_name"].as_str().unwrap_or(""),
+                        "name": r["name"].as_str().unwrap_or(""),
+                        "body": r["body"].as_str().unwrap_or(""),
+                        "publishedAt": r["published_at"].as_str().unwrap_or(""),
+                        "prerelease": r["prerelease"].as_bool().unwrap_or(false),
+                    })
+                })
+                .collect()
+        };
+
+        serde_json::to_string(&releases).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn wuddle_fetch_repo_file(url: String, path: String) -> Result<String, String> {
+    run_blocking(move || {
+        if path.contains("..") {
+            return Err("invalid path".into());
+        }
+        let parsed = reqwest::Url::parse(url.trim())
+            .map_err(|e| format!("invalid URL: {e}"))?;
+        let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+        let segs: Vec<&str> = parsed
+            .path_segments()
+            .map(|s| s.collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s: &&str| !s.is_empty())
+            .collect();
+        if segs.len() < 2 {
+            return Err("URL must include owner and repo name".into());
+        }
+        let owner = segs[0];
+        let name = segs[1].trim_end_matches(".git");
+
+        let client = shared_http_client();
+        let ua = format!("Wuddle/{}", env!("CARGO_PKG_VERSION"));
+
+        let resp = if host == "github.com" {
+            let api_url = format!(
+                "https://api.github.com/repos/{owner}/{name}/contents/{path}"
+            );
+            let mut req = client
+                .get(&api_url)
+                .header("User-Agent", &ua)
+                .header("Accept", "application/vnd.github.raw+json");
+            if let Some(token) = wuddle_engine::github_token() {
+                req = req.bearer_auth(token);
+            }
+            req.send().map_err(|e| format!("github file: {e}"))?
+        } else if host == "gitlab.com" {
+            let encoded_path = format!("{owner}/{name}").replace('/', "%2F");
+            let encoded_file = path.replace('/', "%2F");
+            let api_url = format!(
+                "https://{host}/api/v4/projects/{encoded_path}/repository/files/{encoded_file}/raw?ref=HEAD"
+            );
+            client
+                .get(&api_url)
+                .header("User-Agent", &ua)
+                .send()
+                .map_err(|e| format!("gitlab file: {e}"))?
+        } else {
+            let api_url = format!(
+                "https://{host}/api/v1/repos/{owner}/{name}/raw/{path}"
+            );
+            client
+                .get(&api_url)
+                .header("User-Agent", &ua)
+                .send()
+                .map_err(|e| format!("gitea file: {e}"))?
+        };
+
+        if !resp.status().is_success() {
+            return Err(format!("file not found (HTTP {})", resp.status()));
+        }
+        let len = resp.content_length().unwrap_or(0);
+        if len > 512 * 1024 {
+            return Err("File too large to preview".into());
+        }
+        let text = resp.text().map_err(|e| format!("read body: {e}"))?;
+        if text.len() > 512 * 1024 {
+            return Err("File too large to preview".into());
+        }
+        Ok(text)
+    })
+    .await
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn wuddle_read_local_file(
+    wowDir: String,
+    path: String,
+) -> Result<String, String> {
+    run_blocking(move || {
+        if path.contains("..") {
+            return Err("invalid path".into());
+        }
+        let full = Path::new(&wowDir).join(&path);
+        let meta = fs::metadata(&full).map_err(|e| format!("stat: {e}"))?;
+        if meta.len() > 512 * 1024 {
+            return Err("File too large to preview".into());
+        }
+        let bytes = fs::read(&full).map_err(|e| format!("read: {e}"))?;
+        // Binary guard: check first 8KB for null bytes
+        let check_len = bytes.len().min(8192);
+        if bytes[..check_len].contains(&0u8) {
+            return Err("Binary file \u{2014} cannot preview".into());
+        }
+        String::from_utf8(bytes).map_err(|_| "File is not valid UTF-8 text".into())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn wuddle_list_repo_installs(id: i64) -> Result<String, String> {
+    run_blocking(move || {
+        let eng = engine()?;
+        let installs = eng.db().list_installs(id).map_err(|e| e.to_string())?;
+        let entries: Vec<serde_json::Value> = installs
+            .into_iter()
+            .map(|e| {
+                serde_json::json!({
+                    "path": e.path,
+                    "kind": e.kind,
+                })
+            })
+            .collect();
+        serde_json::to_string(&entries).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn wuddle_list_local_files(
+    wowDir: String,
+    basePath: String,
+) -> Result<String, String> {
+    run_blocking(move || {
+        if basePath.contains("..") {
+            return Err("invalid path".into());
+        }
+        let full = Path::new(&wowDir).join(&basePath);
+        if !full.is_dir() {
+            return Err("not a directory".into());
+        }
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        let mut count = 0u32;
+        for entry in fs::read_dir(&full).map_err(|e| e.to_string())? {
+            if count >= 100 {
+                break;
+            }
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let ft = entry.file_type().map_err(|e| e.to_string())?;
+            let kind = if ft.is_dir() { "dir" } else { "file" };
+            entries.push(serde_json::json!({ "name": name, "type": kind }));
+            count += 1;
+        }
+        // Sort: dirs first, then files, alphabetical within each group
+        entries.sort_by(|a, b| {
+            let a_type = a["type"].as_str().unwrap_or("");
+            let b_type = b["type"].as_str().unwrap_or("");
+            let a_dir = a_type == "dir";
+            let b_dir = b_type == "dir";
+            if a_dir != b_dir {
+                return if a_dir {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                };
+            }
+            let a_name = a["name"].as_str().unwrap_or("");
+            let b_name = b["name"].as_str().unwrap_or("");
+            a_name.to_ascii_lowercase().cmp(&b_name.to_ascii_lowercase())
+        });
+        serde_json::to_string(&entries).map_err(|e| e.to_string())
+    })
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -2057,7 +2452,12 @@ pub fn run() {
             wuddle_fetch_repo_readme,
             wuddle_fetch_repo_info,
             wuddle_fetch_repo_tree,
-            wuddle_fetch_repo_contents
+            wuddle_fetch_repo_contents,
+            wuddle_fetch_repo_releases,
+            wuddle_fetch_repo_file,
+            wuddle_read_local_file,
+            wuddle_list_repo_installs,
+            wuddle_list_local_files
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -358,6 +358,7 @@ export function bindDialogOutsideToClose(dlg) {
 const FADE_THRESHOLD = 4;
 const _wiredScrollFade = new WeakSet();
 const _fadeColorCache = new WeakMap();       // el → computed color string
+const _scrollRafPending = new WeakSet();     // throttle: one rAF per element
 let _fadeColorGeneration = 0;                // bumped on theme change to invalidate cache
 
 function updateScrollFade(el) {
@@ -434,7 +435,14 @@ function computeEffectiveBg(el) {
 function wireScrollFade(el) {
   if (_wiredScrollFade.has(el)) return;
   _wiredScrollFade.add(el);
-  el.addEventListener("scroll", () => updateScrollFade(el), { passive: true });
+  el.addEventListener("scroll", () => {
+    if (_scrollRafPending.has(el)) return;
+    _scrollRafPending.add(el);
+    requestAnimationFrame(() => {
+      _scrollRafPending.delete(el);
+      updateScrollFade(el);
+    });
+  }, { passive: true });
   requestAnimationFrame(() => {
     syncFadeColor(el);
     updateScrollFade(el);

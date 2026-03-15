@@ -1734,6 +1734,7 @@ body.busy {
 .name-link {
   border: none;
   background: transparent;
+  outline: none;
   color: var(--project-link);
   font-size: 20px;
   font-weight: 600;
@@ -2044,6 +2045,7 @@ dialog.dialog::backdrop {
   opacity: 0;
   transition: opacity 0.2s ease;
   flex-shrink: 0;
+  will-change: opacity;
 }
 .scroll-fade::before {
   top: calc(-1 * var(--fade-pad-y));
@@ -2238,6 +2240,7 @@ dialog.dialog > .select-menu-pop {
   overflow-y: auto;
   --fade-pad-x: 14px;
   --fade-pad-y: 12px;
+  contain: layout paint;
 }
 
 .dlg-add-content-frame #quickAddField { margin: 0; }
@@ -2252,6 +2255,7 @@ dialog.dialog > .select-menu-pop {
   font-size: 15px;
   line-height: 1.65;
   color: var(--text-soft);
+  contain: layout style;
 }
 
 /* Hide GitHub anchor permalink icons next to headings */
@@ -2493,6 +2497,124 @@ dialog.dialog > .select-menu-pop {
   }
 }
 
+/* ---- Repo detail dialog ---- */
+
+#dlgRepoDetail .dialog-inner {
+  width: min(960px, calc(100vw - 36px));
+  max-height: none;
+}
+
+@media (min-width: 1300px) {
+  #dlgRepoDetail .dialog-inner {
+    width: min(1080px, calc(100vw - 48px));
+  }
+}
+
+@media (min-width: 1650px) {
+  #dlgRepoDetail .dialog-inner {
+    width: min(1240px, calc(100vw - 64px));
+  }
+}
+
+.dlg-detail-header {
+  flex-shrink: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+.dlg-detail-header .dialog-head {
+  margin-bottom: 0;
+}
+
+.detail-title-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-weight: 800;
+  font-size: 20px;
+  color: var(--project-link);
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  outline: none;
+}
+
+.detail-title-link:hover {
+  color: var(--project-link-hover);
+  text-decoration-color: var(--project-link-hover);
+}
+
+#btnDetailOpenForge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+}
+
+#btnDetailOpenForge svg {
+  display: block;
+}
+
+/* Release changelog entries */
+.release-entry {
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.release-entry:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.release-tag {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--primary);
+  margin: 0 0 2px 0;
+}
+
+.release-meta {
+  font-size: 12px;
+  color: var(--text-soft);
+  margin-bottom: 8px;
+}
+
+.release-meta .release-pre-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(255, 180, 0, 0.18);
+  color: var(--text-soft);
+  margin-left: 6px;
+}
+
+.release-body {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-soft);
+}
+
+.release-body ul {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.release-body li {
+  margin: 2px 0;
+}
+
+/* Tree path context prefix */
+.tree-path-prefix {
+  color: var(--text-soft);
+  opacity: 0.5;
+  font-size: 12px;
+}
+
 /* ---- File tree ---- */
 
 .repo-tree {
@@ -2548,6 +2670,61 @@ dialog.dialog > .select-menu-pop {
 
 .tree-children {
   padding-left: 18px;
+}
+
+.tree-entry.file {
+  cursor: pointer;
+}
+
+.tree-entry.file:hover .tree-name {
+  color: var(--project-link);
+  text-decoration: underline;
+}
+
+/* ---- File preview ---- */
+
+.file-preview-code {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+/* highlight.js syntax theme — adaptive to app theme via CSS variables */
+.hljs { color: var(--text); }
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-name { color: #c586c0; }
+.hljs-string,
+.hljs-attr { color: #ce9178; }
+.hljs-number,
+.hljs-literal { color: #b5cea8; }
+.hljs-comment { color: #6a9955; font-style: italic; }
+.hljs-function,
+.hljs-title { color: #dcdcaa; }
+.hljs-variable,
+.hljs-params { color: #9cdcfe; }
+.hljs-type,
+.hljs-class .hljs-title { color: #4ec9b0; }
+.hljs-meta { color: #d7ba7d; }
+.hljs-section { color: var(--primary); font-weight: 700; }
+.hljs-tag { color: #569cd6; }
+.hljs-attribute { color: #9cdcfe; }
+.hljs-symbol,
+.hljs-bullet { color: #d4d4d4; }
+.hljs-addition { color: #b5cea8; background: rgba(155, 185, 85, 0.1); }
+.hljs-deletion { color: #ce9178; background: rgba(206, 145, 120, 0.1); }
+
+.frame-label-back {
+  cursor: pointer;
+  color: var(--project-link);
+}
+
+.frame-label-back:hover {
+  text-decoration: underline;
 }
 
 /* ---- About panel ---- */

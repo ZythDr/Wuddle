@@ -1,6 +1,6 @@
 [package]
 name = "wuddle-gui"
-version = "2.5.2"
+version = "2.5.3"
 description = "All-in-one manager and launcher for World of Warcraft"
 authors = ["you"]
 edition = "2021"
