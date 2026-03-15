@@ -2,6 +2,25 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.5.6
+
+### Add Dialog Enhancements
+- **Forge icon and Release Notes in Add dialog:** When previewing a repo in the Add dialog (via Quick Add or URL), forge icon and Release Notes buttons now appear in the footer — matching the detail dialog experience.
+- **"No README" placeholder:** Repos without a README.md now show a clear placeholder message instead of silently hiding the preview area.
+
+### Markdown Code Block Support
+- **Fenced code blocks:** README previews from Gitea/GitLab repos now render `` ``` `` fenced code blocks with proper `<pre><code>` styling instead of showing raw backtick fences.
+- **Inline code:** Single and double backtick inline code (`` `code` ``) now renders with monospace background styling in markdown READMEs.
+
+### Link Fixes
+- **README links open correctly:** Links in README previews now open in the system browser as intended. Previously, some markdown-generated links had `href="#"` which broke click handling and showed `http://127.0.0.1:1430/#` on right-click.
+- **Right-click "Copy URL" works:** All README links now have the resolved URL in their `href` attribute so the browser context menu shows the correct destination.
+
+### Input UX
+- **Clearable input fields:** All text inputs (repo URL, search, instance settings) now have a generic clear button (✕) matching the existing project search style.
+- **DMA-BUF rendering toggle:** Added an experimental settings toggle for DMA-BUF rendering on Linux (disabled by default) with crash detection auto-fallback.
+- **Linux-only options:** The xattr and DMA-BUF settings are now only shown on Linux.
+
 ## v2.5.5
 
 ### GIF Playback Fix

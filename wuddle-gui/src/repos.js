@@ -1592,9 +1592,13 @@ export function renderAddPresets() {
       titleLink.type = "button";
       titleLink.className = "preset-title-link";
       titleLink.textContent = preset.name;
-      titleLink.addEventListener("click", async (ev) => {
+      titleLink.addEventListener("click", (ev) => {
         ev.stopPropagation();
-        await openUrl(preset.url);
+        const input = $("repoUrl");
+        if (input) {
+          input.value = preset.url;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
       });
       head.appendChild(titleLink);
     } else {
@@ -1839,14 +1843,21 @@ function cappedSet(map, key, value) {
 const _readmeCache = new Map();
 const _repoInfoCache = new Map();
 const _repoTreeCache = new Map();
+const _addReleaseNotesCache = new Map();
 let _readmeDebounceTimer = null;
 let _readmeAbortKey = 0;
+let _addShowReleaseNotes = false;
 
 export function setupReadmePreviewListener() {
   const input = $("repoUrl");
   if (!input) return;
+
   input.addEventListener("input", () => {
     clearTimeout(_readmeDebounceTimer);
+    if (!input.value.trim()) {
+      hideAllRepoPreviews();
+      return;
+    }
     _readmeDebounceTimer = setTimeout(() => {
       void fetchAllRepoPreviews(input.value);
     }, 600);
@@ -1885,7 +1896,7 @@ function hideAllRepoPreviews() {
     treeSec.classList.add("hidden");
     $("repoTree").innerHTML = "";
   }
-
+  _activeReadmeRepoUrl = "";
 }
 
 /** Show the side panel if at least one section is visible. */
@@ -1903,9 +1914,13 @@ function updateSidePanelVisibility() {
 
 /** Show README wrap and hide Quick Add (they share the same frame). */
 function showReadmePanel() {
-  // Dismiss file preview if active
+  // Dismiss file preview and release notes if active
   const fp = $("addFilePreview");
   if (fp) { fp.innerHTML = ""; fp.classList.add("hidden"); }
+  const rn = $("addReleaseNotes");
+  if (rn) { rn.classList.add("hidden"); }
+  _addShowReleaseNotes = false;
+
   const wrap = $("readmePreviewWrap");
   if (wrap) wrap.classList.remove("hidden");
   const quickAdd = $("quickAddField");
@@ -1922,6 +1937,9 @@ function showReadmePanel() {
     frame.classList.remove("hidden");
     requestAnimationFrame(() => refreshScrollFade(frame));
   }
+
+  // Show forge icon + Release Notes buttons
+  syncAddForgeButtons();
 }
 
 /** Hide README wrap and restore Quick Add (mods only — addons have no presets). */
@@ -1931,6 +1949,10 @@ function hideReadmePanel() {
     wrap.classList.add("hidden");
     $("readmePreview").innerHTML = "";
   }
+  const rn = $("addReleaseNotes");
+  if (rn) { rn.innerHTML = ""; rn.classList.add("hidden"); }
+  _addShowReleaseNotes = false;
+
   const isAddons = state.projectView === "addons";
   const quickAdd = $("quickAddField");
   if (quickAdd) quickAdd.classList.toggle("hidden", isAddons);
@@ -1943,6 +1965,117 @@ function hideReadmePanel() {
   if (frame) {
     frame.classList.toggle("hidden", isAddons);
     requestAnimationFrame(() => refreshScrollFade(frame));
+  }
+
+  // Hide forge icon + Release Notes buttons
+  hideAddForgeButtons();
+}
+
+// ---------------------------------------------------------------------------
+// Add dialog — forge icon + Release Notes buttons
+// ---------------------------------------------------------------------------
+
+/** Show forge icon and Release Notes buttons based on the current repo URL. */
+function syncAddForgeButtons() {
+  const url = _activeReadmeRepoUrl || ($("repoUrl")?.value || "").trim();
+  const info = parseRepoUrlInfo(url);
+  const forgeBtn = $("btnAddOpenForge");
+  const rnBtn = $("btnAddReleaseNotes");
+  if (!forgeBtn || !rnBtn) return;
+
+  if (!info.host || !info.owner || !info.name) {
+    hideAddForgeButtons();
+    return;
+  }
+
+  const forgeLabel = forgeFromHost(info.host);
+  const forgeName = forgeLabel.charAt(0).toUpperCase() + forgeLabel.slice(1);
+  forgeBtn.innerHTML = forgeIconSvg(forgeLabel);
+  forgeBtn.title = `Open on ${forgeName}`;
+  forgeBtn.onclick = () => openUrl(url);
+  forgeBtn.classList.remove("hidden");
+
+  rnBtn.textContent = _addShowReleaseNotes ? "README" : "Release Notes";
+  rnBtn.onclick = () => toggleAddReleaseNotes(url);
+  rnBtn.classList.remove("hidden");
+}
+
+function hideAddForgeButtons() {
+  $("btnAddOpenForge")?.classList.add("hidden");
+  $("btnAddReleaseNotes")?.classList.add("hidden");
+}
+
+/** Derive forge label from hostname. */
+function forgeFromHost(host) {
+  if (host.includes("github")) return "github";
+  if (host.includes("gitlab")) return "gitlab";
+  if (host.includes("codeberg")) return "codeberg";
+  if (host.includes("gitea")) return "gitea";
+  return "github";
+}
+
+/** Toggle between README and Release Notes in the Add dialog. */
+function toggleAddReleaseNotes(url) {
+  _addShowReleaseNotes = !_addShowReleaseNotes;
+  const lbl = $("contentFrameLabel");
+  const wrap = $("readmePreviewWrap");
+  const rn = $("addReleaseNotes");
+  const rnBtn = $("btnAddReleaseNotes");
+
+  if (_addShowReleaseNotes) {
+    if (wrap) wrap.classList.add("hidden");
+    if (rn) rn.classList.remove("hidden");
+    if (lbl) lbl.textContent = "Release Notes";
+    if (rnBtn) rnBtn.textContent = "README";
+    fetchAddReleaseNotes(url);
+  } else {
+    if (rn) rn.classList.add("hidden");
+    if (wrap) wrap.classList.remove("hidden");
+    if (lbl) lbl.textContent = "README";
+    if (rnBtn) rnBtn.textContent = "Release Notes";
+  }
+
+  const frame = wrap?.closest(".scroll-fade");
+  if (frame) {
+    frame.scrollTop = 0;
+    requestAnimationFrame(() => refreshScrollFade(frame));
+  }
+}
+
+/** Fetch and display release notes in the Add dialog. */
+async function fetchAddReleaseNotes(url) {
+  const container = $("addReleaseNotes");
+  if (!container) return;
+
+  const info = parseRepoUrlInfo(url);
+  const cacheKey = `${info.host}|${info.owner}|${info.name}`.toLowerCase();
+
+  if (_addReleaseNotesCache.has(cacheKey)) {
+    container.innerHTML = _addReleaseNotesCache.get(cacheKey);
+    return;
+  }
+
+  container.innerHTML = '<div class="readme-preview-loading">Loading release notes\u2026</div>';
+
+  try {
+    const json = await safeInvoke("wuddle_fetch_repo_releases", { url }, { timeoutMs: 20000 });
+    // Check if still showing release notes for this URL
+    if (!_addShowReleaseNotes || _activeReadmeRepoUrl !== url) return;
+    const releases = JSON.parse(json);
+
+    if (!releases.length) {
+      const html = '<div class="readme-preview-loading">No release notes found.</div>';
+      cappedSet(_addReleaseNotesCache, cacheKey, html);
+      container.innerHTML = html;
+      return;
+    }
+
+    const html = renderReleases(releases);
+    cappedSet(_addReleaseNotesCache, cacheKey, html);
+    container.innerHTML = html;
+  } catch (_) {
+    if (!_addShowReleaseNotes) return;
+    container.innerHTML = '<div class="readme-preview-loading">Could not load release notes.</div>';
   }
 }
 
@@ -1982,7 +2115,8 @@ async function fetchAndShowReadme(url, info) {
 
   } catch (_) {
     if (generation !== _readmeAbortKey) return;
-    hideReadmePanel();
+    container.innerHTML = '<div class="readme-preview-loading">No README.md was found for this repository.</div>';
+    showReadmePanel();
   }
 }
 
@@ -2299,12 +2433,15 @@ function wireReadmeLinks(container) {
 
   // Wire links to open in system browser
   container.querySelectorAll("a[href]").forEach((a) => {
-    const href = a.getAttribute("href") || "";
-    if (href.startsWith("#")) return;
+    const href = a.getAttribute("data-href") || a.getAttribute("href") || "";
+    if (!href || href === "#") return;
+    const resolved = resolveReadmeUrl(href);
+    // Set the real URL so right-click "Copy URL" works
+    a.setAttribute("href", resolved);
     a.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      void openUrl(resolveReadmeUrl(href));
+      void openUrl(resolved);
     });
   });
 }
@@ -2313,6 +2450,9 @@ export function openAddDialog() {
   const dlg = $("dlgAdd");
   if (!dlg) return;
   $("repoUrl").value = "";
+  /* sync the generic clear-button visibility */
+  const urlWrap = $("repoUrl")?.closest(".input-clearable");
+  if (urlWrap) urlWrap.classList.remove("has-value");
   renderAddPresets();
   hideAllRepoPreviews();
   if (!dlg.open) {

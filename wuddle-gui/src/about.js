@@ -213,9 +213,32 @@ export function changelogToHtml(md) {
   const lines = md.split("\n");
   let html = "";
   let inList = false;
+  let inCode = false;
+  let codeLang = "";
 
-  for (const raw of lines) {
-    const line = raw.trimEnd();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trimEnd();
+
+    // Fenced code blocks (``` or ~~~)
+    const fenceMatch = line.match(/^(`{3,}|~{3,})\s*(\S*)/);
+    if (fenceMatch) {
+      if (!inCode) {
+        if (inList) { html += "</ul>"; inList = false; }
+        codeLang = fenceMatch[2] || "";
+        const cls = codeLang ? ` class="language-${escapeHtml(codeLang)}"` : "";
+        html += `<pre><code${cls}>`;
+        inCode = true;
+      } else {
+        html += "</code></pre>";
+        inCode = false;
+      }
+      continue;
+    }
+
+    if (inCode) {
+      html += escapeHtml(lines[i]) + "\n";
+      continue;
+    }
 
     if (line.startsWith("# ") && !line.startsWith("## ")) {
       if (inList) { html += "</ul>"; inList = false; }
@@ -249,19 +272,24 @@ export function changelogToHtml(md) {
     if (inList) { html += "</ul>"; inList = false; }
     html += `<p>${inlineFormat(line)}</p>`;
   }
+  if (inCode) html += "</code></pre>";
   if (inList) html += "</ul>";
   return html;
 }
 
-/** Apply inline markdown formatting (bold, links) with HTML escaping. */
+/** Apply inline markdown formatting (bold, code, links) with HTML escaping. */
 function inlineFormat(text) {
   let out = escapeHtml(text);
+  // ``code`` (double backtick)
+  out = out.replace(/``(.+?)``/g, "<code>$1</code>");
+  // `code` (single backtick)
+  out = out.replace(/`(.+?)`/g, "<code>$1</code>");
   // **bold**
   out = out.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   // [text](url)
   out = out.replace(
     /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
-    '<a href="#" class="changelog-link" data-href="$2">$1</a>',
+    '<a href="$2" class="changelog-link" data-href="$2">$1</a>',
   );
   return out;
 }

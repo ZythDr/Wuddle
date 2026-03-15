@@ -326,9 +326,14 @@
               <input id="optSymlinks" type="checkbox" />
               <span>Use symlink installs when possible</span>
             </label>
-            <label class="check">
+            <label id="optXattrLabel" class="check hidden">
               <input id="optXattr" type="checkbox" />
-              <span>Set xattr file comments (if OS supports it)</span>
+              <span>Set xattr file comments</span>
+            </label>
+            <label id="optDmabufLabel" class="check hidden"
+              title="Experimental: enables DMA-BUF rendering in AppImage builds for potentially smoother visuals. May cause crashes on some GPU drivers (especially Nvidia). If Wuddle crashes twice on startup, DMA-BUF is automatically disabled. Requires restart to take effect.">
+              <input id="optDmabuf" type="checkbox" />
+              <span>Enable DMA-BUF rendering <span class="hint-inline">(experimental — requires restart)</span></span>
             </label>
           </div>
         </section>
@@ -371,15 +376,12 @@
         <section class="settings-card auth-block">
           <div class="row align-center auth-header-row">
             <div class="settings-head">GitHub Authentication</div>
-            <div id="ghAuthHint" class="hint">
+            <div id="ghAuthHint" class="hint grow">
               Optional: add a GitHub token to avoid anonymous API rate limits.
             </div>
-          </div>
-
-          <div class="row tight auth-connect-row">
             <button
               id="btnConnectGithub"
-              class="btn"
+              class="btn auth-tokens-btn"
               title="Opens GitHub in your browser so you can create or manage a token."
             >
               GitHub Tokens
@@ -440,7 +442,10 @@
             <span>Auto-scroll</span>
           </label>
           <label class="field log-search">
-            <input id="logSearch" placeholder="Search logs" />
+            <div class="input-clearable">
+              <input id="logSearch" placeholder="Search logs" />
+              <button type="button" class="input-clear-btn" aria-label="Clear">✕</button>
+            </div>
           </label>
         </div>
       </div>
@@ -686,7 +691,10 @@
 
             <label class="field">
               <div id="addRepoUrlLabel" class="label">Addon Repo URL</div>
-              <input id="repoUrl" placeholder="(e.g. https://gitea.com/avitasia/nampower)" />
+              <div class="input-clearable" id="repoUrlWrap">
+                <input id="repoUrl" placeholder="(e.g. https://gitea.com/avitasia/nampower)" />
+                <button type="button" class="input-clear-btn" aria-label="Clear" title="Clear URL and return to Quick Add">✕</button>
+              </div>
             </label>
           </div>
 
@@ -701,6 +709,7 @@
               <div id="readmePreviewWrap" class="readme-preview-wrap hidden">
                 <div id="readmePreview" class="readme-preview"></div>
               </div>
+              <div id="addReleaseNotes" class="readme-preview hidden"></div>
               <div id="addFilePreview" class="readme-preview hidden"></div>
             </div>
           </div>
@@ -708,6 +717,8 @@
           <!-- Sticky footer -->
           <div class="dlg-add-footer">
             <div class="dlg-add-footer-left">
+              <button id="btnAddOpenForge" class="btn ghost add-forge-btn hidden"></button>
+              <button id="btnAddReleaseNotes" class="btn ghost add-forge-btn hidden">Release Notes</button>
               <input type="checkbox" id="chkAdvanced" class="dlg-add-advanced-chk">
               <label for="chkAdvanced" class="dlg-add-advanced-label">Advanced</label>
               <label class="dlg-add-mode">
@@ -944,7 +955,10 @@
           <div class="row align-end instance-name-row">
             <label class="field grow instance-name-field">
               <div class="label">Name</div>
-              <input id="instanceSettingsName" placeholder="WoW1" />
+              <div class="input-clearable">
+                <input id="instanceSettingsName" placeholder="WoW1" />
+                <button type="button" class="input-clear-btn" aria-label="Clear">✕</button>
+              </div>
             </label>
             <label
               class="check instance-turtles-check"
@@ -958,7 +972,10 @@
           <div class="row align-end instance-path-row">
             <label class="field grow instance-path-field">
               <div class="label">WoW path</div>
-              <input id="instanceSettingsPath" placeholder="/path/to/Wow.exe (or VanillaFixes.exe)" />
+              <div class="input-clearable">
+                <input id="instanceSettingsPath" placeholder="/path/to/Wow.exe (or VanillaFixes.exe)" />
+                <button type="button" class="input-clear-btn" aria-label="Clear">✕</button>
+              </div>
             </label>
             <button id="btnInstanceSettingsChoosePath" class="btn" type="button">Choose...</button>
             <button id="btnInstanceSettingsOpenPath" class="btn" type="button">Open</button>
@@ -989,10 +1006,13 @@
           <div id="instanceSettingsLaunchLutris" class="instance-launch-group hidden">
             <label class="field">
               <div class="label">Lutris target</div>
-              <input
-                id="instanceSettingsLutrisTarget"
-                placeholder="lutris:rungameid/2"
-              />
+              <div class="input-clearable">
+                <input
+                  id="instanceSettingsLutrisTarget"
+                  placeholder="lutris:rungameid/2"
+                />
+                <button type="button" class="input-clear-btn" aria-label="Clear">✕</button>
+              </div>
             </label>
             <div class="hint">Example: <code>lutris:rungameid/2</code></div>
           </div>
@@ -1000,25 +1020,37 @@
           <div id="instanceSettingsLaunchWine" class="instance-launch-group hidden">
             <label class="field">
               <div class="label">Wine command</div>
-              <input id="instanceSettingsWineCommand" placeholder="wine" />
+              <div class="input-clearable">
+                <input id="instanceSettingsWineCommand" placeholder="wine" />
+                <button type="button" class="input-clear-btn" aria-label="Clear">✕</button>
+              </div>
             </label>
             <label class="field">
               <div class="label">Extra args (optional)</div>
-              <input id="instanceSettingsWineArgs" placeholder="--some-arg value" />
+              <div class="input-clearable">
+                <input id="instanceSettingsWineArgs" placeholder="--some-arg value" />
+                <button type="button" class="input-clear-btn" aria-label="Clear">✕</button>
+              </div>
             </label>
           </div>
 
           <div id="instanceSettingsLaunchCustom" class="instance-launch-group hidden">
             <label class="field">
               <div class="label">Custom command</div>
-              <input id="instanceSettingsCustomCommand" placeholder="command" />
+              <div class="input-clearable">
+                <input id="instanceSettingsCustomCommand" placeholder="command" />
+                <button type="button" class="input-clear-btn" aria-label="Clear">✕</button>
+              </div>
             </label>
             <label class="field">
               <div class="label">Arguments (optional)</div>
-              <input
-                id="instanceSettingsCustomArgs"
-                placeholder="--flag value"
-              />
+              <div class="input-clearable">
+                <input
+                  id="instanceSettingsCustomArgs"
+                  placeholder="--flag value"
+                />
+                <button type="button" class="input-clear-btn" aria-label="Clear">✕</button>
+              </div>
             </label>
             <div class="hint">Tip: use <code>{exe}</code> in args to inject the detected game executable path.</div>
           </div>
@@ -1027,7 +1059,10 @@
             <summary>Advanced</summary>
             <label class="field">
               <div class="label">Working directory override</div>
-              <input id="instanceSettingsWorkingDir" placeholder="/path/to/working/dir" />
+              <div class="input-clearable">
+                <input id="instanceSettingsWorkingDir" placeholder="/path/to/working/dir" />
+                <button type="button" class="input-clear-btn" aria-label="Clear">✕</button>
+              </div>
             </label>
             <label class="field">
               <div class="label">Environment variables</div>

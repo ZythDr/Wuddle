@@ -51,6 +51,7 @@ import {
   bindDialogOutsideToClose,
   setUiCallbacks,
   initScrollFade,
+  wireInputClearButtons,
 } from "./ui.js";
 
 import {
@@ -263,6 +264,7 @@ function loadSettings() {
   loadIgnoredUpdates();
   setupReadmePreviewListener();
   initScrollFade();
+  wireInputClearButtons();
   const symlinks = localStorage.getItem(OPT_SYMLINKS_KEY) === "true";
   const xattr = localStorage.getItem(OPT_XATTR_KEY) === "true";
   const clock12 = localStorage.getItem(OPT_CLOCK12_KEY) === "true";
@@ -297,6 +299,17 @@ function loadSettings() {
   setTheme(savedTheme);
   setUiFontStyle(useFrizFont);
   renderAutoCheckSettings();
+
+  // Show Linux-only options
+  const isLinux = /linux/i.test(navigator.userAgent);
+  if (isLinux) {
+    $("optXattrLabel")?.classList.remove("hidden");
+    $("optDmabufLabel")?.classList.remove("hidden");
+    // Load DMA-BUF toggle state from render probe file
+    safeInvoke("wuddle_get_dmabuf_enabled").then((enabled) => {
+      $("optDmabuf").checked = !!enabled;
+    }).catch(() => {});
+  }
 
   setTab("home");
 
@@ -474,6 +487,9 @@ $("optFrizFont").addEventListener("change", saveOptionFlags);
 $("optAutoCheck").addEventListener("change", saveOptionFlags);
 $("optAutoCheckMinutes").addEventListener("change", saveOptionFlags);
 $("optDesktopNotify").addEventListener("change", saveOptionFlags);
+$("optDmabuf").addEventListener("change", () => {
+  safeInvoke("wuddle_set_dmabuf_enabled", { enabled: !!$("optDmabuf").checked }).catch(() => {});
+});
 $("themePicker")?.addEventListener("click", (ev) => {
   const target = ev.target;
   if (!(target instanceof Element)) return;

@@ -28,13 +28,20 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **GitHub auth token (optional):** helps avoid anonymous API limits
 - **Logs panel:** operational visibility and copyable logs
 
+### What's New In v2.5.6
+
+- **Forge icon + Release Notes in Add dialog:** Previewing a repo now shows forge icon and Release Notes buttons, matching the detail dialog.
+- **Markdown code blocks:** Fenced (`` ``` ``) and inline (`` ` ``) code blocks now render correctly in README previews from Gitea/GitLab repos.
+- **Fixed README links:** Links in README previews now open in the system browser and show the correct URL on right-click.
+- **Clearable inputs:** All text inputs now have a clear button (✕). Added DMA-BUF rendering toggle for Linux.
+
+<details>
+<summary><strong>Previous versions</strong></summary>
+
 ### What's New In v2.5.5
 
 - **Fixed GIF playback speed:** Animated GIFs in README previews now play at their intended frame rate — fixes WebKitGTK playing some GIFs extremely fast.
 - **Debounced search inputs:** Project and log search now wait 500ms after typing stops before updating, reducing unnecessary re-renders.
-
-<details>
-<summary><strong>Previous versions</strong></summary>
 
 ### What's New In v2.5.4
 

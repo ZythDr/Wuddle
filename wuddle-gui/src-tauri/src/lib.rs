@@ -581,22 +581,195 @@ fn apply_linux_runtime_env_defaults() {
         return;
     }
 
+    // --- Render probe: DMA-BUF crash detection ---
+    // Try DMA-BUF by default for smoother rendering.  If the app crashes
+    // twice in a row within the first few seconds (the DMA-BUF failure
+    // signature), automatically disable it on subsequent launches.
+    if render_probe_should_disable_dmabuf() {
+        set_env_if_empty("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+    render_probe_mark_starting();
+
     let defaults = [
-        // Work around WebKitGTK rendering issues seen in some AppImage environments.
-        ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
         ("WEBKIT_DISABLE_COMPOSITING_MODE", "1"),
         // On some hosts WebKit sandboxing breaks inside AppImage and yields a blank view.
         ("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1"),
     ];
 
     for (key, value) in defaults {
-        let has_value = std::env::var_os(key)
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-        if !has_value {
-            std::env::set_var(key, value);
+        set_env_if_empty(key, value);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn set_env_if_empty(key: &str, value: &str) {
+    let has_value = std::env::var_os(key)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if !has_value {
+        std::env::set_var(key, value);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Render probe — DMA-BUF crash-and-fallback
+// ---------------------------------------------------------------------------
+//
+// State file: <data_dir>/render-probe.json
+//   { "early_crashes": <u32>, "started_at": <unix_secs>, "stable": <bool> }
+//
+// On startup:
+//   - If previous launch was NOT marked stable and started_at is recent,
+//     increment early_crashes.
+//   - If early_crashes >= 2, return true (disable DMA-BUF).
+//   - Write { early_crashes, started_at: now, stable: false }.
+//
+// After 10 s of running:
+//   - Write { early_crashes: 0, started_at, stable: true }.
+
+#[cfg(target_os = "linux")]
+fn render_probe_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("io.github.zythdr.wuddle"))
+}
+
+#[cfg(target_os = "linux")]
+fn render_probe_path() -> Option<PathBuf> {
+    render_probe_dir().map(|d| d.join("render-probe.json"))
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Serialize, Deserialize)]
+struct RenderProbe {
+    early_crashes: u32,
+    started_at: u64,
+    stable: bool,
+    /// User opt-in: try DMA-BUF rendering (default false = disabled).
+    #[serde(default)]
+    dmabuf_enabled: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl Default for RenderProbe {
+    fn default() -> Self {
+        Self {
+            early_crashes: 0,
+            started_at: 0,
+            stable: false,
+            dmabuf_enabled: false,
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn read_render_probe() -> RenderProbe {
+    let path = match render_probe_path() {
+        Some(p) => p,
+        None => return RenderProbe::default(),
+    };
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn write_render_probe(probe: &RenderProbe) {
+    if let Some(dir) = render_probe_dir() {
+        let _ = fs::create_dir_all(&dir);
+        if let Some(path) = render_probe_path() {
+            let _ = fs::write(&path, serde_json::to_string(probe).unwrap_or_default());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "linux")]
+fn render_probe_should_disable_dmabuf() -> bool {
+    let mut probe = read_render_probe();
+
+    // If the user already set the env var, don't interfere.
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    // If the user hasn't opted in to DMA-BUF, keep it disabled.
+    if !probe.dmabuf_enabled {
+        return true;
+    }
+
+    // If the previous launch was NOT stable and it started recently (within
+    // 60 s — covers the case where the app crashed instantly and the user
+    // relaunched), count it as an early crash.
+    if !probe.stable && probe.started_at > 0 {
+        let elapsed = now_secs().saturating_sub(probe.started_at);
+        if elapsed < 60 {
+            probe.early_crashes = probe.early_crashes.saturating_add(1);
+        } else {
+            // Too long ago — the user probably killed the app manually, not a
+            // DMA-BUF crash.  Reset.
+            probe.early_crashes = 0;
+        }
+    }
+
+    probe.early_crashes >= 2
+}
+
+#[cfg(target_os = "linux")]
+fn render_probe_mark_starting() {
+    let mut probe = read_render_probe();
+
+    // Preserve the early_crashes count we just computed, but if the previous
+    // launch was stable, reset it.
+    if probe.stable {
+        probe.early_crashes = 0;
+    }
+
+    probe.started_at = now_secs();
+    probe.stable = false;
+    write_render_probe(&probe);
+}
+
+#[cfg(target_os = "linux")]
+fn render_probe_mark_stable() {
+    let mut probe = read_render_probe();
+    probe.stable = true;
+    probe.early_crashes = 0;
+    write_render_probe(&probe);
+}
+
+#[tauri::command]
+fn wuddle_get_dmabuf_enabled() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        read_render_probe().dmabuf_enabled
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+#[tauri::command]
+fn wuddle_set_dmabuf_enabled(enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut probe = read_render_probe();
+        probe.dmabuf_enabled = enabled;
+        // Reset crash counter when toggling so the probe starts fresh.
+        probe.early_crashes = 0;
+        write_render_probe(&probe);
+    }
+    Ok(())
 }
 
 async fn run_blocking<T, F>(f: F) -> Result<T, String>
@@ -2455,6 +2628,16 @@ pub fn run() {
                     let _ = window.set_icon(icon);
                 }
             }
+
+            // Mark the launch as stable after 10 seconds (render probe).
+            #[cfg(target_os = "linux")]
+            {
+                std::thread::spawn(|| {
+                    std::thread::sleep(Duration::from_secs(10));
+                    render_probe_mark_stable();
+                });
+            }
+
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -2498,7 +2681,9 @@ pub fn run() {
             wuddle_read_local_file,
             wuddle_list_repo_installs,
             wuddle_list_local_files,
-            wuddle_send_notification
+            wuddle_send_notification,
+            wuddle_get_dmabuf_enabled,
+            wuddle_set_dmabuf_enabled
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

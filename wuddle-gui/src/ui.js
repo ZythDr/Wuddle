@@ -478,3 +478,41 @@ export function refreshScrollFade(el) {
   syncFadeColor(el);
   updateScrollFade(el);
 }
+
+// ---------------------------------------------------------------------------
+// Generic clearable input wiring
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire all `.input-clearable` wrappers so the `✕` button clears the input
+ * and the `has-value` class toggles automatically.
+ *
+ * Pass an optional `onClear` map keyed by input id for custom clear callbacks
+ * (e.g. the repo URL clear should also hide previews).
+ */
+export function wireInputClearButtons(onClear = {}) {
+  for (const wrap of document.querySelectorAll(".input-clearable")) {
+    const input = wrap.querySelector("input");
+    const btn = wrap.querySelector(".input-clear-btn");
+    if (!input || !btn) continue;
+    if (wrap.dataset.clearWired) continue;
+    wrap.dataset.clearWired = "1";
+
+    const sync = () => wrap.classList.toggle("has-value", !!input.value.trim());
+
+    input.addEventListener("input", sync);
+    input.addEventListener("change", sync);
+    sync();
+
+    btn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      input.value = "";
+      sync();
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      const cb = onClear[input.id];
+      if (cb) cb();
+      input.focus();
+    });
+  }
+}
