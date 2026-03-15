@@ -10,6 +10,11 @@ All notable changes to Wuddle are documented in this file.
 - **Notifications on manual check:** Clicking "Check for updates" now sends a desktop notification for both "updates available" and "no updates available" results (previously only background checks triggered notifications)
 - **Simplified notification logic:** Unified the manual/auto/startup notification paths into a single clean flow with dedup-key tracking for background checks
 
+### Launch Environment Fix
+- **Clean environment for child processes:** All launch modes (Lutris, Wine, Custom, Auto) now strip AppImage/Tauri-injected environment variables (`LD_LIBRARY_PATH`, `GDK_BACKEND`, etc.) before spawning, fixing Lutris launch failures in AppImage builds
+- **Process group detachment:** Launched games now run in their own process group, preventing Wuddle's taskbar icon from appearing on the game window and ensuring the game survives if Wuddle is closed
+- **Refactored env cleanup:** The AppImage env-cleaning logic (previously only used for `xdg-open`) is now shared across all child process launches
+
 ### Other
 - **AI context file:** Added `CONTEXT.md` documenting project architecture, conventions, pitfalls, and priorities for AI-assisted development
 - **Removed unused Tauri notification plugin:** Dropped `tauri-plugin-notification` crate and its capability permission (replaced by `notify-rust`)

@@ -32,6 +32,7 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 
 - **Fixed desktop notifications:** Notifications now work reliably on Linux using native D-Bus, with the Wuddle app icon and correct app name.
 - **Notifications on manual check:** "Check for updates" now always sends a desktop notification with the result.
+- **Fixed Lutris launch in AppImage:** All launch modes now clean inherited AppImage/Tauri environment variables and detach the game into its own process group — fixes Lutris failures in AppImage builds and prevents the game from showing Wuddle's taskbar icon.
 
 <details>
 <summary><strong>Previous versions</strong></summary>

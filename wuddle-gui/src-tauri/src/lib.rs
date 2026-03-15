@@ -1346,6 +1346,53 @@ fn normalize_working_dir(wow_path: &Path, override_dir: Option<&str>) -> PathBuf
     }
 }
 
+/// Env vars injected by AppImage / Tauri that break child processes
+/// (Wine, Lutris, xdg-open, etc.) when inherited.
+#[cfg(all(unix, not(target_os = "macos")))]
+const APPIMAGE_ENV_BLOCKLIST: &[&str] = &[
+    "APPDIR",
+    "APPIMAGE",
+    "ARGV0",
+    "OWD",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "GIO_MODULE_DIR",
+    "GST_PLUGIN_PATH",
+    "GST_PLUGIN_SYSTEM_PATH",
+    "QT_PLUGIN_PATH",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "GDK_BACKEND",
+];
+
+/// Strip AppImage-injected env vars and clean PATH / XDG_DATA_DIRS so child
+/// processes (Wine, Lutris, xdg-open, etc.) see a normal system environment.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn clean_env_for_child(cmd: &mut Command) {
+    for key in APPIMAGE_ENV_BLOCKLIST {
+        cmd.env_remove(key);
+    }
+    // Clean PATH: remove AppImage internal dirs.
+    let clean_path = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|p| !p.contains("/tmp/.mount_"))
+        .collect::<Vec<_>>()
+        .join(":");
+    if !clean_path.is_empty() {
+        cmd.env("PATH", clean_path);
+    }
+    // Restore XDG_DATA_DIRS to system default if modified by AppImage.
+    if let Ok(dirs) = std::env::var("XDG_DATA_DIRS") {
+        let clean: Vec<&str> = dirs.split(':').filter(|p| !p.contains("/tmp/.mount_")).collect();
+        if !clean.is_empty() {
+            cmd.env("XDG_DATA_DIRS", clean.join(":"));
+        } else {
+            cmd.env_remove("XDG_DATA_DIRS");
+        }
+    }
+}
+
 fn spawn_launch_command(
     program: &str,
     args: &[String],
@@ -1354,6 +1401,16 @@ fn spawn_launch_command(
 ) -> Result<(), String> {
     let mut cmd = Command::new(program);
     cmd.args(args).current_dir(cwd);
+
+    // On Linux, clean inherited AppImage/Tauri env and detach the child
+    // into its own process group so it survives if Wuddle exits.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        clean_env_for_child(&mut cmd);
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     if let Some(env_map) = env_map {
         for (k, v) in env_map {
             let key = k.trim();
@@ -1641,55 +1698,12 @@ fn wuddle_launch_game(wowDir: String, launch: Option<LaunchConfig>) -> Result<St
 }
 
 /// Build an `xdg-open` Command with AppImage-injected env vars stripped so
-/// the system browser / file manager launches correctly. Uses a blacklist
-/// rather than a whitelist because xdg-open and the programs it delegates to
-/// (kfmclient, gio, etc.) need many DE-specific vars that are hard to enumerate.
+/// the system browser / file manager launches correctly.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn clean_xdg_open(arg: &str) -> Command {
     let mut cmd = Command::new("xdg-open");
     cmd.arg(arg);
-    // Remove all env vars that the AppImage runtime injects.
-    for key in &[
-        // AppImage runtime vars
-        "APPDIR",
-        "APPIMAGE",
-        "ARGV0",
-        "OWD",
-        // Library paths pointing into the AppImage mount
-        "LD_LIBRARY_PATH",
-        "LD_PRELOAD",
-        // GIO/GStreamer/Qt module paths bundled in the AppImage
-        "GIO_MODULE_DIR",
-        "GST_PLUGIN_PATH",
-        "GST_PLUGIN_SYSTEM_PATH",
-        "QT_PLUGIN_PATH",
-        // Python paths (some AppImages bundle Python)
-        "PYTHONPATH",
-        "PYTHONHOME",
-        // We set this ourselves for the Wayland/X11 fallback
-        "GDK_BACKEND",
-    ] {
-        cmd.env_remove(key);
-    }
-    // Clean PATH so AppImage internal dirs don't shadow system binaries.
-    let clean_path = std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .filter(|p| !p.contains("/tmp/.mount_"))
-        .collect::<Vec<_>>()
-        .join(":");
-    if !clean_path.is_empty() {
-        cmd.env("PATH", clean_path);
-    }
-    // Restore XDG_DATA_DIRS to system default if it was modified by AppImage.
-    if let Ok(dirs) = std::env::var("XDG_DATA_DIRS") {
-        let clean: Vec<&str> = dirs.split(':').filter(|p| !p.contains("/tmp/.mount_")).collect();
-        if !clean.is_empty() {
-            cmd.env("XDG_DATA_DIRS", clean.join(":"));
-        } else {
-            cmd.env_remove("XDG_DATA_DIRS");
-        }
-    }
+    clean_env_for_child(&mut cmd);
     cmd
 }
 
