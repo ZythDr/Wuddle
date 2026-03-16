@@ -1,0 +1,13 @@
+[package]
+name = "wuddle-iced"
+version = "3.0.0-alpha.1"
+description = "Wuddle v3 — native GPU-rendered frontend using Iced"
+edition = "2021"
+
+[[bin]]
+name = "wuddle"
+path = "src/main.rs"
+
+[dependencies]
+wuddle-engine = { path = "../wuddle-engine" }
+iced = { version = "0.14", features = ["markdown", "image", "svg", "tokio"] }
