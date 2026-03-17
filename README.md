@@ -124,14 +124,15 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 
 Wuddle is its own implementation, but parts of the functionality and UX were inspired by:
 
-- **GitAddonsManager** (WobLight)
-  Git addon update workflows, `.toc`-driven addon deployment ideas, and branch-oriented addon management.
-  https://gitlab.com/woblight/GitAddonsManager
+- **[GitAddonsManager](https://gitlab.com/woblight/GitAddonsManager)** by WobLight  
+  Git addon update workflows, `.toc`-driven addon deployment ideas, and branch-oriented addon management.  
 
-- **WoWRetroLauncher** (Parquelle)
-  Sparked the idea for Wuddle's themes.
-  https://github.com/Parquelle/WoWRetroLauncher
+  
+- **[WoWRetroLauncher](https://github.com/Parquelle/WoWRetroLauncher)** by Parquelle  
+  Sparked the idea for Wuddle's themes.  
 
-- **vanilla-tweaks** (brndd)
-  WoW.exe binary patching logic for the Tweaks tab (FoV, farclip, quickloot, camera fixes, etc.).
-  https://github.com/brndd/vanilla-tweaks
+  
+- **[vanilla-tweaks](https://github.com/brndd/vanilla-tweaks)** by brndd  
+  WoW.exe binary patching logic for the Tweaks tab (FoV, farclip, quickloot, camera fixes, etc.).  
+
+  
