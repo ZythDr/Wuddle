@@ -10,4 +10,13 @@ path = "src/main.rs"
 
 [dependencies]
 wuddle-engine = { path = "../wuddle-engine" }
-iced = { version = "0.14", features = ["markdown", "image", "svg", "tokio"] }
+iced = { version = "0.14", features = ["markdown", "image", "svg", "tokio", "canvas"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+tokio = { version = "1", features = ["rt", "sync"] }
+open = "5"
+arboard = "3"
+rfd = "0.15"
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+notify-rust = "4"

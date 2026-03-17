@@ -871,6 +871,56 @@ impl Engine {
         Ok(removed)
     }
 
+    /// Remove repos from the database whose installed files no longer exist
+    /// on disk at the given `wow_dir`.  This only untracks them — it never
+    /// deletes any user files.
+    ///
+    /// A repo is pruned when it has **zero** install entries that resolve to
+    /// an existing path, OR when it has no install entries at all and is not
+    /// a manually-added (non-addon_git) repo that was never installed.
+    pub fn prune_missing_repos(&self, wow_dir: &Path) -> Result<usize> {
+        let repos = self.db.list_repos()?;
+        let mut pruned = 0usize;
+
+        for repo in &repos {
+            let entries = match self.db.list_installs(repo.id) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            // Repos with no install entries were never installed.
+            // For addon_git repos this means the clone is gone → prune.
+            // For other modes (manually added by URL) that were never
+            // installed, keep them — the user explicitly added them.
+            if entries.is_empty() {
+                if matches!(repo.mode, InstallMode::AddonGit) {
+                    // Check if the git worktree still exists
+                    let worktree = self.addon_git_worktree_dir(repo.id, wow_dir, repo);
+                    if !worktree.is_dir() {
+                        self.db.remove_repo(repo.id)?;
+                        pruned += 1;
+                    }
+                }
+                continue;
+            }
+
+            // Check if ANY installed path still exists on disk.
+            let any_present = entries.iter().any(|entry| {
+                Self::resolve_install_path(&entry.path, Some(wow_dir))
+                    .map(|full| full.exists())
+                    .unwrap_or(false)
+            });
+
+            if !any_present {
+                // No files on disk → untrack this repo (DB only, no file deletion)
+                self.db.remove_repo(repo.id)?;
+                pruned += 1;
+            }
+        }
+
+        Ok(pruned)
+    }
+
     fn build_git_addon_plan_for_repo(
         &self,
         r: &Repo,
