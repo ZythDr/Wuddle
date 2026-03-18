@@ -6728,7 +6728,7 @@ dependencies = [
 
 [[package]]
 name = "wuddle-iced"
-version = "3.0.0-alpha.1"
+version = "3.0.0-alpha.2"
 dependencies = [
  "arboard",
  "dirs 6.0.0",
@@ -6737,6 +6737,7 @@ dependencies = [
  "notify-rust",
  "open",
  "rfd",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",

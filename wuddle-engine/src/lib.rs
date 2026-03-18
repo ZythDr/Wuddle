@@ -897,6 +897,7 @@ impl Engine {
                     // Check if the git worktree still exists
                     let worktree = self.addon_git_worktree_dir(repo.id, wow_dir, repo);
                     if !worktree.is_dir() {
+                        eprintln!("[prune] removing addon_git '{}' (no worktree at {:?})", repo.name, worktree);
                         self.db.remove_repo(repo.id)?;
                         pruned += 1;
                     }
@@ -906,16 +907,23 @@ impl Engine {
 
             // Check if ANY installed path still exists on disk.
             let any_present = entries.iter().any(|entry| {
-                Self::resolve_install_path(&entry.path, Some(wow_dir))
-                    .map(|full| full.exists())
-                    .unwrap_or(false)
+                let resolved = Self::resolve_install_path(&entry.path, Some(wow_dir));
+                let exists = resolved.as_ref().map(|full| full.exists()).unwrap_or(false);
+                if !exists {
+                    eprintln!("[prune] '{}' install entry '{}' -> {:?} exists={}", repo.name, entry.path, resolved, exists);
+                }
+                exists
             });
 
             if !any_present {
-                // No files on disk → untrack this repo (DB only, no file deletion)
+                eprintln!("[prune] removing '{}' ({}) — no install entries found on disk", repo.name, repo.mode.as_str());
                 self.db.remove_repo(repo.id)?;
                 pruned += 1;
             }
+        }
+
+        if pruned > 0 {
+            eprintln!("[prune] pruned {} repos from database", pruned);
         }
 
         Ok(pruned)

@@ -133,7 +133,7 @@ wuddle-launcher/   Thin launcher binary (launches wuddle-gui, used for self-upda
 - **User experience**: Wuddle should feel fast, responsive, and self-explanatory. Toast messages for feedback, no silent failures
 - **Correctness over cleverness**: Simple, readable code. Avoid over-abstraction
 - **Cross-forge consistency**: Features should work across GitHub, GitLab, and Gitea/Codeberg
-- **Linux-first but cross-platform**: Primary target is Linux (AppImage). Windows support is secondary but maintained
+- **Linux-first but cross-platform**: Primary target is Linux (AppImage). Windows support is secondary but maintained and equally important.
 - **Minimal dependencies**: Don't add npm packages or Rust crates unless clearly necessary
 - **Backward compatibility**: DB migrations must handle upgrades from any previous version gracefully
 

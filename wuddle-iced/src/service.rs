@@ -90,16 +90,19 @@ pub async fn list_repos(
     wow_dir: Option<String>,
 ) -> Result<Vec<RepoRow>, String> {
     tokio::task::spawn_blocking(move || {
+        // No wow_dir means no WoW installation configured — return empty list
+        let dir = match wow_dir.as_deref() {
+            Some(d) if !d.trim().is_empty() => d,
+            _ => return Ok(Vec::new()),
+        };
         let eng = open_engine(db_path.as_deref())?;
-        if let Some(ref dir) = wow_dir {
-            let wow_path = Path::new(dir);
-            // Prune repos whose files no longer exist on disk (DB only, never deletes files)
-            let _ = eng.prune_missing_repos(wow_path);
-            // Auto-import newly discovered addon git repos
-            let _ = eng.import_existing_addon_git_repos(wow_path);
-            // Remove duplicate tracking entries
-            let _ = eng.dedup_addon_repos_by_folder(wow_path);
-        }
+        let wow_path = Path::new(dir);
+        // Prune repos whose files no longer exist on disk (DB only, never deletes files)
+        let _ = eng.prune_missing_repos(wow_path);
+        // Auto-import newly discovered addon git repos
+        let _ = eng.import_existing_addon_git_repos(wow_path);
+        // Remove duplicate tracking entries
+        let _ = eng.dedup_addon_repos_by_folder(wow_path);
         // One-time casing fix (v4 migration lowercased owner/name).
         if eng.db().needs_casing_fix() {
             let _ = eng.db().mark_casing_fixed();

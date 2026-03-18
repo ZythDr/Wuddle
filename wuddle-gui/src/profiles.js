@@ -163,6 +163,11 @@ export function persistProfiles() {
   } else {
     localStorage.removeItem(ACTIVE_PROFILE_KEY);
   }
+  // Sync to settings.json so the Iced frontend can share profiles
+  safeInvoke("wuddle_sync_profiles_to_settings", {
+    profiles: state.profiles,
+    activeProfileId: state.activeProfileId || "default",
+  }).catch(() => {});
 }
 
 export function activeProfile() {

@@ -2,6 +2,35 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.0.0-alpha.2 (Iced frontend)
+
+### Overlay Context Menus
+- **Anchored overlay system:** The triple-dot (⋮) context menu in the Mods/Addons list now uses Iced's built-in `Widget::overlay()` system (the same mechanism used by `pick_list` dropdowns), giving it exact pixel-accurate positioning anchored to the button regardless of scroll position. Previous approaches using row-index estimation and cursor tracking both had drift errors.
+- **2px gap:** A small visual gap separates the menu popup from the button that opened it.
+- **Toggle to close:** Clicking the ⋮ button a second time now closes the menu (first click = open, second click = close). Fixed a race condition where the overlay's dismiss message and the button's toggle message fired simultaneously causing the menu to reopen.
+
+### Tab Button Improvements
+- **Fixed-width tabs:** Home, Mods, Addons, and Tweaks tabs are now a uniform fixed width (114px) instead of shrinking to content, giving a consistent topbar layout.
+- **Centered tab labels:** Tab button text is now horizontally centered within fixed-width buttons (previously left-aligned).
+
+### Toolbar Layout
+- **Single-row toolbar:** Filter buttons (All/Updates/Errors/Ignored) and the Search/Rescan/Add controls now sit on one row — filters on the left, actions on the right — instead of two stacked rows.
+- **Vertical alignment fix:** All toolbar controls use consistent padding so they align to the same vertical center. Equal 8px spacing above and below the toolbar row.
+
+### Branch Column Spacing
+- **Right padding on branch dropdown:** The branch `pick_list` in the Addons table now has equal padding on both sides of the dropdown, matching the spacing between the Name and Branch columns.
+
+### Profile Switching — Update State Preserved
+- **Cached plans per profile:** Detected updates are now remembered per profile. Switching profiles restores the previously checked update state for that profile without requiring a new network check. The cache is updated after each successful update check or update-all operation.
+
+### Engine Improvements
+- **Prune logging:** Added diagnostic log when a tracked addon is pruned due to a missing git worktree.
+- **Install path resolution:** Improved install path existence checks.
+
+### Project
+- **ICED_DOCUMENTATION.md:** Added a reference document covering Iced 0.14 API specifics, layout patterns, the overlay system, and a table of what worked vs. what didn't during the Iced port.
+- **Windows support:** Clarified in project guidelines that Windows support is equally important alongside Linux.
+
 ## v2.5.6
 
 ### Add Dialog Enhancements

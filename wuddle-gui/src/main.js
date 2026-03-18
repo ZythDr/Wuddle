@@ -357,6 +357,18 @@ function saveOptionFlags() {
   renderLastChecked();
   render();
   renderLog();
+  // Sync to settings.json so the Iced frontend can share options
+  safeInvoke("wuddle_sync_options_to_settings", {
+    theme: selectedTheme,
+    optSymlinks: $("optSymlinks").checked,
+    optClock12: $("optClock12").checked,
+    optFrizFont: useFrizFont,
+    optAutoCheck: autoCheckEnabled,
+    autoCheckMinutes,
+    optDesktopNotify: desktopNotify,
+    logWrap: state.logWrap,
+    logAutoscroll: state.logAutoScroll,
+  }).catch(() => {});
 }
 
 // ============================================================================

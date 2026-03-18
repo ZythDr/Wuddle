@@ -1,3 +1,4 @@
+mod anchored_overlay;
 mod panels;
 mod service;
 mod settings;
@@ -49,9 +50,9 @@ pub enum Tab {
 impl Tab {
     fn icon_label(self) -> &'static str {
         match self {
-            Tab::Options => "\u{2699}",
-            Tab::Logs => "\u{1f4cb}",
-            Tab::About => "\u{2139}",
+            Tab::Options => "\u{2699}",  // ⚙
+            Tab::Logs => "\u{2630}",    // ☰
+            Tab::About => "\u{24D8}",   // ⓘ
             _ => "",
         }
     }
@@ -229,6 +230,7 @@ pub enum Dialog {
     RemoveRepo { id: i64, name: String },
     InstanceSettings {
         is_new: bool,
+        profile_id: String,
         name: String,
         wow_dir: String,
         launch_method: String,  // "auto", "lutris", "wine", "custom"
@@ -279,8 +281,8 @@ pub struct App {
     // Dialog overlay
     pub dialog: Option<Dialog>,
 
-    // Context menu for repo actions: (repo_id, row_index) — index used for positioning
-    pub open_menu: Option<(i64, usize)>,
+    // Context menu: which repo's menu is open
+    pub open_menu: Option<i64>,
 
     // Branch data (cached per repo_id)
     pub branches: HashMap<i64, Vec<String>>,
@@ -294,6 +296,9 @@ pub struct App {
     pub active_profile_id: String,
     pub db_path: Option<PathBuf>,
     pub last_checked: Option<String>,
+
+    // Plans cached per profile so switching profiles restores previous update state
+    pub cached_plans: HashMap<String, (Vec<PlanRow>, Option<String>)>,
 
     // Operation state (Phase 3)
     pub checking_updates: bool,
@@ -355,8 +360,8 @@ pub enum Message {
     OpenDialog(Dialog),
     CloseDialog,
 
-    // Context menu: (repo_id, row_index)
-    ToggleMenu(i64, usize),
+    // Context menu
+    ToggleMenu(i64),
     CloseMenu,
 
     // Engine data (Phase 2)
@@ -403,6 +408,8 @@ pub enum Message {
     SaveInstanceSettings,
     UpdateInstanceField(InstanceField),
     SwitchProfile(String),
+    RemoveProfile(String),
+    RemoveProfileResult(Result<String, String>),
 
     // File dialog
     PickWowDirectory,
@@ -463,6 +470,7 @@ impl App {
             branches: HashMap::new(),
             repos: Vec::new(),
             plans: Vec::new(),
+            cached_plans: HashMap::new(),
             loading: true,
             error: None,
             wow_dir: String::new(),
@@ -654,11 +662,11 @@ impl App {
             Message::CloseDialog => self.dialog = None,
 
             // Context menu
-            Message::ToggleMenu(id, row_idx) => {
-                if self.open_menu.map(|(rid, _)| rid) == Some(id) {
+            Message::ToggleMenu(id) => {
+                if self.open_menu == Some(id) {
                     self.open_menu = None;
                 } else {
-                    self.open_menu = Some((id, row_idx));
+                    self.open_menu = Some(id);
                 }
             }
             Message::CloseMenu => self.open_menu = None,
@@ -694,8 +702,10 @@ impl App {
                 match result {
                     Ok(repos) => {
                         let count = repos.len();
+                        let mod_count = repos.iter().filter(|r| is_mod(r)).count();
+                        let addon_count = count - mod_count;
                         self.repos = repos;
-                        self.log(LogLevel::Info, &format!("Loaded {} repos.", count));
+                        self.log(LogLevel::Info, &format!("Loaded {} repos ({} mods, {} addons).", count, mod_count, addon_count));
                         // Fetch branches for addon_git repos that aren't cached yet
                         let fetch_tasks: Vec<Task<Message>> = self
                             .repos
@@ -740,6 +750,10 @@ impl App {
                         self.log(LogLevel::Info, &format!("Update check complete. {} updates available.", update_count));
                         self.plans = plans;
                         self.last_checked = Some(chrono_now());
+                        self.cached_plans.insert(
+                            self.active_profile_id.clone(),
+                            (self.plans.clone(), self.last_checked.clone()),
+                        );
                     }
                     Err(e) => {
                         self.error = Some(e.clone());
@@ -826,6 +840,10 @@ impl App {
                         let applied = plans.iter().filter(|p| !p.has_update).count();
                         self.log(LogLevel::Info, &format!("Updated {} repos.", applied));
                         self.plans = plans;
+                        self.cached_plans.insert(
+                            self.active_profile_id.clone(),
+                            (self.plans.clone(), self.last_checked.clone()),
+                        );
                         return self.refresh_repos_task();
                     }
                     Err(e) => self.log(LogLevel::Error, &format!("Update all failed: {}", e)),
@@ -1020,7 +1038,7 @@ impl App {
             }
             Message::SaveInstanceSettings => {
                 if let Some(Dialog::InstanceSettings {
-                    is_new, name, wow_dir, launch_method,
+                    is_new, profile_id: dialog_profile_id, name, wow_dir, launch_method,
                     like_turtles, clear_wdb,
                     lutris_target, wine_command, wine_args,
                     custom_command, custom_args,
@@ -1030,8 +1048,10 @@ impl App {
                     let profile_id = if is_new {
                         // Generate a new ID from the name
                         profile_name.to_lowercase().replace(' ', "-")
+                    } else if !dialog_profile_id.is_empty() {
+                        dialog_profile_id
                     } else {
-                        // Find existing profile ID or use active
+                        // Fallback: find existing profile ID or use active
                         self.profiles.iter()
                             .find(|p| p.name == profile_name)
                             .map(|p| p.id.clone())
@@ -1050,6 +1070,8 @@ impl App {
                         wine_args,
                         custom_command,
                         custom_args,
+                        working_dir: String::new(),
+                        env_text: String::new(),
                     };
 
                     // Update or add profile
@@ -1081,24 +1103,62 @@ impl App {
             }
 
             // --- File dialog ---
-            Message::SwitchProfile(profile_name) => {
-                if let Some(p) = self.profiles.iter().find(|p| p.name == profile_name) {
+            Message::SwitchProfile(profile_id) => {
+                if let Some(p) = self.profiles.iter().find(|p| p.id == profile_id) {
                     let pid = p.id.clone();
+                    let pname = p.name.clone();
                     let pdir = p.wow_dir.clone();
                     if pid != self.active_profile_id {
                         self.active_profile_id = pid.clone();
                         self.db_path = settings::profile_db_path(&pid).ok();
                         self.wow_dir = pdir;
-                        // Clear stale data from previous profile
+                        // Restore cached plans for the new profile (or clear if never checked)
                         self.repos.clear();
-                        self.plans.clear();
                         self.branches.clear();
-                        self.last_checked = None;
+                        if let Some((plans, last_checked)) = self.cached_plans.get(&pid) {
+                            self.plans = plans.clone();
+                            self.last_checked = last_checked.clone();
+                        } else {
+                            self.plans.clear();
+                            self.last_checked = None;
+                        }
                         self.loading = true;
-                        self.log(LogLevel::Info, &format!("Switched to profile: {}", profile_name));
+                        self.log(LogLevel::Info, &format!("Switched to profile: {} ({})", pname, pid));
                         self.save_settings();
                         return self.refresh_repos_task();
                     }
+                }
+            }
+
+            Message::RemoveProfile(profile_id) => {
+                if profile_id == self.active_profile_id {
+                    self.log(LogLevel::Error, "Cannot remove the active profile.");
+                    return Task::none();
+                }
+                let db = settings::profile_db_path(&profile_id).ok();
+                self.profiles.retain(|p| p.id != profile_id);
+                self.dialog = None;
+                self.log(LogLevel::Info, &format!("Removed profile: {}", profile_id));
+                self.save_settings();
+                // Delete the profile's SQLite database in the background
+                return Task::perform(
+                    async move {
+                        if let Some(path) = db {
+                            // Remove main db + WAL/SHM sidecars
+                            for suffix in &["", "-wal", "-shm"] {
+                                let p = format!("{}{}", path.display(), suffix);
+                                let _ = tokio::fs::remove_file(&p).await;
+                            }
+                        }
+                        Ok(profile_id)
+                    },
+                    Message::RemoveProfileResult,
+                );
+            }
+            Message::RemoveProfileResult(result) => {
+                match result {
+                    Ok(id) => self.log(LogLevel::Info, &format!("Deleted database for profile: {}", id)),
+                    Err(e) => self.log(LogLevel::Error, &format!("Failed to delete profile db: {}", e)),
                 }
             }
 
@@ -1394,12 +1454,14 @@ impl App {
                 .into()
             }
             Dialog::InstanceSettings {
-                is_new, name, wow_dir, launch_method,
+                is_new, profile_id, name, wow_dir, launch_method,
                 like_turtles, clear_wdb,
                 lutris_target, wine_command, wine_args,
                 custom_command, custom_args,
             } => {
                 let title_text = if *is_new { "Add Instance" } else { "Instance Settings" };
+                let can_remove = !*is_new && *profile_id != self.active_profile_id;
+                let remove_id = profile_id.clone();
 
                 let method_buttons: Vec<Element<Message>> = [
                     ("Auto", "auto"), ("Lutris", "lutris"), ("Wine", "wine"), ("Custom", "custom"),
@@ -1496,20 +1558,42 @@ impl App {
                     row(method_buttons).spacing(4),
                     launch_fields,
                     Space::new().height(4),
-                    row![
-                        Space::new().width(Length::Fill),
-                        button(text("Cancel").size(13))
-                            .on_press(Message::CloseDialog)
-                            .padding([6, 14])
-                            .style(move |_theme, status| match status {
-                                button::Status::Hovered => theme::tab_button_hovered_style(&c),
-                                _ => theme::tab_button_style(&c),
-                            }),
-                        button(text("Save").size(13))
-                            .on_press(Message::SaveInstanceSettings)
-                            .padding([6, 14])
-                            .style(move |_theme, _status| theme::tab_button_active_style(&c)),
-                    ].spacing(8),
+                    {
+                        let mut footer_items: Vec<Element<Message>> = Vec::new();
+                        if can_remove {
+                            let c2 = c;
+                            footer_items.push(
+                                button(text("Remove").size(13).color(c.bad))
+                                    .on_press(Message::RemoveProfile(remove_id))
+                                    .padding([6, 14])
+                                    .style(move |_theme, _status| {
+                                        let mut s = theme::tab_button_style(&c2);
+                                        s.border.color = c2.bad;
+                                        s
+                                    })
+                                    .into(),
+                            );
+                        }
+                        footer_items.push(Space::new().width(Length::Fill).into());
+                        footer_items.push(
+                            button(text("Cancel").size(13))
+                                .on_press(Message::CloseDialog)
+                                .padding([6, 14])
+                                .style(move |_theme, status| match status {
+                                    button::Status::Hovered => theme::tab_button_hovered_style(&c),
+                                    _ => theme::tab_button_style(&c),
+                                })
+                                .into(),
+                        );
+                        footer_items.push(
+                            button(text("Save").size(13))
+                                .on_press(Message::SaveInstanceSettings)
+                                .padding([6, 14])
+                                .style(move |_theme, _status| theme::tab_button_active_style(&c))
+                                .into(),
+                        );
+                        row(footer_items).spacing(8)
+                    },
                 ]
                 .spacing(8)
                 .into()
@@ -1545,34 +1629,55 @@ impl App {
         ]
         .spacing(8);
 
-        // Busy spinner for topbar (shown when any operation is in progress)
-        let spinner_el: Option<Element<Message>> = if self.is_busy() {
+        // Busy spinner — always reserve its space so the left section never
+        // changes width. Render an invisible placeholder when not spinning.
+        let spinner_el: Element<Message> = if self.is_busy() {
             let tick = self.spinner_tick;
             let primary = colors.primary;
-            Some(
-                canvas(SpinnerCanvas { tick, color: primary })
-                    .width(26)
-                    .height(26)
-                    .into(),
-            )
+            canvas(SpinnerCanvas { tick, color: primary })
+                .width(26)
+                .height(26)
+                .into()
         } else {
-            None
+            Space::new().width(26).height(26).into()
         };
 
-        // Profile picker: only show when multiple profiles exist
+        // Left section: title + spinner placeholder (fixed width, never shifts)
+        let left_section = row![title, spinner_el]
+            .spacing(12)
+            .align_y(iced::Alignment::End);
+
+        // Right section: optional profile picker + action buttons
         let mut right_items: Vec<Element<Message>> = Vec::new();
 
         if self.profiles.len() > 1 {
-            let profile_names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
-            let active_name = self.profiles.iter()
+            let display_labels: Vec<String> = self.profiles.iter().map(|p| {
+                let dupes = self.profiles.iter().filter(|q| q.name == p.name).count();
+                if dupes > 1 { format!("{} ({})", p.name, p.id) } else { p.name.clone() }
+            }).collect();
+
+            let active_display = self.profiles.iter()
                 .find(|p| p.id == self.active_profile_id)
-                .map(|p| p.name.clone())
+                .map(|p| {
+                    let dupes = self.profiles.iter().filter(|q| q.name == p.name).count();
+                    if dupes > 1 { format!("{} ({})", p.name, p.id) } else { p.name.clone() }
+                })
                 .unwrap_or_else(|| "Default".to_string());
 
             let profile_picker: Element<Message> = iced::widget::pick_list(
-                profile_names,
-                Some(active_name),
-                |name: String| Message::SwitchProfile(name),
+                display_labels,
+                Some(active_display),
+                {
+                    let profiles = self.profiles.clone();
+                    move |display: String| {
+                        let profile = profiles.iter().find(|p| {
+                            let dupes = profiles.iter().filter(|q| q.name == p.name).count();
+                            let label = if dupes > 1 { format!("{} ({})", p.name, p.id) } else { p.name.clone() };
+                            label == display
+                        });
+                        Message::SwitchProfile(profile.map(|p| p.id.clone()).unwrap_or_default())
+                    }
+                },
             )
             .text_size(13)
             .into();
@@ -1585,30 +1690,38 @@ impl App {
         right_items.push(action_tabs.into());
         let right_section = row(right_items).spacing(10).align_y(iced::Alignment::Center);
 
-        // Build left section: title + spinner (when busy)
-        let mut left_items: Vec<Element<Message>> = Vec::new();
-        left_items.push(title.into());
-        if let Some(sp) = spinner_el {
-            left_items.push(sp);
-        }
-        let left_section = row(left_items).spacing(12).align_y(iced::Alignment::End);
+        // Use a Stack so the tabs float in their own centered layer,
+        // completely independent of the left/right content widths.
+        // Both layers share the same height and vertical alignment so
+        // tabs and buttons land on the same baseline.
+        const BAR_H: f32 = 58.0;
 
-        let bar = row![
-            left_section,
-            Space::new().width(Length::Fill),
-            view_tabs,
-            Space::new().width(Length::Fill),
-            right_section,
-        ]
-        .spacing(18)
-        .padding([10, 8])
-        .align_y(iced::Alignment::End);
+        // Layer 0 (bottom): logo on left, controls on right
+        let sides = container(
+            row![
+                left_section,
+                Space::new().width(Length::Fill),
+                right_section,
+            ]
+            .align_y(iced::Alignment::Center),
+        )
+        .width(Length::Fill)
+        .height(BAR_H)
+        .align_y(iced::Alignment::Center)
+        .padding([0, 12]);
+
+        // Layer 1 (top): tabs centered, same height and padding
+        let center = container(view_tabs)
+            .width(Length::Fill)
+            .height(BAR_H)
+            .align_x(iced::Alignment::Center)
+            .align_y(iced::Alignment::Center)
+            .padding([0, 0]);
+
+        let bar = stack![sides, center].width(Length::Fill).height(BAR_H);
 
         container(bar)
             .width(Length::Fill)
-            .max_height(58)
-            .clip(true)
-            .align_bottom(Length::Shrink)
             .style(move |_theme| theme::topbar_style(&c))
             .into()
     }
@@ -1620,10 +1733,16 @@ impl App {
         let is_icon = matches!(tab, Tab::Options | Tab::Logs | Tab::About);
 
         let lbl = self.tab_label(tab);
-        let label = text(lbl).size(if is_icon { 16 } else { 14 });
-        let btn = button(label)
+        let label = text(lbl).size(if is_icon { 15 } else { 14 });
+        // All fixed-width buttons: center content inside
+        let content: Element<Message> = container(label)
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .into();
+        let btn = button(content)
             .on_press(Message::SetTab(tab))
-            .padding(if is_icon { [7, 10] } else { [7, 14] });
+            .padding([7, 0])
+            .width(if is_icon { Length::Fixed(32.0) } else { Length::Fixed(114.0) });
 
         if is_active {
             btn.style(move |_theme, _status| {
@@ -1707,8 +1826,10 @@ impl App {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// A repo is a "mod" if it's NOT an addon (addon or addon_git mode).
+/// This matches the Tauri version's `isAddonRepo` inverse logic.
 pub fn is_mod(repo: &RepoRow) -> bool {
-    matches!(repo.mode.as_str(), "dll" | "mixed" | "raw")
+    !matches!(repo.mode.as_str(), "addon" | "addon_git")
 }
 
 /// Returns the font for project names: Bold when using default font, Regular when using Friz

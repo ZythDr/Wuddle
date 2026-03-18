@@ -1362,6 +1362,128 @@ async fn wuddle_delete_profile(
     .await
 }
 
+/// Sync profiles from the frontend (localStorage) to settings.json so that
+/// non-WebView frontends (Iced) can share the same profile list.
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn wuddle_sync_profiles_to_settings(
+    profiles: Vec<serde_json::Value>,
+    activeProfileId: String,
+) -> Result<(), String> {
+    run_blocking(move || {
+        let dir = app_dir()?;
+        let settings_path = dir.join("settings.json");
+
+        // Read existing settings or start fresh
+        let mut settings: serde_json::Value = if settings_path.exists() {
+            let data = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
+            serde_json::from_str(&data).unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+
+        let map = settings
+            .as_object_mut()
+            .ok_or_else(|| "settings.json is not an object".to_string())?;
+
+        // Convert camelCase profile objects to snake_case for Iced compatibility
+        let converted: Vec<serde_json::Value> = profiles
+            .iter()
+            .map(|p| {
+                let launch = p.get("launch").cloned().unwrap_or(serde_json::json!({}));
+                serde_json::json!({
+                    "id": p.get("id").and_then(|v| v.as_str()).unwrap_or("default"),
+                    "name": p.get("name").and_then(|v| v.as_str()).unwrap_or("WoW"),
+                    "wow_dir": p.get("wowDir").and_then(|v| v.as_str()).unwrap_or(""),
+                    "launch_method": launch.get("method").and_then(|v| v.as_str()).unwrap_or("auto"),
+                    "like_turtles": p.get("likesTurtles").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "clear_wdb": launch.get("clearWdb").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "lutris_target": launch.get("lutrisTarget").and_then(|v| v.as_str()).unwrap_or(""),
+                    "wine_command": launch.get("wineCommand").and_then(|v| v.as_str()).unwrap_or("wine"),
+                    "wine_args": launch.get("wineArgs").and_then(|v| v.as_str()).unwrap_or(""),
+                    "custom_command": launch.get("customCommand").and_then(|v| v.as_str()).unwrap_or(""),
+                    "custom_args": launch.get("customArgs").and_then(|v| v.as_str()).unwrap_or(""),
+                    "working_dir": launch.get("workingDir").and_then(|v| v.as_str()).unwrap_or(""),
+                    "env_text": launch.get("envText").and_then(|v| v.as_str()).unwrap_or(""),
+                })
+            })
+            .collect();
+
+        map.insert(
+            "profiles".to_string(),
+            serde_json::to_value(&converted).map_err(|e| e.to_string())?,
+        );
+        map.insert(
+            "active_profile_id".to_string(),
+            serde_json::Value::String(normalize_profile_id(&activeProfileId)),
+        );
+
+        // Also sync wow_dir from active profile for backward compat
+        if let Some(active) = converted
+            .iter()
+            .find(|p| {
+                p.get("id").and_then(|v| v.as_str())
+                    == Some(&normalize_profile_id(&activeProfileId))
+            })
+        {
+            if let Some(wow_dir) = active.get("wow_dir").and_then(|v| v.as_str()) {
+                map.insert("wow_dir".to_string(), serde_json::Value::String(wow_dir.to_string()));
+            }
+        }
+
+        let data = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+        fs::write(&settings_path, data).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+}
+
+/// Sync option flags from the frontend (localStorage) to settings.json.
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn wuddle_sync_options_to_settings(
+    theme: String,
+    optSymlinks: bool,
+    optClock12: bool,
+    optFrizFont: bool,
+    optAutoCheck: bool,
+    autoCheckMinutes: u32,
+    optDesktopNotify: bool,
+    logWrap: bool,
+    logAutoscroll: bool,
+) -> Result<(), String> {
+    run_blocking(move || {
+        let dir = app_dir()?;
+        let settings_path = dir.join("settings.json");
+
+        let mut settings: serde_json::Value = if settings_path.exists() {
+            let data = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
+            serde_json::from_str(&data).unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+
+        let map = settings
+            .as_object_mut()
+            .ok_or_else(|| "settings.json is not an object".to_string())?;
+
+        map.insert("theme".to_string(), serde_json::Value::String(theme));
+        map.insert("opt_symlinks".to_string(), serde_json::Value::Bool(optSymlinks));
+        map.insert("opt_clock12".to_string(), serde_json::Value::Bool(optClock12));
+        map.insert("opt_friz_font".to_string(), serde_json::Value::Bool(optFrizFont));
+        map.insert("opt_auto_check".to_string(), serde_json::Value::Bool(optAutoCheck));
+        map.insert("auto_check_minutes".to_string(), serde_json::json!(autoCheckMinutes));
+        map.insert("opt_desktop_notify".to_string(), serde_json::Value::Bool(optDesktopNotify));
+        map.insert("log_wrap".to_string(), serde_json::Value::Bool(logWrap));
+        map.insert("log_autoscroll".to_string(), serde_json::Value::Bool(logAutoscroll));
+
+        let data = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+        fs::write(&settings_path, data).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+}
+
 #[tauri::command]
 async fn wuddle_github_auth_status() -> Result<GithubAuthStatus, String> {
     run_blocking(|| {
@@ -2656,6 +2778,8 @@ pub fn run() {
             wuddle_set_repo_branch,
             wuddle_set_active_profile,
             wuddle_delete_profile,
+            wuddle_sync_profiles_to_settings,
+            wuddle_sync_options_to_settings,
             wuddle_github_auth_status,
             wuddle_github_auth_set_token,
             wuddle_github_auth_clear_token,

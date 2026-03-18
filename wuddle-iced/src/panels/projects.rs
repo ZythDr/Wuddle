@@ -1,6 +1,7 @@
 use iced::widget::{button, checkbox, column, container, pick_list, row, rule, scrollable, text, text_input, Space};
 use iced::{Element, Length};
 
+use crate::anchored_overlay::AnchoredOverlay;
 use crate::service::RepoRow;
 use crate::theme::{self, ThemeColors};
 use crate::{is_mod, App, Dialog, Filter, Message, SortDir, SortKey};
@@ -94,8 +95,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         (if is_mods_tab { is_mod(r) } else { !is_mod(r) }) && !r.enabled
     }).count();
 
-    // Toolbar row 1: filters + API status
-    let filters = row![
+    // Toolbar: filters on left, search + buttons on right, all on one row
+    let filters_part = row![
         filter_button(&format!("All ({})", total), Filter::All, app.filter, &c),
         filter_button(&format!("Updates ({})", update_count), Filter::Updates, app.filter, &c),
         filter_button(&format!("Errors ({})", error_count), Filter::Errors, app.filter, &c),
@@ -112,14 +113,12 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
     .spacing(4)
     .align_y(iced::Alignment::Center);
 
-    // Toolbar row 2: search + rescan (addons only) + add
     let mut action_items: Vec<Element<Message>> = Vec::new();
-    action_items.push(Space::new().width(Length::Fill).into());
     action_items.push(
         text_input("Search...", &app.project_search)
             .on_input(Message::SetProjectSearch)
             .width(180)
-            .padding([6, 10])
+            .padding([4, 10])
             .into(),
     );
     if !is_mods_tab {
@@ -127,7 +126,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         action_items.push(
             button(text("\u{27F2}").size(14)) // ⟲ rescan
                 .on_press(Message::RefreshRepos)
-                .padding([6, 10])
+                .padding([4, 10])
                 .style(move |_theme, status| match status {
                     button::Status::Hovered => theme::tab_button_hovered_style(&c2),
                     _ => theme::tab_button_style(&c2),
@@ -143,7 +142,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
                     url: String::new(),
                     mode: String::from("auto"),
                 }))
-                .padding([6, 14])
+                .padding([4, 14])
                 .style(move |_theme, status| match status {
                     button::Status::Hovered => theme::tab_button_hovered_style(&c2),
                     _ => theme::tab_button_style(&c2),
@@ -151,9 +150,14 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
                 .into(),
         );
     }
-    let actions = row(action_items).spacing(8).align_y(iced::Alignment::Center);
+    let actions_part = row(action_items).spacing(8).align_y(iced::Alignment::Center);
 
-    let toolbar = column![filters, actions].spacing(6);
+    let toolbar = row![
+        filters_part,
+        Space::new().width(Length::Fill),
+        actions_part,
+    ]
+    .align_y(iced::Alignment::Center);
 
     // Sort indicator
     let sort_arrow = |key: SortKey| -> &'static str {
@@ -232,12 +236,11 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
     } else {
         let rows: Vec<Element<Message>> = filtered_repos
             .iter()
-            .enumerate()
-            .map(|(idx, repo)| {
+            .map(|repo| {
                 if is_mods_tab {
-                    mod_row(app, repo, idx, colors)
+                    mod_row(app, repo, colors)
                 } else {
-                    addon_row(app, repo, idx, colors)
+                    addon_row(app, repo, colors)
                 }
             })
             .collect();
@@ -247,12 +250,15 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
     };
 
     // Card wrapping the table
+    // Nest header+body together so spacing(8) only applies between toolbar and the table,
+    // not between the header row and the first data row.
+    let table_section = column![header_row, body].spacing(0);
     let card = {
         let c2 = c;
         container(
-            column![toolbar, header_row, body]
-                .spacing(0)
-                .padding([12, 12]),
+            column![toolbar, table_section]
+                .spacing(8)
+                .padding([8, 12]),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -282,7 +288,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
 }
 
 /// Mods row: Name | Current | Latest | Enabled | Status | Actions
-fn mod_row<'a>(app: &App, repo: &'a RepoRow, row_idx: usize, colors: &ThemeColors) -> Element<'a, Message> {
+fn mod_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
     let plan = app.plans.iter().find(|p| p.repo_id == repo.id);
     let current_str = plan.and_then(|p| p.current.clone())
@@ -298,6 +304,8 @@ fn mod_row<'a>(app: &App, repo: &'a RepoRow, row_idx: usize, colors: &ThemeColor
     let (status_text, status_color) = status_info(has_error, has_update, enabled, colors);
 
     let name_col = name_cell(repo, colors);
+    let is_menu_open = app.open_menu == Some(repo.id);
+    let menu_content = crate::inline_context_menu(app, repo, &c);
 
     let row_content = row![
         name_col,
@@ -305,7 +313,7 @@ fn mod_row<'a>(app: &App, repo: &'a RepoRow, row_idx: usize, colors: &ThemeColor
         col_cell(text(latest_str).size(12).color(colors.muted), COL_LATEST),
         col_cell(checkbox(enabled).on_toggle(move |b| Message::ToggleRepoEnabled(rid, b)), COL_ENABLED),
         col_cell(text(status_text).size(12).color(status_color), COL_STATUS),
-        col_cell(action_buttons(repo, row_idx, has_update, &c), COL_ACTIONS),
+        col_cell(action_buttons(repo, has_update, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
     .padding([9, 12])
@@ -313,21 +321,11 @@ fn mod_row<'a>(app: &App, repo: &'a RepoRow, row_idx: usize, colors: &ThemeColor
 
     let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(&c));
 
-    if app.open_menu.map(|(rid, _)| rid) == Some(repo.id) {
-        let menu = crate::inline_context_menu(app, repo, &c);
-        let menu_row = row![
-            Space::new().width(Length::Fill),
-            menu,
-            Space::new().width(4),
-        ];
-        column![separator, row_content, menu_row].into()
-    } else {
-        column![separator, row_content].into()
-    }
+    column![separator, row_content].into()
 }
 
 /// Addons row: Name | Branch | Status | Actions
-fn addon_row<'a>(app: &App, repo: &'a RepoRow, row_idx: usize, colors: &ThemeColors) -> Element<'a, Message> {
+fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
     let plan = app.plans.iter().find(|p| p.repo_id == repo.id);
     let has_update = plan.map(|p| p.has_update).unwrap_or(false);
@@ -338,24 +336,30 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, row_idx: usize, colors: &ThemeCol
     let (status_text, status_color) = status_info(has_error, has_update, enabled, colors);
 
     let name_col = name_cell(repo, colors);
+    let is_menu_open = app.open_menu == Some(repo.id);
+    let menu_content = crate::inline_context_menu(app, repo, &c);
 
     let rid = repo.id;
     let branch_options = app.branches.get(&repo.id).cloned().unwrap_or_default();
-    let branch_display: Element<Message> = pick_list(
-        branch_options,
-        Some(current_branch),
-        move |branch: String| Message::SetRepoBranch(rid, branch),
+    let branch_display: Element<Message> = container(
+        pick_list(
+            branch_options,
+            Some(current_branch),
+            move |branch: String| Message::SetRepoBranch(rid, branch),
+        )
+        .placeholder("master")
+        .text_size(12)
+        .width(Length::Fill),
     )
-    .placeholder("master")
-    .text_size(12)
     .width(Length::Fill)
+    .padding(iced::Padding { top: 0.0, right: 10.0, bottom: 0.0, left: 0.0 })
     .into();
 
     let row_content = row![
         name_col,
         col_cell(branch_display, COL_BRANCH),
         col_cell(text(status_text).size(12).color(status_color), COL_STATUS),
-        col_cell(action_buttons(repo, row_idx, has_update, &c), COL_ACTIONS),
+        col_cell(action_buttons(repo, has_update, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
     .padding([9, 12])
@@ -363,17 +367,7 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, row_idx: usize, colors: &ThemeCol
 
     let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(&c));
 
-    if app.open_menu.map(|(rid, _)| rid) == Some(repo.id) {
-        let menu = crate::inline_context_menu(app, repo, &c);
-        let menu_row = row![
-            Space::new().width(Length::Fill),
-            menu,
-            Space::new().width(4),
-        ];
-        column![separator, row_content, menu_row].into()
-    } else {
-        column![separator, row_content].into()
-    }
+    column![separator, row_content].into()
 }
 
 /// Shared name cell (left-aligned, clickable link)
@@ -423,11 +417,12 @@ fn status_info(
     }
 }
 
-/// Action column: Update button + triple-dot menu button
+/// Action column: Update button + triple-dot menu button (with anchored overlay).
 fn action_buttons<'a>(
     repo: &RepoRow,
-    row_idx: usize,
     has_update: bool,
+    is_menu_open: bool,
+    menu_content: Element<'a, Message>,
     colors: &ThemeColors,
 ) -> Element<'a, Message> {
     let c = *colors;
@@ -435,26 +430,39 @@ fn action_buttons<'a>(
 
     let mut items: Vec<Element<Message>> = Vec::new();
 
-    if has_update {
+    // Download/update button — always shown, active only when update available
+    {
         let c2 = c;
-        items.push(
-            button(text("\u{2193}").size(14)) // ↓
-                .on_press(Message::UpdateRepo(rid))
-                .padding([4, 8])
+        let btn = button(text("\u{2193}").size(14)) // ↓
+            .padding([4, 8]);
+        items.push(if has_update {
+            btn.on_press(Message::UpdateRepo(rid))
                 .style(move |_theme, _status| theme::tab_button_active_style(&c2))
-                .into(),
-        );
+                .into()
+        } else {
+            btn.style(move |_theme, _status| {
+                let mut s = theme::tab_button_style(&c2);
+                s.text_color = iced::Color::from_rgba(1.0, 1.0, 1.0, 0.2);
+                s
+            })
+            .into()
+        });
     }
 
+    // Triple-dot button wrapped in AnchoredOverlay so the popup is pinned
+    // to the button's actual screen position via Iced's overlay system.
     let c2 = c;
+    let dots_btn = button(text("\u{22EE}").size(14)) // ⋮
+        .on_press(Message::ToggleMenu(rid))
+        .padding([4, 8])
+        .style(move |_theme, status| match status {
+            button::Status::Hovered => theme::tab_button_hovered_style(&c2),
+            _ => theme::tab_button_style(&c2),
+        });
+
     items.push(
-        button(text("\u{22EE}").size(14)) // ⋮
-            .on_press(Message::ToggleMenu(rid, row_idx))
-            .padding([4, 8])
-            .style(move |_theme, status| match status {
-                button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                _ => theme::tab_button_style(&c2),
-            })
+        AnchoredOverlay::new(dots_btn, menu_content, is_menu_open)
+            .on_dismiss(Message::CloseMenu)
             .into(),
     );
 

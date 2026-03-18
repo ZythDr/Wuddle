@@ -22,6 +22,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             button(text("+ Add Instance").size(13))
                 .on_press(Message::OpenDialog(Dialog::InstanceSettings {
                     is_new: true,
+                    profile_id: String::new(),
                     name: String::new(),
                     wow_dir: String::new(),
                     launch_method: String::from("auto"),
@@ -57,6 +58,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         )
         .on_press(Message::OpenDialog(Dialog::InstanceSettings {
             is_new: false,
+            profile_id: p.id.clone(),
             name: p.name.clone(),
             wow_dir: p.wow_dir.clone(),
             launch_method: p.launch_method.clone(),
