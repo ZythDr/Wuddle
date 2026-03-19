@@ -6,6 +6,9 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 use wuddle_engine::{CheckMode, Engine, InstallMode, InstallOptions, Repo, UpdatePlan};
+use reqwest::Client;
+use serde::Deserialize;
+use iced;
 
 // ---------------------------------------------------------------------------
 // Row types for the UI (Clone-friendly, owned data)
@@ -488,4 +491,628 @@ pub async fn clear_github_token() -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
+// Repo preview (for Add dialog)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct RepoFileEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepoPreviewInfo {
+    pub name: String,
+    pub description: String,
+    pub stars: u64,
+    pub forks: u64,
+    pub language: String,
+    pub license: String,
+    pub readme_text: String,
+    pub readme_items: Vec<iced::widget::markdown::Item>,
+    /// Fetched image bytes keyed by the URL as it appears in the markdown (may be absolute or relative).
+    pub image_cache: std::collections::HashMap<String, Vec<u8>>,
+    pub files: Vec<RepoFileEntry>,
+    /// Base URL for resolving relative image paths (e.g. "https://raw.githubusercontent.com/owner/repo/HEAD/")
+    pub raw_base_url: String,
+    pub forge: String,
+    pub owner: String,
+    pub repo_name: String,
+    pub forge_url: String,
+}
+
+// ---------------------------------------------------------------------------
+// Parse forge from URL
+// ---------------------------------------------------------------------------
+
+pub struct ForgeInfo {
+    pub owner: String,
+    pub repo: String,
+    pub forge: &'static str,
+    pub host: String,
+    pub scheme: String,
+}
+
+pub fn parse_forge_url(url: &str) -> Option<ForgeInfo> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .map(|s| ("https", s))
+        .or_else(|| trimmed.strip_prefix("http://").map(|s| ("http", s)))
+        .unwrap_or(("https", trimmed));
+    let (scheme, rest) = without_scheme;
+
+    if let Some(r) = rest.strip_prefix("github.com/") {
+        let parts: Vec<&str> = r.splitn(3, '/').collect();
+        if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+            let repo = parts[1].trim_end_matches(".git").to_string();
+            return Some(ForgeInfo { owner: parts[0].to_string(), repo, forge: "github", host: "github.com".into(), scheme: scheme.into() });
+        }
+    } else if let Some(r) = rest.strip_prefix("gitlab.com/") {
+        let parts: Vec<&str> = r.splitn(3, '/').collect();
+        if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+            let repo = parts[1].trim_end_matches(".git").to_string();
+            return Some(ForgeInfo { owner: parts[0].to_string(), repo, forge: "gitlab", host: "gitlab.com".into(), scheme: scheme.into() });
+        }
+    } else {
+        let parts: Vec<&str> = rest.splitn(4, '/').collect();
+        if parts.len() >= 3 && !parts[1].is_empty() && !parts[2].is_empty() {
+            let host = parts[0];
+            if host.contains("gitea") || host.contains("forgejo") || host.contains("codeberg") || host.contains("gitea") {
+                let repo = parts[2].trim_end_matches(".git").to_string();
+                return Some(ForgeInfo { owner: parts[1].to_string(), repo, forge: "gitea", host: host.into(), scheme: scheme.into() });
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Image helpers
+// ---------------------------------------------------------------------------
+
+/// Collect image URLs by scanning raw markdown text for:
+///   - ![alt](url) markdown syntax
+///   - <img src="url"> / <img src='url'> HTML syntax
+fn collect_image_urls_from_text(markdown: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+
+    // --- Markdown syntax: ![alt](url) ---
+    let mut pos = 0;
+    while pos < markdown.len() {
+        match markdown[pos..].find("![") {
+            None => break,
+            Some(bang_offset) => {
+                let abs = pos + bang_offset;
+                match markdown[abs + 2..].find("](") {
+                    None => { pos = abs + 2; continue; }
+                    Some(close_offset) => {
+                        let url_start = abs + 2 + close_offset + 2;
+                        match markdown[url_start..].find(')') {
+                            None => { pos = abs + 2; continue; }
+                            Some(end_offset) => {
+                                let raw = markdown[url_start..url_start + end_offset].trim();
+                                // Strip optional title: url "title" or url 'title'
+                                let url = raw
+                                    .find(|c: char| c == ' ' || c == '"' || c == '\'')
+                                    .map(|i| raw[..i].trim())
+                                    .unwrap_or(raw);
+                                if !url.is_empty() {
+                                    urls.push(url.to_string());
+                                }
+                                pos = url_start + end_offset + 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- HTML syntax: <img src="url"> or <img src='url'> ---
+    let mut hpos = 0;
+    while hpos < markdown.len() {
+        match markdown[hpos..].find("<img") {
+            None => break,
+            Some(tag_offset) => {
+                let tag_start = hpos + tag_offset;
+                // Find the end of this tag
+                let tag_end = markdown[tag_start..].find('>')
+                    .map(|e| tag_start + e + 1)
+                    .unwrap_or(markdown.len());
+                let tag_slice = &markdown[tag_start..tag_end];
+                // Find src= attribute inside tag
+                if let Some(src_pos) = tag_slice.find("src=") {
+                    let after_src = &tag_slice[src_pos + 4..];
+                    let quote = after_src.chars().next();
+                    if let Some(q @ ('"' | '\'')) = quote {
+                        let inner = &after_src[1..];
+                        if let Some(end_q) = inner.find(q) {
+                            let url = inner[..end_q].trim();
+                            if !url.is_empty() {
+                                urls.push(url.to_string());
+                            }
+                        }
+                    }
+                }
+                hpos = tag_start + 4; // skip past "<img"
+            }
+        }
+    }
+
+    urls
+}
+
+/// Resolve a potentially-relative image URL against a raw base URL.
+pub fn resolve_image_url(url: &str, raw_base_url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        let clean = url.trim_start_matches("./").trim_start_matches('/');
+        format!("{}{}", raw_base_url, clean)
+    }
+}
+
+/// Fetch image bytes for URLs found in the README. Limits: max 12 images, 5 MB each, 20 MB total.
+async fn fetch_images(
+    client: &Client,
+    image_urls: &[String],
+    raw_base_url: &str,
+) -> std::collections::HashMap<String, Vec<u8>> {
+    let mut cache = std::collections::HashMap::new();
+    let mut total_bytes = 0usize;
+
+    for url in image_urls.iter().take(12) {
+        if total_bytes > 20_000_000 { break; }
+
+        let abs_url = resolve_image_url(url, raw_base_url);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            async {
+                let resp = client.get(&abs_url).send().await?;
+                if !resp.status().is_success() {
+                    return Err(reqwest::Error::from(resp.error_for_status().unwrap_err()));
+                }
+                resp.bytes().await
+            },
+        ).await;
+
+        if let Ok(Ok(bytes)) = result {
+            if bytes.len() <= 5_000_000 {
+                total_bytes += bytes.len();
+                let data = bytes.to_vec();
+                // Store by original URL (as seen in markdown) AND absolute URL
+                cache.insert(url.clone(), data.clone());
+                if abs_url != *url {
+                    cache.insert(abs_url, data);
+                }
+            }
+        }
+    }
+    cache
+}
+
+// ---------------------------------------------------------------------------
+// Files tree helper
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct ContentEntry { name: String, #[serde(rename = "type")] kind: String }
+
+async fn fetch_files(client: &Client, forge: &str, host: &str, owner: &str, repo: &str, scheme: &str) -> Vec<RepoFileEntry> {
+    match forge {
+        "github" => {
+            let url = format!("https://api.github.com/repos/{}/{}/contents/", owner, repo);
+            let mut req = client.get(&url).header("Accept", "application/vnd.github+json");
+            if let Some(token) = wuddle_engine::github_token() { req = req.bearer_auth(token); }
+            match req.send().await {
+                Ok(r) if r.status().is_success() => {
+                    r.json::<Vec<ContentEntry>>().await.unwrap_or_default()
+                        .into_iter()
+                        .map(|e| RepoFileEntry { is_dir: e.kind == "dir", path: e.name.clone(), name: e.name })
+                        .collect()
+                }
+                _ => Vec::new(),
+            }
+        }
+        "gitlab" => {
+            let encoded = format!("{}/{}", owner, repo).replace('/', "%2F");
+            let url = format!("https://gitlab.com/api/v4/projects/{}/repository/tree?per_page=50", encoded);
+            match client.get(&url).send().await {
+                Ok(r) if r.status().is_success() => {
+                    r.json::<Vec<ContentEntry>>().await.unwrap_or_default()
+                        .into_iter()
+                        .map(|e| RepoFileEntry { is_dir: e.kind == "tree", path: e.name.clone(), name: e.name })
+                        .collect()
+                }
+                _ => Vec::new(),
+            }
+        }
+        _ => {
+            let url = format!("{}://{}/api/v1/repos/{}/{}/contents/", scheme, host, owner, repo);
+            match client.get(&url).send().await {
+                Ok(r) if r.status().is_success() => {
+                    r.json::<Vec<ContentEntry>>().await.unwrap_or_default()
+                        .into_iter()
+                        .map(|e| RepoFileEntry { is_dir: e.kind == "dir", path: e.name.clone(), name: e.name })
+                        .collect()
+                }
+                _ => Vec::new(),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
+
+pub async fn fetch_repo_preview(url: String) -> Result<RepoPreviewInfo, String> {
+    let fi = parse_forge_url(&url)
+        .ok_or_else(|| "Could not parse repo URL".to_string())?;
+
+    let client = Client::builder()
+        .user_agent("wuddle-iced")
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    match fi.forge {
+        "github" => fetch_github_preview(&client, &fi.owner, &fi.repo).await,
+        "gitlab" => fetch_gitlab_preview(&client, &fi.owner, &fi.repo).await,
+        _ => fetch_gitea_preview(&client, &fi.host, &fi.scheme, &fi.owner, &fi.repo).await,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GitHub
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct GhRepoInfo {
+    name: Option<String>,
+    description: Option<String>,
+    stargazers_count: Option<u64>,
+    forks_count: Option<u64>,
+    language: Option<String>,
+    license: Option<GhLicense>,
+}
+#[derive(Debug, Deserialize)]
+struct GhLicense { spdx_id: Option<String> }
+
+async fn fetch_github_preview(client: &Client, owner: &str, repo: &str) -> Result<RepoPreviewInfo, String> {
+    let info_url = format!("https://api.github.com/repos/{}/{}", owner, repo);
+    let mut req = client.get(&info_url).header("Accept", "application/vnd.github+json");
+    if let Some(token) = wuddle_engine::github_token() { req = req.bearer_auth(token); }
+    let info: GhRepoInfo = req.send().await.map_err(|e| e.to_string())?
+        .json().await.map_err(|e| e.to_string())?;
+
+    let readme_url = format!("https://api.github.com/repos/{}/{}/readme", owner, repo);
+    let mut readme_req = client.get(&readme_url).header("Accept", "application/vnd.github.raw+json");
+    if let Some(token) = wuddle_engine::github_token() { readme_req = readme_req.bearer_auth(token); }
+    let readme_text = match readme_req.send().await {
+        Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
+        _ => String::new(),
+    };
+
+    let raw_base = format!("https://raw.githubusercontent.com/{}/{}/HEAD/", owner, repo);
+    let readme_items: Vec<iced::widget::markdown::Item> = iced::widget::markdown::parse(&readme_text).collect();
+    let image_urls = collect_image_urls_from_text(&readme_text);
+    let image_cache = fetch_images(client, &image_urls, &raw_base).await;
+
+    let files = fetch_files(client, "github", "github.com", owner, repo, "https").await;
+
+    let license = info.license.and_then(|l| l.spdx_id).unwrap_or_default();
+    let license = if license == "NOASSERTION" || license.is_empty() { String::new() } else { license };
+
+    Ok(RepoPreviewInfo {
+        name: info.name.unwrap_or_else(|| repo.to_string()),
+        description: info.description.unwrap_or_default(),
+        stars: info.stargazers_count.unwrap_or(0),
+        forks: info.forks_count.unwrap_or(0),
+        language: info.language.unwrap_or_default(),
+        license,
+        readme_items,
+        readme_text,
+        image_cache,
+        files,
+        raw_base_url: raw_base,
+        forge: "github".into(),
+        owner: owner.into(),
+        repo_name: repo.into(),
+        forge_url: format!("https://github.com/{}/{}", owner, repo),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// GitLab
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct GlProject {
+    name: Option<String>,
+    description: Option<String>,
+    star_count: Option<u64>,
+    forks_count: Option<u64>,
+}
+
+async fn fetch_gitlab_preview(client: &Client, owner: &str, repo: &str) -> Result<RepoPreviewInfo, String> {
+    let encoded = format!("{}/{}", owner, repo).replace('/', "%2F");
+    let url = format!("https://gitlab.com/api/v4/projects/{}", encoded);
+    let info: GlProject = client.get(&url).send().await.map_err(|e| e.to_string())?
+        .json().await.map_err(|e| e.to_string())?;
+
+    let readme_url = format!("https://gitlab.com/{}/{}/raw/HEAD/README.md", owner, repo);
+    let readme_text = match client.get(&readme_url).send().await {
+        Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
+        _ => String::new(),
+    };
+
+    let raw_base = format!("https://gitlab.com/{}/{}/raw/HEAD/", owner, repo);
+    let readme_items: Vec<iced::widget::markdown::Item> = iced::widget::markdown::parse(&readme_text).collect();
+    let image_urls = collect_image_urls_from_text(&readme_text);
+    let image_cache = fetch_images(client, &image_urls, &raw_base).await;
+    let files = fetch_files(client, "gitlab", "gitlab.com", owner, repo, "https").await;
+
+    Ok(RepoPreviewInfo {
+        name: info.name.unwrap_or_else(|| repo.to_string()),
+        description: info.description.unwrap_or_default(),
+        stars: info.star_count.unwrap_or(0),
+        forks: info.forks_count.unwrap_or(0),
+        language: String::new(),
+        license: String::new(),
+        readme_items,
+        readme_text,
+        image_cache,
+        files,
+        raw_base_url: raw_base,
+        forge: "gitlab".into(),
+        owner: owner.into(),
+        repo_name: repo.into(),
+        forge_url: format!("https://gitlab.com/{}/{}", owner, repo),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Gitea / Codeberg / Forgejo
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct GiteaRepo {
+    name: Option<String>,
+    description: Option<String>,
+    stars_count: Option<u64>,
+    forks_count: Option<u64>,
+    language: Option<String>,
+}
+
+async fn fetch_gitea_preview(client: &Client, host: &str, scheme: &str, owner: &str, repo: &str) -> Result<RepoPreviewInfo, String> {
+    let api_url = format!("{}://{}/api/v1/repos/{}/{}", scheme, host, owner, repo);
+    let info: GiteaRepo = client.get(&api_url).send().await.map_err(|e| e.to_string())?
+        .json().await.map_err(|e| e.to_string())?;
+
+    let readme_url = format!("{}://{}/{}/{}/raw/branch/master/README.md", scheme, host, owner, repo);
+    let readme_text = match client.get(&readme_url).send().await {
+        Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
+        _ => String::new(),
+    };
+
+    let raw_base = format!("{}://{}/{}/{}/raw/branch/master/", scheme, host, owner, repo);
+    let readme_items: Vec<iced::widget::markdown::Item> = iced::widget::markdown::parse(&readme_text).collect();
+    let image_urls = collect_image_urls_from_text(&readme_text);
+    let image_cache = fetch_images(client, &image_urls, &raw_base).await;
+    let files = fetch_files(client, "gitea", host, owner, repo, scheme).await;
+
+    Ok(RepoPreviewInfo {
+        name: info.name.unwrap_or_else(|| repo.to_string()),
+        description: info.description.unwrap_or_default(),
+        stars: info.stars_count.unwrap_or(0),
+        forks: info.forks_count.unwrap_or(0),
+        language: info.language.unwrap_or_default(),
+        license: String::new(),
+        readme_items,
+        readme_text,
+        image_cache,
+        files,
+        raw_base_url: raw_base,
+        forge: "gitea".into(),
+        owner: owner.into(),
+        repo_name: repo.into(),
+        forge_url: format!("{}://{}/{}/{}", scheme, host, owner, repo),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Tweak wrappers (delegates to crate::tweaks which ports vanilla-tweaks)
+// ---------------------------------------------------------------------------
+
+pub async fn read_tweaks(wow_dir: String) -> Result<crate::tweaks::ReadTweakValues, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::tweaks::read_tweaks(std::path::Path::new(&wow_dir))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn apply_tweaks(wow_dir: String, opts: crate::tweaks::TweakOptions) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::tweaks::apply_tweaks(std::path::Path::new(&wow_dir), &opts)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn restore_tweaks(wow_dir: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::tweaks::restore_backup(std::path::Path::new(&wow_dir))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
+// Releases (for in-app Release Notes)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct ReleaseItem {
+    pub tag_name: String,
+    pub name: String,
+    pub published_at: String,
+    pub body: String,
+    pub prerelease: bool,
+}
+
+pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, String> {
+    let fi = parse_forge_url(&forge_url)
+        .ok_or_else(|| "Could not parse forge URL".to_string())?;
+
+    let client = Client::builder()
+        .user_agent("wuddle-iced")
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    match fi.forge {
+        "github" => {
+            #[derive(Deserialize)]
+            struct GhRelease {
+                tag_name: String,
+                name: Option<String>,
+                published_at: Option<String>,
+                body: Option<String>,
+                prerelease: bool,
+            }
+            let url = format!(
+                "https://api.github.com/repos/{}/{}/releases?per_page=20",
+                fi.owner, fi.repo
+            );
+            let mut req = client.get(&url).header("Accept", "application/vnd.github+json");
+            if let Some(token) = wuddle_engine::github_token() { req = req.bearer_auth(token); }
+            let releases: Vec<GhRelease> = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                req.send(),
+            ).await
+            .map_err(|_| "Timed out fetching releases".to_string())?
+            .map_err(|e| e.to_string())?
+            .json().await.map_err(|e| e.to_string())?;
+            Ok(releases.into_iter().map(|r| ReleaseItem {
+                tag_name: r.tag_name.clone(),
+                name: r.name.filter(|s| !s.is_empty()).unwrap_or_else(|| r.tag_name),
+                published_at: r.published_at.unwrap_or_default(),
+                body: r.body.unwrap_or_default(),
+                prerelease: r.prerelease,
+            }).collect())
+        }
+        "gitlab" => {
+            #[derive(Deserialize)]
+            struct GlRelease {
+                tag_name: String,
+                name: Option<String>,
+                released_at: Option<String>,
+                description: Option<String>,
+            }
+            let encoded = format!("{}/{}", fi.owner, fi.repo).replace('/', "%2F");
+            let url = format!("https://gitlab.com/api/v4/projects/{}/releases", encoded);
+            let releases: Vec<GlRelease> = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                client.get(&url).send(),
+            ).await
+            .map_err(|_| "Timed out fetching releases".to_string())?
+            .map_err(|e| e.to_string())?
+            .json().await.map_err(|e| e.to_string())?;
+            Ok(releases.into_iter().map(|r| ReleaseItem {
+                tag_name: r.tag_name.clone(),
+                name: r.name.filter(|s| !s.is_empty()).unwrap_or_else(|| r.tag_name),
+                published_at: r.released_at.unwrap_or_default(),
+                body: r.description.unwrap_or_default(),
+                prerelease: false,
+            }).collect())
+        }
+        _ => {
+            // Gitea / Forgejo / Codeberg
+            #[derive(Deserialize)]
+            struct GiteaRelease {
+                tag_name: String,
+                name: Option<String>,
+                published_at: Option<String>,
+                body: Option<String>,
+                prerelease: bool,
+            }
+            let url = format!(
+                "{}://{}/api/v1/repos/{}/{}/releases?limit=20",
+                fi.scheme, fi.host, fi.owner, fi.repo
+            );
+            let releases: Vec<GiteaRelease> = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                client.get(&url).send(),
+            ).await
+            .map_err(|_| "Timed out fetching releases".to_string())?
+            .map_err(|e| e.to_string())?
+            .json().await.map_err(|e| e.to_string())?;
+            Ok(releases.into_iter().map(|r| ReleaseItem {
+                tag_name: r.tag_name.clone(),
+                name: r.name.filter(|s| !s.is_empty()).unwrap_or_else(|| r.tag_name),
+                published_at: r.published_at.unwrap_or_default(),
+                body: r.body.unwrap_or_default(),
+                prerelease: r.prerelease,
+            }).collect())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Self-update: fetch latest GitHub release tag
+// ---------------------------------------------------------------------------
+
+const WUDDLE_RELEASE_API: &str = "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
+const CHANGELOG_URL: &str = "https://raw.githubusercontent.com/ZythDr/Wuddle/main/CHANGELOG.md";
+const CHANGELOG_EMBEDDED: &str = include_str!("../../CHANGELOG.md");
+
+pub async fn fetch_changelog() -> Result<String, String> {
+    let client = Client::builder()
+        .user_agent(concat!("wuddle/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    match client.get(CHANGELOG_URL).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            resp.text().await.map_err(|e| e.to_string())
+        }
+        _ => Ok(CHANGELOG_EMBEDDED.to_string()),
+    }
+}
+
+pub async fn check_self_update() -> Result<String, String> {
+    #[derive(Deserialize)]
+    struct GhRelease { tag_name: String }
+
+    let client = Client::builder()
+        .user_agent(concat!("wuddle/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = tokio::time::timeout(
+        Duration::from_secs(12),
+        client.get(WUDDLE_RELEASE_API)
+            .header("Accept", "application/vnd.github+json")
+            .send(),
+    )
+    .await
+    .map_err(|_| "Timed out checking for updates".to_string())?
+    .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API error: HTTP {}", resp.status()));
+    }
+
+    let release: GhRelease = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(release.tag_name)
 }

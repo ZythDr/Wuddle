@@ -1,4 +1,4 @@
-use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input, Space};
+use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input, tooltip, Space};
 use iced::{Element, Length};
 
 use crate::theme::{self, ThemeColors, WuddleTheme};
@@ -48,6 +48,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         let dir_display = if p.wow_dir.is_empty() { "No directory set" } else { &p.wow_dir };
         let is_active = p.id == app.active_profile_id;
         let active_label = if is_active { " (active)" } else { "" };
+
         button(
             column![
                 text(format!("{}{}", p.name, active_label)).size(14).color(colors.text),
@@ -70,7 +71,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             custom_command: p.custom_command.clone(),
             custom_args: p.custom_args.clone(),
         }))
-        .padding(12)
+        .padding([10, 12])
         .width(260)
         .style(move |_theme, status| {
             let base = theme::card_style(&c2);
@@ -156,12 +157,12 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     );
 
     // --- GitHub Authentication section ---
-    let token_status = if wuddle_engine::github_token().is_some() {
-        "Token active (authenticated)"
+    let (token_status, token_status_color) = if wuddle_engine::github_token().is_some() {
+        ("Token active (authenticated)", colors.good)
     } else if app.github_token_input.is_empty() {
-        "No token"
+        ("No token set", colors.muted)
     } else {
-        "Token entered (not yet saved)"
+        ("Token entered — click Save to activate", colors.warn)
     };
 
     let github_section = settings_card(
@@ -171,13 +172,19 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 Space::new().width(Length::Fill),
                 {
                     let c2 = c;
-                    button(text("GitHub Tokens").size(13))
-                        .on_press(Message::OpenUrl("https://github.com/settings/tokens".to_string()))
-                        .padding([6, 12])
-                        .style(move |_theme, status| match status {
-                            button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                            _ => theme::tab_button_style(&c2),
-                        })
+                    tooltip(
+                        button(text("GitHub Tokens").size(13))
+                            .on_press(Message::OpenUrl("https://github.com/settings/tokens".to_string()))
+                            .padding([6, 12])
+                            .style(move |_theme, status| match status {
+                                button::Status::Hovered => theme::tab_button_hovered_style(&c2),
+                                _ => theme::tab_button_style(&c2),
+                            }),
+                        container(text("Opens GitHub in your browser so you can create or manage a token.").size(11).color(c.text))
+                            .padding([3, 8])
+                            .style(move |_theme| theme::tooltip_style(&c2)),
+                        tooltip::Position::Bottom,
+                    )
                 },
             ]
             .align_y(iced::Alignment::Center),
@@ -213,7 +220,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
-            text(token_status).size(12).color(colors.muted),
+            text(token_status).size(12).color(token_status_color),
         ]
         .spacing(8),
         &c,

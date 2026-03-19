@@ -6728,14 +6728,16 @@ dependencies = [
 
 [[package]]
 name = "wuddle-iced"
-version = "3.0.0-alpha.2"
+version = "3.0.0-alpha.3"
 dependencies = [
  "arboard",
  "dirs 6.0.0",
  "iced",
+ "image",
  "keyring",
  "notify-rust",
  "open",
+ "reqwest",
  "rfd",
  "rusqlite",
  "serde",

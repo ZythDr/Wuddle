@@ -4,6 +4,7 @@ mod service;
 mod settings;
 #[allow(dead_code)]
 mod theme;
+mod tweaks;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -226,8 +227,9 @@ pub enum InstanceField {
 
 #[derive(Debug, Clone)]
 pub enum Dialog {
-    AddRepo { url: String, mode: String },
+    AddRepo { url: String, mode: String, is_addons: bool, advanced: bool },
     RemoveRepo { id: i64, name: String },
+    Changelog { content: Option<String>, loading: bool },
     InstanceSettings {
         is_new: bool,
         profile_id: String,
@@ -320,6 +322,18 @@ pub struct App {
 
     // Spinner animation tick (0..36, one full rotation = 36 ticks @ 80ms each)
     pub spinner_tick: usize,
+
+    // Add-repo dialog preview
+    pub add_repo_preview: Option<service::RepoPreviewInfo>,
+    pub add_repo_preview_loading: bool,
+    pub add_repo_expanded_dirs: HashSet<String>,
+
+    // Add-repo release notes (fetched on demand)
+    pub add_repo_release_notes: Option<Vec<service::ReleaseItem>>,
+    pub add_repo_show_releases: bool,
+
+    // Repos whose updates are being ignored
+    pub ignored_update_ids: HashSet<i64>,
 }
 
 impl Default for WuddleTheme {
@@ -423,22 +437,87 @@ pub enum Message {
     SetTweakMaxCameraDist(String),
     SetTweakSoundChannels(String),
     ReadTweaks,
-    ReadTweaksResult(Result<TweakValues, String>),
+    ReadTweaksResult(Result<tweaks::ReadTweakValues, String>),
     ApplyTweaks,
     ApplyTweaksResult(Result<String, String>),
     RestoreTweaks,
     RestoreTweaksResult(Result<String, String>),
     ResetTweaksToDefault,
 
+    ToggleIgnoreUpdates(i64),
+
     // About
     CheckSelfUpdate,
     CheckSelfUpdateResult(Result<String, String>),
+    ShowChangelog,
+    ChangelogLoaded(Result<String, String>),
+
+    // Add-repo preview
+    SetAddRepoUrl(String),
+    FetchRepoPreview(String),
+    FetchRepoPreviewResult(Result<service::RepoPreviewInfo, String>),
+    ToggleAddRepoDir(String),
+
+    // Release notes (in-app)
+    FetchReleaseNotes,
+    FetchReleaseNotesResult(Result<Vec<service::ReleaseItem>, String>),
+    ShowReadme,
 
     // Auto-check tick
     AutoCheckTick,
 
     // Spinner animation
     SpinnerTick,
+}
+
+// ---------------------------------------------------------------------------
+// Custom markdown viewer that renders cached images from the preview cache
+// ---------------------------------------------------------------------------
+
+struct ImageViewer<'a> {
+    cache: &'a std::collections::HashMap<String, Vec<u8>>,
+    raw_base_url: &'a str,
+}
+
+impl<'a> iced::widget::markdown::Viewer<'a, Message> for ImageViewer<'a> {
+    fn on_link_click(url: iced::widget::markdown::Uri) -> Message {
+        Message::OpenUrl(url)
+    }
+
+    fn image(
+        &self,
+        _settings: iced::widget::markdown::Settings,
+        url: &'a iced::widget::markdown::Uri,
+        _title: &'a str,
+        _alt: &iced::widget::markdown::Text,
+    ) -> Element<'a, Message> {
+        // Try original URL, then resolved absolute URL, then URL-decoded variant
+        let bytes = self.cache.get(url.as_str())
+            .or_else(|| {
+                let abs = service::resolve_image_url(url, self.raw_base_url);
+                self.cache.get(abs.as_str())
+            });
+        if let Some(bytes) = bytes {
+            container(
+                iced::widget::image(
+                    iced::widget::image::Handle::from_bytes(bytes.clone())
+                )
+                .width(Length::Fill)
+            )
+            .width(Length::Fill)
+            .padding([4, 0])
+            .into()
+        } else {
+            // Show a subtle placeholder for unfetched images
+            container(
+                text(format!("[image: {}]", url.split('/').last().unwrap_or(url)))
+                    .size(11)
+                    .color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.25))
+            )
+            .padding([2, 0])
+            .into()
+        }
+    }
 }
 
 impl App {
@@ -486,6 +565,12 @@ impl App {
             auto_check_minutes: 15,
             profiles: vec![settings::ProfileConfig::default()],
             spinner_tick: 0,
+            add_repo_preview: None,
+            add_repo_preview_loading: false,
+            add_repo_expanded_dirs: HashSet::new(),
+            add_repo_release_notes: None,
+            add_repo_show_releases: false,
+            ignored_update_ids: HashSet::new(),
         };
 
         // Sync GitHub token from keychain/env at startup
@@ -504,7 +589,7 @@ impl App {
         self.log_lines.push(LogLine {
             level,
             text: msg.to_string(),
-            timestamp: chrono_now(),
+            timestamp: chrono_now_fmt(self.opt_clock12),
         });
     }
 
@@ -568,11 +653,32 @@ impl App {
             );
         }
 
+        // Hourly self-update check for unauthenticated users; authenticated users get
+        // checked on launch and on every About-tab navigation.
+        if wuddle_engine::github_token().is_none() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_secs(3600))
+                    .map(|_| Message::CheckSelfUpdate),
+            );
+        }
+
         if self.is_busy() {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(80))
                     .map(|_| Message::SpinnerTick),
             );
+        }
+
+        if self.dialog.is_some() {
+            subs.push(iced::event::listen_with(|event, _status, _window| {
+                match event {
+                    iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                        key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                        ..
+                    }) => Some(Message::CloseDialog),
+                    _ => None,
+                }
+            }));
         }
 
         Subscription::batch(subs)
@@ -613,7 +719,13 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::SetTab(tab) => self.active_tab = tab,
+            Message::SetTab(tab) => {
+                self.active_tab = tab;
+                // Fire self-update check whenever the About tab becomes active
+                if tab == Tab::About {
+                    return Task::perform(service::check_self_update(), Message::CheckSelfUpdateResult);
+                }
+            }
             Message::SetTheme(theme) => {
                 self.wuddle_theme = theme;
                 self.save_settings();
@@ -658,8 +770,23 @@ impl App {
             Message::ClearLogs => self.log_lines.clear(),
 
             // Dialogs
-            Message::OpenDialog(d) => { self.open_menu = None; self.dialog = Some(d); }
-            Message::CloseDialog => self.dialog = None,
+            Message::OpenDialog(d) => {
+                self.open_menu = None;
+                let focus_task = if matches!(d, Dialog::AddRepo { .. }) {
+                    iced::widget::operation::focus(iced::widget::Id::new("add_repo_url"))
+                } else {
+                    Task::none()
+                };
+                self.dialog = Some(d);
+                return focus_task;
+            }
+            Message::CloseDialog => {
+                self.dialog = None;
+                self.add_repo_preview = None;
+                self.add_repo_preview_loading = false;
+                self.add_repo_release_notes = None;
+                self.add_repo_show_releases = false;
+            }
 
             // Context menu
             Message::ToggleMenu(id) => {
@@ -707,7 +834,7 @@ impl App {
                         self.repos = repos;
                         self.log(LogLevel::Info, &format!("Loaded {} repos ({} mods, {} addons).", count, mod_count, addon_count));
                         // Fetch branches for addon_git repos that aren't cached yet
-                        let fetch_tasks: Vec<Task<Message>> = self
+                        let mut tasks: Vec<Task<Message>> = self
                             .repos
                             .iter()
                             .filter(|r| r.mode == "addon_git" && !self.branches.contains_key(&r.id))
@@ -719,8 +846,16 @@ impl App {
                                 )
                             })
                             .collect();
-                        if !fetch_tasks.is_empty() {
-                            return Task::batch(fetch_tasks);
+                        // Auto-check on launch if the option is enabled
+                        if self.opt_auto_check && !self.repos.is_empty() && !self.checking_updates {
+                            self.checking_updates = true;
+                            self.log(LogLevel::Info, "Auto-checking for updates on launch...");
+                            tasks.push(self.check_updates_task());
+                        }
+                        // Always fire self-update check on launch
+                        tasks.push(Task::perform(service::check_self_update(), Message::CheckSelfUpdateResult));
+                        if !tasks.is_empty() {
+                            return Task::batch(tasks);
                         }
                     }
                     Err(e) => {
@@ -749,11 +884,17 @@ impl App {
                         let update_count = plans.iter().filter(|p| p.has_update).count();
                         self.log(LogLevel::Info, &format!("Update check complete. {} updates available.", update_count));
                         self.plans = plans;
-                        self.last_checked = Some(chrono_now());
+                        self.last_checked = Some(chrono_now_fmt(self.opt_clock12));
                         self.cached_plans.insert(
                             self.active_profile_id.clone(),
                             (self.plans.clone(), self.last_checked.clone()),
                         );
+                        if self.opt_desktop_notify && update_count > 0 {
+                            let _ = notify_rust::Notification::new()
+                                .summary("Wuddle")
+                                .body(&format!("{} update{} available", update_count, if update_count == 1 { "" } else { "s" }))
+                                .show();
+                        }
                     }
                     Err(e) => {
                         self.error = Some(e.clone());
@@ -762,7 +903,7 @@ impl App {
                 }
             }
             Message::AddRepoSubmit => {
-                if let Some(Dialog::AddRepo { ref url, ref mode }) = self.dialog {
+                if let Some(Dialog::AddRepo { ref url, ref mode, .. }) = self.dialog {
                     let url = url.clone();
                     let mode = mode.clone();
                     let db = self.db_path.clone();
@@ -803,6 +944,13 @@ impl App {
                         return self.refresh_repos_task();
                     }
                     Err(e) => self.log(LogLevel::Error, &format!("Remove failed: {}", e)),
+                }
+            }
+            Message::ToggleIgnoreUpdates(id) => {
+                if self.ignored_update_ids.contains(&id) {
+                    self.ignored_update_ids.remove(&id);
+                } else {
+                    self.ignored_update_ids.insert(id);
                 }
             }
             Message::ToggleRepoEnabled(id, enabled) => {
@@ -1210,13 +1358,56 @@ impl App {
                 self.log(LogLevel::Info, "Tweak values reset to defaults.");
             }
 
-            // Tweak read/apply/restore are placeholders until tweaks.rs is ported
+            // Tweak read/apply/restore
             Message::ReadTweaks => {
-                self.log(LogLevel::Info, "Reading current tweak values... (not yet implemented)");
+                if self.wow_dir.is_empty() {
+                    self.log(LogLevel::Error, "Set a WoW directory in Options first.");
+                } else {
+                    self.log(LogLevel::Info, "Reading tweak values from WoW.exe...");
+                    let wow = self.wow_dir.clone();
+                    return Task::perform(service::read_tweaks(wow), Message::ReadTweaksResult);
+                }
             }
-            Message::ReadTweaksResult(_result) => {}
+            Message::ReadTweaksResult(result) => {
+                match result {
+                    Ok(vals) => {
+                        self.tweak_values.fov = vals.fov;
+                        self.tweak_values.farclip = vals.farclip;
+                        self.tweak_values.frilldistance = vals.frilldistance;
+                        self.tweak_values.nameplate_dist = vals.nameplate_distance;
+                        self.tweak_values.max_camera_dist = vals.max_camera_distance;
+                        self.tweak_values.sound_channels = vals.sound_channels;
+                        self.tweaks.quickloot = vals.quickloot;
+                        self.tweaks.sound_bg = vals.sound_in_background;
+                        self.tweaks.large_address = vals.large_address_aware;
+                        self.tweaks.camera_skip = vals.camera_skip_fix;
+                        self.log(LogLevel::Info, "Tweak values read from WoW.exe.");
+                    }
+                    Err(e) => self.log(LogLevel::Error, &format!("Read tweaks failed: {}", e)),
+                }
+            }
             Message::ApplyTweaks => {
-                self.log(LogLevel::Info, "Applying tweaks... (not yet implemented)");
+                if self.wow_dir.is_empty() {
+                    self.log(LogLevel::Error, "Set a WoW directory in Options first.");
+                } else {
+                    self.log(LogLevel::Info, "Applying tweaks to WoW.exe...");
+                    let wow = self.wow_dir.clone();
+                    let tv = &self.tweak_values;
+                    let ts = &self.tweaks;
+                    let opts = tweaks::TweakOptions {
+                        fov:               if ts.fov { Some(tv.fov) } else { None },
+                        farclip:           if ts.farclip { Some(tv.farclip) } else { None },
+                        frilldistance:     if ts.frilldistance { Some(tv.frilldistance) } else { None },
+                        nameplate_distance:if ts.nameplate_dist { Some(tv.nameplate_dist) } else { None },
+                        sound_channels:    if ts.sound_channels { Some(tv.sound_channels) } else { None },
+                        max_camera_distance: if ts.max_camera_dist { Some(tv.max_camera_dist) } else { None },
+                        quickloot:          ts.quickloot,
+                        sound_in_background:ts.sound_bg,
+                        large_address_aware:ts.large_address,
+                        camera_skip_fix:    ts.camera_skip,
+                    };
+                    return Task::perform(service::apply_tweaks(wow, opts), Message::ApplyTweaksResult);
+                }
             }
             Message::ApplyTweaksResult(result) => {
                 match result {
@@ -1225,7 +1416,13 @@ impl App {
                 }
             }
             Message::RestoreTweaks => {
-                self.log(LogLevel::Info, "Restoring tweaks... (not yet implemented)");
+                if self.wow_dir.is_empty() {
+                    self.log(LogLevel::Error, "Set a WoW directory in Options first.");
+                } else {
+                    self.log(LogLevel::Info, "Restoring WoW.exe from backup...");
+                    let wow = self.wow_dir.clone();
+                    return Task::perform(service::restore_tweaks(wow), Message::RestoreTweaksResult);
+                }
             }
             Message::RestoreTweaksResult(result) => {
                 match result {
@@ -1237,19 +1434,106 @@ impl App {
             // --- About ---
             Message::CheckSelfUpdate => {
                 self.log(LogLevel::Info, "Checking for Wuddle updates...");
-                // Placeholder — will fetch latest release from GitHub API
-                self.latest_version = Some("3.0.0-alpha.1".to_string());
-                self.update_message = Some("Up to date".to_string());
-                self.log(LogLevel::Info, "Version check complete.");
+                return Task::perform(service::check_self_update(), Message::CheckSelfUpdateResult);
             }
             Message::CheckSelfUpdateResult(result) => {
                 match result {
-                    Ok(ver) => {
-                        self.latest_version = Some(ver);
-                        self.update_message = Some("Up to date".to_string());
+                    Ok(latest) => {
+                        let current = env!("CARGO_PKG_VERSION");
+                        let msg = if latest == current || latest.trim_start_matches('v') == current {
+                            "Up to date".to_string()
+                        } else {
+                            format!("Update available: v{}", latest.trim_start_matches('v'))
+                        };
+                        self.latest_version = Some(latest.trim_start_matches('v').to_string());
+                        self.update_message = Some(msg.clone());
+                        self.log(LogLevel::Info, &format!("Version check: {}", msg));
                     }
                     Err(e) => self.log(LogLevel::Error, &format!("Version check failed: {}", e)),
                 }
+            }
+            Message::ShowChangelog => {
+                self.dialog = Some(Dialog::Changelog { content: None, loading: true });
+                return Task::perform(service::fetch_changelog(), Message::ChangelogLoaded);
+            }
+            Message::ChangelogLoaded(result) => {
+                if let Some(Dialog::Changelog { ref mut content, ref mut loading }) = self.dialog {
+                    *loading = false;
+                    *content = Some(result.unwrap_or_else(|e| format!("Failed to load changelog: {}", e)));
+                }
+            }
+
+            // --- Add-repo preview ---
+            Message::SetAddRepoUrl(url) => {
+                // Update dialog URL field
+                if let Some(Dialog::AddRepo { url: ref mut u, .. }) = self.dialog {
+                    *u = url.clone();
+                }
+                // Trigger preview fetch if URL looks like a repo
+                let trimmed = url.trim().to_string();
+                if !trimmed.is_empty() && (trimmed.contains("github.com") || trimmed.contains("gitlab.com") || trimmed.contains("gitea.")) {
+                    self.add_repo_preview_loading = true;
+                    return Task::perform(
+                        service::fetch_repo_preview(trimmed),
+                        Message::FetchRepoPreviewResult,
+                    );
+                } else {
+                    self.add_repo_preview = None;
+                    self.add_repo_preview_loading = false;
+                }
+            }
+            Message::FetchRepoPreview(url) => {
+                self.add_repo_preview_loading = true;
+                return Task::perform(
+                    service::fetch_repo_preview(url),
+                    Message::FetchRepoPreviewResult,
+                );
+            }
+            Message::FetchRepoPreviewResult(result) => {
+                self.add_repo_preview_loading = false;
+                match result {
+                    Ok(info) => {
+                        self.add_repo_preview = Some(info);
+                        // Reset release notes when a new preview loads
+                        self.add_repo_release_notes = None;
+                        self.add_repo_show_releases = false;
+                    }
+                    Err(_) => self.add_repo_preview = None,
+                }
+            }
+
+            Message::ToggleAddRepoDir(path) => {
+                if self.add_repo_expanded_dirs.contains(&path) {
+                    self.add_repo_expanded_dirs.remove(&path);
+                } else {
+                    self.add_repo_expanded_dirs.insert(path);
+                }
+            }
+
+            Message::FetchReleaseNotes => {
+                if self.add_repo_release_notes.is_some() {
+                    // Already fetched — just switch view
+                    self.add_repo_show_releases = true;
+                } else if let Some(ref preview) = self.add_repo_preview {
+                    let url = preview.forge_url.clone();
+                    self.add_repo_show_releases = true;
+                    return Task::perform(
+                        service::fetch_releases(url),
+                        Message::FetchReleaseNotesResult,
+                    );
+                }
+            }
+            Message::FetchReleaseNotesResult(result) => {
+                match result {
+                    Ok(releases) => self.add_repo_release_notes = Some(releases),
+                    Err(e) => {
+                        self.add_repo_show_releases = false;
+                        self.log(LogLevel::Error, &format!("Failed to fetch releases: {}", e));
+                    }
+                }
+            }
+            Message::ShowReadme => {
+                self.add_repo_show_releases = false;
             }
 
             // --- Spinner tick ---
@@ -1317,15 +1601,33 @@ impl App {
         if self.dialog.is_some() {
             let dialog = self.dialog.as_ref().unwrap();
             let c = colors;
-            let (dialog_max_w, dialog_pad) = match dialog {
-                Dialog::AddRepo { .. } => (600, 24),
-                Dialog::InstanceSettings { .. } => (600, 24),
-                _ => (480, 24),
+
+            // Two-card layout for AddRepo with a loaded preview
+            let has_two_cards = matches!(dialog, Dialog::AddRepo { .. })
+                && self.add_repo_preview.is_some();
+
+            let dialog_box: Element<Message> = if has_two_cards {
+                // view_dialog returns a row with two styled card containers
+                container(self.view_dialog(dialog, &c))
+                    .max_width(1060u32)
+                    .into()
+            } else {
+                let (dialog_max_w, dialog_pad) = match dialog {
+                    Dialog::AddRepo { .. } => (900u32, 16),
+                    Dialog::InstanceSettings { .. } => (600u32, 24),
+                    Dialog::Changelog { .. } => (720u32, 24),
+                    _ => (480u32, 24),
+                };
+                container(self.view_dialog(dialog, &c))
+                    .max_width(dialog_max_w)
+                    .padding(dialog_pad)
+                    .style(move |_theme| theme::dialog_style(&c))
+                    .into()
             };
-            let dialog_box = container(self.view_dialog(dialog, &c))
-                .max_width(dialog_max_w)
-                .padding(dialog_pad)
-                .style(move |_theme| theme::dialog_style(&c));
+
+            // Wrap dialog in mouse_area to block click-through to the scrim
+            let dialog_blocker = iced::widget::mouse_area(dialog_box)
+                .on_press(Message::CloseMenu);
 
             let scrim = iced::widget::mouse_area(
                 container(Space::new())
@@ -1335,11 +1637,19 @@ impl App {
             )
             .on_press(Message::CloseDialog);
 
-            let centered_dialog = container(dialog_box)
+            let centered_dialog = container(dialog_blocker)
                 .center_x(Length::Fill)
                 .center_y(Length::Fill);
 
-            stack![main_content, scrim, centered_dialog]
+            // Use opaque() to make the entire overlay absorb ALL mouse events,
+            // preventing any interaction with main_content while the dialog is open.
+            let overlay = iced::widget::opaque(
+                stack![scrim, centered_dialog]
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            );
+
+            stack![main_content, overlay]
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
@@ -1351,72 +1661,433 @@ impl App {
     fn view_dialog<'a>(&'a self, dialog: &'a Dialog, colors: &ThemeColors) -> Element<'a, Message> {
         let c = *colors;
         match dialog {
-            Dialog::AddRepo { url, mode } => {
-                let mode_buttons: Vec<Element<Message>> = ["auto", "addon", "dll", "mixed", "raw"]
-                    .iter()
-                    .map(|&m| {
-                        let c2 = c;
-                        let m_str = String::from(m);
-                        let is_active = mode == m;
-                        let url_c = url.clone();
-                        let btn = button(text(m).size(12))
-                            .on_press(Message::OpenDialog(Dialog::AddRepo {
-                                url: url_c,
-                                mode: m_str,
-                            }))
-                            .padding([4, 10]);
-                        if is_active {
-                            btn.style(move |_t, _s| theme::tab_button_active_style(&c2)).into()
-                        } else {
-                            btn.style(move |_t, s| match s {
-                                button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                                _ => theme::tab_button_style(&c2),
-                            }).into()
-                        }
-                    })
-                    .collect();
+            Dialog::AddRepo { url, mode, is_addons, advanced } => {
+                let is_addons = *is_addons;
+                let advanced = *advanced;
+                let title = if is_addons { "Add an addon repo" } else { "Add a mod repo" };
+                let subtitle = if is_addons {
+                    "Paste a Git repository URL below. Wuddle will automatically download and install the addon for you."
+                } else {
+                    "Quick-add from the mods listed, or add your own Git repo URL below."
+                };
+                let url_label = if is_addons { "Addon Repo URL" } else { "Repo URL" };
+                let placeholder = if is_addons {
+                    "(e.g. https://github.com/pepopo978/BigWigs)"
+                } else {
+                    "(e.g. https://gitea.com/avitasia/nampower)"
+                };
 
-                let mode_clone = mode.clone();
-                column![
+                // --- URL input row with clear (✕) button ---
+                let url_row: Element<Message> = {
                     row![
-                        text("Add Repository").size(18).color(colors.title),
-                        Space::new().width(Length::Fill),
-                        close_button(&c),
-                    ].align_y(iced::Alignment::Center),
-                    text("Paste a GitHub, GitLab, or Codeberg URL. Wuddle will auto-detect the install mode unless you override it below.")
-                        .size(12)
-                        .color(colors.muted),
-                    text("Repository URL").size(13).color(colors.text),
-                    iced::widget::text_input("https://github.com/owner/repo", url)
-                        .on_input(move |s| Message::OpenDialog(Dialog::AddRepo {
-                            url: s,
-                            mode: mode_clone.clone(),
-                        }))
-                        .on_submit(Message::AddRepoSubmit)
-                        .padding([8, 12]),
-                    text("Install mode").size(13).color(colors.text),
-                    row(mode_buttons).spacing(4),
-                    text("auto = detect from repo structure, addon = Interface/AddOns, dll = single DLL, mixed = DLL + data, raw = copy files directly")
-                        .size(11)
-                        .color(colors.muted),
-                    Space::new().height(8),
-                    row![
-                        Space::new().width(Length::Fill),
-                        button(text("Cancel").size(13))
-                            .on_press(Message::CloseDialog)
-                            .padding([6, 14])
-                            .style(move |_theme, status| match status {
+                        iced::widget::text_input(placeholder, url)
+                            .id(iced::widget::Id::new("add_repo_url"))
+                            .on_input(Message::SetAddRepoUrl)
+                            .on_submit(Message::AddRepoSubmit)
+                            .padding([8, 12])
+                            .width(Length::Fill),
+                        button(text("✕").size(13).color(c.muted))
+                            .on_press(Message::SetAddRepoUrl(String::new()))
+                            .padding([8, 10])
+                            .style(move |_t, s| match s {
                                 button::Status::Hovered => theme::tab_button_hovered_style(&c),
                                 _ => theme::tab_button_style(&c),
                             }),
-                        button(text("Add Repository").size(13))
+                    ]
+                    .spacing(4)
+                    .align_y(iced::Alignment::Center)
+                    .into()
+                };
+
+                // --- Footer: mode section + optional forge/release-notes + Cancel + Add ---
+                let footer: Element<Message> = {
+                    let mode_list: Vec<String> = if is_addons {
+                        vec!["addon_git", "addon", "dll", "mixed", "raw"]
+                    } else {
+                        vec!["auto", "addon", "dll", "mixed", "raw"]
+                    }.into_iter().map(String::from).collect();
+
+                    let url_cb = url.clone();
+                    let mode_cb = mode.clone();
+                    let url_pl = url.clone();
+
+                    let advanced_section: Element<Message> = if advanced {
+                        let picked = Some(mode.clone());
+                        row![
+                            iced::widget::checkbox(advanced)
+                                .label("Advanced")
+                                .on_toggle(move |val| Message::OpenDialog(Dialog::AddRepo {
+                                    url: url_cb.clone(), mode: mode_cb.clone(),
+                                    is_addons, advanced: val,
+                                })),
+                            text("Mode").size(12).color(c.muted),
+                            iced::widget::pick_list(mode_list, picked, move |m: String| {
+                                Message::OpenDialog(Dialog::AddRepo {
+                                    url: url_pl.clone(), mode: m,
+                                    is_addons, advanced: true,
+                                })
+                            }).text_size(12).padding([4, 8]),
+                        ]
+                        .spacing(6)
+                        .align_y(iced::Alignment::Center)
+                        .into()
+                    } else {
+                        let url_c2 = url.clone();
+                        let mode_c2 = mode.clone();
+                        iced::widget::checkbox(advanced)
+                            .label("Advanced")
+                            .on_toggle(move |val| Message::OpenDialog(Dialog::AddRepo {
+                                url: url_c2.clone(), mode: mode_c2.clone(),
+                                is_addons, advanced: val,
+                            }))
+                            .into()
+                    };
+
+                    // Forge link button: "Open on [forge icon]" (shown when preview is loaded)
+                    let forge_link: Option<Element<Message>> = self.add_repo_preview.as_ref().map(|p| {
+                        let furl = p.forge_url.clone();
+                        let icon_handle = forge_svg_handle(&p.forge, &p.forge_url);
+                        let icon_color = c.primary;
+                        button(
+                            row![
+                                text("Open on").size(12).color(c.primary),
+                                iced::widget::svg(icon_handle)
+                                    .width(14)
+                                    .height(14)
+                                    .style(move |_t, _s| iced::widget::svg::Style {
+                                        color: Some(icon_color),
+                                    }),
+                            ]
+                            .spacing(5)
+                            .align_y(iced::Alignment::Center)
+                        )
+                        .on_press(Message::OpenUrl(furl))
+                        .padding([6, 10])
+                        .style(move |_t, s| match s {
+                            button::Status::Hovered => theme::tab_button_hovered_style(&c),
+                            _ => theme::tab_button_style(&c),
+                        })
+                        .into()
+                    });
+
+                    // Release Notes / README toggle button (shown when preview is loaded)
+                    let release_notes: Option<Element<Message>> = self.add_repo_preview.as_ref().map(|_p| {
+                        let (label, msg) = if self.add_repo_show_releases {
+                            ("README", Message::ShowReadme)
+                        } else {
+                            ("Release Notes", Message::FetchReleaseNotes)
+                        };
+                        button(text(label).size(12))
+                            .on_press(msg)
+                            .padding([6, 10])
+                            .style(move |_t, s| match s {
+                                button::Status::Hovered => theme::tab_button_hovered_style(&c),
+                                _ => theme::tab_button_style(&c),
+                            })
+                            .into()
+                    });
+
+                    let mut footer_row: Vec<Element<Message>> = Vec::new();
+                    if let Some(fl) = forge_link { footer_row.push(fl); }
+                    if let Some(rn) = release_notes { footer_row.push(rn); }
+                    footer_row.push(advanced_section);
+                    footer_row.push(Space::new().width(Length::Fill).into());
+                    footer_row.push(
+                        button(text("Cancel").size(13))
+                            .on_press(Message::CloseDialog)
+                            .padding([6, 14])
+                            .style(move |_t, s| match s {
+                                button::Status::Hovered => theme::tab_button_hovered_style(&c),
+                                _ => theme::tab_button_style(&c),
+                            })
+                            .into()
+                    );
+                    footer_row.push(
+                        button(text(if is_addons { "Add addon" } else { "Add mod" }).size(13))
                             .on_press(Message::AddRepoSubmit)
                             .padding([6, 14])
-                            .style(move |_theme, _status| theme::tab_button_active_style(&c)),
+                            .style(move |_t, _s| theme::tab_button_active_style(&c))
+                            .into()
+                    );
+                    row(footer_row).spacing(8).align_y(iced::Alignment::Center).into()
+                };
+
+                if let Some(ref preview) = self.add_repo_preview {
+                    // =========================================================
+                    // TWO-CARD LAYOUT: floating side panel + main form card
+                    // =========================================================
+                    let current_theme = self.theme();
+                    let c_sp = c;
+                    let c_form = c;
+                    let c_divider = c;
+
+                    // --- SIDE PANEL CARD (About + Files) ---
+                    let mut sidebar_col: Vec<Element<Message>> = Vec::new();
+
+                    // About section header
+                    sidebar_col.push(text("About").size(12).color(colors.muted).into());
+                    sidebar_col.push(text(&preview.name).size(15).color(colors.text).into());
+                    if !preview.description.is_empty() {
+                        sidebar_col.push(
+                            text(&preview.description).size(12).color(colors.text_soft).into()
+                        );
+                    }
+
+                    // Stats
+                    sidebar_col.push(
+                        row![
+                            text("★").size(13).color(colors.muted),
+                            text(format!("{}", preview.stars)).size(13).color(colors.text_soft),
+                        ].spacing(4).into()
+                    );
+                    if preview.forks > 0 {
+                        sidebar_col.push(
+                            row![
+                                text("⑂").size(13).color(colors.muted),
+                                text(format!("{}", preview.forks)).size(13).color(colors.text_soft),
+                            ].spacing(4).into()
+                        );
+                    }
+                    if !preview.language.is_empty() {
+                        sidebar_col.push(
+                            row![
+                                text("Language").size(12).color(colors.muted),
+                                Space::new().width(Length::Fill),
+                                text(&preview.language).size(12).color(colors.text_soft),
+                            ].into()
+                        );
+                    }
+                    if !preview.license.is_empty() {
+                        sidebar_col.push(
+                            row![
+                                text("License").size(12).color(colors.muted),
+                                Space::new().width(Length::Fill),
+                                text(&preview.license).size(12).color(colors.text_soft),
+                            ].into()
+                        );
+                    }
+
+                    // Files section
+                    if !preview.files.is_empty() {
+                        sidebar_col.push(
+                            rule::horizontal(1)
+                                .style(move |_t| theme::update_line_style(&c_divider))
+                                .into()
+                        );
+                        sidebar_col.push(text("Files").size(12).color(colors.muted).into());
+
+                        let mut sorted_files = preview.files.clone();
+                        sorted_files.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+
+                        let file_rows: Vec<Element<Message>> = sorted_files.iter().take(60).map(|f| {
+                            let (icon, col) = if f.is_dir {
+                                ("📁", colors.text)
+                            } else {
+                                ("📄", colors.text_soft)
+                            };
+                            text(format!("{} {}", icon, f.name))
+                                .size(12).color(col).into()
+                        }).collect();
+
+                        // Files fill remaining sidebar height
+                        sidebar_col.push(
+                            iced::widget::scrollable(column(file_rows).spacing(1))
+                                .height(Length::Fill)
+                                .into()
+                        );
+                    }
+
+                    let sidebar_card = container(
+                        column(sidebar_col).spacing(6).height(Length::Fill)
+                    )
+                    .width(280)
+                    .height(Length::Fill)
+                    .padding([16, 14])
+                    .style(move |_theme| theme::dialog_style(&c_sp));
+
+                    // --- MAIN FORM CARD ---
+                    let content_label = if self.add_repo_show_releases {
+                        text("Release Notes").size(12).color(colors.muted)
+                    } else {
+                        text("README").size(12).color(colors.muted)
+                    };
+
+                    let scrollable_content: Element<Message> = if self.add_repo_show_releases {
+                        // Show release notes or loading indicator
+                        if let Some(ref releases) = self.add_repo_release_notes {
+                            if releases.is_empty() {
+                                container(
+                                    text("No releases found.").size(13).color(colors.muted)
+                                )
+                                .padding([8, 0])
+                                .into()
+                            } else {
+                                let c_rl = c_form;
+                                let items: Vec<Element<Message>> = releases.iter().map(|r| {
+                                    let date = r.published_at.get(..10).unwrap_or(&r.published_at);
+                                    let mut col_items: Vec<Element<Message>> = vec![
+                                        row![
+                                            text(&r.name).size(14).color(colors.text),
+                                            Space::new().width(Length::Fill),
+                                            text(date).size(11).color(colors.muted),
+                                        ].align_y(iced::Alignment::Center).into(),
+                                    ];
+                                    if r.tag_name != r.name && !r.tag_name.is_empty() {
+                                        col_items.push(
+                                            text(&r.tag_name).size(11).color(colors.muted).into()
+                                        );
+                                    }
+                                    if r.prerelease {
+                                        col_items.push(badge_tag("pre-release", iced::Color::from_rgb8(0xfd, 0xe6, 0x8a), iced::Color::from_rgb8(0xd4, 0x82, 0x1a)));
+                                    }
+                                    if !r.body.is_empty() {
+                                        col_items.push(
+                                            text(&r.body).size(12).color(colors.text_soft).into()
+                                        );
+                                    }
+                                    container(column(col_items).spacing(3))
+                                        .width(Length::Fill)
+                                        .padding([8, 12])
+                                        .style(move |_t| theme::card_style(&c_rl))
+                                        .into()
+                                }).collect();
+                                iced::widget::scrollable(
+                                    column(items).spacing(6).width(Length::Fill)
+                                ).height(Length::Fill).into()
+                            }
+                        } else {
+                            // Still loading
+                            container(
+                                text("Loading release notes...").size(13).color(colors.muted)
+                            )
+                            .padding([8, 0])
+                            .into()
+                        }
+                    } else {
+                        // Show README
+                        let viewer = ImageViewer {
+                            cache: &preview.image_cache,
+                            raw_base_url: &preview.raw_base_url,
+                        };
+                        let md_settings = iced::widget::markdown::Settings::with_text_size(
+                            13,
+                            iced::widget::markdown::Style::from(&current_theme),
+                        );
+                        let readme_view = iced::widget::markdown::view_with(
+                            &preview.readme_items,
+                            md_settings,
+                            &viewer,
+                        );
+                        iced::widget::scrollable(readme_view).height(Length::Fill).into()
+                    };
+
+                    let form_card = container(
+                        column![
+                            // Sticky header
+                            row![
+                                text(title).size(17).color(colors.title),
+                                Space::new().width(Length::Fill),
+                                close_button(&c_form),
+                            ].align_y(iced::Alignment::Center),
+                            text(subtitle).size(12).color(colors.text_soft),
+                            rule::horizontal(1).style(move |_t| theme::update_line_style(&c_form)),
+                            text(url_label).size(12).color(colors.text),
+                            url_row,
+                            content_label,
+                            // Scrollable content fills remaining space
+                            scrollable_content,
+                            rule::horizontal(1).style(move |_t| theme::update_line_style(&c_form)),
+                            footer,
+                        ]
+                        .spacing(6)
+                        .height(Length::Fill)
+                    )
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .padding([16, 20])
+                    .style(move |_theme| theme::dialog_style(&c_form));
+
+                    row![sidebar_card, form_card]
+                        .spacing(8)
+                        .height(580)
+                        .into()
+                } else {
+                    // =========================================================
+                    // SINGLE-CARD LAYOUT: no preview — show Quick Add or loading
+                    // =========================================================
+                    let body_content: Element<Message> = if self.add_repo_preview_loading {
+                        container(
+                            text("Loading preview...").size(13).color(colors.muted)
+                        )
+                        .padding([12, 0])
+                        .into()
+                    } else if !is_addons && url.trim().is_empty() {
+                        // Quick Add preset list (mods tab only, when no URL entered)
+                        build_quick_add_presets(&self.repos, colors)
+                    } else {
+                        Space::new().height(0).into()
+                    };
+
+                    let body_section: Element<Message> = if self.add_repo_preview_loading || (!is_addons && url.trim().is_empty()) {
+                        let section_label: Element<Message> = if is_addons { Space::new().height(0).into() } else {
+                            text("Quick Add").size(12).color(colors.muted).into()
+                        };
+                        column![
+                            section_label,
+                            iced::widget::scrollable(body_content).height(Length::Fill),
+                        ]
+                        .spacing(4)
+                        .height(Length::Fill)
+                        .into()
+                    } else {
+                        Space::new().height(0).into()
+                    };
+
+                    column![
+                        row![
+                            text(title).size(17).color(colors.title),
+                            Space::new().width(Length::Fill),
+                            close_button(&c),
+                        ].align_y(iced::Alignment::Center),
+                        text(subtitle).size(12).color(colors.text_soft),
+                        rule::horizontal(1).style(move |_t| theme::update_line_style(&c)),
+                        text(url_label).size(12).color(colors.text),
+                        url_row,
+                        body_section,
+                        rule::horizontal(1).style(move |_t| theme::update_line_style(&c)),
+                        footer,
                     ]
-                    .spacing(8),
+                    .spacing(6)
+                    .height(if !is_addons && url.trim().is_empty() { Length::Fixed(580.0) } else { Length::Shrink })
+                    .into()
+                }
+            }
+            Dialog::Changelog { content, loading } => {
+                let body: Element<Message> = if *loading {
+                    container(text("Loading changelog…").size(13).color(colors.muted))
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill)
+                        .width(Length::Fill)
+                        .height(Length::Fixed(300.0))
+                        .into()
+                } else {
+                    let md = content.as_deref().unwrap_or("No content.");
+                    iced::widget::scrollable(
+                        text(md).size(12).color(colors.text).width(Length::Fill),
+                    )
+                    .height(Length::Fixed(420.0))
+                    .into()
+                };
+                column![
+                    row![
+                        text("Changelog").size(18).color(colors.title),
+                        Space::new().width(Length::Fill),
+                        close_button(&c),
+                    ].align_y(iced::Alignment::Center),
+                    body,
                 ]
-                .spacing(8)
+                .spacing(12)
+                .width(Length::Fixed(700.0))
                 .into()
             }
             Dialog::RemoveRepo { id, name } => {
@@ -1460,7 +2131,8 @@ impl App {
                 custom_command, custom_args,
             } => {
                 let title_text = if *is_new { "Add Instance" } else { "Instance Settings" };
-                let can_remove = !*is_new && *profile_id != self.active_profile_id;
+                let can_remove = !*is_new;
+                let is_active_profile = *profile_id == self.active_profile_id;
                 let remove_id = profile_id.clone();
 
                 let method_buttons: Vec<Element<Message>> = [
@@ -1562,7 +2234,29 @@ impl App {
                         let mut footer_items: Vec<Element<Message>> = Vec::new();
                         if can_remove {
                             let c2 = c;
-                            footer_items.push(
+                            let remove_el: Element<Message> = if is_active_profile {
+                                let dimmed_btn = button(text("Remove").size(13))
+                                    .padding([6, 14])
+                                    .style(move |_theme, _status| button::Style {
+                                        background: None,
+                                        text_color: iced::Color::from_rgba(1.0, 0.4, 0.4, 0.35),
+                                        border: iced::Border {
+                                            color: iced::Color::from_rgba(1.0, 0.4, 0.4, 0.25),
+                                            width: 1.0,
+                                            radius: 4.0.into(),
+                                        },
+                                        shadow: iced::Shadow::default(),
+                                        snap: true,
+                                    });
+                                iced::widget::tooltip(
+                                    dimmed_btn,
+                                    container(text("Cannot remove the active instance").size(11).color(c2.text))
+                                        .padding([4, 8])
+                                        .style(move |_theme| theme::tooltip_style(&c2)),
+                                    iced::widget::tooltip::Position::Top,
+                                )
+                                .into()
+                            } else {
                                 button(text("Remove").size(13).color(c.bad))
                                     .on_press(Message::RemoveProfile(remove_id))
                                     .padding([6, 14])
@@ -1571,8 +2265,9 @@ impl App {
                                         s.border.color = c2.bad;
                                         s
                                     })
-                                    .into(),
-                            );
+                                    .into()
+                            };
+                            footer_items.push(remove_el);
                         }
                         footer_items.push(Space::new().width(Length::Fill).into());
                         footer_items.push(
@@ -1645,7 +2340,7 @@ impl App {
         // Left section: title + spinner placeholder (fixed width, never shifts)
         let left_section = row![title, spinner_el]
             .spacing(12)
-            .align_y(iced::Alignment::End);
+            .align_y(iced::Alignment::Center);
 
         // Right section: optional profile picker + action buttons
         let mut right_items: Vec<Element<Message>> = Vec::new();
@@ -1730,25 +2425,43 @@ impl App {
         let is_active = self.active_tab == tab;
         let c = *colors;
 
-        let is_icon = matches!(tab, Tab::Options | Tab::Logs | Tab::About);
+        let is_icon = matches!(tab, Tab::Options | Tab::Logs);
+        // About uses its Unicode ⓘ glyph — compact width like SVG icon tabs
+        let is_unicode_icon = tab == Tab::About;
 
-        let lbl = self.tab_label(tab);
-        let label = text(lbl).size(if is_icon { 15 } else { 14 });
-        // All fixed-width buttons: center content inside
-        let content: Element<Message> = container(label)
+        let content: Element<Message> = if is_icon {
+            let icon_color = if is_active { c.primary_text } else { c.text };
+            container(
+                iced::widget::svg(tab_icon_svg(tab))
+                    .width(17)
+                    .height(17)
+                    .style(move |_t, _s| iced::widget::svg::Style { color: Some(icon_color) })
+            )
             .width(Length::Fill)
             .center_x(Length::Fill)
-            .into();
+            .into()
+        } else if is_unicode_icon {
+            let icon_color = if is_active { c.primary_text } else { c.text };
+            container(
+                text(tab.icon_label()).size(17).color(icon_color).line_height(1.0),
+            )
+            .center_x(Length::Fill)
+            .into()
+        } else {
+            let lbl = self.tab_label(tab);
+            container(text(lbl).size(14))
+                .width(Length::Fill)
+                .center_x(Length::Fill)
+                .into()
+        };
+
         let btn = button(content)
             .on_press(Message::SetTab(tab))
             .padding([7, 0])
-            .width(if is_icon { Length::Fixed(32.0) } else { Length::Fixed(114.0) });
+            .width(if is_icon || is_unicode_icon { Length::Fixed(32.0) } else { Length::Fixed(114.0) });
 
-        if is_active {
-            btn.style(move |_theme, _status| {
-                theme::tab_button_active_style(&c)
-            })
-            .into()
+        let styled_btn: Element<Message> = if is_active {
+            btn.style(move |_theme, _status| theme::tab_button_active_style(&c)).into()
         } else {
             btn.style(move |_theme, status| match status {
                 button::Status::Hovered => theme::tab_button_hovered_style(&c),
@@ -1756,6 +2469,20 @@ impl App {
                 _ => theme::tab_button_style(&c),
             })
             .into()
+        };
+
+        // Wrap icon tabs in a tooltip showing the tab name
+        if is_icon || tab == Tab::About {
+            iced::widget::tooltip(
+                styled_btn,
+                container(text(tab.tooltip()).size(11).color(c.text))
+                    .padding([3, 8])
+                    .style(move |_theme| theme::tooltip_style(&c)),
+                iced::widget::tooltip::Position::Bottom,
+            )
+            .into()
+        } else {
+            styled_btn
         }
     }
 
@@ -1842,6 +2569,383 @@ pub fn name_font(colors: &ThemeColors) -> Font {
     }
 }
 
+/// Quick Add preset data (mirrors wuddle-gui/src/presets.js)
+struct Preset {
+    name: &'static str,
+    url: &'static str,
+    description: &'static str,
+    categories: &'static [&'static str],
+    recommended: bool,
+    warning: Option<&'static str>,
+    companion_links: &'static [(&'static str, &'static str)],
+    expanded_notes: &'static [&'static str],
+}
+
+static QUICK_ADD_PRESETS: &[Preset] = &[
+    Preset {
+        name: "VanillaFixes",
+        url: "https://github.com/hannesmann/vanillafixes",
+        description: "A client modification for World of Warcraft 1.6.1-1.12.1 to eliminate stutter and animation lag. VanillaFixes also acts as a launcher (start game via VanillaFixes.exe instead of Wow.exe) and DLL mod loader which loads DLL files listed in dlls.txt found in the WoW install directory.",
+        categories: &["Performance"],
+        recommended: true,
+        warning: Some("VanillaFixes may trigger antivirus false-positive alerts on Windows."),
+        companion_links: &[],
+        expanded_notes: &[],
+    },
+    Preset {
+        name: "Interact",
+        url: "https://github.com/lookino/Interact",
+        description: "Legacy WoW client mod for 1.12 that brings Dragonflight-style interact key support to Vanilla, reducing click friction and improving moment-to-moment gameplay.",
+        categories: &["QoL"],
+        recommended: false,
+        warning: None,
+        companion_links: &[],
+        expanded_notes: &[],
+    },
+    Preset {
+        name: "UnitXP_SP3",
+        url: "https://codeberg.org/konaka/UnitXP_SP3",
+        description: "Adds optional camera offset, proper nameplates (showing only with LoS), improved tab-targeting keybind behavior, LoS and distance checks in Lua, screenshot format options, network tweaks, background notifications, and additional QoL features.",
+        categories: &["QoL", "API"],
+        recommended: true,
+        warning: Some("UnitXP_SP3 may trigger antivirus false-positive alerts on Windows."),
+        companion_links: &[],
+        expanded_notes: &[],
+    },
+    Preset {
+        name: "nampower",
+        url: "https://gitea.com/avitasia/nampower",
+        description: "Addresses a 1.12 client casting limitation where follow-up casts wait on round-trip completion feedback. The result is reduced cast downtime and better effective DPS, especially on higher-latency connections.",
+        categories: &["API"],
+        recommended: true,
+        warning: None,
+        companion_links: &[("nampowersettings", "https://gitea.com/avitasia/nampowersettings")],
+        expanded_notes: &[],
+    },
+    Preset {
+        name: "SuperWoW",
+        url: "https://github.com/balakethelock/SuperWoW",
+        description: "Client mod for WoW 1.12.1 that fixes engine/client bugs and expands the Lua API used by addons. Some addons require SuperWoW directly, and many others gain improved functionality when it is present.",
+        categories: &["QoL", "API"],
+        recommended: true,
+        warning: Some("Known issue: SuperWoW will trigger antivirus false-positive alerts on Windows."),
+        companion_links: &[
+            ("SuperAPI", "https://github.com/balakethelock/SuperAPI"),
+            ("SuperAPI_Castlib", "https://github.com/balakethelock/SuperAPI_Castlib"),
+        ],
+        expanded_notes: &[
+            "SuperAPI improves compatibility with the default interface and adds a minimap icon for persistent mod settings.",
+            "It exposes settings like autoloot, clickthrough corpses, GUID in combat log/events, adjustable FoV, enable background sound, uncapped sound channels, and targeting circle style.",
+            "SuperAPI_Castlib adds default-style nameplate castbars. If you're using pfUI/shaguplates, you do not need this module.",
+        ],
+    },
+    Preset {
+        name: "DXVK (GPLAsync fork)",
+        url: "https://gitlab.com/Ph42oN/dxvk-gplasync",
+        description: "DXVK can massively improve performance in old Direct3D titles (including WoW 1.12) by using Vulkan. This fork includes Async + GPL options aimed at further reducing stutters. Async/GPL behavior is controlled through dxvk.conf, so users can keep default behavior if they prefer.",
+        categories: &["Performance"],
+        recommended: true,
+        warning: None,
+        companion_links: &[],
+        expanded_notes: &[],
+    },
+    Preset {
+        name: "perf_boost",
+        url: "https://gitea.com/avitasia/perf_boost",
+        description: "Performance-focused DLL for WoW 1.12.1 intended to improve FPS in crowded areas and raids. Uses advanced render-distance controls.",
+        categories: &["Performance"],
+        recommended: false,
+        warning: None,
+        companion_links: &[("PerfBoostSettings", "https://gitea.com/avitasia/PerfBoostSettings")],
+        expanded_notes: &[],
+    },
+    Preset {
+        name: "VanillaHelpers",
+        url: "https://github.com/isfir/VanillaHelpers",
+        description: "Utility library for WoW 1.12 adding file read/write helpers, minimap blip customization, larger allocator capacity, higher-resolution texture/skin support, and character morph-related functionality.",
+        categories: &["API", "Performance"],
+        recommended: true,
+        warning: None,
+        companion_links: &[],
+        expanded_notes: &[],
+    },
+];
+
+/// Build the Quick Add preset card list (shown when URL input is empty in mods dialog).
+fn build_quick_add_presets<'a>(repos: &[RepoRow], colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+
+    let cards: Vec<Element<Message>> = QUICK_ADD_PRESETS.iter().map(|preset| {
+        let already_installed = repos.iter().any(|r| {
+            r.url.trim_end_matches('/') == preset.url.trim_end_matches('/')
+        });
+
+        // Title link — clicking it fills the URL input (underlined blue link)
+        let preset_url = preset.url.to_string();
+        let title_btn = button(
+            iced::widget::rich_text::<(), _, _, _>([
+                iced::widget::span(preset.name)
+                    .underline(true)
+                    .color(c.link)
+                    .size(14.0_f32),
+            ])
+        )
+        .on_press(Message::SetAddRepoUrl(preset_url.clone()))
+        .padding(0)
+        .style(move |_t, _s| button::Style {
+            background: None,
+            text_color: c.link,
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        });
+
+        // Category/flag tags — colors match Tauri CSS variables exactly
+        let mut tags: Vec<Element<Message>> = Vec::new();
+        if preset.recommended {
+            tags.push(badge_tag(
+                "Recommended",
+                iced::Color::from_rgb8(0x34, 0xd3, 0x99),
+                iced::Color::from_rgb8(0x10, 0xb9, 0x81),
+            ));
+        }
+        if preset.warning.is_some() {
+            tags.push(badge_tag(
+                "AV false-positive",
+                iced::Color::from_rgb8(0xfc, 0xa5, 0xa5),
+                iced::Color::from_rgb8(0xef, 0x44, 0x44),
+            ));
+        }
+        for cat in preset.categories {
+            let (text_col, base_col) = match *cat {
+                "Performance" => (
+                    iced::Color::from_rgb8(0xc4, 0xb5, 0xfd),
+                    iced::Color::from_rgb8(0xa8, 0x55, 0xf7),
+                ),
+                "QoL" => (
+                    iced::Color::from_rgb8(0x93, 0xc5, 0xfd),
+                    iced::Color::from_rgb8(0x3b, 0x82, 0xf6),
+                ),
+                "API" => (
+                    iced::Color::from_rgb8(0xfd, 0xe6, 0x8a),
+                    iced::Color::from_rgb8(0xfa, 0xcc, 0x15),
+                ),
+                _ => (c.muted, c.muted),
+            };
+            tags.push(badge_tag(cat, text_col, base_col));
+        }
+
+        let tags_row = row(tags).spacing(4).align_y(iced::Alignment::Center);
+
+        // Description + optional expanded bullet notes + optional warning
+        let mut desc_col: Vec<Element<Message>> = vec![
+            text(preset.description).size(12).color(c.text_soft).into(),
+        ];
+        // Expanded bullet notes (e.g. SuperWoW)
+        for note in preset.expanded_notes {
+            desc_col.push(
+                row![
+                    text("\u{2022}").size(11).color(c.text_soft),
+                    text(*note).size(11).color(c.text_soft),
+                ]
+                .spacing(4)
+                .into()
+            );
+        }
+        if let Some(warn) = preset.warning {
+            desc_col.push(
+                text(warn).size(11).color(iced::Color::from_rgb8(0xfc, 0xa5, 0xa5)).into()
+            );
+        }
+        // Companion links (blue underlined)
+        if !preset.companion_links.is_empty() {
+            let companions: Vec<Element<Message>> = preset.companion_links.iter().map(|(label, lurl)| {
+                let l = lurl.to_string();
+                button(
+                    iced::widget::rich_text::<(), _, _, _>([
+                        iced::widget::span(*label)
+                            .underline(true)
+                            .color(c.link)
+                            .size(11.0_f32),
+                    ])
+                )
+                .on_press(Message::OpenUrl(l))
+                .padding(0)
+                .style(move |_t, _s| button::Style {
+                    background: None,
+                    text_color: c.link,
+                    border: iced::Border::default(),
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                })
+                .into()
+            }).collect();
+            desc_col.push(
+                row![
+                    text("Companion addons:").size(11).color(c.muted),
+                    row(companions).spacing(8),
+                ].spacing(4).into()
+            );
+        }
+
+        // Action button (Installed badge or Add button) — bottom-right of card
+        let action_btn: Element<Message> = if already_installed {
+            container(
+                text("Installed").size(12).color(iced::Color::from_rgb8(0x34, 0xd3, 0x99))
+            )
+            .padding([4, 10])
+            .style(move |_t| container::Style {
+                background: Some(iced::Background::Color(
+                    iced::Color::from_rgba8(0x10, 0xb9, 0x81, 0.15)
+                )),
+                border: iced::Border {
+                    color: iced::Color::from_rgba8(0x10, 0xb9, 0x81, 0.4),
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+        } else {
+            let pu = preset.url.to_string();
+            button(text("Add").size(12))
+                .on_press(Message::SetAddRepoUrl(pu))
+                .padding([4, 14])
+                .style(move |_t, _s| theme::tab_button_active_style(&c))
+                .into()
+        };
+
+        // Assemble card — action button at bottom-right
+        let card_content = column![
+            row![title_btn, tags_row].spacing(8).align_y(iced::Alignment::Center),
+            column(desc_col).spacing(3),
+            row![Space::new().width(Length::Fill), action_btn]
+                .align_y(iced::Alignment::Center),
+        ]
+        .spacing(6);
+
+        container(card_content)
+            .width(Length::Fill)
+            .padding([10, 14])
+            .style(move |_t| theme::card_style(&c))
+            .into()
+    }).collect();
+
+    column(cards).spacing(6).width(Length::Fill).into()
+}
+
+/// Small colored tag badge used in preset cards.
+/// `text_color` is the label text color; `base_color` controls the background/border tint.
+fn badge_tag<'a>(label: &'static str, text_color: iced::Color, base_color: iced::Color) -> Element<'a, Message> {
+    container(
+        text(label).size(10).color(text_color)
+    )
+    .padding([2, 6])
+    .style(move |_t| container::Style {
+        background: Some(iced::Background::Color(
+            iced::Color::from_rgba(base_color.r, base_color.g, base_color.b, 0.18)
+        )),
+        border: iced::Border {
+            color: iced::Color::from_rgba(base_color.r, base_color.g, base_color.b, 0.45),
+            width: 1.0,
+            radius: 5.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Build an SVG handle for a forge icon.
+/// `forge_url` is used to distinguish Codeberg from other Gitea-based instances.
+fn forge_svg_handle(forge: &str, forge_url: &str) -> iced::widget::svg::Handle {
+    let svg: &str = match forge {
+        "github" => concat!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">"#,
+            r#"<path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 "#,
+            r#"11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61"#,
+            r#"-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 "#,
+            r#"1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776"#,
+            r#".417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22"#,
+            r#"-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 "#,
+            r#"1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 "#,
+            r#"3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 "#,
+            r#"2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 "#,
+            r#"12.297c0-6.627-5.373-12-12-12"/></svg>"#,
+        ),
+        "gitlab" => concat!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">"#,
+            r#"<path d="M23.955 13.587l-1.342-4.135-2.664-8.189c-.135-.423-.73-.423-.867 0L16.42 "#,
+            r#"9.452H7.582L4.918 1.263c-.135-.423-.731-.423-.867 0L1.386 9.452.044 13.587c-.121"#,
+            r#".374.014.784.33 1.016L12 22.047l11.625-8.444c.317-.232.452-.642.33-1.016"/></svg>"#,
+        ),
+        _ => "",  // resolved below based on URL
+    };
+
+    // For gitea-typed forges, distinguish Codeberg from generic Gitea/Forgejo
+    let svg_owned: String;
+    let resolved_svg = if svg.is_empty() {
+        if forge_url.contains("codeberg") {
+            // Codeberg: hollow mountain/iceberg shape (two concentric triangles, fill-rule evenodd)
+            svg_owned = concat!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">"#,
+                r#"<path fill-rule="evenodd" d="M12 2L2 22h20zM12 8L5.5 22h13z"/>"#,
+                r#"</svg>"#,
+            ).to_string();
+        } else {
+            // Gitea / Forgejo: tea cup with handle (stroke-based)
+            svg_owned = concat!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" "#,
+                r#"stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">"#,
+                r#"<path d="M5 9h14v7a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V9z"/>"#,
+                r#"<path d="M5 9V7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v2"/>"#,
+                r#"<path d="M19 11.5h1a2 2 0 0 1 0 4h-1"/>"#,
+                r#"</svg>"#,
+            ).to_string();
+        }
+        svg_owned.as_str()
+    } else {
+        svg
+    };
+
+    iced::widget::svg::Handle::from_memory(resolved_svg.as_bytes().to_vec())
+}
+
+/// SVG icons for the Options / Logs / About tab buttons, matching the Tauri version exactly.
+fn tab_icon_svg(tab: Tab) -> iced::widget::svg::Handle {
+    let svg: &'static str = match tab {
+        Tab::Options => concat!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" "#,
+            r#"stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">"#,
+            r#"<path d="M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6z"/>"#,
+            r#"<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06"#,
+            r#"a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09"#,
+            r#"A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83"#,
+            r#"l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09"#,
+            r#"A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0"#,
+            r#"l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09"#,
+            r#"a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83"#,
+            r#"l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09"#,
+            r#"a1.65 1.65 0 0 0-1.51 1z"/></svg>"#,
+        ),
+        Tab::Logs => concat!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" "#,
+            r#"stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">"#,
+            r#"<path d="M5 4.5A1.5 1.5 0 0 1 6.5 3h9l4.5 4.5V19.5A1.5 1.5 0 0 1 18.5 21h-12"#,
+            r#"A1.5 1.5 0 0 1 5 19.5v-15Zm10 .5v3h3"/>"#,
+            r#"<path d="M8 11h8M8 14h8M8 17h6"/>"#,
+            r#"</svg>"#,
+        ),
+        Tab::About => concat!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">"#,
+            r#"<path fill-rule="evenodd" d="M12 2a10 10 0 0 1 0 20a10 10 0 0 1 0-20z "#,
+            r#"M12 6.8a1.2 1.2 0 0 1 0 2.4a1.2 1.2 0 0 1 0-2.4z "#,
+            r#"M10.5 11h3v7h-3z"/></svg>"#,
+        ),
+        _ => r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"></svg>"#,
+    };
+    iced::widget::svg::Handle::from_memory(svg.as_bytes().to_vec())
+}
+
 fn close_button<'a>(colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
     button(text("\u{2715}").size(16).color(c.muted)) // ✕
@@ -1871,11 +2975,12 @@ pub fn inline_context_menu<'a>(app: &App, repo: &RepoRow, colors: &ThemeColors) 
     let has_update = app.plans.iter().any(|p| p.repo_id == rid && p.has_update);
     let enabled = repo.enabled;
     let is_mod_val = is_mod(repo);
+    let update_ignored = app.ignored_update_ids.contains(&rid);
     let name = format!("{}/{}", repo.owner, repo.name);
 
     let mut items: Vec<Element<Message>> = Vec::new();
 
-    if has_update {
+    if has_update && !update_ignored {
         items.push(ctx_menu_item("\u{2193} Update", Message::UpdateRepo(rid), &c));
     }
     items.push(ctx_menu_item("Reinstall / Repair", Message::ReinstallRepo(rid), &c));
@@ -1883,6 +2988,8 @@ pub fn inline_context_menu<'a>(app: &App, repo: &RepoRow, colors: &ThemeColors) 
         let label = if enabled { "Disable" } else { "Enable" };
         items.push(ctx_menu_item(label, Message::ToggleRepoEnabled(rid, !enabled), &c));
     }
+    let ignore_label = if update_ignored { "Unignore Updates" } else { "Ignore Updates" };
+    items.push(ctx_menu_item(ignore_label, Message::ToggleIgnoreUpdates(rid), &c));
     // Remove (danger)
     let c3 = c;
     items.push(
@@ -2036,14 +3143,24 @@ impl<Message> canvas::Program<Message> for SpinnerCanvas {
     }
 }
 
-fn chrono_now() -> String {
+fn chrono_now_fmt(use_12h: bool) -> String {
     // Simple time string without pulling in chrono crate
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let hours = (secs % 86400) / 3600;
+    let h24 = (secs % 86400) / 3600;
     let mins = (secs % 3600) / 60;
     let s = secs % 60;
-    format!("{:02}:{:02}:{:02}", hours, mins, s)
+    if use_12h {
+        let ampm = if h24 < 12 { "AM" } else { "PM" };
+        let h12 = match h24 % 12 { 0 => 12, h => h };
+        format!("{:02}:{:02}:{:02} {}", h12, mins, s, ampm)
+    } else {
+        format!("{:02}:{:02}:{:02}", h24, mins, s)
+    }
+}
+
+fn chrono_now() -> String {
+    chrono_now_fmt(false)
 }

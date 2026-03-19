@@ -2,6 +2,60 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.0.0-alpha.3 (Iced frontend)
+
+### Feature Parity — All Buttons Wired
+
+- **Open URL:** All external links (home page, forum, Discord, armory, GitHub repos, credits) open in the system browser via `open::that`. Link buttons on the Home tab now show a tooltip with the full URL on hover.
+- **Game launch:** The PLAY button is fully wired. Resolves VanillaFixes.exe → Wow.exe fallback, respects the active profile's launch method (Auto / Lutris / Wine / Custom), and spawns the game process detached from Wuddle.
+- **GitHub token:** Save and Forget token buttons are wired. Token is stored in the system keyring (with a file fallback for portable mode) and loaded into `wuddle_engine` on startup.
+- **WoW directory picker:** Browse button in Instance Settings opens a native folder picker (`rfd`). Picked path is applied to the open dialog immediately.
+- **Copy to clipboard:** "Copy Log" button on the Logs tab copies the full log text to the system clipboard via `arboard`.
+
+### Changelog Dialog
+
+- **In-app changelog:** "Changelog" button on the About tab opens a scrollable in-app dialog instead of opening GitHub in a browser. Content is fetched from the GitHub raw URL on click; falls back to the embedded `CHANGELOG.md` if the fetch fails or no network is available.
+
+### Self-Update Check
+
+- **On launch:** Wuddle checks for a new release on startup (after repos load).
+- **On About tab:** Navigating to the About tab triggers a fresh update check.
+- **Hourly subscription:** When no GitHub token is set, an hourly background check fires automatically so unauthenticated users see current version info without hitting rate limits.
+- **"Refresh" button:** Renamed from "Refresh details" — triggers an immediate version check.
+- **Dynamic version display:** Latest version and update status on the About tab now reflect live check results instead of hardcoded values.
+
+### Projects — Status Badges & Filtering
+
+- **Colored status pills:** Each mod/addon row now shows a color-coded badge (Up to date · Update available · Error · Disabled · Ignored) instead of plain text, using a semi-transparent background and matching border.
+- **Ignore Updates:** The ⋮ context menu now includes "Ignore Updates" / "Unignore Updates". Ignored repos are excluded from the Updates filter and update counts, and shown under a dedicated Ignored filter.
+- **API health indicator:** The filter-row status text is now color-coded — green when authenticated, amber when anonymous, red when rate-limited or erroring.
+
+### Tweaks Panel
+
+- **Fully wired:** Read Current, Reset to Defaults, Restore Backup, and Apply Tweaks buttons are all connected to the engine's tweak functions.
+- **Sliders:** FoV, Farclip, Frill Distance, Nameplate Distance, Max Camera Distance, and Sound Channels each have a live slider or number input. Changing a slider marks that tweak as selected.
+- **Disable when no WoW dir:** All tweak controls are disabled when no WoW directory is configured.
+
+### Instance Settings Dialog
+
+- **Remove button always visible:** When editing an existing instance, the Remove button is always shown at the bottom-left of the dialog. When the selected instance is the active profile it is dimmed (no `on_press`) with a tooltip: "Cannot remove the active instance". Previously it was hidden entirely for the active profile.
+- **Profile cards simplified:** Instance cards in the Options tab are now clean clickable cards (no embedded Remove button). Remove is only accessible through the edit dialog.
+
+### About Tab Layout
+
+- **Side-by-side cards:** Application and Credits cards are displayed side-by-side instead of stacked.
+- **Tooltipped header buttons:** All header buttons (Refresh, Changelog, Open on GitHub, update status) are wrapped in descriptive tooltips.
+
+### Toolbar & Icon Fixes
+
+- **Settings icon:** Replaced the Unicode ⚙ glyph with a proper Feather-style stroke SVG gear icon matching the visual weight of other icons.
+- **About icon:** Restored the ⓘ Unicode character (U+24D8). Icon height is now constrained with `line_height(1.0)` so the About button matches the height of the SVG icon buttons exactly.
+- **Spinner centering:** The loading spinner is now vertically centered with the "Wuddle" title text in the topbar.
+
+### Porting Checklist
+
+- **PORTING_CHECKLIST.md:** Added a feature-by-feature cross-reference table comparing the Tauri and Iced implementations (✅ Done / 🔶 Partial / ❌ Missing).
+
 ## v3.0.0-alpha.2 (Iced frontend)
 
 ### Overlay Context Menus

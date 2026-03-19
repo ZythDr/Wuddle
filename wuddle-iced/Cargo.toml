@@ -1,6 +1,6 @@
 [package]
 name = "wuddle-iced"
-version = "3.0.0-alpha.2"
+version = "3.0.0-alpha.3"
 description = "Wuddle v3 — native GPU-rendered frontend using Iced"
 edition = "2021"
 
@@ -21,3 +21,5 @@ rfd = "0.15"
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 notify-rust = "4"
 rusqlite = { version = "0.31", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+image = { version = "0.25", features = ["webp"] }

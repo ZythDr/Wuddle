@@ -23,6 +23,7 @@ pub struct ThemeColors {
     pub card: Color,
     pub card2: Color,
     pub text: Color,
+    pub text_soft: Color,
     pub muted: Color,
     pub title: Color,
     pub primary: Color,
@@ -122,6 +123,7 @@ impl WuddleTheme {
                 card: hex(0x111018),
                 card2: hex(0x0d0c13),
                 text: hex(0xefe7d9),
+                text_soft: rgba(229, 208, 177, 0.56),
                 muted: rgba(231, 212, 181, 0.72),
                 title: hex(0xf6e8cb),
                 primary: hex(0xbd7427),
@@ -162,6 +164,7 @@ impl WuddleTheme {
                 card: hex(0x0f1420),
                 card2: hex(0x0a0f18),
                 text: hex(0xd8e4f0),
+                text_soft: rgba(190, 213, 240, 0.60),
                 muted: rgba(186, 210, 232, 0.72),
                 title: hex(0xd5e6f5),
                 primary: hex(0x3a7cc6),
@@ -202,6 +205,7 @@ impl WuddleTheme {
                 card: hex(0x0e1812),
                 card2: hex(0x0a120d),
                 text: hex(0xdceee2),
+                text_soft: rgba(186, 221, 202, 0.60),
                 muted: rgba(189, 224, 202, 0.72),
                 title: hex(0xd4f0de),
                 primary: hex(0x2e9c5a),
@@ -242,6 +246,7 @@ impl WuddleTheme {
                 card: hex(0x181010),
                 card2: hex(0x120c0e),
                 text: hex(0xf0e4da),
+                text_soft: rgba(229, 187, 183, 0.60),
                 muted: rgba(232, 210, 192, 0.72),
                 title: hex(0xf5e0d0),
                 primary: hex(0xc4523a),
@@ -282,6 +287,7 @@ impl WuddleTheme {
                 card: hex(0x181418),
                 card2: hex(0x121418),
                 text: hex(0xf0e0c8),
+                text_soft: rgba(204, 209, 218, 0.58),
                 muted: rgba(232, 214, 186, 0.72),
                 title: hex(0xf0dcc0),
                 primary: hex(0xc8a040),
@@ -664,10 +670,10 @@ pub fn scrim_style() -> container::Style {
     }
 }
 
-/// Dialog box style (distinct from card_style — darker, more prominent shadow)
+/// Dialog box style (distinct from card_style — uses card gradient, more prominent shadow)
 pub fn dialog_style(colors: &ThemeColors) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(colors.card)),
+        background: Some(v_gradient(colors.card_grad_top, colors.card_grad_bottom)),
         border: Border {
             color: colors.border,
             width: 1.0,
@@ -713,6 +719,24 @@ pub fn context_menu_style(colors: &ThemeColors) -> container::Style {
             blur_radius: 12.0,
         },
         text_color: None,
+        snap: true,
+    }
+}
+
+pub fn tooltip_style(colors: &ThemeColors) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(colors.card)),
+        border: Border {
+            color: colors.border,
+            width: 1.0,
+            radius: Radius::new(4.0),
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+            offset: iced::Vector::new(1.0, 2.0),
+            blur_radius: 6.0,
+        },
+        text_color: Some(colors.text),
         snap: true,
     }
 }

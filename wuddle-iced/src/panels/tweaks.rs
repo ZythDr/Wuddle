@@ -52,6 +52,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 1.0..=2.5,
                 0.025,
                 |v| Message::SetTweakFov(v),
+                format!("{:.2} ({:.0}°)", tv.fov, tv.fov.to_degrees()),
                 colors,
             ),
             tweak_row_slider(
@@ -63,6 +64,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 777.0..=10000.0,
                 1.0,
                 |v| Message::SetTweakFarclip(v),
+                format!("{:.0}", tv.farclip),
                 colors,
             ),
             tweak_row_slider(
@@ -74,6 +76,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 70.0..=1000.0,
                 1.0,
                 |v| Message::SetTweakFrilldistance(v),
+                format!("{:.0}", tv.frilldistance),
                 colors,
             ),
             tweak_row_slider(
@@ -85,6 +88,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 20.0..=80.0,
                 1.0,
                 |v| Message::SetTweakNameplateDist(v),
+                format!("{:.0}", tv.nameplate_dist),
                 colors,
             ),
         ]
@@ -188,6 +192,7 @@ fn tweak_row_slider<'a, F>(
     range: std::ops::RangeInclusive<f32>,
     step: f32,
     on_change: F,
+    value_display: String,
     colors: &ThemeColors,
 ) -> Element<'a, Message>
 where
@@ -199,10 +204,10 @@ where
             .on_toggle(move |b| Message::ToggleTweak(id, b)),
         row![
             slider(range, value, on_change).step(step).width(Length::Fill),
-            text(format!("{:.2}", value))
+            text(value_display)
                 .size(12)
                 .color(colors.muted)
-                .width(60),
+                .width(80),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),

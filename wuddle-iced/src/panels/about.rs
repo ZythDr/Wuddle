@@ -1,11 +1,10 @@
-use iced::widget::{button, column, container, row, text, Space};
+use iced::widget::{button, column, container, row, text, tooltip, Space};
 use iced::{Element, Length};
 
 use crate::theme::{self, ThemeColors};
 use crate::{App, Message};
 
 const GITHUB_URL: &str = "https://github.com/ZythDr/Wuddle";
-const RELEASES_URL: &str = "https://github.com/ZythDr/Wuddle/releases";
 
 pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
@@ -23,11 +22,12 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         ]
         .spacing(2),
         Space::new().width(Length::Fill),
-        btn("Refresh details", Message::CheckSelfUpdate, &c),
-        btn("Changelog", Message::OpenUrl(RELEASES_URL.to_string()), &c),
-        btn(update_label, Message::CheckSelfUpdate, &c),
-        btn(
-            "Open Wuddle on GitHub",
+        btn_tip("Refresh", "Re-check for Wuddle updates", Message::CheckSelfUpdate, &c),
+        btn_tip("Changelog", "View Wuddle changelog in-app", Message::ShowChangelog, &c),
+        btn_tip(update_label, "Current update status of Wuddle", Message::CheckSelfUpdate, &c),
+        btn_tip(
+            "Open on GitHub",
+            "Open Wuddle repository on GitHub",
             Message::OpenUrl(GITHUB_URL.to_string()),
             &c,
         ),
@@ -44,7 +44,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let app_card = settings_card(
         column![
             text("Application").size(16).color(colors.title),
-            about_row("Current version:", "3.0.0-alpha.1", colors),
+            about_row("Current version:", "3.0.0-alpha.3", colors),
             about_row("Latest version:", latest_display, colors),
             about_row("Package name:", "wuddle-iced", colors),
         ]
@@ -77,7 +77,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         .size(12)
         .color(colors.muted);
 
-    column![header, app_card, credits_card, status]
+    column![header, row![app_card, credits_card].spacing(8), status]
         .spacing(8)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -103,16 +103,23 @@ fn credit_row<'a>(
     let url_owned = String::from(url);
     row![
         text(String::from(key)).size(13).color(colors.muted).width(160),
-        button(text(String::from(label)).size(13).color(c.primary))
-            .on_press(Message::OpenUrl(url_owned))
-            .padding(0)
-            .style(move |_theme, _status| button::Style {
-                background: None,
-                text_color: c.primary,
-                border: iced::Border::default(),
-                shadow: iced::Shadow::default(),
-                snap: true,
-            }),
+        button(
+            iced::widget::rich_text::<(), _, _, _>([
+                iced::widget::span(String::from(label))
+                    .underline(true)
+                    .color(c.link)
+                    .size(13.0_f32),
+            ])
+        )
+        .on_press(Message::OpenUrl(url_owned))
+        .padding(0)
+        .style(move |_theme, _status| button::Style {
+            background: None,
+            text_color: c.link,
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        }),
     ]
     .spacing(8)
     .into()
@@ -129,14 +136,22 @@ fn settings_card<'a>(
         .into()
 }
 
-fn btn<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
+fn btn_tip<'a>(label: &str, tip: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
-    button(text(String::from(label)).size(13))
+    let tip_str = String::from(tip);
+    let btn = button(text(String::from(label)).size(13))
         .on_press(msg)
         .padding([6, 12])
         .style(move |_theme, status| match status {
             button::Status::Hovered => theme::tab_button_hovered_style(&c),
             _ => theme::tab_button_style(&c),
-        })
-        .into()
+        });
+    tooltip(
+        btn,
+        container(text(tip_str).size(11).color(c.text))
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(&c)),
+        tooltip::Position::Bottom,
+    )
+    .into()
 }

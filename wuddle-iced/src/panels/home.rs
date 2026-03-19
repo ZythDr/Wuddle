@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, row, rule, scrollable, text, Space};
+use iced::widget::{button, column, container, row, rule, scrollable, text, tooltip, Space};
 use iced::{Element, Length};
 
 use crate::theme::{self, ThemeColors};
@@ -35,6 +35,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 .on_press(Message::OpenDialog(Dialog::AddRepo {
                     url: String::new(),
                     mode: String::from("auto"),
+                    is_addons: false,
+                    advanced: false,
                 }))
                 .padding([6, 14])
                 .style(move |_theme, status| match status {
@@ -216,44 +218,53 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         .style(move |_theme| theme::card_style(&c2))
     };
 
-    // --- Turtle links card ---
-    let official_links = column![
-        text("Official Links").size(16).color(colors.title),
-        link_button("Homepage", URL_HOMEPAGE, &c),
-        link_button("Database", URL_DATABASE, &c),
-        link_button("Forum", URL_FORUM, &c),
-        link_button("Talent Calculator", URL_TALENTS, &c),
-        link_button("Join Discord", URL_DISCORD, &c),
-        link_button("Armory", URL_ARMORY, &c),
-    ]
-    .spacing(8)
-    .width(Length::Fill)
-    .align_x(iced::Alignment::Center);
+    // Show Turtle WoW links only when the active profile has "I like turtles!" enabled
+    let like_turtles = app.profiles.iter()
+        .find(|p| p.id == app.active_profile_id)
+        .map(|p| p.like_turtles)
+        .unwrap_or(true);
 
-    let community_links = column![
-        text("Useful Community Links").size(16).color(colors.title),
-        link_button("AddOns", URL_ADDONS, &c),
-        link_button("Turtletimers", URL_TURTLETIMERS, &c),
-        link_button("RetroCro Mods Guide", URL_RETROCRO, &c),
-        link_button("Wowauctions", URL_WOWAUCTIONS, &c),
-        link_button("RaidRes", URL_RAIDRES, &c),
-        link_button("Turtlogs", URL_TURTLOGS, &c),
-    ]
-    .spacing(8)
-    .width(Length::Fill)
-    .align_x(iced::Alignment::Center);
+    let mut page_items: Vec<Element<Message>> = vec![updates_card.into()];
 
-    let links_row = row![official_links, community_links].spacing(16);
+    if like_turtles {
+        let official_links = column![
+            text("Official Links").size(16).color(colors.title),
+            link_button("Homepage", URL_HOMEPAGE, &c),
+            link_button("Database", URL_DATABASE, &c),
+            link_button("Forum", URL_FORUM, &c),
+            link_button("Talent Calculator", URL_TALENTS, &c),
+            link_button("Join Discord", URL_DISCORD, &c),
+            link_button("Armory", URL_ARMORY, &c),
+        ]
+        .spacing(8)
+        .width(Length::Fill)
+        .align_x(iced::Alignment::Center);
 
-    let links_card = {
-        let c2 = c;
-        container(links_row.padding(18))
-            .width(Length::Fill)
-            .style(move |_theme| theme::card_style(&c2))
-    };
+        let community_links = column![
+            text("Useful Community Links").size(16).color(colors.title),
+            link_button("AddOns", URL_ADDONS, &c),
+            link_button("Turtletimers", URL_TURTLETIMERS, &c),
+            link_button("RetroCro Mods Guide", URL_RETROCRO, &c),
+            link_button("Wowauctions", URL_WOWAUCTIONS, &c),
+            link_button("RaidRes", URL_RAIDRES, &c),
+            link_button("Turtlogs", URL_TURTLOGS, &c),
+        ]
+        .spacing(8)
+        .width(Length::Fill)
+        .align_x(iced::Alignment::Center);
+
+        let links_card = {
+            let c2 = c;
+            container(row![official_links, community_links].spacing(16).padding(18))
+                .width(Length::Fill)
+                .style(move |_theme| theme::card_style(&c2))
+        };
+
+        page_items.push(links_card.into());
+    }
 
     scrollable(
-        column![updates_card, links_card]
+        iced::widget::column(page_items)
             .spacing(10)
             .width(Length::Fill),
     )
@@ -276,7 +287,8 @@ fn btn_styled<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a
 fn link_button<'a>(label: &str, url: &str, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
     let url_owned = String::from(url);
-    button(
+    let url_tip = format!("Open in browser: {}", url);
+    let btn = button(
         container(text(String::from(label)).size(13).color(c.text))
             .width(Length::Fill)
             .center_x(Length::Shrink),
@@ -287,7 +299,14 @@ fn link_button<'a>(label: &str, url: &str, colors: &ThemeColors) -> Element<'a, 
     .style(move |_theme, status| match status {
         button::Status::Hovered => theme::tab_button_hovered_style(&c),
         _ => theme::tab_button_style(&c),
-    })
+    });
+    tooltip(
+        btn,
+        container(text(url_tip).size(11).color(c.text))
+            .padding([3, 8])
+            .style(move |_theme| crate::theme::tooltip_style(&c)),
+        tooltip::Position::Right,
+    )
     .into()
 }
 

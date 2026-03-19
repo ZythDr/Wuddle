@@ -71,9 +71,10 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         .filter(|r| if is_mods_tab { is_mod(r) } else { !is_mod(r) })
         .filter(|r| match app.filter {
             Filter::All => true,
-            Filter::Updates => app.plans.iter().any(|p| p.repo_id == r.id && p.has_update),
+            Filter::Updates => app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
+                && !app.ignored_update_ids.contains(&r.id),
             Filter::Errors => app.plans.iter().any(|p| p.repo_id == r.id && p.error.is_some()),
-            Filter::Ignored => !r.enabled,
+            Filter::Ignored => !r.enabled || app.ignored_update_ids.contains(&r.id),
         })
         .filter(|r| {
             app.project_search.is_empty()
@@ -86,13 +87,15 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
     let update_count = app.repos.iter().filter(|r| {
         (if is_mods_tab { is_mod(r) } else { !is_mod(r) })
             && app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
+            && !app.ignored_update_ids.contains(&r.id)
     }).count();
     let error_count = app.repos.iter().filter(|r| {
         (if is_mods_tab { is_mod(r) } else { !is_mod(r) })
             && app.plans.iter().any(|p| p.repo_id == r.id && p.error.is_some())
     }).count();
     let ignored_count = app.repos.iter().filter(|r| {
-        (if is_mods_tab { is_mod(r) } else { !is_mod(r) }) && !r.enabled
+        (if is_mods_tab { is_mod(r) } else { !is_mod(r) })
+            && (!r.enabled || app.ignored_update_ids.contains(&r.id))
     }).count();
 
     // Toolbar: filters on left, search + buttons on right, all on one row
@@ -102,13 +105,26 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         filter_button(&format!("Errors ({})", error_count), Filter::Errors, app.filter, &c),
         filter_button(&format!("{} ({})", if is_mods_tab { "Disabled" } else { "Ignored" }, ignored_count), Filter::Ignored, app.filter, &c),
         Space::new().width(8),
-        text(if wuddle_engine::github_token().is_some() {
-            "API status: authenticated"
-        } else {
-            "API status: anonymous"
-        })
-        .size(12)
-        .color(colors.muted),
+        {
+            let has_token = wuddle_engine::github_token().is_some();
+            let has_errors = app.plans.iter().any(|p| {
+                p.error.as_deref().map(|e| {
+                    let e = e.to_lowercase();
+                    e.contains("rate") || e.contains("403") || e.contains("429")
+                }).unwrap_or(false)
+            });
+            let partial_errors = !has_errors && app.plans.iter().any(|p| p.error.is_some());
+            let (api_label, api_color) = if has_errors {
+                ("API status: rate limited", colors.bad)
+            } else if partial_errors {
+                ("API status: partial errors", colors.warn)
+            } else if has_token {
+                ("API status: authenticated", colors.good)
+            } else {
+                ("API status: anonymous", colors.muted)
+            };
+            text(api_label).size(12).color(api_color)
+        },
     ]
     .spacing(4)
     .align_y(iced::Alignment::Center);
@@ -140,7 +156,9 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
             button(text("+ Add").size(13))
                 .on_press(Message::OpenDialog(Dialog::AddRepo {
                     url: String::new(),
-                    mode: String::from("auto"),
+                    mode: if is_mods_tab { String::from("auto") } else { String::from("addon_git") },
+                    is_addons: !is_mods_tab,
+                    advanced: false,
                 }))
                 .padding([4, 14])
                 .style(move |_theme, status| match status {
@@ -301,8 +319,7 @@ fn mod_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a
     let rid = repo.id;
     let enabled = repo.enabled;
 
-    let (status_text, status_color) = status_info(has_error, has_update, enabled, colors);
-
+    let update_ignored = app.ignored_update_ids.contains(&repo.id);
     let name_col = name_cell(repo, colors);
     let is_menu_open = app.open_menu == Some(repo.id);
     let menu_content = crate::inline_context_menu(app, repo, &c);
@@ -312,7 +329,7 @@ fn mod_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a
         col_cell(text(current_str).size(12).color(colors.muted), COL_CURRENT),
         col_cell(text(latest_str).size(12).color(colors.muted), COL_LATEST),
         col_cell(checkbox(enabled).on_toggle(move |b| Message::ToggleRepoEnabled(rid, b)), COL_ENABLED),
-        col_cell(text(status_text).size(12).color(status_color), COL_STATUS),
+        col_cell(status_badge(has_error, has_update, enabled, update_ignored, colors), COL_STATUS),
         col_cell(action_buttons(repo, has_update, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
@@ -333,8 +350,7 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<
     let enabled = repo.enabled;
 
     let current_branch = repo.git_branch.clone().unwrap_or_else(|| "master".to_string());
-    let (status_text, status_color) = status_info(has_error, has_update, enabled, colors);
-
+    let update_ignored = app.ignored_update_ids.contains(&repo.id);
     let name_col = name_cell(repo, colors);
     let is_menu_open = app.open_menu == Some(repo.id);
     let menu_content = crate::inline_context_menu(app, repo, &c);
@@ -358,7 +374,7 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<
     let row_content = row![
         name_col,
         col_cell(branch_display, COL_BRANCH),
-        col_cell(text(status_text).size(12).color(status_color), COL_STATUS),
+        col_cell(status_badge(has_error, has_update, enabled, update_ignored, colors), COL_STATUS),
         col_cell(action_buttons(repo, has_update, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
@@ -370,7 +386,7 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<
     column![separator, row_content].into()
 }
 
-/// Shared name cell (left-aligned, clickable link)
+/// Shared name cell (left-aligned, clickable title only — subtext is non-clickable plain text)
 fn name_cell<'a>(repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
     let url = repo.url.clone();
@@ -380,41 +396,82 @@ fn name_cell<'a>(repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a, Message
         format!("{} \u{2022} {} \u{2022} disabled", repo.owner, repo.forge)
     };
     let name_font = crate::name_font(colors);
-    button(
-        column![
-            text(repo.name.clone()).size(20).color(colors.link).font(name_font),
-            text(sub_text).size(12).color(colors.muted).font(colors.body_font),
-        ]
-        .spacing(2),
+
+    // Only the title is a clickable link — subtext is separate plain text below
+    let title_btn = button(
+        iced::widget::rich_text::<(), _, _, _>([
+            iced::widget::span(repo.name.clone())
+                .underline(true)
+                .color(c.link)
+                .font(name_font)
+                .size(20.0_f32),
+        ])
     )
     .on_press(Message::OpenUrl(url))
     .padding(0)
-    .width(Length::Fill)
     .style(move |_theme, _status| button::Style {
         background: None,
         text_color: c.link,
         border: iced::Border::default(),
         shadow: iced::Shadow::default(),
         snap: true,
-    })
+    });
+
+    container(
+        column![
+            title_btn,
+            text(sub_text).size(12).color(colors.muted).font(colors.body_font),
+        ]
+        .spacing(2),
+    )
+    .width(Length::Fill)
     .into()
 }
 
+/// Returns (label, text_color, bg_base_color) for a status badge.
 fn status_info(
     has_error: bool,
     has_update: bool,
     enabled: bool,
+    update_ignored: bool,
     colors: &ThemeColors,
-) -> (&'static str, iced::Color) {
+) -> (&'static str, iced::Color, iced::Color) {
     if has_error {
-        ("Error", colors.bad)
-    } else if has_update {
-        ("Update available", colors.warn)
+        ("Error", colors.bad, colors.bad)
     } else if !enabled {
-        ("Ignored", colors.muted)
+        ("Ignored", colors.muted, colors.muted)
+    } else if update_ignored {
+        ("Ignored", colors.muted, colors.muted)
+    } else if has_update {
+        ("Update available", colors.warn, colors.warn)
     } else {
-        ("Up to date", colors.good)
+        ("Up to date", colors.good, colors.good)
     }
+}
+
+/// Colored badge pill matching Tauri's badge style.
+fn status_badge<'a>(
+    has_error: bool,
+    has_update: bool,
+    enabled: bool,
+    update_ignored: bool,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let (label, text_color, base_color) = status_info(has_error, has_update, enabled, update_ignored, colors);
+    let bg = iced::Color::from_rgba(base_color.r, base_color.g, base_color.b, 0.18);
+    let border_color = iced::Color::from_rgba(base_color.r, base_color.g, base_color.b, 0.45);
+    container(
+        text(label).size(11).color(text_color),
+    )
+    .padding([2, 8])
+    .style(move |_theme| container::Style {
+        background: Some(iced::Background::Color(bg)),
+        border: iced::Border { color: border_color, width: 1.0, radius: 4.0.into() },
+        shadow: iced::Shadow::default(),
+        text_color: None,
+        snap: true,
+    })
+    .into()
 }
 
 /// Action column: Update button + triple-dot menu button (with anchored overlay).
@@ -533,8 +590,9 @@ fn status_rank(app: &App, repo: &RepoRow) -> u8 {
     let plan = app.plans.iter().find(|p| p.repo_id == repo.id);
     let has_error = plan.and_then(|p| p.error.as_ref()).is_some();
     let has_update = plan.map(|p| p.has_update).unwrap_or(false);
+    let update_ignored = app.ignored_update_ids.contains(&repo.id);
     if has_error { 0 }
-    else if has_update { 1 }
-    else if !repo.enabled { 3 }
+    else if has_update && !update_ignored { 1 }
+    else if !repo.enabled || update_ignored { 3 }
     else { 2 }
 }
