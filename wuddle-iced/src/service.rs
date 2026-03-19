@@ -575,43 +575,11 @@ pub fn parse_forge_url(url: &str) -> Option<ForgeInfo> {
 // Image helpers
 // ---------------------------------------------------------------------------
 
-/// Collect image URLs by scanning raw markdown text for:
-///   - ![alt](url) markdown syntax
-///   - <img src="url"> / <img src='url'> HTML syntax
-fn collect_image_urls_from_text(markdown: &str) -> Vec<String> {
+/// Collect image URLs from raw HTML `<img src="...">` tags in markdown text.
+/// Markdown-syntax images (`![alt](url)`) are handled by `Content::parse().images()` instead,
+/// which uses the same pulldown-cmark parser as iced's renderer (guaranteed URL match).
+fn collect_html_img_urls_from_text(markdown: &str) -> Vec<String> {
     let mut urls = Vec::new();
-
-    // --- Markdown syntax: ![alt](url) ---
-    let mut pos = 0;
-    while pos < markdown.len() {
-        match markdown[pos..].find("![") {
-            None => break,
-            Some(bang_offset) => {
-                let abs = pos + bang_offset;
-                match markdown[abs + 2..].find("](") {
-                    None => { pos = abs + 2; continue; }
-                    Some(close_offset) => {
-                        let url_start = abs + 2 + close_offset + 2;
-                        match markdown[url_start..].find(')') {
-                            None => { pos = abs + 2; continue; }
-                            Some(end_offset) => {
-                                let raw = markdown[url_start..url_start + end_offset].trim();
-                                // Strip optional title: url "title" or url 'title'
-                                let url = raw
-                                    .find(|c: char| c == ' ' || c == '"' || c == '\'')
-                                    .map(|i| raw[..i].trim())
-                                    .unwrap_or(raw);
-                                if !url.is_empty() {
-                                    urls.push(url.to_string());
-                                }
-                                pos = url_start + end_offset + 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     // --- HTML syntax: <img src="url"> or <img src='url'> ---
     let mut hpos = 0;
@@ -801,8 +769,13 @@ async fn fetch_github_preview(client: &Client, owner: &str, repo: &str) -> Resul
     };
 
     let raw_base = format!("https://raw.githubusercontent.com/{}/{}/HEAD/", owner, repo);
-    let readme_items: Vec<iced::widget::markdown::Item> = iced::widget::markdown::parse(&readme_text).collect();
-    let image_urls = collect_image_urls_from_text(&readme_text);
+    let md_content = iced::widget::markdown::Content::parse(&readme_text);
+    let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
+    // Use Content::images() for exact URL match with iced's renderer; add HTML <img> tags too
+    let mut image_urls: Vec<String> = md_content.images().iter().cloned().collect();
+    for url in collect_html_img_urls_from_text(&readme_text) {
+        if !image_urls.contains(&url) { image_urls.push(url); }
+    }
     let image_cache = fetch_images(client, &image_urls, &raw_base).await;
 
     let files = fetch_files(client, "github", "github.com", owner, repo, "https").await;
@@ -854,8 +827,12 @@ async fn fetch_gitlab_preview(client: &Client, owner: &str, repo: &str) -> Resul
     };
 
     let raw_base = format!("https://gitlab.com/{}/{}/raw/HEAD/", owner, repo);
-    let readme_items: Vec<iced::widget::markdown::Item> = iced::widget::markdown::parse(&readme_text).collect();
-    let image_urls = collect_image_urls_from_text(&readme_text);
+    let md_content = iced::widget::markdown::Content::parse(&readme_text);
+    let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
+    let mut image_urls: Vec<String> = md_content.images().iter().cloned().collect();
+    for url in collect_html_img_urls_from_text(&readme_text) {
+        if !image_urls.contains(&url) { image_urls.push(url); }
+    }
     let image_cache = fetch_images(client, &image_urls, &raw_base).await;
     let files = fetch_files(client, "gitlab", "gitlab.com", owner, repo, "https").await;
 
@@ -903,8 +880,12 @@ async fn fetch_gitea_preview(client: &Client, host: &str, scheme: &str, owner: &
     };
 
     let raw_base = format!("{}://{}/{}/{}/raw/branch/master/", scheme, host, owner, repo);
-    let readme_items: Vec<iced::widget::markdown::Item> = iced::widget::markdown::parse(&readme_text).collect();
-    let image_urls = collect_image_urls_from_text(&readme_text);
+    let md_content = iced::widget::markdown::Content::parse(&readme_text);
+    let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
+    let mut image_urls: Vec<String> = md_content.images().iter().cloned().collect();
+    for url in collect_html_img_urls_from_text(&readme_text) {
+        if !image_urls.contains(&url) { image_urls.push(url); }
+    }
     let image_cache = fetch_images(client, &image_urls, &raw_base).await;
     let files = fetch_files(client, "gitea", host, owner, repo, scheme).await;
 
@@ -965,6 +946,7 @@ pub struct ReleaseItem {
     pub name: String,
     pub published_at: String,
     pub body: String,
+    pub items: Vec<iced::widget::markdown::Item>,
     pub prerelease: bool,
 }
 
@@ -1001,12 +983,17 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
             .map_err(|_| "Timed out fetching releases".to_string())?
             .map_err(|e| e.to_string())?
             .json().await.map_err(|e| e.to_string())?;
-            Ok(releases.into_iter().map(|r| ReleaseItem {
-                tag_name: r.tag_name.clone(),
-                name: r.name.filter(|s| !s.is_empty()).unwrap_or_else(|| r.tag_name),
-                published_at: r.published_at.unwrap_or_default(),
-                body: r.body.unwrap_or_default(),
-                prerelease: r.prerelease,
+            Ok(releases.into_iter().map(|r| {
+                let body = r.body.unwrap_or_default();
+                let items = iced::widget::markdown::Content::parse(&body).items().to_vec();
+                ReleaseItem {
+                    tag_name: r.tag_name.clone(),
+                    name: r.name.filter(|s| !s.is_empty()).unwrap_or_else(|| r.tag_name),
+                    published_at: r.published_at.unwrap_or_default(),
+                    body,
+                    items,
+                    prerelease: r.prerelease,
+                }
             }).collect())
         }
         "gitlab" => {
@@ -1026,12 +1013,17 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
             .map_err(|_| "Timed out fetching releases".to_string())?
             .map_err(|e| e.to_string())?
             .json().await.map_err(|e| e.to_string())?;
-            Ok(releases.into_iter().map(|r| ReleaseItem {
-                tag_name: r.tag_name.clone(),
-                name: r.name.filter(|s| !s.is_empty()).unwrap_or_else(|| r.tag_name),
-                published_at: r.released_at.unwrap_or_default(),
-                body: r.description.unwrap_or_default(),
-                prerelease: false,
+            Ok(releases.into_iter().map(|r| {
+                let body = r.description.unwrap_or_default();
+                let items = iced::widget::markdown::Content::parse(&body).items().to_vec();
+                ReleaseItem {
+                    tag_name: r.tag_name.clone(),
+                    name: r.name.filter(|s| !s.is_empty()).unwrap_or_else(|| r.tag_name),
+                    published_at: r.released_at.unwrap_or_default(),
+                    body,
+                    items,
+                    prerelease: false,
+                }
             }).collect())
         }
         _ => {
@@ -1055,12 +1047,17 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
             .map_err(|_| "Timed out fetching releases".to_string())?
             .map_err(|e| e.to_string())?
             .json().await.map_err(|e| e.to_string())?;
-            Ok(releases.into_iter().map(|r| ReleaseItem {
-                tag_name: r.tag_name.clone(),
-                name: r.name.filter(|s| !s.is_empty()).unwrap_or_else(|| r.tag_name),
-                published_at: r.published_at.unwrap_or_default(),
-                body: r.body.unwrap_or_default(),
-                prerelease: r.prerelease,
+            Ok(releases.into_iter().map(|r| {
+                let body = r.body.unwrap_or_default();
+                let items = iced::widget::markdown::Content::parse(&body).items().to_vec();
+                ReleaseItem {
+                    tag_name: r.tag_name.clone(),
+                    name: r.name.filter(|s| !s.is_empty()).unwrap_or_else(|| r.tag_name),
+                    published_at: r.published_at.unwrap_or_default(),
+                    body,
+                    items,
+                    prerelease: r.prerelease,
+                }
             }).collect())
         }
     }

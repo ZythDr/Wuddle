@@ -1,38 +1,412 @@
-# Iced 0.14 — Wuddle Development Notes
+# Iced 0.14 — Wuddle Development Reference
 
 Discoveries made while porting the Tauri/Svelte Wuddle frontend to Iced 0.14.
 
 ---
 
+## Cargo Setup
+
+```toml
+iced = { version = "0.14", features = [
+    "tokio",     # async runtime integration
+    "canvas",    # Canvas widget for custom drawing
+    "markdown",  # Markdown rendering widget
+    "image",     # Image widget
+    "svg",       # SVG widget
+    "advanced",  # Required for custom widget / overlay implementation
+] }
+```
+
+The `advanced` feature is **required** if you implement custom widgets via
+`iced::advanced::Widget` or `iced::advanced::overlay::Overlay`.
+
+---
+
+## Application Entry Point
+
+```rust
+iced::application(App::new, App::update, App::view)
+    .title("My App")
+    .theme(App::theme)
+    .subscription(App::subscription)
+    .font(include_bytes!("../assets/fonts/MyFont.ttf"))
+    .default_font(my_font)
+    .window_size((1100.0, 850.0))
+    .run()
+```
+
+- `App::new` returns `(App, Task<Message>)`
+- `App::update` returns `Task<Message>`
+- `App::view` returns `Element<'_, Message>`
+- `App::theme` returns `Theme` (or your custom theme type)
+- `App::subscription` returns `Subscription<Message>`
+
+---
+
+## Elm Architecture
+
+Iced uses strict Elm architecture. Every UI interaction goes through:
+1. A **Message** enum variant
+2. `update(&mut self, msg: Message) -> Task<Message>`
+3. `view(&self) -> Element<'_, Message>` rebuilds the entire UI on every update
+
+`Task::none()` is the no-op return. Use `Task::perform(future, Msg)` for async.
+
+---
+
+## Layout System
+
+### Length variants
+```rust
+Length::Fill          // expand to fill available space
+Length::Shrink        // shrink to content size
+Length::Fixed(f32)    // exact pixel size
+Length::FillPortion(u16) // proportional fill
+```
+
+### Key layout widgets
+```rust
+column![a, b, c].spacing(8).padding([12, 16])
+row![a, b, c].spacing(8).align_y(Alignment::Center)
+container(content).width(Fill).height(Fill).center_x(Fill)
+Space::new().width(Length::Fill)   // flexible spacer
+Space::new().width(16).height(4)   // fixed spacer
+scrollable(content).height(Fill)
+```
+
+### Padding syntax
+```rust
+.padding(16)              // all sides
+.padding([8, 12])         // [vertical, horizontal]
+.padding([top, right, bottom, left])
+// Or use iced::Padding struct for asymmetric:
+.padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 })
+```
+
+---
+
+## Styling
+
+Iced 0.14 uses closure-based styling:
+
+```rust
+button(content)
+    .style(move |_theme, status| match status {
+        button::Status::Hovered => my_hovered_style,
+        button::Status::Pressed => my_pressed_style,
+        _ => my_default_style,
+    })
+
+container(content)
+    .style(move |_theme| container::Style {
+        background: Some(Background::Color(color)),
+        border: Border { color, width: 1.0, radius: 0.0.into() },
+        ..Default::default()
+    })
+```
+
+`ThemeColors` pattern: define a struct of `iced::Color` fields and copy it
+into closures with `let c = *colors;` to avoid lifetime issues.
+
+### Font colors: text vs text_soft vs muted
+
+| Tier | Usage | ThemeColors field |
+|------|-------|-------------------|
+| Bright | File names, headings, interactive text | `colors.text` |
+| Soft | Body text, descriptions, README, stats | `colors.text_soft` |
+| Dim | Labels, hints, placeholders | `colors.muted` |
+
+Use `text_soft` for anything readable but not prominent. Use `muted` only for labels.
+
+---
+
+## Stack Widget (Layered Overlays)
+
+`stack![]` renders layers on top of each other. All layers share the same
+space; each layer is sized independently.
+
+```rust
+// Example: center tabs over left/right sections in a topbar
+let sides = container(row![left, Space::new().width(Fill), right])
+    .width(Fill).height(BAR_H).align_y(Center);
+let center = container(tabs)
+    .width(Fill).height(BAR_H).align_x(Center).align_y(Center);
+let bar = stack![sides, center].width(Fill).height(BAR_H);
+```
+
+**Pitfall**: All stack layers must have identical `height()` set explicitly.
+
+**Pitfall**: `stack![]` does NOT create proper overlays — content is clipped
+to the stack's own bounds. For true floating overlays, use the overlay system.
+
+---
+
+## Proper Overlays — The `Widget::overlay()` System
+
+This is how `pick_list` dropdowns work in Iced. A custom widget can return
+an overlay that renders on top of *everything*, anchored to exact screen position.
+
+### Why cursor-position or row-index estimation fails
+
+Approaches like estimating overlay Y from `row_idx * row_height` compound
+errors and don't account for scroll offsets. The overlay system gives you
+**absolute window coordinates** of the widget.
+
+### How it works
+
+1. Implement `iced::advanced::Widget` for your wrapper widget.
+2. In the `overlay()` method, `layout.bounds()` gives the widget's position
+   in **absolute window coordinates** — exact, regardless of scroll.
+3. Return an `overlay::Element` wrapping your `Overlay` impl.
+4. The overlay's `layout()` receives the full window `Size` and must return
+   a `layout::Node` with absolute coordinates (use `.translate()`).
+
+### Iced 0.14 Widget trait — exact signatures
+
+```rust
+use iced::advanced::{
+    layout::{self, Layout},
+    mouse, overlay, renderer,
+    widget::{tree, Tree, Widget},
+    Clipboard, Shell,
+};
+use iced::{Element, Event, Length, Rectangle, Size, Vector};
+
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer> for MyWidget {
+    fn tag(&self) -> tree::Tag { tree::Tag::stateless() }
+    fn state(&self) -> tree::State { tree::State::None }
+    fn children(&self) -> Vec<Tree> { vec![] }
+    fn diff(&self, tree: &mut Tree) { tree.diff_children(&[]); }
+    fn size(&self) -> Size<Length> { ... }
+
+    // Note: &mut self, not &self
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer,
+              limits: &layout::Limits) -> layout::Node { ... }
+
+    fn draw(&self, tree: &Tree, renderer: &mut Renderer, theme: &Theme,
+            style: &renderer::Style, layout: Layout<'_>,
+            cursor: mouse::Cursor, viewport: &Rectangle) { ... }
+
+    // Renamed from on_event; takes &Event (reference)
+    fn update(&mut self, tree: &mut Tree, event: &Event, layout: Layout<'_>,
+              cursor: mouse::Cursor, renderer: &Renderer,
+              clipboard: &mut dyn Clipboard, shell: &mut Shell<'_, Message>,
+              viewport: &Rectangle) { }
+
+    fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>,
+                         cursor: mouse::Cursor, viewport: &Rectangle,
+                         renderer: &Renderer) -> mouse::Interaction {
+        mouse::Interaction::None
+    }
+
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>,
+               renderer: &Renderer,
+               operation: &mut dyn iced::advanced::widget::Operation) { }
+
+    // Extra viewport: &Rectangle param compared to older Iced versions
+    fn overlay<'a>(&'a mut self, tree: &'a mut Tree, layout: Layout<'a>,
+                   renderer: &Renderer, _viewport: &Rectangle,
+                   translation: Vector)
+        -> Option<overlay::Element<'a, Message, Theme, Renderer>> { None }
+}
+```
+
+### Iced 0.14 Overlay trait — exact signatures
+
+```rust
+impl<Message, Theme, Renderer> overlay::Overlay<Message, Theme, Renderer>
+    for MyOverlay
+{
+    fn layout(&mut self, renderer: &Renderer, bounds: Size) -> layout::Node {
+        // bounds = full window size
+        // Return node in absolute window coordinates
+        layout::Node::with_children(
+            Size::new(bounds.width, bounds.height),
+            vec![child.translate(Vector::new(x, y))],
+        )
+    }
+
+    fn draw(&self, renderer: &mut Renderer, theme: &Theme,
+            style: &renderer::Style, layout: Layout<'_>,
+            cursor: mouse::Cursor) { ... }
+
+    // Renamed from on_event; no return value
+    fn update(&mut self, event: &Event, layout: Layout<'_>,
+              cursor: mouse::Cursor, renderer: &Renderer,
+              clipboard: &mut dyn Clipboard,
+              shell: &mut Shell<'_, Message>) { }
+
+    // Only 3 params — no viewport, no tree
+    fn mouse_interaction(&self, layout: Layout<'_>, cursor: mouse::Cursor,
+                         renderer: &Renderer) -> mouse::Interaction {
+        mouse::Interaction::None
+    }
+
+    // No is_over() in Iced 0.14 — hit testing done by the runtime
+}
+```
+
+**Important differences from Iced 0.13:**
+- `on_event` → `update` (renamed, no return value, takes `&Event` not `Event`)
+- `Widget::overlay` now takes an extra `_viewport: &Rectangle` parameter
+- `Widget::layout` now takes `&mut self` not `&self`
+- `overlay::Overlay::mouse_interaction` has 3 params (no viewport/tree)
+- `overlay::Overlay::is_over` **does not exist** in 0.14
+
+### Context menu toggle pitfall
+
+When a dismiss message (`CloseMenu`) and toggle message both fire on the same
+click, the menu reopens. Fix: check if click is on the underlay button:
+
+```rust
+// In overlay update():
+let on_button = self.underlay_bounds.contains(cursor_pos);
+if !in_menu && !on_button {
+    shell.publish(CloseMenu);
+}
+```
+
+---
+
+## Canvas / Custom Drawing (Spinner Example)
+
+```rust
+use iced::widget::canvas::{self, Canvas, Frame, Geometry};
+
+struct SpinnerCanvas { tick: u32, color: iced::Color }
+
+impl canvas::Program<Message> for SpinnerCanvas {
+    type State = ();
+
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme,
+            bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        vec![frame.into_geometry()]
+    }
+}
+
+// Usage:
+canvas(SpinnerCanvas { tick, color }).width(26).height(26)
+```
+
+**Always reserve spinner space** so layout doesn't shift when busy state changes:
+```rust
+if self.is_busy() {
+    canvas(SpinnerCanvas { tick, color }).width(26).height(26).into()
+} else {
+    Space::new().width(26).height(26).into()  // same size, invisible
+}
+```
+
+---
+
+## Fixed-Width Centered Tab Buttons
+
+To make all tabs the same width with centered text:
+
+```rust
+let content: Element<Message> = container(label)
+    .width(Length::Fill)
+    .center_x(Length::Fill)
+    .into();
+
+button(content)
+    .on_press(msg)
+    .padding([7, 0])          // horizontal padding = 0, width handles it
+    .width(Length::Fixed(114.0))
+```
+
+Without wrapping in a `container` with `center_x`, text will be left-aligned.
+
+### Icon-width tabs (SVG or Unicode glyph)
+
+For 32px-wide icon tabs use `Length::Fixed(32.0)`. For Unicode glyphs, set
+`line_height(1.0)` so the text height equals the font size exactly — otherwise
+the button will be taller than SVG icon buttons:
+
+```rust
+container(text("ⓘ").size(17).color(icon_color).line_height(1.0))
+    .center_x(Length::Fill)
+```
+
+---
+
+## Vertical Dividers in Tables
+
+`rule::vertical` expands to fill all available height in scrollable layouts,
+which breaks row sizing. Use a `container` with fixed height instead:
+
+```rust
+fn vdiv<'a>(alpha: f32, height: u32) -> Element<'a, Message> {
+    container(Space::new().width(1).height(height))
+        .width(1)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(Color::from_rgba(1.0,1.0,1.0,alpha))),
+            ..Default::default()
+        })
+        .into()
+}
+```
+
+---
+
 ## Markdown Widget
 
-### Basic usage
+### API overview
 
 ```rust
-// Parse once, store in state (Item is Clone + owns all its data)
-let items: Vec<iced::widget::markdown::Item> = iced::widget::markdown::parse(&readme_text).collect();
+// Option A: parse into items (simple, for storing in state)
+let items: Vec<iced::widget::markdown::Item> = iced::widget::markdown::parse(&text).collect();
 
-// Render in view — returns Element<'a, String> where String is a clicked URL
-iced::widget::markdown::view(&items, &theme)
+// Option B: parse via Content (preferred — also exposes image URLs)
+let content = iced::widget::markdown::Content::parse(&text);
+let items: Vec<iced::widget::markdown::Item> = content.items().to_vec();
+let image_urls: &HashSet<String> = content.images(); // exact URLs iced will render
+
+// Render without custom viewer (links become OpenUrl messages via .map)
+iced::widget::markdown::view(&items, settings)
     .map(Message::OpenUrl)
+
+// Render with custom viewer (e.g. for image rendering from cache)
+iced::widget::markdown::view_with(&items, settings, &my_viewer)
 ```
 
-`markdown::view` takes `(items: impl IntoIterator<Item = &'a Item>, settings: impl Into<Settings>)`.
-In iced 0.14 the second argument is `Settings`, not the theme directly — but `Settings` implements
-`From<&Theme>` so `&theme` is accepted.
+`markdown::Uri` is a type alias for `String`.
 
-### Item enum variants (relevant ones)
+### Settings
 
 ```rust
-iced::widget::markdown::Item::Image { url: String, .. }
+let settings = iced::widget::markdown::Settings::with_text_size(
+    13,
+    iced::widget::markdown::Style::from(&self.theme()),
+);
+// Heading sizes are derived automatically (h1 = 2× base, h2 = 1.75×, etc.)
 ```
 
-The `url` field is the raw string as it appears in the markdown (may be relative).
+`Settings` also implements `From<&Theme>`, so `iced::widget::markdown::Settings::from(&theme)`
+works as a quick default.
+
+### Item enum (relevant variants)
+
+```rust
+pub enum Item {
+    Heading(pulldown_cmark::HeadingLevel, Text),
+    Paragraph(Text),
+    CodeBlock { language: Option<String>, code: String, lines: Vec<Text> },
+    List { start: Option<u64>, bullets: Vec<Bullet> },
+    Image { url: Uri, title: String, alt: Text },
+    Quote(Vec<Item>),
+    Rule,
+    Table { /* ... */ },
+}
+```
+
+`Item` is `Debug + Clone` and owns all its data — safe to store in app state.
 
 ### Custom Viewer for images
 
-The default viewer renders image alt text in a code-block container. To display actual images,
-implement the `Viewer` trait:
+The default viewer renders image alt text as placeholder. To display actual
+images pre-fetched into a cache, implement the `Viewer` trait:
 
 ```rust
 struct ImageViewer<'a> {
@@ -52,42 +426,48 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for ImageViewer<'a> {
         _title: &'a str,
         _alt: &iced::widget::markdown::Text,
     ) -> Element<'a, Message> {
-        let bytes = if let Some(b) = self.cache.get(url.as_str()) {
-            Some(b)
-        } else {
+        let bytes = self.cache.get(url.as_str()).or_else(|| {
             let abs = resolve_image_url(url, self.raw_base_url);
             self.cache.get(abs.as_str())
-        };
+        });
         if let Some(bytes) = bytes {
-            iced::widget::image(iced::widget::image::Handle::from_bytes(bytes.clone()))
-                .width(Length::Fill)
-                .into()
+            container(
+                iced::widget::image(iced::widget::image::Handle::from_bytes(bytes.clone()))
+                    .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .padding([4, 0])
+            .into()
         } else {
-            Space::new().height(0).into()
+            container(
+                text(format!("[image: {}]", url.split('/').last().unwrap_or(url)))
+                    .size(11)
+                    .color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.25)),
+            )
+            .padding([2, 0])
+            .into()
         }
     }
 }
-```
 
-Then use `markdown::view_with` instead of `markdown::view`:
-
-```rust
+// Usage:
 let viewer = ImageViewer { cache: &preview.image_cache, raw_base_url: &preview.raw_base_url };
 let settings = iced::widget::markdown::Settings::with_text_size(13, Style::from(&theme));
 iced::widget::markdown::view_with(&items, settings, &viewer)
 ```
 
-**Key lifetime rule:** `ImageViewer<'a>` must satisfy `Self: 'a` (i.e., all references inside must
-live at least as long as `'a`). The cache reference must come from app state that outlives the
-view call — typically borrowed from `self.add_repo_preview`.
+**Lifetime rule:** `ImageViewer<'a>` must have its cache reference live at
+least as long as `'a`. Borrow from app state (e.g. `self.add_repo_preview`),
+not from a local variable.
 
 ### Storing parsed items in state
 
-**Problem:** `markdown::view` borrows the items and the returned `Element` has the same lifetime.
-If you parse inside the view function, the `Vec<Item>` is a local and the element outlives it.
+**Problem:** `markdown::view` borrows the items and the returned `Element` has
+the same lifetime. Parsing inside the view function creates a local `Vec<Item>`
+that is dropped before the element is used.
 
-**Solution:** Store the parsed `Vec<Item>` in app state (e.g., inside `RepoPreviewInfo`). Since
-`Item` is `Clone` and owns all its string data, this works fine.
+**Solution:** Store `Vec<Item>` in app state. Since `Item` is `Clone` and owns
+all its string data, this is straightforward:
 
 ```rust
 pub struct RepoPreviewInfo {
@@ -95,22 +475,38 @@ pub struct RepoPreviewInfo {
     // ...
 }
 // Parse once when fetching:
-let readme_items: Vec<iced::widget::markdown::Item> = markdown::parse(&readme_text).collect();
+let content = iced::widget::markdown::Content::parse(&readme_text);
+let readme_items = content.items().to_vec();
+```
+
+### Correct image URL collection (critical)
+
+**Problem:** A custom regex scanner to collect image URLs may extract different
+strings than what iced's markdown renderer passes to `ImageViewer::image()`.
+This causes cache misses even when images were successfully fetched.
+
+**Root cause:** iced uses pulldown-cmark internally to parse markdown. If your
+URL scanner uses a different parser or regex, the extracted URLs may differ
+(e.g. reference-style images `![alt][ref]`, different whitespace handling, etc.)
+
+**Solution:** Use `Content::parse().images()` to get the exact set of image
+URLs that iced will render. These are guaranteed to match because they come from
+the same pulldown-cmark parse pass:
+
+```rust
+let content = iced::widget::markdown::Content::parse(&readme_text);
+let image_urls: Vec<String> = content.images().iter().cloned().collect();
+// Also collect HTML <img src="..."> tags separately (not handled by pulldown-cmark):
+for url in collect_html_img_urls(&readme_text) {
+    if !image_urls.contains(&url) { image_urls.push(url); }
+}
+let image_cache = fetch_images(client, &image_urls, &raw_base).await;
 ```
 
 ### GIF / animated images
 
-Iced 0.14 does **not** support animated GIFs. The `image::Handle::from_bytes()` will display
-the first frame only. There is no built-in animation support; a custom canvas-based approach
-would be required for GIF animation (not implemented).
-
-### Settings / text sizing
-
-```rust
-// Create settings with a specific base text size and style derived from the current theme
-let settings = iced::widget::markdown::Settings::with_text_size(13, Style::from(&theme));
-// Heading sizes are derived automatically (h1 = 2× base, h2 = 1.75×, etc.)
-```
+Iced 0.14 does **not** support animated GIFs. `image::Handle::from_bytes()`
+displays the first frame only. Canvas-based animation would be required.
 
 ---
 
@@ -119,38 +515,40 @@ let settings = iced::widget::markdown::Settings::with_text_size(13, Style::from(
 ### `image::Handle::from_bytes`
 
 ```rust
-// Load PNG/JPEG from a Vec<u8>
 let handle = iced::widget::image::Handle::from_bytes(bytes.clone());
 iced::widget::image(handle).width(Length::Fill)
 ```
 
 `from_bytes` accepts any `Into<Bytes>` — `Vec<u8>` works directly.
+Supports PNG, JPEG, WebP, BMP, and most common formats.
 
 ### Fetching remote images
 
 Use `reqwest` with tokio timeouts and size limits:
 
 ```rust
-let result = tokio::time::timeout(
-    Duration::from_secs(3),
-    client.get(&url).send(),
-).await;
-if let Ok(Ok(resp)) = result {
-    if resp.status().is_success() {
-        if let Ok(bytes) = resp.bytes().await {
-            if bytes.len() <= 1_500_000 { // 1.5 MB limit
-                cache.insert(url, bytes.to_vec());
+// Limits: max 12 images, 5 MB each, 20 MB total
+for url in image_urls.iter().take(12) {
+    let abs_url = resolve_image_url(url, raw_base_url);
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.get(&abs_url).send(),
+    ).await;
+    if let Ok(Ok(resp)) = result {
+        if resp.status().is_success() {
+            if let Ok(bytes) = resp.bytes().await {
+                if bytes.len() <= 5_000_000 {
+                    // Store by both original and absolute URL for flexible lookup
+                    cache.insert(url.clone(), bytes.to_vec());
+                    if abs_url != *url { cache.insert(abs_url, bytes.to_vec()); }
+                }
             }
         }
     }
 }
 ```
 
-Recommended limits: max 8 images, 1.5 MB each, 6 MB total.
-
 ### Resolving relative image URLs
-
-GitHub raw base: `https://raw.githubusercontent.com/{owner}/{repo}/HEAD/`
 
 ```rust
 fn resolve_image_url(url: &str, raw_base_url: &str) -> String {
@@ -163,18 +561,37 @@ fn resolve_image_url(url: &str, raw_base_url: &str) -> String {
 }
 ```
 
-Store both the original URL and the resolved absolute URL in the cache so lookups work
-regardless of which form the markdown uses.
+Raw base URLs by forge:
+- GitHub: `https://raw.githubusercontent.com/{owner}/{repo}/HEAD/`
+- GitLab: `https://gitlab.com/{owner}/{repo}/raw/HEAD/`
+- Gitea: `{scheme}://{host}/{owner}/{repo}/raw/branch/master/`
 
 ---
 
-## Keyboard Event Subscription (Escape to close dialogs)
+## Subscriptions
 
 ```rust
 fn subscription(&self) -> Subscription<Message> {
     let mut subs = Vec::new();
-    // ...other subscriptions...
 
+    // Timer-based
+    if self.opt_auto_check {
+        let mins = self.auto_check_minutes.max(1) as u64;
+        subs.push(
+            iced::time::every(Duration::from_secs(mins * 60))
+                .map(|_| Message::AutoCheckTick),
+        );
+    }
+
+    // Spinner animation (only when busy)
+    if self.is_busy() {
+        subs.push(
+            iced::time::every(Duration::from_millis(80))
+                .map(|_| Message::SpinnerTick),
+        );
+    }
+
+    // Keyboard events (gated — only active when dialog is open)
     if self.dialog.is_some() {
         subs.push(iced::event::listen_with(|event, _status, _window| {
             match event {
@@ -191,132 +608,25 @@ fn subscription(&self) -> Subscription<Message> {
 }
 ```
 
-Gating on `self.dialog.is_some()` means the subscription is only active when needed, avoiding
-unnecessary event processing.
+**Note:** A continuous `CursorMoved` subscription generates a message on
+every mouse movement. Prefer the overlay system over cursor tracking.
 
 ---
 
-## Dialog Pattern
-
-### Dialog enum with mutable field state
-
-Fields like URL input, mode selection, and advanced toggle are stored directly in the `Dialog`
-enum variant rather than in the `App` struct. This keeps all dialog-related state together.
-
-For fields that need to change without clearing a preview (e.g., URL input), store the preview
-in `App` rather than in the `Dialog`:
+## Async Tasks
 
 ```rust
-// In App:
-pub add_repo_preview: Option<RepoPreviewInfo>,  // lives outside dialog
-pub add_repo_preview_loading: bool,
+// Fire-and-forget async
+Task::perform(
+    async move { my_async_fn(arg).await },
+    Message::MyResult,
+)
 
-// URL input gets its own message to avoid triggering OpenDialog (which would reset the preview):
-Message::SetAddRepoUrl(String)  // updates url in dialog + fires preview fetch
-// vs
-Message::OpenDialog(Dialog::AddRepo { url, mode, ..., advanced: !advanced })  // for toggle only
-```
-
-### Two-card floating side panel layout (matching Tauri)
-
-When a preview is loaded, the dialog switches from a single card to **two separate cards**
-side by side, matching the Tauri version's floating side panel approach:
-
-```
-+--sidebar card (260px)--+  +--main form card (fills)----+
-| About                  |  | Title               [×]    |
-| Atlas-TW               |  | Subtitle                   |
-| Description text...    |  | URL input                  |
-| ★ 16                   |  | ┌─README (scrollable)────┐ |
-| ⑂ 1                    |  | │ Heading                 │ |
-| Language         Lua   |  | │ Images render inline    │ |
-| ──────────────────     |  | │ Text continues...       │ |
-| Files                  |  | └─────────────────────────┘ |
-| ▸ Images/              |  | [Advanced □] [Cancel] [Add] |
-| ▸ Locales/             |  +-----------------------------+
-|   Atlas-TW.toc         |
-|   README.md            |
-+------------------------+
-```
-
-**Key implementation details:**
-- `view()` detects `has_two_cards` (AddRepo + preview loaded) and wraps the dialog in a
-  transparent outer container with `max_width(1060)` — no padding or style
-- `view_dialog()` returns a `row![sidebar_card, form_card]` where **each card** has its own
-  `dialog_style` (border, background gradient, shadow, rounded corners)
-- The sidebar card is 260px fixed width with its own padding
-- The form card fills remaining space
-- Both cards sit inside a row with `height(560)` and `spacing(8)` gap
-- Without a preview, falls back to single-card layout (700px, dialog_style on outer container)
-
-**Why two cards instead of one?** The Tauri version uses `display: flex` with two siblings
-(`.repo-side-panel` + `.dialog-inner`) each having their own `border`, `border-radius`,
-`background-image`, and `box-shadow`. A single card with an internal sidebar can't replicate
-the floating panel look.
-
-### Click-through prevention
-
-**Critical finding:** iced 0.14's `stack!` dispatches events to ALL layers simultaneously
-via `fold(Ignored, Status::merge)`. A `mouse_area` in one layer cannot prevent lower layers
-from also processing the same event. This means widgets in `main_content` (buttons, etc.)
-can still fire even when a dialog overlay is displayed on top.
-
-**Solution:** Use `iced::widget::opaque()` to wrap the entire overlay, which absorbs ALL
-mouse events and prevents them from reaching any lower layer:
-
-```rust
-// Wrap the scrim + dialog stack in opaque() so main_content is completely blocked
-let overlay = iced::widget::opaque(
-    stack![scrim, centered_dialog]
-        .width(Length::Fill)
-        .height(Length::Fill),
-);
-stack![main_content, overlay]
-```
-
-`iced::widget::opaque` is available via `pub use helpers::*` in `iced_widget` which is
-re-exported through `iced::widget`. It returns `event::Status::Captured` for every event
-regardless of what inner widgets return, effectively making the overlay a complete event sink.
-
-**Also wrap dialog in mouse_area** so click on the dialog itself doesn't fire the scrim:
-
-```rust
-let dialog_blocker = iced::widget::mouse_area(dialog_box)
-    .on_press(Message::CloseMenu);  // harmless — just clears context menus
-
-let centered_dialog = container(dialog_blocker)
-    .center_x(Length::Fill)
-    .center_y(Length::Fill);
-```
-
-**Do NOT** rely only on `mouse_area` without `opaque` — `mouse_area` alone cannot stop
-events from reaching lower layers in a `stack!`.
-
-### Font colors: text vs text_soft vs muted
-
-The Tauri version uses three text color tiers. The iced theme now matches:
-
-| Tier | CSS Variable | Usage | ThemeColors field |
-|------|-------------|-------|-------------------|
-| Bright | `--text` | File names, headings, interactive text | `colors.text` |
-| Soft | `--text-soft` | Body text, descriptions, README, stats | `colors.text_soft` |
-| Dim | `--muted` | Labels ("About", "Files"), hints, placeholders | `colors.muted` |
-
-Use `text_soft` for anything that should be readable but not prominent (descriptions,
-README body, sidebar stats). Use `muted` only for labels and structural text.
-
----
-
-## Pick List with String items
-
-`iced::widget::pick_list` requires `T: ToString + PartialEq + Clone + 'static`. Using
-`Vec<String>` works directly. Pass `Some(selected.clone())` as the current selection.
-
-```rust
-let modes = vec!["auto".to_string(), "addon".to_string(), "dll".to_string()];
-iced::widget::pick_list(modes, Some(current_mode.clone()), |new_mode: String| {
-    Message::OpenDialog(Dialog::AddRepo { mode: new_mode, ..rest })
-})
+// Blocking work off the async thread
+Task::perform(
+    tokio::task::spawn_blocking(move || heavy_computation()),
+    |res| Message::MyResult(res.unwrap()),
+)
 ```
 
 ---
@@ -333,88 +643,150 @@ const LIFECRAFT: Font = Font::with_name("LifeCraft");
 const FRIZ: Font = Font::with_name("Friz Quadrata Std");
 ```
 
-The font name must match the font's internal name metadata, not the filename. Use a font
-inspection tool if `Font::with_name(...)` doesn't render (the name might differ from the filename).
+The font name must match the font's internal name metadata, not the filename.
 
-**Note:** `default_font` is set once at startup. Changing it at runtime requires a restart;
-there is no hot-reload. Log a message telling the user to restart when they toggle the font setting.
-
----
-
-## Auto-check Timer
-
-```rust
-fn subscription(&self) -> Subscription<Message> {
-    if self.opt_auto_check {
-        let mins = self.auto_check_minutes.max(1) as u64;
-        iced::time::every(Duration::from_secs(mins * 60)).map(|_| Message::AutoCheckTick)
-    } else {
-        Subscription::none()
-    }
-}
-```
+**Note:** `default_font` is set once at startup. Changing it at runtime requires
+a restart. Log a message to tell the user when they toggle the font setting.
 
 ---
 
-## Spinner Animation
-
-A canvas-based spinner that uses a subscription:
+## Pick List with String Items
 
 ```rust
-// In subscription():
-if self.is_busy() {
-    subs.push(
-        iced::time::every(Duration::from_millis(80))
-            .map(|_| Message::SpinnerTick),
-    );
-}
-
-// In update():
-Message::SpinnerTick => { self.spinner_tick = (self.spinner_tick + 1) % 36; }
-
-// In view (always reserves space so layout doesn't shift):
-if self.is_busy() {
-    canvas(SpinnerCanvas { tick, color }).width(26).height(26).into()
-} else {
-    Space::new().width(26).height(26).into()  // same size, invisible
-}
+let modes = vec!["auto".to_string(), "addon".to_string(), "dll".to_string()];
+iced::widget::pick_list(modes, Some(current_mode.clone()), |new_mode: String| {
+    Message::OpenDialog(Dialog::AddRepo { mode: new_mode, ..rest })
+})
 ```
+
+`T` must be `ToString + PartialEq + Clone + 'static`. `Vec<String>` works directly.
 
 ---
 
-## forge / GitHub API patterns
+## Dialog Pattern
 
-### Collect image URLs from parsed markdown
+### Dialog enum with inline field state
+
+Fields like URL input, mode, and toggle state live directly in the `Dialog` enum
+variant. This keeps all dialog-related state together and avoids scattered App fields.
+
+For state that must survive dialog-internal navigation (e.g. a fetched preview),
+store it in `App` rather than in `Dialog`:
 
 ```rust
-fn collect_image_urls(items: &[markdown::Item]) -> Vec<String> {
-    items.iter().filter_map(|item| {
-        if let markdown::Item::Image { url, .. } = item {
-            Some(url.clone())
-        } else {
-            None
-        }
-    }).collect()
-}
+// In App:
+pub add_repo_preview: Option<RepoPreviewInfo>,  // survives re-opening dialog
+// URL input gets its own message to avoid resetting the preview:
+Message::SetAddRepoUrl(String)  // updates url field + fires preview fetch
 ```
 
-### GitHub API endpoints used
+### Two-card floating side panel layout
+
+When a preview is loaded, switch from single-card to two side-by-side cards:
+
+```
++--sidebar (260px)-------+  +--main form (fills)----------+
+| About                  |  | Title                  [×]  |
+| Atlas-TW               |  | URL input                   |
+| ★ 16   ⑂ 1            |  | ┌──README (scrollable)────┐  |
+| Language   Lua         |  | │ Heading                  │  |
+| ────────────────        |  | │ Images render inline     │  |
+| Files                  |  | │ Text continues...        │  |
+| ▸ Images/              |  | └──────────────────────────┘  |
+| ▸ Locales/             |  | [Release Notes] [Cancel] [Add]|
++------------------------+  +-------------------------------+
+```
+
+- Detect `has_two_cards` in `view()`, wrap with `max_width(1060)` container
+- `view_dialog()` returns `row![sidebar, form_card]` — each card has its own style
+- Sidebar: 260px fixed width; form card: fills remaining space
+- Row height: 560px; spacing: 8px
+
+### Click-through prevention
+
+**Critical:** `stack![]` dispatches events to ALL layers. A `mouse_area` alone
+cannot stop lower-layer widgets from firing when a dialog overlay is shown.
+
+**Solution:** Wrap the entire overlay in `iced::widget::opaque()`:
+
+```rust
+let overlay = iced::widget::opaque(
+    stack![scrim, centered_dialog]
+        .width(Length::Fill)
+        .height(Length::Fill),
+);
+stack![main_content, overlay]
+```
+
+`opaque()` returns `Status::Captured` for every event, making the overlay a
+complete event sink. Available via `iced::widget::opaque` (re-exported from helpers).
+
+---
+
+## Profile / Multi-Instance Pattern
+
+Each profile uses a separate SQLite database:
+- `default` profile → `wuddle.sqlite`
+- Named profiles → `wuddle-{id}.sqlite`
+
+Settings are persisted to `settings.json` in the app data dir.
+
+---
+
+## Forge / GitHub API Patterns
+
+### GitHub API endpoints
 
 - Repo info: `GET https://api.github.com/repos/{owner}/{repo}`
   - Headers: `Accept: application/vnd.github+json`
-  - Auth: `Authorization: Bearer {token}` (optional but needed for rate limits)
-- README (raw): `GET https://api.github.com/repos/{owner}/{repo}/readme`
+  - Auth: `Authorization: Bearer {token}` (optional but increases rate limits)
+- README (raw text): `GET https://api.github.com/repos/{owner}/{repo}/readme`
   - Headers: `Accept: application/vnd.github.raw+json`
 - File tree: `GET https://api.github.com/repos/{owner}/{repo}/contents/`
+- Releases: `GET https://api.github.com/repos/{owner}/{repo}/releases?per_page=20`
 
 ### GitLab API endpoints
 
 - Repo info: `GET https://gitlab.com/api/v4/projects/{owner%2Frepo}`
 - README: `GET https://gitlab.com/{owner}/{repo}/raw/HEAD/README.md`
 - File tree: `GET https://gitlab.com/api/v4/projects/{owner%2Frepo}/repository/tree?per_page=50`
+- Releases: `GET https://gitlab.com/api/v4/projects/{owner%2Frepo}/releases`
 
-### Gitea/Forgejo/Codeberg API endpoints
+### Gitea / Forgejo / Codeberg API endpoints
 
 - Repo info: `GET {scheme}://{host}/api/v1/repos/{owner}/{repo}`
 - README: `GET {scheme}://{host}/{owner}/{repo}/raw/branch/master/README.md`
 - File tree: `GET {scheme}://{host}/api/v1/repos/{owner}/{repo}/contents/`
+- Releases: `GET {scheme}://{host}/api/v1/repos/{owner}/{repo}/releases?limit=20`
+
+---
+
+## What Didn't Work
+
+| Approach | Problem |
+|----------|---------|
+| Estimating overlay Y from `row_idx * row_height` | Compounds errors, breaks with scroll |
+| Tracking `cursor_y` via `MouseMoved` subscription | Off-by-a-few-pixels, generates noise |
+| `stack![]` for context menu overlays | Clipped to stack bounds, layout shifts |
+| Inline context menu row expansion | Expands row height, pushes rows below down |
+| `Length::Shrink` for fixed-count tab buttons | Tabs have inconsistent widths |
+| `rule::vertical` in scrollable rows | Expands to fill height, breaks row sizing |
+| Custom regex scanner for markdown image URLs | Mismatches iced's pulldown-cmark URLs |
+| Unicode glyph tab icon at large `size()` | Button becomes taller than SVG icon tabs |
+
+---
+
+## What Worked
+
+| Approach | Notes |
+|----------|-------|
+| `Widget::overlay()` for context menus | Exact pixel positioning, scroll-immune |
+| `stack![]` for topbar centering | Tabs float independently of side sections |
+| `container(label).center_x(Fill)` in fixed-width buttons | Centers text reliably |
+| `tree::Tag::stateless()` for no-state custom widgets | Correct default for wrappers |
+| `layout::Node::with_children(window_size, vec![child.translate(offset)])` | Correct overlay absolute positioning |
+| Passing `underlay_bounds` to overlay to skip dismiss on button click | Fixes toggle reopen bug |
+| `iced::widget::opaque()` wrapping the overlay stack | Complete event sink, blocks all layers below |
+| `markdown::Content::parse()` + `.images()` for image URL collection | Guaranteed URL match with renderer |
+| `text("ⓘ").size(17).line_height(1.0)` for Unicode icon tabs | Matches SVG icon button height exactly |
+| Storing `Vec<markdown::Item>` in app state (dialog, release notes) | Avoids parse-in-view lifetime issues |

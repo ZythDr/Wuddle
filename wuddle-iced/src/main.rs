@@ -229,7 +229,7 @@ pub enum InstanceField {
 pub enum Dialog {
     AddRepo { url: String, mode: String, is_addons: bool, advanced: bool },
     RemoveRepo { id: i64, name: String },
-    Changelog { content: Option<String>, loading: bool },
+    Changelog { items: Vec<iced::widget::markdown::Item>, loading: bool },
     InstanceSettings {
         is_new: bool,
         profile_id: String,
@@ -1453,13 +1453,14 @@ impl App {
                 }
             }
             Message::ShowChangelog => {
-                self.dialog = Some(Dialog::Changelog { content: None, loading: true });
+                self.dialog = Some(Dialog::Changelog { items: Vec::new(), loading: true });
                 return Task::perform(service::fetch_changelog(), Message::ChangelogLoaded);
             }
             Message::ChangelogLoaded(result) => {
-                if let Some(Dialog::Changelog { ref mut content, ref mut loading }) = self.dialog {
+                if let Some(Dialog::Changelog { ref mut items, ref mut loading }) = self.dialog {
                     *loading = false;
-                    *content = Some(result.unwrap_or_else(|e| format!("Failed to load changelog: {}", e)));
+                    let text = result.unwrap_or_else(|e| format!("Failed to load changelog: {}", e));
+                    *items = iced::widget::markdown::Content::parse(&text).items().to_vec();
                 }
             }
 
@@ -1923,7 +1924,12 @@ impl App {
                                 .into()
                             } else {
                                 let c_rl = c_form;
-                                let items: Vec<Element<Message>> = releases.iter().map(|r| {
+                                let rn_theme = self.theme();
+                                let rn_settings = iced::widget::markdown::Settings::with_text_size(
+                                    12,
+                                    iced::widget::markdown::Style::from(&rn_theme),
+                                );
+                                let release_cards: Vec<Element<Message>> = releases.iter().map(|r| {
                                     let date = r.published_at.get(..10).unwrap_or(&r.published_at);
                                     let mut col_items: Vec<Element<Message>> = vec![
                                         row![
@@ -1940,9 +1946,11 @@ impl App {
                                     if r.prerelease {
                                         col_items.push(badge_tag("pre-release", iced::Color::from_rgb8(0xfd, 0xe6, 0x8a), iced::Color::from_rgb8(0xd4, 0x82, 0x1a)));
                                     }
-                                    if !r.body.is_empty() {
+                                    if !r.items.is_empty() {
                                         col_items.push(
-                                            text(&r.body).size(12).color(colors.text_soft).into()
+                                            iced::widget::markdown::view(&r.items, rn_settings)
+                                                .map(Message::OpenUrl)
+                                                .into()
                                         );
                                     }
                                     container(column(col_items).spacing(3))
@@ -1952,7 +1960,7 @@ impl App {
                                         .into()
                                 }).collect();
                                 iced::widget::scrollable(
-                                    column(items).spacing(6).width(Length::Fill)
+                                    column(release_cards).spacing(6).width(Length::Fill)
                                 ).height(Length::Fill).into()
                             }
                         } else {
@@ -2062,7 +2070,7 @@ impl App {
                     .into()
                 }
             }
-            Dialog::Changelog { content, loading } => {
+            Dialog::Changelog { items, loading } => {
                 let body: Element<Message> = if *loading {
                     container(text("Loading changelog…").size(13).color(colors.muted))
                         .center_x(Length::Fill)
@@ -2071,11 +2079,15 @@ impl App {
                         .height(Length::Fixed(300.0))
                         .into()
                 } else {
-                    let md = content.as_deref().unwrap_or("No content.");
+                    let md_settings = iced::widget::markdown::Settings::with_text_size(
+                        13,
+                        iced::widget::markdown::Style::from(&self.theme()),
+                    );
                     iced::widget::scrollable(
-                        text(md).size(12).color(colors.text).width(Length::Fill),
+                        iced::widget::markdown::view(items, md_settings)
+                            .map(Message::OpenUrl),
                     )
-                    .height(Length::Fixed(420.0))
+                    .height(Length::Fixed(480.0))
                     .into()
                 };
                 column![
