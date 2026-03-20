@@ -2,6 +2,34 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.0.0-alpha.4 (Iced frontend)
+
+### Multi-DLL Mod Support
+
+- **Expandable rows:** Mods that install multiple DLL files (e.g. WeirdUtils) now appear as a single collapsible parent row. Click anywhere in the Name column to expand/collapse child DLL rows. A `›`/`⌄` SVG chevron and a "N DLLs" badge indicate the expandable state.
+- **Per-DLL enable toggles:** Each child DLL row has its own enable checkbox to comment/uncomment individual entries in `dlls.txt`. Toggling the parent row's Enable checkbox now also toggles all child DLLs in sync.
+- **dlls.txt block markers:** Multi-DLL repos now write `# == RepoName ==` / `# == /RepoName ==` block markers around their entries in `dlls.txt`, grouping them visually and making them easy to identify.
+- **Auto mode detection:** The Auto install mode now correctly identifies multi-DLL releases (no zip asset present) and downloads all `.dll` assets, not just the first one.
+
+### Remove Dialog — File Preview
+
+- **"Also delete local files" checkbox:** The Remove dialog now includes an optional checkbox to delete the mod's installed files from disk alongside removing it from the database.
+- **File tree preview:** When the delete checkbox is enabled, a scrollable file tree lists every installed file with type icons (⚙ dll · 📁 addon folder · 📄 raw file), so nothing is deleted by surprise.
+
+### Forge Label Fix
+
+- **Codeberg correctly labelled:** Repos hosted on `codeberg.org` were previously displayed with the forge label `gitea`. They now show `codeberg`. Existing repos are corrected on next load without needing to be re-added.
+
+### Update Check Improvements
+
+- **Disabled repos skipped:** Disabled mods and addons are now completely skipped during update checks — no git pull, no API call, no error log entry.
+- **Cleaner error messages:** Git/network errors in the Logs tab are now condensed into human-readable messages (e.g. "Repository not found or requires authentication (Error Code -16)") instead of raw libgit2 error chains.
+- **Addon name in error lines:** Branch-fetch errors now include the affected addon name (e.g. `Failed to fetch branches for mrrosh/sqminimapfix: …`) so errors are immediately identifiable without cross-referencing the repo list.
+
+### Logs Tab
+
+- **Color-coded lines:** `[ERROR]` lines are highlighted in red; `[INFO]` lines use the default text color. Uses the `text_editor` widget's `highlight_with` API so text remains fully selectable and copyable.
+
 ## v3.0.0-alpha.3 (Iced frontend)
 
 ### Feature Parity — All Buttons Wired

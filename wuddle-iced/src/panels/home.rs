@@ -87,6 +87,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 .width(Length::Fill),
         )
         .height(Length::Fill)
+        .direction(theme::vscroll())
+        .style(move |t, s| theme::scrollable_style(&c)(t, s))
         .into()
     } else {
         let lines: Vec<Element<Message>> = mod_plans
@@ -114,6 +116,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             .collect();
         scrollable(column(lines).width(Length::Fill))
             .height(Length::Fill)
+            .direction(theme::vscroll())
+            .style(move |t, s| theme::scrollable_style(&c)(t, s))
             .into()
     };
 
@@ -162,6 +166,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 .width(Length::Fill),
         )
         .height(Length::Fill)
+        .direction(theme::vscroll())
+        .style(move |t, s| theme::scrollable_style(&c)(t, s))
         .into()
     } else {
         let lines: Vec<Element<Message>> = addon_plans
@@ -189,6 +195,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             .collect();
         scrollable(column(lines).width(Length::Fill))
             .height(Length::Fill)
+            .direction(theme::vscroll())
+            .style(move |t, s| theme::scrollable_style(&c)(t, s))
             .into()
     };
 
@@ -269,6 +277,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             .width(Length::Fill),
     )
     .height(Length::Fill)
+    .direction(theme::vscroll())
+    .style(move |t, s| theme::scrollable_style(&c)(t, s))
     .into()
 }
 
@@ -305,8 +315,9 @@ fn link_button<'a>(label: &str, url: &str, colors: &ThemeColors) -> Element<'a, 
         container(text(url_tip).size(11).color(c.text))
             .padding([3, 8])
             .style(move |_theme| crate::theme::tooltip_style(&c)),
-        tooltip::Position::Right,
+        tooltip::Position::Top,
     )
+    .gap(0.0)
     .into()
 }
 

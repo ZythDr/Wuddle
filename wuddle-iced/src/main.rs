@@ -8,19 +8,44 @@ mod tweaks;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
-use iced::widget::{button, canvas, column, container, row, rule, stack, text, Space};
+use iced::widget::{button, canvas, checkbox, column, container, row, rule, scrollable, stack, text, Space};
 use iced::{Element, Font, Length, Subscription, Task, Theme};
 use service::{PlanRow, RepoRow};
 use theme::{ThemeColors, WuddleTheme};
 
 const LIFECRAFT: Font = Font::with_name("LifeCraft");
 const FRIZ: Font = Font::with_name("Friz Quadrata Std");
+const NOTO: Font = Font::with_name("Noto Sans");
+
+/// Returns a path to a temp copy of the app icon, suitable for desktop notifications.
+/// Written once and cached for the process lifetime.
+fn notification_icon_path() -> &'static str {
+    static ICON_PATH: OnceLock<String> = OnceLock::new();
+    ICON_PATH.get_or_init(|| {
+        let icon_bytes = include_bytes!("../icons/128x128.png");
+        let dir = std::env::temp_dir().join("wuddle");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("notification-icon.png");
+        if !path.exists()
+            || std::fs::metadata(&path)
+                .map(|m| m.len())
+                .unwrap_or(0)
+                != icon_bytes.len() as u64
+        {
+            let _ = std::fs::write(&path, icon_bytes);
+        }
+        path.to_string_lossy().into_owned()
+    })
+}
 
 fn main() -> iced::Result {
-    // Read settings early so we can set the default font
+    // Read settings early so we can set the default font.
+    // Noto Sans is the default UI font (matches Tauri's system-ui stack on Linux);
+    // Friz Quadrata overrides it when the user opts in.
     let saved = settings::load_settings();
-    let default_font = if saved.opt_friz_font { FRIZ } else { Font::DEFAULT };
+    let default_font = if saved.opt_friz_font { FRIZ } else { NOTO };
 
     iced::application(App::new, App::update, App::view)
         .title("Wuddle")
@@ -28,6 +53,8 @@ fn main() -> iced::Result {
         .subscription(App::subscription)
         .font(include_bytes!("../assets/fonts/LifeCraft_Font.ttf"))
         .font(include_bytes!("../assets/fonts/FrizQuadrataStd-Regular.otf"))
+        .font(include_bytes!("../assets/fonts/NotoSans-Regular.ttf"))
+        .font(include_bytes!("../assets/fonts/NotoSans-Bold.ttf"))
         .default_font(default_font)
         .window_size((1100.0, 850.0))
         .run()
@@ -228,7 +255,7 @@ pub enum InstanceField {
 #[derive(Debug, Clone)]
 pub enum Dialog {
     AddRepo { url: String, mode: String, is_addons: bool, advanced: bool },
-    RemoveRepo { id: i64, name: String },
+    RemoveRepo { id: i64, name: String, remove_files: bool, files: Vec<(String, String)> },
     Changelog { items: Vec<iced::widget::markdown::Item>, loading: bool },
     InstanceSettings {
         is_new: bool,
@@ -279,6 +306,9 @@ pub struct App {
     pub log_search: String,
     pub log_wrap: bool,
     pub log_autoscroll: bool,
+    // Error sub-filters (only active when log_filter == Errors)
+    pub log_error_fetch: bool,
+    pub log_error_misc: bool,
 
     // Dialog overlay
     pub dialog: Option<Dialog>,
@@ -327,6 +357,10 @@ pub struct App {
     pub add_repo_preview: Option<service::RepoPreviewInfo>,
     pub add_repo_preview_loading: bool,
     pub add_repo_expanded_dirs: HashSet<String>,
+    /// Lazily-loaded directory contents, keyed by dir path.
+    pub add_repo_dir_contents: HashMap<String, Vec<service::RepoFileEntry>>,
+    /// Currently previewed file (name, content). None = show README or release notes.
+    pub add_repo_file_preview: Option<(String, String)>,
 
     // Add-repo release notes (fetched on demand)
     pub add_repo_release_notes: Option<Vec<service::ReleaseItem>>,
@@ -334,6 +368,16 @@ pub struct App {
 
     // Repos whose updates are being ignored
     pub ignored_update_ids: HashSet<i64>,
+
+    // Multi-DLL repos that are currently expanded in the project list
+    pub expanded_repo_ids: HashSet<i64>,
+
+    // Selectable log view
+    pub log_editor_content: iced::widget::text_editor::Content,
+
+    // README source-view toggle (formatted markdown ↔ selectable raw text)
+    pub readme_source_view: bool,
+    pub readme_editor_content: iced::widget::text_editor::Content,
 }
 
 impl Default for WuddleTheme {
@@ -368,6 +412,8 @@ pub enum Message {
     SetLogSearch(String),
     ToggleLogWrap(bool),
     ToggleLogAutoScroll(bool),
+    ToggleLogErrorFetch(bool),
+    ToggleLogErrorMisc(bool),
     ClearLogs,
 
     // Dialogs
@@ -388,18 +434,23 @@ pub enum Message {
     CheckUpdatesResult(Result<Vec<PlanRow>, String>),
     AddRepoSubmit,
     AddRepoResult(Result<i64, String>),
-    RemoveRepoConfirm(i64),
+    RemoveRepoConfirm(i64, bool),
+    ToggleRemoveFiles(bool),
+    RemoveRepoFilesLoaded(Result<Vec<(String, String)>, String>),
     RemoveRepoResult(Result<(), String>),
     ToggleRepoEnabled(i64, bool),
     ToggleRepoEnabledResult(Result<(), String>),
+    ToggleRepoExpanded(i64),
+    ToggleDllEnabled(i64, String, bool),
+    ToggleDllEnabledResult(Result<(), String>),
     UpdateAll,
-    UpdateAllResult(Result<Vec<PlanRow>, String>),
+    UpdateAllResult(Result<Vec<service::UpdateOneResult>, String>),
     UpdateRepo(i64),
     UpdateRepoResult(Result<Option<PlanRow>, String>),
     ReinstallRepo(i64),
     ReinstallRepoResult(Result<PlanRow, String>),
     FetchBranches(i64),
-    FetchBranchesResult(Result<(i64, Vec<String>), String>),
+    FetchBranchesResult((i64, Result<Vec<String>, String>)),
     SetRepoBranch(i64, String),
     SetRepoBranchResult(Result<i64, String>),
     RefreshRepos,
@@ -457,6 +508,10 @@ pub enum Message {
     FetchRepoPreview(String),
     FetchRepoPreviewResult(Result<service::RepoPreviewInfo, String>),
     ToggleAddRepoDir(String),
+    PreviewRepoFile(String),
+    PreviewRepoFileResult(Result<(String, String), String>),
+    FetchDirContents(String, String),
+    FetchDirContentsResult(Result<(String, Vec<service::RepoFileEntry>), String>),
 
     // Release notes (in-app)
     FetchReleaseNotes,
@@ -468,10 +523,61 @@ pub enum Message {
 
     // Spinner animation
     SpinnerTick,
+
+    // Selectable log view
+    LogEditorAction(iced::widget::text_editor::Action),
+
+    // README source toggle
+    ToggleReadmeSourceView,
+    ReadmeEditorAction(iced::widget::text_editor::Action),
 }
 
 // ---------------------------------------------------------------------------
-// Custom markdown viewer that renders cached images from the preview cache
+// Wraps a code block element with a "Copy" button overlaid at the top-right corner.
+fn with_copy_button(block: Element<'_, Message>, code: String) -> Element<'_, Message> {
+    let copy_btn = container(
+        button(text("Copy").size(11))
+            .on_press(Message::CopyToClipboard(code))
+            .padding([2, 8])
+            .style(|_theme, status| match status {
+                button::Status::Hovered => button::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.15))),
+                    text_color: iced::Color::WHITE,
+                    border: iced::Border { radius: 3.0.into(), ..Default::default() },
+                    ..Default::default()
+                },
+                _ => button::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.07))),
+                    text_color: iced::Color::from_rgb8(0xb0, 0xc4, 0xde),
+                    border: iced::Border { radius: 3.0.into(), ..Default::default() },
+                    ..Default::default()
+                },
+            }),
+    )
+    .width(Length::Fill)
+    .align_x(iced::Alignment::End)
+    .padding(iced::Padding { top: 4.0, right: 6.0, bottom: 0.0, left: 0.0 });
+
+    iced::widget::stack![block, copy_btn].into()
+}
+
+// ---------------------------------------------------------------------------
+// Lazy-initialized syntect state for syntax highlighting
+// ---------------------------------------------------------------------------
+
+fn syntax_set() -> &'static syntect::parsing::SyntaxSet {
+    static SS: OnceLock<syntect::parsing::SyntaxSet> = OnceLock::new();
+    SS.get_or_init(syntect::parsing::SyntaxSet::load_defaults_newlines)
+}
+
+fn highlight_theme() -> &'static syntect::highlighting::Theme {
+    static TS: OnceLock<syntect::highlighting::ThemeSet> = OnceLock::new();
+    let ts = TS.get_or_init(syntect::highlighting::ThemeSet::load_defaults);
+    &ts.themes["base16-ocean.dark"]
+}
+
+// ---------------------------------------------------------------------------
+// Custom markdown viewer: cached images + bold headings + syntax highlighting
 // ---------------------------------------------------------------------------
 
 struct ImageViewer<'a> {
@@ -481,7 +587,59 @@ struct ImageViewer<'a> {
 
 impl<'a> iced::widget::markdown::Viewer<'a, Message> for ImageViewer<'a> {
     fn on_link_click(url: iced::widget::markdown::Uri) -> Message {
-        Message::OpenUrl(url)
+        if let Some(text) = url.strip_prefix("wuddle-copy://") {
+            Message::CopyToClipboard(text.to_string())
+        } else {
+            Message::OpenUrl(url)
+        }
+    }
+
+    fn paragraph(
+        &self,
+        settings: iced::widget::markdown::Settings,
+        text: &iced::widget::markdown::Text,
+    ) -> Element<'a, Message> {
+        // Clone spans and inject copy links into inline-code spans (identified by highlight background)
+        let raw_spans = text.spans(settings.style);
+        let has_code = raw_spans.iter().any(|s| s.highlight.is_some() && s.link.is_none());
+        if !has_code {
+            return iced::widget::markdown::paragraph(settings, text, Self::on_link_click);
+        }
+        let patched: Vec<iced::widget::text::Span<'static, iced::widget::markdown::Uri>> =
+            raw_spans.iter().cloned().map(|mut s| {
+                if s.highlight.is_some() && s.link.is_none() {
+                    let copy_text = s.text.as_ref().trim().to_string();
+                    s.link = Some(format!("wuddle-copy://{copy_text}"));
+                    // Subtle underline hint so user knows it's clickable
+                    s.underline = true;
+                }
+                s
+            }).collect();
+        iced::widget::rich_text(patched)
+            .size(settings.text_size)
+            .on_link_click(Self::on_link_click)
+            .into()
+    }
+
+    fn heading(
+        &self,
+        settings: iced::widget::markdown::Settings,
+        level: &'a iced::widget::markdown::HeadingLevel,
+        text: &'a iced::widget::markdown::Text,
+        index: usize,
+    ) -> Element<'a, Message> {
+        // Render headings with bold weight
+        let bold_settings = iced::widget::markdown::Settings {
+            style: iced::widget::markdown::Style {
+                font: iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..settings.style.font
+                },
+                ..settings.style
+            },
+            ..settings
+        };
+        iced::widget::markdown::heading(bold_settings, level, text, index, Self::on_link_click)
     }
 
     fn image(
@@ -491,7 +649,7 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for ImageViewer<'a> {
         _title: &'a str,
         _alt: &iced::widget::markdown::Text,
     ) -> Element<'a, Message> {
-        // Try original URL, then resolved absolute URL, then URL-decoded variant
+        // Try original URL, then resolved absolute URL
         let bytes = self.cache.get(url.as_str())
             .or_else(|| {
                 let abs = service::resolve_image_url(url, self.raw_base_url);
@@ -517,6 +675,89 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for ImageViewer<'a> {
             .padding([2, 0])
             .into()
         }
+    }
+
+    fn code_block(
+        &self,
+        settings: iced::widget::markdown::Settings,
+        language: Option<&'a str>,
+        code: &'a str,
+        lines: &'a [iced::widget::markdown::Text],
+    ) -> Element<'a, Message> {
+        use syntect::easy::HighlightLines;
+        use syntect::util::LinesWithEndings;
+
+        // Only attempt syntect highlighting when a language hint is given and recognized
+        if let Some(lang_str) = language {
+            let ps = syntax_set();
+            let syntax = ps.find_syntax_by_token(lang_str)
+                .or_else(|| ps.find_syntax_by_extension(lang_str));
+
+            if let Some(syntax) = syntax {
+                let theme = highlight_theme();
+                let mut h = HighlightLines::new(syntax, theme);
+                let code_font = settings.style.code_block_font;
+                let code_size = settings.code_size;
+
+                let line_elements: Vec<Element<'a, Message>> = LinesWithEndings::from(code)
+                    .filter_map(|line| {
+                        let tokens = h.highlight_line(line, ps).ok()?;
+                        let spans: Vec<iced::widget::text::Span<'static, iced::widget::markdown::Uri>> = tokens
+                            .iter()
+                            .filter(|(_, s)| !s.is_empty())
+                            .map(|(style, token)| {
+                                iced::widget::span(token.to_string())
+                                    .color(iced::Color::from_rgb(
+                                        style.foreground.r as f32 / 255.0,
+                                        style.foreground.g as f32 / 255.0,
+                                        style.foreground.b as f32 / 255.0,
+                                    ))
+                                    .font(code_font)
+                            })
+                            .collect();
+                        Some(
+                            iced::widget::rich_text(spans)
+                                .size(code_size)
+                                .into(),
+                        )
+                    })
+                    .collect();
+
+                let bg = iced::Color::from_rgb8(0x14, 0x18, 0x24);
+                let border_color = iced::Color::from_rgb8(0x2a, 0x2f, 0x3d);
+                let code_owned = code.to_string();
+
+                let inner = container(
+                    iced::widget::scrollable(
+                        container(column(line_elements))
+                            .padding(settings.code_size),
+                    )
+                    .direction(iced::widget::scrollable::Direction::Horizontal(
+                        iced::widget::scrollable::Scrollbar::default()
+                            .width(settings.code_size / 2)
+                            .scroller_width(settings.code_size / 2),
+                    )),
+                )
+                .width(Length::Fill)
+                .padding(settings.code_size / 4)
+                .style(move |_t| container::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    border: iced::Border {
+                        color: border_color,
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                });
+
+                return with_copy_button(inner.into(), code_owned);
+            }
+        }
+
+        // Fall back to default unstyled code block, also with copy button
+        let code_owned = code.to_string();
+        let fallback = iced::widget::markdown::code_block(settings, lines, Self::on_link_click);
+        with_copy_button(fallback, code_owned)
     }
 }
 
@@ -544,6 +785,8 @@ impl App {
             log_search: String::new(),
             log_wrap: false,
             log_autoscroll: true,
+            log_error_fetch: true,
+            log_error_misc: true,
             dialog: None,
             open_menu: None,
             branches: HashMap::new(),
@@ -568,9 +811,17 @@ impl App {
             add_repo_preview: None,
             add_repo_preview_loading: false,
             add_repo_expanded_dirs: HashSet::new(),
+            add_repo_dir_contents: HashMap::new(),
+            add_repo_file_preview: None,
             add_repo_release_notes: None,
             add_repo_show_releases: false,
             ignored_update_ids: HashSet::new(),
+            expanded_repo_ids: HashSet::new(),
+            log_editor_content: iced::widget::text_editor::Content::with_text(
+                "[INFO] Wuddle v3.0.0-alpha.1 started\n[INFO] Ready."
+            ),
+            readme_source_view: false,
+            readme_editor_content: iced::widget::text_editor::Content::new(),
         };
 
         // Sync GitHub token from keychain/env at startup
@@ -591,6 +842,7 @@ impl App {
             text: msg.to_string(),
             timestamp: chrono_now_fmt(self.opt_clock12),
         });
+        self.rebuild_log_content();
     }
 
     fn refresh_repos_task(&self) -> Task<Message> {
@@ -630,6 +882,7 @@ impl App {
             log_autoscroll: self.log_autoscroll,
             auto_check_minutes: self.auto_check_minutes,
             profiles: self.profiles.clone(),
+            ignored_update_ids: self.ignored_update_ids.iter().cloned().collect(),
         };
         let _ = settings::save_settings(&s);
     }
@@ -638,8 +891,38 @@ impl App {
         self.wuddle_theme.to_iced_theme()
     }
 
+    fn rebuild_log_content(&mut self) {
+        let search = self.log_search.to_ascii_lowercase();
+        let text: String = self.log_lines
+            .iter()
+            .filter(|line| match self.log_filter {
+                LogFilter::All => true,
+                LogFilter::Info => matches!(line.level, LogLevel::Info),
+                LogFilter::Errors => {
+                    if !matches!(line.level, LogLevel::Error) { return false; }
+                    let fetch = panels::logs::is_fetch_error(&line.text);
+                    (fetch && self.log_error_fetch) || (!fetch && self.log_error_misc)
+                }
+            })
+            .filter(|line| search.is_empty() || line.text.to_ascii_lowercase().contains(&search))
+            .map(|line| {
+                let prefix = match line.level {
+                    LogLevel::Info => "[INFO]",
+                    LogLevel::Error => "[ERROR]",
+                };
+                format!("[{}] {} {}", line.timestamp, prefix, line.text)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.log_editor_content = iced::widget::text_editor::Content::with_text(&text);
+    }
+
     fn is_busy(&self) -> bool {
-        self.loading || self.checking_updates || self.updating_all || !self.updating_repo_ids.is_empty()
+        self.loading
+            || self.checking_updates
+            || self.updating_all
+            || !self.updating_repo_ids.is_empty()
+            || self.add_repo_preview_loading
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -691,7 +974,7 @@ impl App {
     }
 
     pub fn body_font(&self) -> Font {
-        if self.opt_friz_font { FRIZ } else { Font::DEFAULT }
+        if self.opt_friz_font { FRIZ } else { NOTO }
     }
 
     /// Tab label with live update counts (matches Tauri behavior)
@@ -763,22 +1046,51 @@ impl App {
             Message::ToggleTweak(id, val) => self.tweaks.set(id, val),
 
             // Logs
-            Message::SetLogFilter(f) => self.log_filter = f,
-            Message::SetLogSearch(s) => self.log_search = s,
+            Message::SetLogFilter(f) => { self.log_filter = f; self.rebuild_log_content(); }
+            Message::SetLogSearch(s) => { self.log_search = s; self.rebuild_log_content(); }
             Message::ToggleLogWrap(b) => { self.log_wrap = b; self.save_settings(); }
             Message::ToggleLogAutoScroll(b) => { self.log_autoscroll = b; self.save_settings(); }
-            Message::ClearLogs => self.log_lines.clear(),
+            Message::ToggleLogErrorFetch(b) => { self.log_error_fetch = b; self.rebuild_log_content(); }
+            Message::ToggleLogErrorMisc(b) => { self.log_error_misc = b; self.rebuild_log_content(); }
+            Message::ClearLogs => { self.log_lines.clear(); self.rebuild_log_content(); }
+            Message::LogEditorAction(action) => {
+                if !action.is_edit() {
+                    self.log_editor_content.perform(action);
+                }
+            }
+
+            // README source toggle
+            Message::ToggleReadmeSourceView => {
+                self.readme_source_view = !self.readme_source_view;
+            }
+            Message::ReadmeEditorAction(action) => {
+                if !action.is_edit() {
+                    self.readme_editor_content.perform(action);
+                }
+            }
 
             // Dialogs
             Message::OpenDialog(d) => {
                 self.open_menu = None;
-                let focus_task = if matches!(d, Dialog::AddRepo { .. }) {
+                let fetch_task = if let Dialog::RemoveRepo { id, .. } = &d {
+                    let db = self.db_path.clone();
+                    let repo_id = *id;
+                    Task::perform(
+                        service::list_repo_installs(db, repo_id),
+                        Message::RemoveRepoFilesLoaded,
+                    )
+                } else if matches!(d, Dialog::AddRepo { .. }) {
                     iced::widget::operation::focus(iced::widget::Id::new("add_repo_url"))
                 } else {
                     Task::none()
                 };
                 self.dialog = Some(d);
-                return focus_task;
+                return fetch_task;
+            }
+            Message::RemoveRepoFilesLoaded(result) => {
+                if let Some(Dialog::RemoveRepo { ref mut files, .. }) = self.dialog {
+                    *files = result.unwrap_or_default();
+                }
             }
             Message::CloseDialog => {
                 self.dialog = None;
@@ -786,6 +1098,9 @@ impl App {
                 self.add_repo_preview_loading = false;
                 self.add_repo_release_notes = None;
                 self.add_repo_show_releases = false;
+                self.add_repo_file_preview = None;
+                self.add_repo_expanded_dirs.clear();
+                self.add_repo_dir_contents.clear();
             }
 
             // Context menu
@@ -810,6 +1125,7 @@ impl App {
                 self.log_wrap = s.log_wrap;
                 self.log_autoscroll = s.log_autoscroll;
                 self.auto_check_minutes = s.auto_check_minutes.max(1);
+                self.ignored_update_ids = s.ignored_update_ids.into_iter().collect();
                 self.profiles = if s.profiles.is_empty() {
                     vec![settings::ProfileConfig::default()]
                 } else {
@@ -891,8 +1207,10 @@ impl App {
                         );
                         if self.opt_desktop_notify && update_count > 0 {
                             let _ = notify_rust::Notification::new()
+                                .appname("Wuddle")
                                 .summary("Wuddle")
                                 .body(&format!("{} update{} available", update_count, if update_count == 1 { "" } else { "s" }))
+                                .icon(notification_icon_path())
                                 .show();
                         }
                     }
@@ -927,15 +1245,20 @@ impl App {
                     }
                 }
             }
-            Message::RemoveRepoConfirm(id) => {
+            Message::RemoveRepoConfirm(id, remove_files) => {
                 let db = self.db_path.clone();
                 let wow = if self.wow_dir.is_empty() { None } else { Some(self.wow_dir.clone()) };
                 self.dialog = None;
-                self.log(LogLevel::Info, &format!("Removing repo id={}...", id));
+                self.log(LogLevel::Info, &format!("Removing repo id={} (remove_files={})...", id, remove_files));
                 return Task::perform(
-                    service::remove_repo(db, id, wow, false),
+                    service::remove_repo(db, id, wow, remove_files),
                     Message::RemoveRepoResult,
                 );
+            }
+            Message::ToggleRemoveFiles(val) => {
+                if let Some(Dialog::RemoveRepo { ref mut remove_files, .. }) = self.dialog {
+                    *remove_files = val;
+                }
             }
             Message::RemoveRepoResult(result) => {
                 match result {
@@ -952,11 +1275,13 @@ impl App {
                 } else {
                     self.ignored_update_ids.insert(id);
                 }
+                self.save_settings();
             }
             Message::ToggleRepoEnabled(id, enabled) => {
                 let db = self.db_path.clone();
+                let wow = self.wow_dir.clone();
                 return Task::perform(
-                    service::set_repo_enabled(db, id, enabled),
+                    service::set_repo_enabled(db, id, enabled, wow),
                     Message::ToggleRepoEnabledResult,
                 );
             }
@@ -966,32 +1291,80 @@ impl App {
                     Err(e) => self.log(LogLevel::Error, &format!("Enable/disable failed: {}", e)),
                 }
             }
+            Message::ToggleRepoExpanded(id) => {
+                if self.expanded_repo_ids.contains(&id) {
+                    self.expanded_repo_ids.remove(&id);
+                } else {
+                    self.expanded_repo_ids.insert(id);
+                }
+            }
+            Message::ToggleDllEnabled(_repo_id, dll_name, enabled) => {
+                let db = self.db_path.clone();
+                let wow = self.wow_dir.clone();
+                return Task::perform(
+                    service::set_dll_enabled(db, wow, dll_name, enabled),
+                    Message::ToggleDllEnabledResult,
+                );
+            }
+            Message::ToggleDllEnabledResult(result) => {
+                match result {
+                    Ok(()) => return self.refresh_repos_task(),
+                    Err(e) => self.log(LogLevel::Error, &format!("DLL enable/disable failed: {}", e)),
+                }
+            }
             Message::UpdateAll => {
                 if self.wow_dir.is_empty() {
                     self.log(LogLevel::Error, "Set a WoW directory in Options first.");
                 } else {
-                    self.updating_all = true;
-                    self.log(LogLevel::Info, "Updating all repos...");
-                    let db = self.db_path.clone();
-                    let wow = self.wow_dir.clone();
-                    let opts = self.install_options();
-                    return Task::perform(
-                        service::update_all(db, wow, opts),
-                        Message::UpdateAllResult,
-                    );
+                    // Only update repos that have a pending update, are not ignored, and are enabled.
+                    let ignored = &self.ignored_update_ids;
+                    let repos = &self.repos;
+                    let ids_to_update: Vec<i64> = self.plans.iter()
+                        .filter(|p| {
+                            p.has_update
+                                && !ignored.contains(&p.repo_id)
+                                && repos.iter().any(|r| r.id == p.repo_id && r.enabled)
+                        })
+                        .map(|p| p.repo_id)
+                        .collect();
+
+                    if ids_to_update.is_empty() {
+                        self.log(LogLevel::Info, "Nothing to update.");
+                    } else {
+                        self.updating_all = true;
+                        self.log(LogLevel::Info, &format!("Updating {} repo(s)...", ids_to_update.len()));
+                        let db = self.db_path.clone();
+                        let wow = self.wow_dir.clone();
+                        let opts = self.install_options();
+                        return Task::perform(
+                            service::update_all(db, wow, ids_to_update, opts),
+                            Message::UpdateAllResult,
+                        );
+                    }
                 }
             }
             Message::UpdateAllResult(result) => {
                 self.updating_all = false;
                 match result {
-                    Ok(plans) => {
-                        let applied = plans.iter().filter(|p| !p.has_update).count();
-                        self.log(LogLevel::Info, &format!("Updated {} repos.", applied));
-                        self.plans = plans;
-                        self.cached_plans.insert(
-                            self.active_profile_id.clone(),
-                            (self.plans.clone(), self.last_checked.clone()),
-                        );
+                    Ok(results) => {
+                        let mut applied = 0usize;
+                        let mut failed = 0usize;
+                        for r in &results {
+                            for line in &r.log_lines {
+                                let level = if r.error.is_some() { LogLevel::Error } else { LogLevel::Info };
+                                self.log(level, line);
+                            }
+                            if r.error.is_some() {
+                                failed += 1;
+                            } else if r.plan.is_some() {
+                                applied += 1;
+                            }
+                        }
+                        if failed > 0 {
+                            self.log(LogLevel::Error, &format!("Done. Updated {} repo(s); {} failed.", applied, failed));
+                        } else {
+                            self.log(LogLevel::Info, &format!("Done. Updated {} repo(s).", applied));
+                        }
                         return self.refresh_repos_task();
                     }
                     Err(e) => self.log(LogLevel::Error, &format!("Update all failed: {}", e)),
@@ -1055,12 +1428,18 @@ impl App {
                     Message::FetchBranchesResult,
                 );
             }
-            Message::FetchBranchesResult(result) => {
+            Message::FetchBranchesResult((repo_id, result)) => {
                 match result {
-                    Ok((repo_id, branch_list)) => {
+                    Ok(branch_list) => {
                         self.branches.insert(repo_id, branch_list);
                     }
-                    Err(e) => self.log(LogLevel::Error, &format!("Failed to fetch branches: {}", e)),
+                    Err(e) => {
+                        let repo_name = self.repos.iter()
+                            .find(|r| r.id == repo_id)
+                            .map(|r| format!("{}/{}", r.owner, r.name))
+                            .unwrap_or_else(|| format!("repo#{}", repo_id));
+                        self.log(LogLevel::Error, &format!("Failed to fetch branches for {}: {}", repo_name, simplify_git_error(&e)));
+                    }
                 }
             }
             Message::SetRepoBranch(repo_id, branch) => {
@@ -1079,7 +1458,7 @@ impl App {
                         self.branches.remove(&repo_id);
                         return self.refresh_repos_task();
                     }
-                    Err(e) => self.log(LogLevel::Error, &format!("Set branch failed: {}", e)),
+                    Err(e) => self.log(LogLevel::Error, &format!("Set branch failed: {}", simplify_git_error(&e))),
                 }
             }
             Message::RefreshRepos => {
@@ -1111,10 +1490,25 @@ impl App {
                 if self.wow_dir.is_empty() {
                     self.log(LogLevel::Error, "Set a WoW directory in Options first.");
                 } else {
-                    self.log(LogLevel::Info, "Launching game...");
+                    let active = self.profiles.iter()
+                        .find(|p| p.id == self.active_profile_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    let cfg = service::LaunchConfig {
+                        method: active.launch_method,
+                        lutris_target: active.lutris_target,
+                        wine_command: active.wine_command,
+                        wine_args: active.wine_args,
+                        custom_command: active.custom_command,
+                        custom_args: active.custom_args,
+                        clear_wdb: active.clear_wdb,
+                    };
+                    self.log(LogLevel::Info, &format!(
+                        "Launching game (method: {})...", cfg.method
+                    ));
                     let wow = self.wow_dir.clone();
                     return Task::perform(
-                        service::launch_game(wow),
+                        service::launch_game(wow, cfg),
                         Message::LaunchGameResult,
                     );
                 }
@@ -1470,9 +1864,9 @@ impl App {
                 if let Some(Dialog::AddRepo { url: ref mut u, .. }) = self.dialog {
                     *u = url.clone();
                 }
-                // Trigger preview fetch if URL looks like a repo
+                // Trigger preview fetch if the URL resolves to a known forge
                 let trimmed = url.trim().to_string();
-                if !trimmed.is_empty() && (trimmed.contains("github.com") || trimmed.contains("gitlab.com") || trimmed.contains("gitea.")) {
+                if service::parse_forge_url(&trimmed).is_some() {
                     self.add_repo_preview_loading = true;
                     return Task::perform(
                         service::fetch_repo_preview(trimmed),
@@ -1494,10 +1888,16 @@ impl App {
                 self.add_repo_preview_loading = false;
                 match result {
                     Ok(info) => {
+                        // Build selectable source content from raw readme text
+                        self.readme_editor_content = iced::widget::text_editor::Content::with_text(&info.readme_text);
+                        self.readme_source_view = false;
                         self.add_repo_preview = Some(info);
-                        // Reset release notes when a new preview loads
+                        // Reset all per-preview state when a new preview loads
                         self.add_repo_release_notes = None;
                         self.add_repo_show_releases = false;
+                        self.add_repo_file_preview = None;
+                        self.add_repo_expanded_dirs.clear();
+                        self.add_repo_dir_contents.clear();
                     }
                     Err(_) => self.add_repo_preview = None,
                 }
@@ -1507,7 +1907,30 @@ impl App {
                 if self.add_repo_expanded_dirs.contains(&path) {
                     self.add_repo_expanded_dirs.remove(&path);
                 } else {
-                    self.add_repo_expanded_dirs.insert(path);
+                    self.add_repo_expanded_dirs.insert(path.clone());
+                    // Lazily fetch this directory's contents if not yet loaded
+                    if !self.add_repo_dir_contents.contains_key(&path) {
+                        if let Some(ref preview) = self.add_repo_preview {
+                            let forge_url = preview.forge_url.clone();
+                            return Task::perform(
+                                service::fetch_dir_contents(forge_url, path),
+                                Message::FetchDirContentsResult,
+                            );
+                        }
+                    }
+                }
+            }
+            Message::FetchDirContents(forge_url, path) => {
+                return Task::perform(
+                    service::fetch_dir_contents(forge_url, path),
+                    Message::FetchDirContentsResult,
+                );
+            }
+            Message::FetchDirContentsResult(result) => {
+                if let Ok((dir_path, entries)) = result {
+                    let mut sorted = entries;
+                    sorted.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+                    self.add_repo_dir_contents.insert(dir_path, sorted);
                 }
             }
 
@@ -1535,6 +1958,23 @@ impl App {
             }
             Message::ShowReadme => {
                 self.add_repo_show_releases = false;
+                self.add_repo_file_preview = None;
+            }
+
+            Message::PreviewRepoFile(path) => {
+                if let Some(ref preview) = self.add_repo_preview {
+                    let raw_base = preview.raw_base_url.clone();
+                    return Task::perform(
+                        service::fetch_raw_file(raw_base, path),
+                        Message::PreviewRepoFileResult,
+                    );
+                }
+            }
+            Message::PreviewRepoFileResult(result) => {
+                match result {
+                    Ok((path, content)) => self.add_repo_file_preview = Some((path, content)),
+                    Err(e) => self.add_repo_file_preview = Some(("Error".to_string(), e)),
+                }
             }
 
             // --- Spinner tick ---
@@ -1607,23 +2047,49 @@ impl App {
             let has_two_cards = matches!(dialog, Dialog::AddRepo { .. })
                 && self.add_repo_preview.is_some();
 
+            // For AddRepo: whether the inner content needs full height
+            let add_repo_use_fill_h = match dialog {
+                Dialog::AddRepo { url, is_addons, .. } => !is_addons && url.trim().is_empty(),
+                _ => false,
+            };
+
             let dialog_box: Element<Message> = if has_two_cards {
-                // view_dialog returns a row with two styled card containers
+                // Two-card layout fills the padded window area
                 container(self.view_dialog(dialog, &c))
-                    .max_width(1060u32)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
                     .into()
             } else {
                 let (dialog_max_w, dialog_pad) = match dialog {
-                    Dialog::AddRepo { .. } => (900u32, 16),
+                    Dialog::AddRepo { .. } => (1400u32, 16),
                     Dialog::InstanceSettings { .. } => (600u32, 24),
                     Dialog::Changelog { .. } => (720u32, 24),
                     _ => (480u32, 24),
                 };
-                container(self.view_dialog(dialog, &c))
-                    .max_width(dialog_max_w)
-                    .padding(dialog_pad)
-                    .style(move |_theme| theme::dialog_style(&c))
-                    .into()
+                let c_dlg = c;
+                let is_add_repo = matches!(dialog, Dialog::AddRepo { .. });
+                if is_add_repo && add_repo_use_fill_h {
+                    container(self.view_dialog(dialog, &c))
+                        .max_width(dialog_max_w)
+                        .padding(dialog_pad)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(move |_theme| theme::dialog_style(&c_dlg))
+                        .into()
+                } else if is_add_repo {
+                    container(self.view_dialog(dialog, &c))
+                        .max_width(dialog_max_w)
+                        .padding(dialog_pad)
+                        .width(Length::Fill)
+                        .style(move |_theme| theme::dialog_style(&c_dlg))
+                        .into()
+                } else {
+                    container(self.view_dialog(dialog, &c))
+                        .max_width(dialog_max_w)
+                        .padding(dialog_pad)
+                        .style(move |_theme| theme::dialog_style(&c_dlg))
+                        .into()
+                }
             };
 
             // Wrap dialog in mouse_area to block click-through to the scrim
@@ -1638,9 +2104,11 @@ impl App {
             )
             .on_press(Message::CloseDialog);
 
+            // 40px margin on all sides ≈ 90% of a typical window
             let centered_dialog = container(dialog_blocker)
                 .center_x(Length::Fill)
-                .center_y(Length::Fill);
+                .center_y(Length::Fill)
+                .padding(40);
 
             // Use opaque() to make the entire overlay absorb ALL mouse events,
             // preventing any interaction with main_content while the dialog is open.
@@ -1678,25 +2146,47 @@ impl App {
                     "(e.g. https://gitea.com/avitasia/nampower)"
                 };
 
-                // --- URL input row with clear (✕) button ---
+                // --- URL input with inline clear (✕) button ---
+                let show_url_clear = !url.is_empty();
                 let url_row: Element<Message> = {
-                    row![
+                    let c2 = c;
+                    stack![
                         iced::widget::text_input(placeholder, url)
                             .id(iced::widget::Id::new("add_repo_url"))
                             .on_input(Message::SetAddRepoUrl)
                             .on_submit(Message::AddRepoSubmit)
-                            .padding([8, 12])
+                            .padding(iced::Padding {
+                                top: 8.0,
+                                right: if show_url_clear { 32.0 } else { 12.0 },
+                                bottom: 8.0,
+                                left: 12.0,
+                            })
                             .width(Length::Fill),
-                        button(text("✕").size(13).color(c.muted))
-                            .on_press(Message::SetAddRepoUrl(String::new()))
-                            .padding([8, 10])
-                            .style(move |_t, s| match s {
-                                button::Status::Hovered => theme::tab_button_hovered_style(&c),
-                                _ => theme::tab_button_style(&c),
-                            }),
+                        {
+                            let clear_el: Element<Message> = if show_url_clear {
+                                button(text("\u{2715}").size(12).color(c2.muted))
+                                    .on_press(Message::SetAddRepoUrl(String::new()))
+                                    .padding([5, 8])
+                                    .style(move |_t, _s| button::Style {
+                                        background: None,
+                                        text_color: c2.muted,
+                                        border: iced::Border::default(),
+                                        shadow: iced::Shadow::default(),
+                                        snap: true,
+                                    })
+                                    .into()
+                            } else {
+                                Space::new().into()
+                            };
+                            container(clear_el)
+                        }
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::Alignment::End)
+                        .align_y(iced::Alignment::Center)
+                        .padding(iced::Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 0.0 }),
                     ]
-                    .spacing(4)
-                    .align_y(iced::Alignment::Center)
+                    .width(Length::Fill)
                     .into()
                 };
 
@@ -1748,10 +2238,11 @@ impl App {
                     let forge_link: Option<Element<Message>> = self.add_repo_preview.as_ref().map(|p| {
                         let furl = p.forge_url.clone();
                         let icon_handle = forge_svg_handle(&p.forge, &p.forge_url);
-                        let icon_color = c.primary;
+                        let icon_color = c.text;
                         button(
                             row![
-                                text("Open on").size(12).color(c.primary),
+                                text("Open on").size(12).color(c.text)
+                                    .line_height(iced::widget::text::LineHeight::Relative(1.0)),
                                 iced::widget::svg(icon_handle)
                                     .width(14)
                                     .height(14)
@@ -1837,34 +2328,56 @@ impl App {
                     // Stats
                     sidebar_col.push(
                         row![
-                            text("★").size(13).color(colors.muted),
-                            text(format!("{}", preview.stars)).size(13).color(colors.text_soft),
+                            text("\u{2b50}").size(12),  // ⭐
+                            text(format!("{} star{}", preview.stars, if preview.stars == 1 { "" } else { "s" }))
+                                .size(13).color(colors.text_soft),
                         ].spacing(4).into()
                     );
                     if preview.forks > 0 {
+                        let forks_url = format!("{}/forks", preview.forge_url);
+                        let c_fk = c;
+                        let fork_count = preview.forks;
                         sidebar_col.push(
                             row![
-                                text("⑂").size(13).color(colors.muted),
-                                text(format!("{}", preview.forks)).size(13).color(colors.text_soft),
-                            ].spacing(4).into()
+                                text("\u{1f374}").size(12),  // 🍴
+                                button(
+                                    iced::widget::rich_text::<(), _, _, _>([
+                                        iced::widget::span(format!(
+                                            "{} fork{}",
+                                            fork_count,
+                                            if fork_count == 1 { "" } else { "s" }
+                                        ))
+                                        .underline(true)
+                                        .color(c_fk.link)
+                                        .size(13.0_f32),
+                                    ])
+                                )
+                                .on_press(Message::OpenUrl(forks_url))
+                                .padding(0)
+                                .style(move |_t, _s| button::Style {
+                                    background: None,
+                                    text_color: c_fk.link,
+                                    border: iced::Border::default(),
+                                    shadow: iced::Shadow::default(),
+                                    snap: true,
+                                }),
+                            ].spacing(4).align_y(iced::Alignment::Center).into()
                         );
                     }
                     if !preview.language.is_empty() {
                         sidebar_col.push(
                             row![
-                                text("Language").size(12).color(colors.muted),
-                                Space::new().width(Length::Fill),
+                                text("\u{1f4bb}").size(12),  // 💻
                                 text(&preview.language).size(12).color(colors.text_soft),
-                            ].into()
+                            ].spacing(4).into()
                         );
                     }
                     if !preview.license.is_empty() {
                         sidebar_col.push(
                             row![
-                                text("License").size(12).color(colors.muted),
-                                Space::new().width(Length::Fill),
+                                text("\u{1f4cb}").size(12),  // 📋
                                 text(&preview.license).size(12).color(colors.text_soft),
-                            ].into()
+                            ].spacing(4).into()
                         );
                     }
 
@@ -1880,26 +2393,136 @@ impl App {
                         let mut sorted_files = preview.files.clone();
                         sorted_files.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
 
-                        let file_rows: Vec<Element<Message>> = sorted_files.iter().take(60).map(|f| {
-                            let (icon, col) = if f.is_dir {
-                                ("📁", colors.text)
+                        let mut file_rows: Vec<Element<Message>> = Vec::new();
+                        for f in sorted_files.iter().take(60) {
+                            let c_tree = c;
+                            let path = f.path.clone();
+                            if f.is_dir {
+                                let expanded = self.add_repo_expanded_dirs.contains(&f.path);
+                                let folder_icon = if expanded { "\u{1f4c2}" } else { "\u{1f4c1}" }; // 📂 / 📁
+                                file_rows.push(
+                                    button(
+                                        text(format!("{} {}", folder_icon, f.name))
+                                            .size(12).color(colors.text)
+                                    )
+                                    .on_press(Message::ToggleAddRepoDir(path.clone()))
+                                    .padding([2, 4])
+                                    .style(move |_t, status| match status {
+                                        button::Status::Hovered => button::Style {
+                                            background: Some(iced::Background::Color(
+                                                iced::Color::from_rgba(1.0, 1.0, 1.0, 0.07)
+                                            )),
+                                            text_color: c_tree.text,
+                                            border: iced::Border::default(),
+                                            shadow: iced::Shadow::default(),
+                                            snap: true,
+                                        },
+                                        _ => button::Style {
+                                            background: None,
+                                            text_color: c_tree.text,
+                                            border: iced::Border::default(),
+                                            shadow: iced::Shadow::default(),
+                                            snap: true,
+                                        },
+                                    })
+                                    .into()
+                                );
+                                if expanded {
+                                    if let Some(children) = self.add_repo_dir_contents.get(&f.path) {
+                                        for child in children.iter().take(40) {
+                                            let c_ch = c;
+                                            let child_path = child.path.clone();
+                                            let child_icon = if child.is_dir { "\u{1f4c1}" } else { "\u{1f4c4}" };
+                                            let child_msg = if child.is_dir {
+                                                Message::ToggleAddRepoDir(child_path.clone())
+                                            } else {
+                                                Message::PreviewRepoFile(child_path.clone())
+                                            };
+                                            let child_color = if child.is_dir { colors.text } else { colors.text_soft };
+                                            file_rows.push(
+                                                button(
+                                                    row![
+                                                        Space::new().width(14),
+                                                        text(format!("{} {}", child_icon, child.name))
+                                                            .size(11).color(child_color),
+                                                    ]
+                                                )
+                                                .on_press(child_msg)
+                                                .padding([1, 4])
+                                                .style(move |_t, status| match status {
+                                                    button::Status::Hovered => button::Style {
+                                                        background: Some(iced::Background::Color(
+                                                            iced::Color::from_rgba(1.0, 1.0, 1.0, 0.07)
+                                                        )),
+                                                        text_color: c_ch.text,
+                                                        border: iced::Border::default(),
+                                                        shadow: iced::Shadow::default(),
+                                                        snap: true,
+                                                    },
+                                                    _ => button::Style {
+                                                        background: None,
+                                                        text_color: c_ch.text_soft,
+                                                        border: iced::Border::default(),
+                                                        shadow: iced::Shadow::default(),
+                                                        snap: true,
+                                                    },
+                                                })
+                                                .into()
+                                            );
+                                        }
+                                    } else {
+                                        file_rows.push(
+                                            row![
+                                                Space::new().width(18),
+                                                text("Loading…").size(11).color(colors.muted),
+                                            ].into()
+                                        );
+                                    }
+                                }
                             } else {
-                                ("📄", colors.text_soft)
-                            };
-                            text(format!("{} {}", icon, f.name))
-                                .size(12).color(col).into()
-                        }).collect();
+                                file_rows.push(
+                                    button(
+                                        text(format!("\u{1f4c4} {}", f.name))
+                                            .size(12).color(colors.text_soft)
+                                    )
+                                    .on_press(Message::PreviewRepoFile(path))
+                                    .padding([2, 4])
+                                    .style(move |_t, status| match status {
+                                        button::Status::Hovered => button::Style {
+                                            background: Some(iced::Background::Color(
+                                                iced::Color::from_rgba(1.0, 1.0, 1.0, 0.07)
+                                            )),
+                                            text_color: c_tree.text,
+                                            border: iced::Border::default(),
+                                            shadow: iced::Shadow::default(),
+                                            snap: true,
+                                        },
+                                        _ => button::Style {
+                                            background: None,
+                                            text_color: c_tree.text_soft,
+                                            border: iced::Border::default(),
+                                            shadow: iced::Shadow::default(),
+                                            snap: true,
+                                        },
+                                    })
+                                    .into()
+                                );
+                            }
+                        }
 
                         // Files fill remaining sidebar height
                         sidebar_col.push(
-                            iced::widget::scrollable(column(file_rows).spacing(1))
+                            iced::widget::scrollable(column(file_rows).spacing(1).width(Length::Fill))
+                                .width(Length::Fill)
                                 .height(Length::Fill)
+                                .direction(theme::vscroll())
+                                .style(move |t, s| theme::scrollable_style(&c_sp)(t, s))
                                 .into()
                         );
                     }
 
                     let sidebar_card = container(
-                        column(sidebar_col).spacing(6).height(Length::Fill)
+                        column(sidebar_col).spacing(6).width(Length::Fill).height(Length::Fill)
                     )
                     .width(280)
                     .height(Length::Fill)
@@ -1907,13 +2530,53 @@ impl App {
                     .style(move |_theme| theme::dialog_style(&c_sp));
 
                     // --- MAIN FORM CARD ---
-                    let content_label = if self.add_repo_show_releases {
-                        text("Release Notes").size(12).color(colors.muted)
+                    let content_label: Element<Message> = if let Some((ref fname, _)) = self.add_repo_file_preview {
+                        let c_lbl = c_form;
+                        let label = format!("\u{2190} {}", fname);
+                        button(text(label).size(12).color(colors.link))
+                            .on_press(Message::ShowReadme)
+                            .padding([0, 0])
+                            .style(move |_t, _s| button::Style {
+                                background: None,
+                                text_color: c_lbl.link,
+                                border: iced::Border::default(),
+                                shadow: iced::Shadow::default(),
+                                snap: true,
+                            })
+                            .into()
+                    } else if self.add_repo_show_releases {
+                        text("Release Notes").size(12).color(colors.muted).into()
                     } else {
-                        text("README").size(12).color(colors.muted)
+                        text("README").size(12).color(colors.muted).into()
                     };
 
-                    let scrollable_content: Element<Message> = if self.add_repo_show_releases {
+                    let scrollable_content: Element<Message> = if let Some((_, ref content)) = self.add_repo_file_preview {
+                        // Show file content (plain text, monospace)
+                        let inner_content = container(
+                            iced::widget::scrollable(
+                                text(content.as_str()).size(12).font(Font::MONOSPACE)
+                                    .color(colors.text)
+                            )
+                            .height(Length::Fill)
+                            .direction(theme::vscroll())
+                            .style(move |t, s| theme::scrollable_style(&c_form)(t, s))
+                        )
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .padding(8)
+                        .style(move |_t| container::Style {
+                            background: Some(iced::Background::Color(
+                                iced::Color::from_rgba(0.0, 0.0, 0.0, 0.38)
+                            )),
+                            border: iced::Border {
+                                color: c_form.border,
+                                width: 1.0,
+                                radius: iced::border::Radius::from(6),
+                            },
+                            ..Default::default()
+                        });
+                        inner_content.into()
+                    } else if self.add_repo_show_releases {
                         // Show release notes or loading indicator
                         if let Some(ref releases) = self.add_repo_release_notes {
                             if releases.is_empty() {
@@ -1925,9 +2588,11 @@ impl App {
                             } else {
                                 let c_rl = c_form;
                                 let rn_theme = self.theme();
+                                let mut rn_style = iced::widget::markdown::Style::from(&rn_theme);
+                                rn_style.link_color = c_rl.link;
                                 let rn_settings = iced::widget::markdown::Settings::with_text_size(
                                     12,
-                                    iced::widget::markdown::Style::from(&rn_theme),
+                                    rn_style,
                                 );
                                 let release_cards: Vec<Element<Message>> = releases.iter().map(|r| {
                                     let date = r.published_at.get(..10).unwrap_or(&r.published_at);
@@ -1961,32 +2626,133 @@ impl App {
                                 }).collect();
                                 iced::widget::scrollable(
                                     column(release_cards).spacing(6).width(Length::Fill)
-                                ).height(Length::Fill).into()
+                                )
+                                .height(Length::Fill)
+                                .direction(theme::vscroll())
+                                .style(move |t, s| theme::scrollable_style(&c_rl)(t, s))
+                                .into()
                             }
                         } else {
                             // Still loading
+                            let tick = self.spinner_tick;
+                            let primary = colors.primary;
                             container(
-                                text("Loading release notes...").size(13).color(colors.muted)
+                                row![
+                                    canvas(SpinnerCanvas { tick, color: primary }).width(18).height(18),
+                                    text("Resolving...").size(13).color(colors.muted),
+                                ]
+                                .spacing(8)
+                                .align_y(iced::Alignment::Center)
                             )
                             .padding([8, 0])
                             .into()
                         }
                     } else {
-                        // Show README
-                        let viewer = ImageViewer {
-                            cache: &preview.image_cache,
-                            raw_base_url: &preview.raw_base_url,
+                        // Show README (or placeholder if empty)
+                        let readme_is_source = self.readme_source_view;
+                        let inner_scrollable: Element<Message> = if preview.readme_items.is_empty() {
+                            container(
+                                column![
+                                    text("\u{1f4c4}").size(32),
+                                    text("No README found for this repository.")
+                                        .size(13).color(colors.muted),
+                                ]
+                                .spacing(8)
+                                .align_x(iced::Alignment::Center)
+                            )
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .align_x(iced::Alignment::Center)
+                            .align_y(iced::Alignment::Center)
+                            .into()
+                        } else if readme_is_source {
+                            // Source view: selectable raw markdown text
+                            iced::widget::text_editor(&self.readme_editor_content)
+                                .on_action(Message::ReadmeEditorAction)
+                                .font(Font::MONOSPACE)
+                                .size(12)
+                                .height(Length::Fill)
+                                .padding(10)
+                                .style(move |_theme, _status| iced::widget::text_editor::Style {
+                                    background: iced::Background::Color(iced::Color::from_rgb8(0x0d, 0x11, 0x1a)),
+                                    border: iced::Border::default(),
+                                    placeholder: iced::Color::from_rgb8(0x4a, 0x55, 0x68),
+                                    value: iced::Color::from_rgb8(0xdb, 0xe7, 0xff),
+                                    selection: iced::Color { a: 0.35, ..iced::Color::from_rgb8(0x4a, 0x90, 0xd9) },
+                                })
+                                .into()
+                        } else {
+                            let viewer = ImageViewer {
+                                cache: &preview.image_cache,
+                                raw_base_url: &preview.raw_base_url,
+                            };
+                            let mut md_style = iced::widget::markdown::Style::from(&current_theme);
+                            md_style.link_color = c_form.link;
+                            // Use theme text color for body (not the iced default white)
+                            md_style.font = iced::Font::DEFAULT;
+                            // Style inline code to match dark terminal aesthetic
+                            md_style.inline_code_color = iced::Color::from_rgb8(0xe0, 0xc0, 0x80);
+                            md_style.inline_code_highlight = iced::widget::markdown::Highlight {
+                                background: iced::Color::from_rgb8(0x14, 0x18, 0x24).into(),
+                                border: iced::Border { color: iced::Color::from_rgb8(0x2a, 0x2f, 0x3d), width: 1.0, radius: 3.0.into() },
+                            };
+                            let mut md_settings = iced::widget::markdown::Settings::with_text_size(
+                                13,
+                                md_style,
+                            );
+                            // Tighten heading sizes to be closer to Tauri's rendering
+                            md_settings.h1_size = 22.0.into();
+                            md_settings.h2_size = 19.0.into();
+                            md_settings.h3_size = 16.0.into();
+                            md_settings.h4_size = 14.0.into();
+                            let readme_view = iced::widget::markdown::view_with(
+                                &preview.readme_items,
+                                md_settings,
+                                &viewer,
+                            );
+                            iced::widget::scrollable(readme_view)
+                                .height(Length::Fill)
+                                .direction(theme::vscroll())
+                                .style(move |t, s| theme::scrollable_style(&c_form)(t, s))
+                                .into()
                         };
-                        let md_settings = iced::widget::markdown::Settings::with_text_size(
-                            13,
-                            iced::widget::markdown::Style::from(&current_theme),
-                        );
-                        let readme_view = iced::widget::markdown::view_with(
-                            &preview.readme_items,
-                            md_settings,
-                            &viewer,
-                        );
-                        iced::widget::scrollable(readme_view).height(Length::Fill).into()
+                        // Source toggle button overlaid at top-right of readme area
+                        let source_label = if readme_is_source { "Formatted" } else { "Source" };
+                        let source_btn = {
+                            let c2 = c_form;
+                            button(text(source_label).size(11))
+                                .on_press(Message::ToggleReadmeSourceView)
+                                .padding([3, 8])
+                                .style(move |_theme, status| match status {
+                                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
+                                    _ => theme::tab_button_style(&c2),
+                                })
+                        };
+                        let readme_area = column![
+                            container(source_btn)
+                                .width(Length::Fill)
+                                .align_x(iced::Alignment::End)
+                                .padding(iced::Padding { top: 4.0, right: 4.0, bottom: 2.0, left: 4.0 }),
+                            inner_scrollable,
+                        ]
+                        .width(Length::Fill)
+                        .height(Length::Fill);
+                        container(readme_area)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .padding(8)
+                        .style(move |_t| container::Style {
+                            background: Some(iced::Background::Color(
+                                iced::Color::from_rgba(0.0, 0.0, 0.0, 0.38)
+                            )),
+                            border: iced::Border {
+                                color: c_form.border,
+                                width: 1.0,
+                                radius: iced::border::Radius::from(6),
+                            },
+                            ..Default::default()
+                        })
+                        .into()
                     };
 
                     let form_card = container(
@@ -2017,15 +2783,23 @@ impl App {
 
                     row![sidebar_card, form_card]
                         .spacing(8)
-                        .height(580)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
                         .into()
                 } else {
                     // =========================================================
                     // SINGLE-CARD LAYOUT: no preview — show Quick Add or loading
                     // =========================================================
                     let body_content: Element<Message> = if self.add_repo_preview_loading {
+                        let tick = self.spinner_tick;
+                        let primary = colors.primary;
                         container(
-                            text("Loading preview...").size(13).color(colors.muted)
+                            row![
+                                canvas(SpinnerCanvas { tick, color: primary }).width(18).height(18),
+                                text("Resolving...").size(13).color(colors.muted),
+                            ]
+                            .spacing(8)
+                            .align_y(iced::Alignment::Center)
                         )
                         .padding([12, 0])
                         .into()
@@ -2042,7 +2816,10 @@ impl App {
                         };
                         column![
                             section_label,
-                            iced::widget::scrollable(body_content).height(Length::Fill),
+                            iced::widget::scrollable(body_content)
+                                .height(Length::Fill)
+                                .direction(theme::vscroll())
+                                .style(move |t, s| theme::scrollable_style(&c)(t, s)),
                         ]
                         .spacing(4)
                         .height(Length::Fill)
@@ -2066,7 +2843,8 @@ impl App {
                         footer,
                     ]
                     .spacing(6)
-                    .height(if !is_addons && url.trim().is_empty() { Length::Fixed(580.0) } else { Length::Shrink })
+                    .width(Length::Fill)
+                    .height(if !is_addons && url.trim().is_empty() { Length::Fill } else { Length::Shrink })
                     .into()
                 }
             }
@@ -2079,15 +2857,19 @@ impl App {
                         .height(Length::Fixed(300.0))
                         .into()
                 } else {
+                    let mut cl_style = iced::widget::markdown::Style::from(&self.theme());
+                    cl_style.link_color = c.link;
                     let md_settings = iced::widget::markdown::Settings::with_text_size(
                         13,
-                        iced::widget::markdown::Style::from(&self.theme()),
+                        cl_style,
                     );
                     iced::widget::scrollable(
                         iced::widget::markdown::view(items, md_settings)
                             .map(Message::OpenUrl),
                     )
                     .height(Length::Fixed(480.0))
+                    .direction(theme::vscroll())
+                    .style(move |t, s| theme::scrollable_style(&c)(t, s))
                     .into()
                 };
                 column![
@@ -2102,17 +2884,76 @@ impl App {
                 .width(Length::Fixed(700.0))
                 .into()
             }
-            Dialog::RemoveRepo { id, name } => {
+            Dialog::RemoveRepo { id, name, remove_files, files } => {
                 let rid = *id;
+                let rf = *remove_files;
+
+                // File tree preview
+                let file_rows: Vec<Element<Message>> = files.iter().map(|(path, kind)| {
+                    let icon = match kind.as_str() {
+                        "dll"   => "\u{2699}",  // ⚙
+                        "addon" => "\u{1f4c1}", // 📁
+                        _       => "\u{1f4c4}", // 📄
+                    };
+                    let color = if rf { colors.warn } else { colors.text_soft };
+                    container(
+                        text(format!("{} {}", icon, path))
+                            .size(12)
+                            .color(color)
+                    )
+                    .padding([2, 6])
+                    .into()
+                }).collect();
+
+                let file_tree: Element<Message> = if files.is_empty() {
+                    text("No tracked files found.").size(12).color(colors.muted).into()
+                } else {
+                    scrollable(
+                        column(file_rows).spacing(0).width(Length::Fill)
+                    )
+                    .height(iced::Length::Fixed(160.0))
+                    .direction(theme::vscroll_overlay())
+                    .style(move |t, s| theme::scrollable_style(&c)(t, s))
+                    .into()
+                };
+
+                let file_section: Element<Message> = container(file_tree)
+                    .width(Length::Fill)
+                    .padding([6, 0])
+                    .style(move |_t| container::Style {
+                        background: Some(iced::Background::Color(
+                            iced::Color { a: 0.5, ..c.card }
+                        )),
+                        border: iced::Border {
+                            color: iced::Color { a: 0.15, ..c.border },
+                            width: 1.0,
+                            radius: 6.0.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .into();
+
                 column![
                     row![
                         text("Remove Repository").size(18).color(colors.title),
                         Space::new().width(Length::Fill),
                         close_button(&c),
                     ].align_y(iced::Alignment::Center),
-                    text(format!("Remove \"{}\"? This will untrack it from Wuddle.", name))
+                    text(format!("Remove \"{}\" from Wuddle?", name))
                         .size(13)
                         .color(colors.text),
+                    file_section,
+                    checkbox(rf)
+                        .label("Also delete local files (DLLs / addon folders)")
+                        .on_toggle(Message::ToggleRemoveFiles)
+                        .text_size(13),
+                    text(if rf {
+                        "⚠ Installed files will be permanently deleted from your WoW directory."
+                    } else {
+                        "Wuddle will stop tracking this mod. Local files will be left on disk."
+                    })
+                    .size(12)
+                    .color(if rf { colors.warn } else { colors.muted }),
                     row![
                         Space::new().width(Length::Fill),
                         button(text("Cancel").size(13))
@@ -2123,7 +2964,7 @@ impl App {
                                 _ => theme::tab_button_style(&c),
                             }),
                         button(text("Remove").size(13).color(c.bad))
-                            .on_press(Message::RemoveRepoConfirm(rid))
+                            .on_press(Message::RemoveRepoConfirm(rid, rf))
                             .padding([6, 12])
                             .style(move |_theme, _status| {
                                 let mut s = theme::tab_button_style(&c);
@@ -2527,10 +3368,47 @@ impl App {
     fn view_footer(&self, colors: &ThemeColors) -> Element<'_, Message> {
         let c = *colors;
 
-        let hint = if self.wow_dir.is_empty() {
-            text("No WoW directory set. Go to Options to configure.").size(12).color(colors.warn)
+        let hint: Element<Message> = if self.wow_dir.is_empty() {
+            text("No WoW directory set. Go to Options to configure.")
+                .size(12).color(colors.warn).into()
         } else {
-            text("Launch target: VanillaFixes.exe if installed, otherwise Wow.exe.").size(12).color(colors.muted)
+            let active = self.profiles.iter()
+                .find(|p| p.id == self.active_profile_id)
+                .cloned()
+                .unwrap_or_default();
+            let (mode_label, tooltip_detail) = match active.launch_method.as_str() {
+                "lutris" => {
+                    let target = if active.lutris_target.trim().is_empty() {
+                        "(no target set)".to_string()
+                    } else {
+                        active.lutris_target.clone()
+                    };
+                    ("Launch Mode: Lutris".to_string(), format!("Target: {}", target))
+                }
+                "wine" => {
+                    let cmd = if active.wine_command.trim().is_empty() { "wine".to_string() } else { active.wine_command.clone() };
+                    ("Launch Mode: Wine".to_string(), format!("Command: {}", cmd))
+                }
+                "custom" => {
+                    let cmd = if active.custom_command.trim().is_empty() { "(no command set)".to_string() } else { active.custom_command.clone() };
+                    ("Launch Mode: Custom".to_string(), format!("Command: {}", cmd))
+                }
+                _ => (
+                    "Launch Mode: Auto".to_string(),
+                    "Launches VanillaFixes.exe if present, otherwise Wow.exe".to_string(),
+                ),
+            };
+            let tooltip_content = container(
+                text(tooltip_detail).size(11).color(colors.text)
+            )
+            .padding([6, 10]);
+            iced::widget::tooltip(
+                text(mode_label).size(12).color(colors.muted),
+                tooltip_content,
+                iced::widget::tooltip::Position::Top,
+            )
+            .style(move |_t| theme::tooltip_style(&c))
+            .into()
         };
 
         let play_btn = button(
@@ -2571,13 +3449,13 @@ pub fn is_mod(repo: &RepoRow) -> bool {
     !matches!(repo.mode.as_str(), "addon" | "addon_git")
 }
 
-/// Returns the font for project names: Bold when using default font, Regular when using Friz
+/// Returns the font for project names: Bold when using Noto Sans, Regular when using Friz
 /// (Friz Quadrata only ships Regular weight; requesting Bold causes a fallback to system font).
 pub fn name_font(colors: &ThemeColors) -> Font {
-    if colors.body_font.family == iced::font::Family::SansSerif {
-        Font { weight: iced::font::Weight::Bold, ..Font::DEFAULT }
+    if colors.body_font == FRIZ {
+        FRIZ
     } else {
-        colors.body_font
+        Font { weight: iced::font::Weight::Bold, ..colors.body_font }
     }
 }
 
@@ -2869,7 +3747,7 @@ fn badge_tag<'a>(label: &'static str, text_color: iced::Color, base_color: iced:
 
 /// Build an SVG handle for a forge icon.
 /// `forge_url` is used to distinguish Codeberg from other Gitea-based instances.
-fn forge_svg_handle(forge: &str, forge_url: &str) -> iced::widget::svg::Handle {
+pub(crate) fn forge_svg_handle(forge: &str, forge_url: &str) -> iced::widget::svg::Handle {
     let svg: &str = match forge {
         "github" => concat!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">"#,
@@ -2897,10 +3775,16 @@ fn forge_svg_handle(forge: &str, forge_url: &str) -> iced::widget::svg::Handle {
     let svg_owned: String;
     let resolved_svg = if svg.is_empty() {
         if forge_url.contains("codeberg") {
-            // Codeberg: hollow mountain/iceberg shape (two concentric triangles, fill-rule evenodd)
+            // Codeberg: official Simple Icons path (CC0)
             svg_owned = concat!(
                 r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">"#,
-                r#"<path fill-rule="evenodd" d="M12 2L2 22h20zM12 8L5.5 22h13z"/>"#,
+                r#"<path d="M11.999.747A11.974 11.974 0 000 12.75c0 2.254.635 4.465 1.833 6.376L11.837 "#,
+                r#"6.19c.072-.092.251-.092.323 0l4.178 5.402h-2.992l.065.239h3.113l.882 1.138h-3.674"#,
+                r#"l.103.374h3.86l.777 1.003h-4.358l.135.483h4.593l.695.894h-5.038l.165.589h5.326"#,
+                r#"l.609.785h-5.717l.182.65h6.038l.562.727h-6.397l.183.65h6.717A12.003 12.003 0 0024"#,
+                r#" 12.75 11.977 11.977 0 0011.999.747zm3.654 19.104.182.65h5.326c.173-.204.353-.433"#,
+                r#".513-.65zm.385 1.377.18.65h3.563c.233-.198.485-.428.712-.65zm.383 1.377.182.648h"#,
+                r#"1.203c.356-.204.685-.412 1.042-.648z"/>"#,
                 r#"</svg>"#,
             ).to_string();
         } else {
@@ -2960,18 +3844,26 @@ fn tab_icon_svg(tab: Tab) -> iced::widget::svg::Handle {
 
 fn close_button<'a>(colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
-    button(text("\u{2715}").size(16).color(c.muted)) // ✕
+    button(text("\u{2715}").size(14).color(c.bad)) // ✕ in red
         .on_press(Message::CloseDialog)
         .padding([4, 8])
         .style(move |_theme, status| match status {
-            button::Status::Hovered => {
-                let mut s = theme::tab_button_hovered_style(&c);
-                s.text_color = c.text;
-                s
-            }
+            button::Status::Hovered => button::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgba(
+                    c.bad.r, c.bad.g, c.bad.b, 0.15,
+                ))),
+                text_color: c.bad,
+                border: iced::Border {
+                    color: iced::Color::from_rgba(c.bad.r, c.bad.g, c.bad.b, 0.4),
+                    width: 1.0,
+                    radius: iced::border::Radius::from(4),
+                },
+                shadow: iced::Shadow::default(),
+                snap: true,
+            },
             _ => button::Style {
                 background: None,
-                text_color: c.muted,
+                text_color: c.bad,
                 border: iced::Border::default(),
                 shadow: iced::Shadow::default(),
                 snap: true,
@@ -3006,7 +3898,7 @@ pub fn inline_context_menu<'a>(app: &App, repo: &RepoRow, colors: &ThemeColors) 
     let c3 = c;
     items.push(
         button(text("Remove").size(12).color(c.bad))
-            .on_press(Message::OpenDialog(Dialog::RemoveRepo { id: rid, name }))
+            .on_press(Message::OpenDialog(Dialog::RemoveRepo { id: rid, name, remove_files: false, files: Vec::new() }))
             .padding([6, 12])
             .width(Length::Fill)
             .style(move |_theme, status| {
@@ -3052,53 +3944,37 @@ fn ctx_menu_item<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element
         .into()
 }
 
-/// Clipboard helper — uses system commands on Linux for reliable Wayland support.
+/// Clipboard helper.
+///
+/// On Linux (Wayland/X11) the clipboard is "owned" by a process that must keep serving requests
+/// until another app takes ownership. We spawn a background thread that holds `Clipboard` alive
+/// via `wait_until()` so clipboard managers have time to read and cache the content.
+///
+/// On Windows/macOS the OS retains clipboard content after the handle is closed, so a simple
+/// `set_text` is sufficient.
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+    #[cfg(target_os = "linux")]
+    {
+        use arboard::SetExtLinux;
+        let text_owned = text.to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        std::thread::spawn(move || {
+            if let Ok(mut cb) = arboard::Clipboard::new() {
+                let _ = cb.set().wait_until(deadline).text(text_owned);
+            }
+        });
+        return Ok(());
+    }
 
-    // Try wl-copy (Wayland) — most reliable on modern Linux
-    if let Ok(mut child) = Command::new("wl-copy")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+    #[cfg(not(target_os = "linux"))]
     {
-        if let Some(ref mut stdin) = child.stdin {
-            let _ = stdin.write_all(text.as_bytes());
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            if cb.set_text(text).is_ok() {
+                return Ok(());
+            }
         }
-        let _ = child.wait();
-        return Ok(());
+        Err("Clipboard unavailable".to_string())
     }
-    // Try xclip (X11)
-    if let Ok(mut child) = Command::new("xclip")
-        .args(["-selection", "clipboard"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        if let Some(ref mut stdin) = child.stdin {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        let _ = child.wait();
-        return Ok(());
-    }
-    // Try xsel
-    if let Ok(mut child) = Command::new("xsel")
-        .args(["--clipboard", "--input"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        if let Some(ref mut stdin) = child.stdin {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        let _ = child.wait();
-        return Ok(());
-    }
-    Err("No clipboard tool found (wl-copy, xclip, xsel)".to_string())
 }
 
 /// Canvas-drawn spinner: a rotating arc, matching Tauri's CSS border-top spinner.
@@ -3152,6 +4028,69 @@ impl<Message> canvas::Program<Message> for SpinnerCanvas {
         );
 
         vec![frame.into_geometry()]
+    }
+}
+
+/// Converts a verbose libgit2/network error chain into a short, human-readable message,
+/// appending the numeric error code if one is found (e.g. "… (Error Code -16)").
+///
+/// Raw errors look like:
+///   "list remote branches URL (last tried URL): connect remote URL (auth failed: … class=Http (34); code=Auth (-16))"
+/// Which becomes: "Repository not found or requires authentication (Error Code -16)"
+fn simplify_git_error(raw: &str) -> String {
+    // Extract numeric error code from "code=Something (-NN)" anywhere in the raw string.
+    let error_code: Option<String> = raw
+        .find("code=")
+        .and_then(|i| {
+            let after = &raw[i..];
+            let lparen = after.find('(')?;
+            let rparen = after.find(')')?;
+            if rparen > lparen {
+                let num = after[lparen + 1..rparen].trim();
+                if num.chars().all(|c| c.is_ascii_digit() || c == '-') {
+                    return Some(num.to_string());
+                }
+            }
+            None
+        });
+
+    // Unwrap "list remote ... (last tried ...): INNER" chains.
+    let mut inner = raw;
+    while let Some(pos) = inner.find("): ") {
+        inner = &inner[pos + 3..];
+    }
+
+    // Unwrap "connect remote URL (auth failed: DETAIL)" → keep DETAIL.
+    if let Some(start) = inner.find("(auth failed: ") {
+        inner = inner[start + 14..].trim_end_matches(|c: char| c == ')' || c == ' ');
+    }
+
+    // Strip "Git sync check failed: " prefix if still present.
+    inner = inner.strip_prefix("Git sync check failed: ").unwrap_or(inner);
+
+    let lower = inner.to_lowercase();
+    let msg = if lower.contains("authentication required")
+        || lower.contains("code=auth")
+        || lower.contains("class=http (34)")
+        || lower.contains("auth failed")
+    {
+        "Repository not found or requires authentication".to_string()
+    } else if lower.contains("not found") || lower.contains("404") {
+        "Repository not found".to_string()
+    } else if lower.contains("timed out")
+        || lower.contains("connection refused")
+        || lower.contains("network unreachable")
+    {
+        "Network error — check your connection".to_string()
+    } else if inner.len() > 120 {
+        format!("{}…", &inner[..120])
+    } else {
+        inner.to_string()
+    };
+
+    match error_code {
+        Some(code) => format!("{} (Error Code {})", msg, code),
+        None => msg,
     }
 }
 

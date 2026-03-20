@@ -100,7 +100,7 @@ pub fn install_from_zip(
                 });
             }
         }
-        update_dlls_txt(wow_root, &installed_dlls)?;
+        update_dlls_txt(wow_root, comment, &installed_dlls)?;
     }
 
     if want_addon {
@@ -284,40 +284,101 @@ fn maybe_set_comment(path: &Path, comment: &str, enabled: bool) {
     }
 }
 
-fn update_dlls_txt(wow_dir: &Path, dll_names: &[String]) -> Result<()> {
+/// Write `dll_names` into dlls.txt, grouped under `# == repo_name ==` / `# == /repo_name ==`
+/// block markers when more than one DLL is being registered.
+///
+/// Rules:
+/// - If the DLL already exists in dlls.txt (commented or not), its enabled/disabled state
+///   (`#` prefix) is preserved — we only update the normalised filename casing.
+/// - If the DLL is new, it is appended inside the block (or as a bare line for single-DLL mods).
+/// - Block markers are only written when `dll_names.len() > 1`.
+pub(crate) fn update_dlls_txt(wow_dir: &Path, repo_name: &str, dll_names: &[String]) -> Result<()> {
     if dll_names.is_empty() {
         return Ok(());
     }
 
     let path = wow_dir.join("dlls.txt");
     let existing = fs::read_to_string(&path).unwrap_or_default();
-
     let mut lines: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
 
-    for dll in dll_names {
-        let mut found = false;
+    let multi = dll_names.len() > 1;
+    let block_start = format!("# == {} ==", repo_name);
+    let block_end   = format!("# == /{} ==", repo_name);
 
-        for line in lines.iter_mut() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
+    // Track which DLLs still need inserting after scanning existing lines.
+    let mut needs_insert: Vec<&String> = dll_names.iter().collect();
 
-            let (_commented, rest) = if let Some(stripped) = trimmed.strip_prefix('#') {
-                (true, stripped.trim())
+    // Pass 1 — update any existing lines for these DLLs, preserving their # state.
+    for line in lines.iter_mut() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (commented, rest) = if let Some(s) = trimmed.strip_prefix('#') {
+            (true, s.trim())
+        } else {
+            (false, trimmed)
+        };
+        // Skip marker lines.
+        if rest.starts_with("== ") {
+            continue;
+        }
+        if let Some(pos) = needs_insert.iter().position(|d| d.eq_ignore_ascii_case(rest)) {
+            let dll = needs_insert.remove(pos);
+            // Preserve enabled/disabled state; only normalise casing.
+            *line = if commented {
+                format!("# {}", dll)
             } else {
-                (false, trimmed)
+                dll.clone()
             };
+        }
+    }
 
-            if rest.eq_ignore_ascii_case(dll) {
-                *line = dll.clone();
-                found = true;
-                break;
+    // Pass 2 — insert any DLLs not yet present.
+    if !needs_insert.is_empty() {
+        if multi {
+            // Find existing block end marker and insert before it, or append a new block.
+            if let Some(end_pos) = lines.iter().position(|l| {
+                l.trim().eq_ignore_ascii_case(block_end.trim())
+            }) {
+                for dll in needs_insert.iter().rev() {
+                    lines.insert(end_pos, (*dll).clone());
+                }
+            } else {
+                // No block yet — append start marker, DLLs, end marker.
+                if !lines.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
+                    lines.push(String::new());
+                }
+                lines.push(block_start.clone());
+                for dll in needs_insert.iter() {
+                    lines.push((*dll).clone());
+                }
+                lines.push(block_end.clone());
+            }
+        } else {
+            for dll in needs_insert.iter() {
+                lines.push((*dll).clone());
             }
         }
+    }
 
-        if !found {
-            lines.push(dll.clone());
+    // Ensure block markers exist for multi-DLL repos even if all DLLs were already tracked.
+    if multi && !existing.contains(&block_start) {
+        // Find the first of our DLL lines and wrap the group.
+        // (They may be scattered; just prepend/append markers around the last known position.)
+        if let Some(first_pos) = lines.iter().position(|l| {
+            let trimmed = l.trim();
+            let rest = trimmed.strip_prefix('#').map(|s| s.trim()).unwrap_or(trimmed);
+            dll_names.iter().any(|d| d.eq_ignore_ascii_case(rest))
+        }) {
+            lines.insert(first_pos, block_start);
+            // Find new last position after insertion.
+            let last_pos = lines.iter().rposition(|l| {
+                let trimmed = l.trim();
+                let rest = trimmed.strip_prefix('#').map(|s| s.trim()).unwrap_or(trimmed);
+                dll_names.iter().any(|d| d.eq_ignore_ascii_case(rest))
+            }).unwrap_or(first_pos);
+            lines.insert(last_pos + 1, block_end);
         }
     }
 
@@ -621,7 +682,7 @@ pub fn install_dll(
 ) -> Result<InstallRecord> {
     let dst = wow_dir.join(filename);
     install_file_or_symlink(downloaded, &dst, opts.use_symlinks)?;
-    update_dlls_txt(wow_dir, &[filename.to_string()])?;
+    update_dlls_txt(wow_dir, comment, &[filename.to_string()][..])?;
     maybe_set_comment(&dst, comment, opts.set_xattr_comment);
     Ok(InstallRecord {
         path: dst,

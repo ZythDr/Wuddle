@@ -25,13 +25,22 @@ pub struct RepoRow {
     pub enabled: bool,
     pub last_version: Option<String>,
     pub git_branch: Option<String>,
+    /// DLL files managed by this repo: (filename, is_enabled_in_dlls_txt).
+    /// Empty for non-DLL repos. More than one entry means this is a multi-DLL mod.
+    pub installed_dlls: Vec<(String, bool)>,
 }
 
 impl From<Repo> for RepoRow {
     fn from(r: Repo) -> Self {
+        // Normalize legacy "gitea" label for well-known hosts with their own brand.
+        let forge = if r.forge == "gitea" && r.host.eq_ignore_ascii_case("codeberg.org") {
+            "codeberg".to_string()
+        } else {
+            r.forge
+        };
         Self {
             id: r.id,
-            forge: r.forge,
+            forge,
             owner: r.owner,
             name: r.name,
             url: r.url,
@@ -39,6 +48,7 @@ impl From<Repo> for RepoRow {
             enabled: r.enabled,
             last_version: r.last_version,
             git_branch: r.git_branch,
+            installed_dlls: Vec::new(),
         }
     }
 }
@@ -111,7 +121,32 @@ pub async fn list_repos(
             let _ = eng.db().mark_casing_fixed();
         }
         let repos = eng.db().list_repos().map_err(|e| e.to_string())?;
-        Ok(repos.into_iter().map(RepoRow::from).collect())
+
+        // Read dlls.txt once to determine per-DLL enabled state.
+        let dlls_txt = std::fs::read_to_string(wow_path.join("dlls.txt")).unwrap_or_default();
+        let enabled_dlls: std::collections::HashSet<String> = dlls_txt
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+            .map(|l| l.trim().to_lowercase())
+            .collect();
+
+        let mut rows: Vec<RepoRow> = Vec::with_capacity(repos.len());
+        for repo in repos {
+            let mut row = RepoRow::from(repo);
+            let installs = eng.db().list_installs(row.id).unwrap_or_default();
+            row.installed_dlls = installs
+                .into_iter()
+                .filter(|e| e.kind == "dll")
+                .filter_map(|e| {
+                    let fname = std::path::Path::new(&e.path)
+                        .file_name()?.to_str()?.to_string();
+                    let is_enabled = enabled_dlls.contains(&fname.to_lowercase());
+                    Some((fname, is_enabled))
+                })
+                .collect();
+            rows.push(row);
+        }
+        Ok(rows)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -175,10 +210,54 @@ pub async fn set_repo_enabled(
     db_path: Option<PathBuf>,
     id: i64,
     enabled: bool,
+    wow_dir: String,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         eng.set_repo_enabled(id, enabled, None)
+            .map_err(|e| e.to_string())?;
+        // Also toggle all DLLs for this repo so dlls.txt stays in sync.
+        if !wow_dir.is_empty() {
+            let installs = eng.db().list_installs(id).unwrap_or_default();
+            let wow_path = Path::new(&wow_dir);
+            for entry in installs.iter().filter(|e| e.kind == "dll") {
+                if let Some(fname) = Path::new(&entry.path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                {
+                    let _ = eng.set_dll_enabled(fname, enabled, wow_path);
+                }
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Returns all installed files for a repo as (path_relative_to_wow_root, kind) pairs.
+pub async fn list_repo_installs(
+    db_path: Option<PathBuf>,
+    repo_id: i64,
+) -> Result<Vec<(String, String)>, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        let entries = eng.db().list_installs(repo_id).map_err(|e| e.to_string())?;
+        Ok(entries.into_iter().map(|e| (e.path, e.kind)).collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn set_dll_enabled(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    dll_name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_dll_enabled(&dll_name, enabled, Path::new(&wow_dir))
             .map_err(|e| e.to_string())?;
         Ok(())
     })
@@ -186,20 +265,94 @@ pub async fn set_repo_enabled(
     .map_err(|e| e.to_string())?
 }
 
+/// Result for a single repo updated as part of update-all.
+#[derive(Debug, Clone)]
+pub struct UpdateOneResult {
+    pub owner: String,
+    pub name: String,
+    /// The updated plan, or None if already up to date.
+    pub plan: Option<PlanRow>,
+    /// Verbose log lines for this repo.
+    pub log_lines: Vec<String>,
+    /// Error message if the update failed.
+    pub error: Option<String>,
+}
+
+/// Update only the repos in `ids_to_update` (already filtered: has_update && !ignored && enabled).
+/// Repos are updated in parallel. Returns one result per repo.
 pub async fn update_all(
     db_path: Option<PathBuf>,
     wow_dir: String,
+    ids_to_update: Vec<i64>,
     opts: InstallOptions,
-) -> Result<Vec<PlanRow>, String> {
-    tokio::task::spawn_blocking(move || {
-        let eng = open_engine(db_path.as_deref())?;
-        let plans = tokio::runtime::Handle::current()
-            .block_on(async { eng.apply_updates(Path::new(&wow_dir), None, opts).await })
-            .map_err(|e| e.to_string())?;
-        Ok(plans.into_iter().map(PlanRow::from).collect())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+) -> Result<Vec<UpdateOneResult>, String> {
+    if ids_to_update.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut set = tokio::task::JoinSet::new();
+
+    for id in ids_to_update {
+        let db = db_path.clone();
+        let wow = wow_dir.clone();
+        let opts = opts.clone();
+
+        set.spawn_blocking(move || -> Result<UpdateOneResult, String> {
+            let eng = open_engine(db.as_deref())?;
+            let repo = eng.db().get_repo(id).map_err(|e| e.to_string())?;
+            let owner = repo.owner.clone();
+            let name = repo.name.clone();
+            let mut log: Vec<String> = Vec::new();
+
+            if repo.mode.as_str() == "addon_git" {
+                let branch = repo.git_branch.as_deref().unwrap_or("master");
+                log.push(format!("{}/{}: syncing branch '{}'.", owner, name, branch));
+            } else {
+                log.push(format!("{}/{}: checking release assets.", owner, name));
+            }
+
+            let result = tokio::runtime::Handle::current().block_on(async {
+                eng.update_repo(id, Path::new(&wow), None, opts).await
+            });
+
+            match result {
+                Err(e) => {
+                    let err = e.to_string();
+                    log.push(format!("{}/{}: error — {}", owner, name, err));
+                    Ok(UpdateOneResult { owner, name, plan: None, log_lines: log, error: Some(err) })
+                }
+                Ok(None) => {
+                    log.push(format!("{}/{}: already up to date.", owner, name));
+                    Ok(UpdateOneResult { owner, name, plan: None, log_lines: log, error: None })
+                }
+                Ok(Some(plan)) => {
+                    if plan.mode.as_str() == "addon_git" {
+                        log.push(format!("{}/{}: repository synced.", plan.owner, plan.name));
+                    } else if !plan.asset_name.is_empty() {
+                        log.push(format!("{}/{}: installed '{}'.", plan.owner, plan.name, plan.asset_name));
+                    }
+                    log.push(format!("{}/{}: update complete.", plan.owner, plan.name));
+                    Ok(UpdateOneResult {
+                        owner: plan.owner.clone(),
+                        name: plan.name.clone(),
+                        plan: Some(PlanRow::from(plan)),
+                        log_lines: log,
+                        error: None,
+                    })
+                }
+            }
+        });
+    }
+
+    let mut results = Vec::new();
+    while let Some(task) = set.join_next().await {
+        match task {
+            Err(e) => return Err(format!("Update task panicked: {}", e)),
+            Ok(Err(e)) => return Err(e),
+            Ok(Ok(r)) => results.push(r),
+        }
+    }
+    Ok(results)
 }
 
 pub async fn update_repo(
@@ -248,14 +401,15 @@ pub async fn reinstall_repo(
 pub async fn list_repo_branches(
     db_path: Option<PathBuf>,
     repo_id: i64,
-) -> Result<(i64, Vec<String>), String> {
-    tokio::task::spawn_blocking(move || {
+) -> (i64, Result<Vec<String>, String>) {
+    let result: Result<Vec<String>, String> = tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
-        let branches = eng.list_repo_branches(repo_id).map_err(|e| e.to_string())?;
-        Ok((repo_id, branches))
+        eng.list_repo_branches(repo_id).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+    (repo_id, result)
 }
 
 pub async fn set_repo_branch(
@@ -277,6 +431,17 @@ pub async fn set_repo_branch(
 // Game launch
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone)]
+pub struct LaunchConfig {
+    pub method: String,        // "auto", "lutris", "wine", "custom"
+    pub lutris_target: String, // e.g. "lutris:rungameid/2"
+    pub wine_command: String,  // e.g. "wine"
+    pub wine_args: String,
+    pub custom_command: String,
+    pub custom_args: String,
+    pub clear_wdb: bool,
+}
+
 fn first_existing_file(dir: &Path, names: &[&str]) -> Option<PathBuf> {
     names
         .iter()
@@ -293,6 +458,24 @@ fn resolve_launch_target(wow_path: &Path) -> Result<PathBuf, String> {
                 wow_path.display()
             )
         })
+}
+
+fn parse_arg_string(raw: &str) -> Vec<String> {
+    raw.split_whitespace().map(|s| s.to_string()).collect()
+}
+
+fn spawn_launch_command(program: &str, args: &[String], cwd: &Path) -> Result<(), String> {
+    let mut cmd = Command::new(program);
+    cmd.args(args).current_dir(cwd);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        clean_env_for_child(&mut cmd);
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Failed to launch '{}': {}", program, e))
 }
 
 /// Strip AppImage-injected env vars so child processes see a normal environment.
@@ -326,27 +509,81 @@ fn clean_env_for_child(cmd: &mut Command) {
     }
 }
 
-pub async fn launch_game(wow_dir: String) -> Result<String, String> {
+pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let wow_path = PathBuf::from(wow_dir.trim());
         if !wow_path.is_dir() {
             return Err(format!("WoW path is not a directory: {}", wow_path.display()));
         }
+
+        // Optionally clear WDB cache before launch
+        if cfg.clear_wdb {
+            let wdb = wow_path.join("WDB");
+            if wdb.is_dir() {
+                let _ = std::fs::remove_dir_all(&wdb);
+            }
+        }
+
         let target = resolve_launch_target(&wow_path)?;
+        let target_str = target.to_string_lossy().to_string();
         let target_name = target.file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "game".to_string());
 
+        let method = cfg.method.trim().to_ascii_lowercase();
+
+        if method == "lutris" {
+            let command = if cfg.custom_command.trim().is_empty() { "lutris" } else { cfg.custom_command.trim() };
+            let target_arg = cfg.lutris_target.trim();
+            if target_arg.is_empty() {
+                return Err("Lutris launch target is empty (expected e.g. lutris:rungameid/2).".to_string());
+            }
+            let mut args = vec![target_arg.to_string()];
+            args.extend(parse_arg_string(&cfg.custom_args));
+            spawn_launch_command(command, &args, &wow_path)?;
+            return Ok(format!("Launched {} via {}.", target_name, command));
+        }
+
+        if method == "wine" {
+            let command = if cfg.wine_command.trim().is_empty() { "wine" } else { cfg.wine_command.trim() };
+            let mut args = parse_arg_string(&cfg.wine_args);
+            args.push(target_str);
+            spawn_launch_command(command, &args, &wow_path)?;
+            return Ok(format!("Launched {} via {}.", target_name, command));
+        }
+
+        if method == "custom" {
+            let command = cfg.custom_command.trim();
+            if command.is_empty() {
+                return Err("Custom launch command is empty.".to_string());
+            }
+            let mut args = parse_arg_string(&cfg.custom_args);
+            let mut inserted_exe = false;
+            for arg in &mut args {
+                if arg.contains("{exe}") {
+                    *arg = arg.replace("{exe}", &target_str);
+                    inserted_exe = true;
+                }
+                if arg.contains("{wow_dir}") {
+                    *arg = arg.replace("{wow_dir}", wow_path.to_string_lossy().as_ref());
+                }
+            }
+            if !inserted_exe {
+                args.push(target_str);
+            }
+            spawn_launch_command(command, &args, &wow_path)?;
+            return Ok(format!("Launched {} via custom command.", target_name));
+        }
+
+        // "auto" or fallback: launch executable directly
         let mut cmd = Command::new(&target);
         cmd.current_dir(&wow_path);
-
         #[cfg(all(unix, not(target_os = "macos")))]
         {
             clean_env_for_child(&mut cmd);
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
-
         cmd.spawn()
             .map(|_| format!("Launched {}.", target_name))
             .map_err(|e| format!("Failed to launch {}: {}", target_name, e))
@@ -634,24 +871,52 @@ async fn fetch_images(
     let mut cache = std::collections::HashMap::new();
     let mut total_bytes = 0usize;
 
+    // Pre-resolve github.com/user-attachments/assets/UUID → signed CDN URLs.
+    // GitHub renders these as private-user-images.githubusercontent.com/?jwt=... in its HTML.
+    let attachment_resolves =
+        resolve_github_user_attachments(client, raw_base_url, image_urls).await;
+
     for url in image_urls.iter().take(12) {
         if total_bytes > 20_000_000 { break; }
 
         let abs_url = resolve_image_url(url, raw_base_url);
 
+        // For user-attachments URLs, use the signed CDN URL extracted from GitHub HTML.
+        let fetch_url: String = attachment_resolves
+            .get(url.as_str())
+            .cloned()
+            .unwrap_or_else(|| abs_url.clone());
+
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             async {
-                let resp = client.get(&abs_url).send().await?;
+                let mut req = client.get(&fetch_url);
+                // Non-signed private-user-images URLs may need a GitHub token.
+                if fetch_url.contains("private-user-images.githubusercontent.com")
+                    && !fetch_url.contains("?jwt=")
+                {
+                    if let Some(token) = wuddle_engine::github_token() {
+                        req = req.bearer_auth(token);
+                    }
+                }
+                let resp = req.send().await?;
+                let ct = resp.headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("(none)")
+                    .to_string();
                 if !resp.status().is_success() {
                     return Err(reqwest::Error::from(resp.error_for_status().unwrap_err()));
+                }
+                if !ct.starts_with("image/") {
+                    return Ok(Default::default());
                 }
                 resp.bytes().await
             },
         ).await;
 
         if let Ok(Ok(bytes)) = result {
-            if bytes.len() <= 5_000_000 {
+            if !bytes.is_empty() && bytes.len() <= 5_000_000 {
                 total_bytes += bytes.len();
                 let data = bytes.to_vec();
                 // Store by original URL (as seen in markdown) AND absolute URL
@@ -663,6 +928,97 @@ async fn fetch_images(
         }
     }
     cache
+}
+
+/// Resolve `github.com/user-attachments/assets/UUID` URLs to time-limited signed CDN URLs.
+///
+/// GitHub's HTML page for the repo contains `<img src="https://private-user-images.githubusercontent.com/…?jwt=…">`
+/// entries for any user-attachments referenced in the README.  We fetch the page once, then
+/// extract the signed URL for each UUID we care about.
+async fn resolve_github_user_attachments(
+    client: &Client,
+    raw_base_url: &str,
+    image_urls: &[String],
+) -> std::collections::HashMap<String, String> {
+    let attachment_pairs: Vec<(String, String)> = image_urls
+        .iter()
+        .filter_map(|u| {
+            u.strip_prefix("https://github.com/user-attachments/assets/")
+                .map(|uuid| (u.clone(), uuid.to_string()))
+        })
+        .collect();
+
+    let mut result: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if attachment_pairs.is_empty() { return result; }
+
+    // Derive owner/repo from raw_base_url:
+    //   "https://raw.githubusercontent.com/{owner}/{repo}/..."
+    let after = raw_base_url
+        .strip_prefix("https://raw.githubusercontent.com/")
+        .unwrap_or("");
+    let parts: Vec<&str> = after.splitn(3, '/').collect();
+    if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
+        return result;
+    }
+    let html_url = format!("https://github.com/{}/{}", parts[0], parts[1]);
+
+    let resp = match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        client.get(&html_url).send(),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => return result,
+        Err(_) => return result,
+    };
+    if !resp.status().is_success() { return result; }
+    let html = resp.text().await.unwrap_or_default();
+
+    // Scan all private-user-images URLs in the HTML and match each one by UUID.
+    // We scan rather than searching for the UUID first because the UUID may appear
+    // earlier in the HTML inside JSON blobs where the signed URL isn't present.
+    let signed_prefix = "https://private-user-images.githubusercontent.com/";
+    let mut signed_urls: Vec<String> = Vec::new();
+    let mut scan_pos = 0;
+    while let Some(p) = html[scan_pos..].find(signed_prefix) {
+        let start = scan_pos + p;
+        let rest = &html[start..];
+        // URL ends at the first `"`, `'`, `\` (JSON-escaped quote context), or whitespace
+        let end = rest
+            .find(|c: char| c == '"' || c == '\'' || c == '\\' || c.is_ascii_whitespace())
+            .unwrap_or_else(|| rest.len().min(3000));
+        let candidate = rest[..end].to_string();
+        if !candidate.is_empty() && !signed_urls.contains(&candidate) {
+            signed_urls.push(candidate);
+        }
+        scan_pos = start + signed_prefix.len();
+    }
+    for (orig_url, uuid) in &attachment_pairs {
+        // Find the signed URL whose path contains this UUID
+        if let Some(signed) = signed_urls.iter().find(|u| u.contains(uuid.as_str())) {
+            result.insert(orig_url.clone(), signed.clone());
+        }
+    }
+    result
+}
+
+/// Fetch raw text content of a file from a repo's raw base URL.
+/// Returns (filename/path, content).
+pub async fn fetch_raw_file(raw_base_url: String, path: String) -> Result<(String, String), String> {
+    let base = raw_base_url.trim_end_matches('/');
+    let url = format!("{}/{}", base, path.trim_start_matches('/'));
+    let client = Client::builder()
+        .user_agent("wuddle-iced")
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let content = resp.text().await.map_err(|e| e.to_string())?;
+    Ok((path, content))
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +1070,85 @@ async fn fetch_files(client: &Client, forge: &str, host: &str, owner: &str, repo
             }
         }
     }
+}
+
+/// Fetch contents of a subdirectory within a repo tree.
+/// Returns (dir_path, entries) where each entry's `path` is the full path from repo root.
+pub async fn fetch_dir_contents(
+    forge_url: String,
+    dir_path: String,
+) -> Result<(String, Vec<RepoFileEntry>), String> {
+    let fi = parse_forge_url(&forge_url)
+        .ok_or_else(|| "Could not parse repo URL".to_string())?;
+    let client = Client::builder()
+        .user_agent("wuddle-iced")
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let entries: Vec<RepoFileEntry> = match fi.forge {
+        "github" => {
+            let url = format!(
+                "https://api.github.com/repos/{}/{}/contents/{}",
+                fi.owner, fi.repo, dir_path
+            );
+            let mut req = client.get(&url).header("Accept", "application/vnd.github+json");
+            if let Some(token) = wuddle_engine::github_token() { req = req.bearer_auth(token); }
+            match req.send().await {
+                Ok(r) if r.status().is_success() => {
+                    r.json::<Vec<ContentEntry>>().await.unwrap_or_default()
+                        .into_iter()
+                        .map(|e| RepoFileEntry {
+                            is_dir: e.kind == "dir",
+                            path: format!("{}/{}", dir_path, e.name),
+                            name: e.name,
+                        })
+                        .collect()
+                }
+                _ => Vec::new(),
+            }
+        }
+        "gitlab" => {
+            let encoded = format!("{}/{}", fi.owner, fi.repo).replace('/', "%2F");
+            let url = format!(
+                "https://gitlab.com/api/v4/projects/{}/repository/tree?path={}&per_page=50",
+                encoded, dir_path
+            );
+            match client.get(&url).send().await {
+                Ok(r) if r.status().is_success() => {
+                    r.json::<Vec<ContentEntry>>().await.unwrap_or_default()
+                        .into_iter()
+                        .map(|e| RepoFileEntry {
+                            is_dir: e.kind == "tree",
+                            path: format!("{}/{}", dir_path, e.name),
+                            name: e.name,
+                        })
+                        .collect()
+                }
+                _ => Vec::new(),
+            }
+        }
+        _ => {
+            let url = format!(
+                "{}://{}/api/v1/repos/{}/{}/contents/{}",
+                fi.scheme, fi.host, fi.owner, fi.repo, dir_path
+            );
+            match client.get(&url).send().await {
+                Ok(r) if r.status().is_success() => {
+                    r.json::<Vec<ContentEntry>>().await.unwrap_or_default()
+                        .into_iter()
+                        .map(|e| RepoFileEntry {
+                            is_dir: e.kind == "dir",
+                            path: format!("{}/{}", dir_path, e.name),
+                            name: e.name,
+                        })
+                        .collect()
+                }
+                _ => Vec::new(),
+            }
+        }
+    };
+    Ok((dir_path, entries))
 }
 
 // ---------------------------------------------------------------------------
@@ -866,6 +1301,7 @@ struct GiteaRepo {
     stars_count: Option<u64>,
     forks_count: Option<u64>,
     language: Option<String>,
+    default_branch: Option<String>,
 }
 
 async fn fetch_gitea_preview(client: &Client, host: &str, scheme: &str, owner: &str, repo: &str) -> Result<RepoPreviewInfo, String> {
@@ -873,13 +1309,14 @@ async fn fetch_gitea_preview(client: &Client, host: &str, scheme: &str, owner: &
     let info: GiteaRepo = client.get(&api_url).send().await.map_err(|e| e.to_string())?
         .json().await.map_err(|e| e.to_string())?;
 
-    let readme_url = format!("{}://{}/{}/{}/raw/branch/master/README.md", scheme, host, owner, repo);
+    let branch = info.default_branch.as_deref().unwrap_or("master");
+    let readme_url = format!("{}://{}/{}/{}/raw/branch/{}/README.md", scheme, host, owner, repo, branch);
     let readme_text = match client.get(&readme_url).send().await {
         Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
         _ => String::new(),
     };
 
-    let raw_base = format!("{}://{}/{}/{}/raw/branch/master/", scheme, host, owner, repo);
+    let raw_base = format!("{}://{}/{}/{}/raw/branch/{}/", scheme, host, owner, repo, branch);
     let md_content = iced::widget::markdown::Content::parse(&readme_text);
     let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
     let mut image_urls: Vec<String> = md_content.images().iter().cloned().collect();

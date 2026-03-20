@@ -58,7 +58,7 @@ Cross-reference of every Tauri/Svelte feature vs. the Iced 0.14 implementation.
 | Enable/disable checkbox per repo | ✅ | ✅ | |
 | Search / filter input with clear (✕) | ✅ | ✅ | |
 | Filter: All / Updates / Errors | ✅ | ✅ | |
-| Filter: Ignored | ✅ | ❌ | Tauri allows marking updates as ignored; Iced has no Ignored state |
+| Filter: Ignored | ✅ | ✅ | Tauri allows marking updates as ignored; Iced has no Ignored state |
 | Sort by name / status (ascending/descending) | ✅ | ✅ | |
 | "Check for updates" button | ✅ | ✅ | |
 | "Update all" button | ✅ | ✅ | |
@@ -139,7 +139,7 @@ Cross-reference of every Tauri/Svelte feature vs. the Iced 0.14 implementation.
 | Auto-clear WDB cache checkbox | ✅ | ✅ | |
 | GitHub token entry + Save/Forget | ✅ | ✅ | OS keychain with file fallback |
 | GitHub Tokens web link | ✅ | ✅ | |
-| GitHub auth health status display | ✅ | ❌ | Tauri shows rate-limit/keychain health badges; Iced does not |
+| GitHub auth health status display | ✅ | ✅ | Tauri shows rate-limit/keychain health badges; Iced does not |
 | Auto-check toggle | ✅ | ✅ | |
 | Auto-check interval (minutes) | ✅ | ✅ | stored in settings |
 | Desktop notifications toggle | ✅ | ✅ | |

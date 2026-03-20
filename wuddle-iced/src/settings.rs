@@ -56,6 +56,7 @@ pub struct AppSettings {
     pub log_autoscroll: bool,
     pub auto_check_minutes: u32,
     pub profiles: Vec<ProfileConfig>,
+    pub ignored_update_ids: Vec<i64>,
 }
 
 impl Default for AppSettings {
@@ -73,6 +74,7 @@ impl Default for AppSettings {
             log_autoscroll: true,
             auto_check_minutes: 15,
             profiles: vec![ProfileConfig::default()],
+            ignored_update_ids: Vec::new(),
         }
     }
 }

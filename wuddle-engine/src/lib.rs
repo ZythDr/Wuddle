@@ -53,6 +53,10 @@ pub struct UpdatePlan {
     pub not_modified: bool,
     pub applied: bool,
     pub error: Option<String>,
+
+    /// Additional assets to install alongside the primary one.
+    /// Only populated for Dll-mode repos that publish multiple individual .dll files.
+    pub extra_assets: Vec<ReleaseAsset>,
 }
 
 /// Controls how aggressively the engine checks for updates.
@@ -343,6 +347,7 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            extra_assets: Vec::new(),
         }
     }
 
@@ -1004,6 +1009,7 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            extra_assets: Vec::new(),
         })
     }
 
@@ -1100,6 +1106,7 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            extra_assets: Vec::new(),
         })
     }
 
@@ -1225,6 +1232,28 @@ impl Engine {
         };
 
         let mode = r.mode.clone();
+
+        // Collect ALL .dll assets for repos that publish individual DLL files (e.g. WeirdUtils).
+        // Applies to Dll mode always, and to Auto/Mixed when no zip asset is present (a zip
+        // would bundle all the DLLs itself, so we only need the zip in that case).
+        let has_zip_asset = rel.assets.iter().any(|a| {
+            a.name.to_lowercase().ends_with(".zip") && Self::is_asset_allowed(a, &mode)
+        });
+        let collect_all_dlls = matches!(mode, InstallMode::Dll)
+            || (!has_zip_asset && matches!(mode, InstallMode::Auto | InstallMode::Mixed));
+        let all_dll_assets: Vec<ReleaseAsset> = if collect_all_dlls {
+            rel.assets
+                .iter()
+                .filter(|a| {
+                    a.name.to_lowercase().ends_with(".dll")
+                        && Self::is_asset_allowed(a, &mode)
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let asset = match Self::pick_asset(&rel, mode.clone(), r.asset_regex.as_deref()) {
             Ok(asset) => asset,
             Err(e) => {
@@ -1233,7 +1262,21 @@ impl Engine {
                 return Ok(p);
             }
         };
-        let latest_tag = Self::effective_latest_label(&rel.tag, &asset.name);
+
+        // Extra assets = everything except the primary one (skip duplicates by name).
+        let extra_assets: Vec<ReleaseAsset> = all_dll_assets
+            .into_iter()
+            .filter(|a| !a.name.eq_ignore_ascii_case(&asset.name))
+            .collect();
+
+        // For version tracking of multi-asset repos, use the release tag so that the "version"
+        // represents the whole release rather than a specific DLL filename.
+        let latest_tag = if extra_assets.is_empty() {
+            Self::effective_latest_label(&rel.tag, &asset.name)
+        } else {
+            // Use tag directly — individual asset names carry no shared version info.
+            rel.tag.clone()
+        };
         let asset_id = Self::effective_asset_id(&asset);
         let asset_size_i64 = Self::size_u64_to_i64(asset.size);
 
@@ -1270,6 +1313,7 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            extra_assets,
         })
     }
 
@@ -1365,6 +1409,9 @@ impl Engine {
         let mut git_repos = Vec::new();
         let mut release_repos = Vec::new();
         for repo in repos {
+            if !repo.enabled {
+                continue; // skip disabled repos — no git pull/clone, no API check
+            }
             if matches!(repo.mode, InstallMode::AddonGit) {
                 git_repos.push(repo);
             } else {
@@ -1651,19 +1698,21 @@ impl Engine {
 
     async fn download_asset_to(&self, plan: &UpdatePlan, dest: &Path) -> Result<()> {
         Self::validate_asset_url(plan)?;
+        self.download_url_to(&plan.asset_url, dest).await
+    }
+
+    async fn download_url_to(&self, url: &str, dest: &Path) -> Result<()> {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-
         let bytes = self
             .client
-            .get(&plan.asset_url)
+            .get(url)
             .send()
             .await?
             .error_for_status()?
             .bytes()
             .await?;
-
         std::fs::write(dest, &bytes)?;
         Ok(())
     }
@@ -2031,6 +2080,19 @@ impl Engine {
         Ok(touched)
     }
 
+    /// Toggle a single DLL's enabled state in dlls.txt without touching the whole repo.
+    /// Returns `true` if dlls.txt was modified.
+    pub fn set_dll_enabled(
+        &self,
+        dll_name: &str,
+        enabled: bool,
+        wow_dir: &Path,
+    ) -> Result<bool> {
+        let names = vec![dll_name.to_string()];
+        let touched = Self::set_dlls_txt_entries_commented(wow_dir, &names, !enabled)?;
+        Ok(touched > 0)
+    }
+
     pub fn set_repo_git_branch(&self, repo_id: i64, git_branch: Option<String>) -> Result<()> {
         let repo = self.db.get_repo(repo_id)?;
         if !matches!(repo.mode, InstallMode::AddonGit) {
@@ -2288,7 +2350,7 @@ impl Engine {
             plan.owner, plan.name, plan.latest
         );
 
-        let records = if Self::looks_like_zip(&asset_path, &plan.asset_name) {
+        let mut records = if Self::looks_like_zip(&asset_path, &plan.asset_name) {
             let extract_dir = release_dir.join("unzip");
             install::install_from_zip(
                 &asset_path,
@@ -2323,6 +2385,51 @@ impl Engine {
                 anyhow::bail!("Asset is not zip/dll; use raw mode (or auto with raw_dest).")
             }
         };
+
+        // Download and install any additional .dll assets (multi-DLL repos like WeirdUtils).
+        for extra in &plan.extra_assets {
+            let extra_name_fs = Path::new(&extra.name)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("extra.dll")
+                .to_string();
+            let extra_path = release_dir.join(&extra_name_fs);
+            let needs_dl = match (extra_path.metadata().ok(), extra.size) {
+                (Some(meta), Some(expected)) => meta.len() != expected,
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            if needs_dl {
+                self.download_url_to(&extra.download_url, &extra_path).await?;
+            }
+            if extra_path.exists() {
+                records.push(install::install_dll(
+                    &extra_path,
+                    wow_dir,
+                    &extra.name,
+                    opts,
+                    &comment,
+                )?);
+            }
+        }
+
+        // For multi-DLL repos, do a consolidated update_dlls_txt call with ALL dll names so that
+        // block markers (# == RepoName == / # == /RepoName ==) get written around the group.
+        if !plan.extra_assets.is_empty() {
+            let all_dll_names: Vec<String> = records
+                .iter()
+                .filter(|r| r.kind == "dll")
+                .filter_map(|r| {
+                    std::path::Path::new(&r.path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+            if !all_dll_names.is_empty() {
+                install::update_dlls_txt(wow_dir, &plan.name, &all_dll_names)?;
+            }
+        }
 
         // Remove previously tracked addon targets that are no longer part of this release install
         // (e.g. suffix variants like "-tbc"/"-wotlk" collapsing into one canonical addon folder).
@@ -2464,6 +2571,7 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            extra_assets: Vec::new(),
         };
 
         self.apply_one(&plan, wow_dir, raw_dest, opts).await?;

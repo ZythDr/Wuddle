@@ -697,10 +697,48 @@ When a preview is loaded, switch from single-card to two side-by-side cards:
 +------------------------+  +-------------------------------+
 ```
 
-- Detect `has_two_cards` in `view()`, wrap with `max_width(1060)` container
-- `view_dialog()` returns `row![sidebar, form_card]` — each card has its own style
-- Sidebar: 260px fixed width; form card: fills remaining space
-- Row height: 560px; spacing: 8px
+- Detect `has_two_cards` in `view()`, give `dialog_box` `width(Fill).height(Fill)`
+- `view_dialog()` returns `row![sidebar, form_card].width(Fill).height(Fill)` — each card fills the row
+- Sidebar: 260px fixed width; form card: `width(Fill).height(Fill)`
+
+### Making dialogs fill ~90% of the window
+
+Add uniform padding to the `centered_dialog` container. The padding creates margins on all
+sides, and `Fill` children fill the remaining area up to those margins:
+
+```rust
+let centered_dialog = container(dialog_blocker)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .padding(40);  // ~40px margin ≈ 90% on a typical 800px window
+
+// For the dialog box itself (AddRepo etc.):
+container(content)
+    .width(Length::Fill)
+    .height(Length::Fill)  // fills the padded space
+    .into()
+
+// Inner scrollable content also needs height(Fill) to fill dialog height
+row![sidebar_card, form_card]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+```
+
+**Key rule:** `center_y(Fill)` with symmetric padding still centers compact dialogs
+(those with `height(Shrink)`) in the window. Only `height(Fill)` dialogs stretch to fill it.
+So compact confirmation dialogs remain centered without changes.
+
+**Conditional fill height:** for cases where the same dialog can be compact (URL entry mode)
+or tall (quick-add list mode), check the condition before the `dialog_box` construction:
+
+```rust
+let use_fill_height = match dialog {
+    Dialog::AddRepo { url, is_addons, .. } => !is_addons && url.trim().is_empty(),
+    _ => false,
+};
+// Then set height(Fill) on dialog_box only when use_fill_height is true.
+```
 
 ### Click-through prevention
 
@@ -761,6 +799,234 @@ Settings are persisted to `settings.json` in the app data dir.
 
 ---
 
+## Equal-Height Cards in a Row (CSS `align-items: stretch` Equivalent)
+
+Iced has no direct equivalent of CSS `align-items: stretch`. To make sibling cards in a
+`row![]` match the height of the tallest card:
+
+### The pattern
+
+Give the **naturally taller card** `height(Shrink)` (default) — it anchors the row height.
+Give the **shorter card(s)** `height(Fill)` — they stretch to match.
+
+How it works: a `Row` with `height(Shrink)` sets its cross-axis height to the max natural
+height of all its Shrink children. Fill children then receive that same height.
+
+```rust
+fn settings_card<'a>(content: impl Into<Element<'a, Message>>, colors: &ThemeColors)
+    -> Element<'a, Message>
+{
+    let c = *colors;
+    container(container(content).padding(16))
+        .width(Length::Fill)
+        // height defaults to Shrink — this is the "anchor" card
+        .style(move |_theme| theme::card_style(&c))
+        .into()
+}
+
+fn settings_card_fill<'a>(content: impl Into<Element<'a, Message>>, colors: &ThemeColors)
+    -> Element<'a, Message>
+{
+    let c = *colors;
+    container(container(content).padding(16))
+        .width(Length::Fill)
+        .height(Length::Fill)  // stretches to match the tallest sibling
+        .style(move |_theme| theme::card_style(&c))
+        .into()
+}
+
+// Usage: identify which card is naturally taller in each row
+let rendering = settings_card(rendering_col, &c);     // taller — Shrink anchor
+let camera    = settings_card_fill(camera_col, &c);   // shorter — Fill stretch
+
+let audio  = settings_card(audio_col, &c);            // taller — Shrink anchor
+let system = settings_card_fill(system_col, &c);      // shorter — Fill stretch
+
+row![rendering, camera].spacing(8).width(Length::Fill)   // both cards same height ✓
+row![audio, system].spacing(8).width(Length::Fill)
+```
+
+### What does NOT work
+
+- **Manual spacers** (`Space::new().height(X)`) are fragile — they break when fonts,
+  padding, or content changes, and require re-tuning after every content edit.
+- **`height(Fill)` on ALL cards** in a row with `height(Shrink)` — Fill children
+  contribute 0 to the row's natural height, so the row may collapse.
+- **Wrapping in a fixed-height container** — requires hardcoded pixel heights that
+  drift when content changes.
+
+### Equal-height cards when there is only one row (e.g. About page)
+
+When each column already has the same number of items except one is shorter, add an
+explicit `Space::new().height(X)` to the shorter column where:
+
+```
+X = (height_of_taller - height_of_shorter) - (one_column_spacing_gap)
+```
+
+Use visual inspection (screenshots) to confirm: a 1-row height difference ≈ `text_size * 1.3 + gap`.
+This is accurate enough when content is stable.
+
+---
+
+## Overlay Scrollbar (No Content Shift)
+
+By default, an Iced `scrollable` with a vertical scrollbar reserves width for the
+scrollbar (typically 10px + 8px gap = 18px), causing content to shift left when a
+scrollbar appears. This misaligns table columns and header rows.
+
+### Solution: overlay scrollbar
+
+Use `Scrollbar::new()` **without** `.spacing()` — the scrollbar floats over the content:
+
+```rust
+pub fn vscroll_overlay() -> iced::widget::scrollable::Direction {
+    iced::widget::scrollable::Direction::Vertical(
+        iced::widget::scrollable::Scrollbar::new()
+            .width(10)
+            .scroller_width(10),
+        // No .spacing() — scrollbar is an overlay, does not shift content
+    )
+}
+
+// vs. vscroll() which reserves space:
+pub fn vscroll() -> iced::widget::scrollable::Direction {
+    iced::widget::scrollable::Direction::Vertical(
+        iced::widget::scrollable::Scrollbar::new()
+            .width(10)
+            .scroller_width(10)
+            .spacing(8),  // adds 8px gap, shifts content left by 18px total
+    )
+}
+```
+
+Use `vscroll_overlay()` for tables and any scrollable where column alignment must be
+consistent regardless of scrollbar presence. Use `vscroll()` where extra right padding
+is acceptable.
+
+**Do NOT add VSCROLL_RESERVED padding to header rows** when using overlay mode — the
+scrollbar floats and headers stay aligned automatically.
+
+---
+
+## Inline Clear Button in Text Input
+
+The pattern for an "×" clear button that appears inside a text input, right-aligned,
+only when the field has text (matching browser-native input behavior):
+
+```rust
+let show_clear = !value.is_empty();
+
+stack![
+    text_input(placeholder, value)
+        .on_input(Message::SetValue)
+        .padding(iced::Padding {
+            top: 4.0,
+            right: if show_clear { 26.0 } else { 10.0 },  // reserve space for X
+            bottom: 4.0,
+            left: 10.0,
+        })
+        .width(Length::Fill),
+
+    {   // Typed variable required — type inference fails on Space::new().into() in if/else
+        let clear_el: Element<Message> = if show_clear {
+            button(text("\u{2715}").size(12).color(colors.muted))
+                .on_press(Message::SetValue(String::new()))
+                .padding([3, 7])
+                .style(move |_t, _s| button::Style {
+                    background: None,
+                    text_color: colors.muted,
+                    border: iced::Border::default(),
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                })
+                .into()
+        } else {
+            Space::new().into()
+        };
+        container(clear_el)
+    }
+    .width(Length::Fill)
+    .height(Length::Fill)   // REQUIRED: without this, container has Shrink height
+    .align_x(iced::Alignment::End)
+    .align_y(iced::Alignment::Center)
+    .padding(iced::Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 0.0 }),
+]
+.width(Length::Fill)
+```
+
+**Critical: `height(Length::Fill)` on the overlay container**
+
+Inside a `stack![]`, each layer occupies the same bounding box (the stack's computed size).
+The stack's height = max natural height of all Shrink children = the text input height.
+
+If the overlay container has `height(Shrink)` (default), it shrinks to the button size
+and is positioned at `(0, 0)` — the **top-left** of the stack area. `align_y(Center)` has
+no room to center anything. Result: button appears in the top-right corner.
+
+With `height(Length::Fill)`, the container fills the stack height (= input height), and
+`align_y(Center)` correctly centers the button vertically within the input.
+
+---
+
+## Bold Font Loading
+
+Iced automatically selects font weight variants when multiple weights of the same family
+are registered. To get proper bold rendering (e.g. in markdown headers):
+
+```rust
+// Register both Regular and Bold under the same family name
+iced::application(...)
+    .font(include_bytes!("../assets/fonts/NotoSans-Regular.ttf"))
+    .font(include_bytes!("../assets/fonts/NotoSans-Bold.ttf"))
+    .default_font(Font::with_name("Noto Sans"))
+```
+
+Iced will automatically use `NotoSans-Bold.ttf` when a widget requests
+`Font { weight: Weight::Bold, family: Family::Name("Noto Sans"), .. }`.
+Without the bold variant registered, Iced fakes bold (thicker rendering) or
+uses regular weight everywhere.
+
+### Font family identity check pitfall
+
+When checking whether a font is a specific named font, do NOT compare `font.family`:
+
+```rust
+// WRONG — Font::with_name("Noto Sans") has Family::Name("Noto Sans"),
+// not Family::SansSerif, so this check always fails:
+if colors.body_font.family == iced::font::Family::SansSerif { ... }
+
+// CORRECT — compare the full Font struct:
+if colors.body_font == FRIZ { ... }
+// Or compare the specific font constant you care about:
+const FRIZ: Font = Font::with_name("Friz Quadrata Std");
+fn name_font(colors: &ThemeColors) -> Font {
+    if colors.body_font == FRIZ {
+        FRIZ  // Friz doesn't have a bold variant
+    } else {
+        Font { weight: iced::font::Weight::Bold, ..colors.body_font }
+    }
+}
+```
+
+---
+
+## Markdown Link Color
+
+`iced::widget::markdown::Style` has a `link_color` field that defaults to the theme's
+primary/accent color. To match your app's link color scheme, override it:
+
+```rust
+let mut md_style = iced::widget::markdown::Style::from(&self.theme());
+md_style.link_color = colors.link;  // use your ThemeColors.link field
+let settings = iced::widget::markdown::Settings::with_text_size(13, md_style);
+```
+
+Apply this to **all** markdown views in the app (README, release notes, changelog, etc.)
+for consistent link styling.
+
+---
+
 ## What Didn't Work
 
 | Approach | Problem |
@@ -773,6 +1039,13 @@ Settings are persisted to `settings.json` in the app data dir.
 | `rule::vertical` in scrollable rows | Expands to fill height, breaks row sizing |
 | Custom regex scanner for markdown image URLs | Mismatches iced's pulldown-cmark URLs |
 | Unicode glyph tab icon at large `size()` | Button becomes taller than SVG icon tabs |
+| Manual `Space::new().height(X)` to match card heights | Fragile — breaks on any content/font/padding change |
+| Comparing `font.family == Family::SansSerif` to detect non-Friz fonts | `Font::with_name()` uses `Family::Name(...)`, not `SansSerif` |
+| Default `markdown::Style::from(&theme)` for link color | Ignores ThemeColors.link, uses theme primary instead |
+| `vscroll()` with `.spacing(8)` in tables | Scrollbar reserves 18px, shifts columns left when it appears |
+| `height(Shrink)` on clear-button overlay container in stack | Container sticks to top-left; `align_y(Center)` has no effect |
+| External clear button in a `row![]` next to text input | Button renders outside the input field, not inline |
+| Fixed `height(580)` on dialog row | Doesn't adapt to window size; looks small on tall monitors |
 
 ---
 
@@ -790,3 +1063,10 @@ Settings are persisted to `settings.json` in the app data dir.
 | `markdown::Content::parse()` + `.images()` for image URL collection | Guaranteed URL match with renderer |
 | `text("ⓘ").size(17).line_height(1.0)` for Unicode icon tabs | Matches SVG icon button height exactly |
 | Storing `Vec<markdown::Item>` in app state (dialog, release notes) | Avoids parse-in-view lifetime issues |
+| `settings_card` (Shrink) + `settings_card_fill` (Fill) pattern for grid rows | Taller card anchors row height; shorter card stretches to match |
+| `vscroll_overlay()` — `Scrollbar::new()` without `.spacing()` | Scrollbar floats over content, columns stay aligned |
+| `height(Length::Fill)` on overlay container inside `stack![]` | Enables `align_y(Center)` to work correctly |
+| `let el: Element<Message> = if cond { a.into() } else { Space::new().into() }` | Typed variable resolves `Space` type ambiguity in `container()` |
+| `centered_dialog.padding(40)` + dialog_box `width/height(Fill)` | Dialog fills ~90% of window, compact dialogs still center correctly |
+| `md_style.link_color = colors.link` before markdown settings | All links use consistent app link color |
+| Loading both `NotoSans-Regular.ttf` and `NotoSans-Bold.ttf` | Iced selects bold automatically for `Weight::Bold` requests |

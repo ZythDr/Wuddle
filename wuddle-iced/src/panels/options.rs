@@ -1,4 +1,4 @@
-use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input, tooltip, Space};
+use iced::widget::{button, checkbox, column, container, row, scrollable, stack, text, text_input, tooltip, Space};
 use iced::{Element, Length};
 
 use crate::theme::{self, ThemeColors, WuddleTheme};
@@ -195,10 +195,33 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 .size(12)
                 .color(colors.muted),
             row![
-                text_input("ghp_...", &app.github_token_input)
-                    .on_input(Message::SetGithubTokenInput)
+                {
+                    let c2 = c;
+                    let show_clear = !app.github_token_input.is_empty();
+                    stack![
+                        text_input("ghp_...", &app.github_token_input)
+                            .on_input(Message::SetGithubTokenInput)
+                            .width(Length::Fill)
+                            .padding(iced::Padding { top: 8.0, right: if show_clear { 28.0 } else { 12.0 }, bottom: 8.0, left: 12.0 }),
+                        container(
+                            button(text("\u{2715}").size(10).color(c2.muted))
+                                .on_press(Message::SetGithubTokenInput(String::new()))
+                                .padding([6, 6])
+                                .style(move |_t, _s| button::Style {
+                                    background: None,
+                                    text_color: c2.muted,
+                                    border: iced::Border::default(),
+                                    shadow: iced::Shadow::default(),
+                                    snap: true,
+                                })
+                        )
+                        .width(Length::Fill)
+                        .align_x(iced::Alignment::End)
+                        .align_y(iced::Alignment::Center)
+                        .padding([0, 3]),
+                    ]
                     .width(Length::Fill)
-                    .padding([8, 12]),
+                },
                 {
                     let c2 = c;
                     button(text("Save token").size(13))
@@ -237,6 +260,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         .width(Length::Fill),
     )
     .height(Length::Fill)
+    .direction(theme::vscroll())
+    .style(move |t, s| theme::scrollable_style(&c)(t, s))
     .into()
 }
 

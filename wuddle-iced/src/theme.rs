@@ -4,6 +4,7 @@ use iced::theme::Palette;
 use iced::widget::button;
 use iced::widget::container;
 use iced::widget::rule;
+use iced::widget::text_editor;
 use iced::{Border, Color, Font, Gradient, Radians, Shadow, Theme, Vector};
 
 /// Wuddle's 5 custom themes, ported from the CSS variables.
@@ -367,7 +368,7 @@ pub fn tab_button_active_style(colors: &ThemeColors) -> button::Style {
         background: Some(v_gradient(colors.tab_active_top, colors.tab_active_bottom)),
         text_color: colors.primary_text,
         border: Border {
-            color: rgba_color(243, 190, 128, 0.55),
+            color: Color { a: 0.65, ..colors.tab_active_top },
             width: 1.0,
             radius: Radius::new(0.0),
         },
@@ -498,7 +499,7 @@ pub fn theme_button_active_style(colors: &ThemeColors) -> button::Style {
         background: Some(iced::Background::Color(colors.primary)),
         text_color: colors.primary_text,
         border: Border {
-            color: rgba_color(243, 190, 128, 0.55),
+            color: Color { a: 0.70, ..colors.primary },
             width: 1.0,
             radius: Radius::new(0.0),
         },
@@ -650,7 +651,7 @@ pub fn btn_primary_style(colors: &ThemeColors) -> button::Style {
         background: Some(iced::Background::Color(colors.primary)),
         text_color: colors.primary_text,
         border: Border {
-            color: rgba_color(241, 190, 130, 0.60),
+            color: Color { a: 0.70, ..colors.primary },
             width: 1.0,
             radius: Radius::new(0.0),
         },
@@ -701,6 +702,21 @@ pub fn log_terminal_style(colors: &ThemeColors) -> container::Style {
         shadow: Shadow::default(),
         text_color: Some(hex(0xdbe7ff)),
         snap: true,
+    }
+}
+
+/// text_editor style matching the log terminal area (dark bg, no visible border, light text)
+pub fn log_editor_style(colors: &ThemeColors) -> impl Fn(&Theme, text_editor::Status) -> text_editor::Style + '_ {
+    move |_theme, _status| text_editor::Style {
+        background: iced::Background::Color(hex(0x0a0f16)),
+        border: Border {
+            color: colors.border,
+            width: 1.0,
+            radius: Radius::new(0.0),
+        },
+        placeholder: hex(0x4a5568),
+        value: hex(0xdbe7ff),
+        selection: Color { a: 0.35, ..hex(0x4a90d9) },
     }
 }
 
@@ -768,6 +784,101 @@ fn v_gradient(top: Color, bottom: Color) -> iced::Background {
             .add_stop(0.0, top)
             .add_stop(1.0, bottom),
     ))
+}
+
+/// Total horizontal space reserved by the vertical scrollbar (width + spacing).
+/// Add this as a right-side spacer to any header row that sits above a scrollable body,
+/// so the header columns stay aligned with the scrollable content columns.
+pub const VSCROLL_RESERVED: f32 = 18.0; // width 10 + spacing 8
+
+/// Embedded (non-overlapping) vertical scrollbar direction.
+///
+/// Using `.spacing()` makes Iced allocate layout space for the scrollbar so it
+/// never floats over content.
+pub fn vscroll() -> iced::widget::scrollable::Direction {
+    iced::widget::scrollable::Direction::Vertical(
+        iced::widget::scrollable::Scrollbar::new()
+            .width(10)
+            .scroller_width(10)
+            .spacing(8),
+    )
+}
+
+/// Overlay vertical scrollbar — floats over content without shifting it.
+///
+/// Use in layouts where a header row sits outside the scrollable and must stay
+/// aligned regardless of whether the scrollbar is visible.
+pub fn vscroll_overlay() -> iced::widget::scrollable::Direction {
+    iced::widget::scrollable::Direction::Vertical(
+        iced::widget::scrollable::Scrollbar::new()
+            .width(10)
+            .scroller_width(10),
+    )
+}
+
+/// Themed style for embedded scrollbars.
+/// The thumb uses the same gradient colors as the idle/hover tab buttons.
+/// The track is a darker version of the idle-bottom color blended over the background.
+pub fn scrollable_style(
+    colors: &ThemeColors,
+) -> impl Fn(&Theme, iced::widget::scrollable::Status) -> iced::widget::scrollable::Style + use<'_> {
+    let c = *colors;
+    move |_theme, status| {
+        use iced::widget::scrollable::{Rail, Scroller, Style};
+        use iced::Background;
+
+        let mk_grad = |top: Color, bottom: Color| -> Background {
+            Background::Gradient(Gradient::Linear(
+                gradient::Linear::new(Radians(std::f32::consts::PI))
+                    .add_stop(0.0, top)
+                    .add_stop(1.0, bottom),
+            ))
+        };
+
+        let (thumb_bg, border_a) = match status {
+            iced::widget::scrollable::Status::Hovered { is_vertical_scrollbar_hovered: true, .. }
+            | iced::widget::scrollable::Status::Dragged { .. } => {
+                (mk_grad(c.btn_hover_top, c.btn_hover_bottom), 0.70)
+            }
+            _ => (mk_grad(c.tab_idle_top, c.tab_idle_bottom), 0.42),
+        };
+
+        let border_color = Color { a: border_a, r: c.btn_border.r, g: c.btn_border.g, b: c.btn_border.b };
+
+        // Track: blend tab_idle_bottom at reduced opacity over bg → darker than the thumb
+        let ta = c.tab_idle_bottom.a * 0.55;
+        let track_color = Color {
+            r: c.tab_idle_bottom.r * ta + c.bg.r * (1.0 - ta),
+            g: c.tab_idle_bottom.g * ta + c.bg.g * (1.0 - ta),
+            b: c.tab_idle_bottom.b * ta + c.bg.b * (1.0 - ta),
+            a: 1.0,
+        };
+
+        let rail = Rail {
+            background: Some(Background::Color(track_color)),
+            border: Border::default(),
+            scroller: Scroller {
+                background: thumb_bg,
+                border: Border {
+                    color: border_color,
+                    width: 1.0,
+                    radius: Radius::new(0.0),
+                },
+            },
+        };
+        Style {
+            container: container::Style::default(),
+            vertical_rail: rail,
+            horizontal_rail: rail,
+            gap: None,
+            auto_scroll: iced::widget::scrollable::AutoScroll {
+                background: Background::Color(Color::TRANSPARENT),
+                border: Border::default(),
+                shadow: Shadow::default(),
+                icon: c.text,
+            },
+        }
+    }
 }
 
 /// Blend a semi-transparent color over a solid background.

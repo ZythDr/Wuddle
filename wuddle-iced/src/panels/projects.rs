@@ -1,4 +1,4 @@
-use iced::widget::{button, checkbox, column, container, pick_list, row, rule, scrollable, text, text_input, Space};
+use iced::widget::{button, checkbox, column, container, pick_list, row, rule, scrollable, stack, text, text_input, Space};
 use iced::{Element, Length};
 
 use crate::anchored_overlay::AnchoredOverlay;
@@ -73,7 +73,9 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
             Filter::All => true,
             Filter::Updates => app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
                 && !app.ignored_update_ids.contains(&r.id),
-            Filter::Errors => app.plans.iter().any(|p| p.repo_id == r.id && p.error.is_some()),
+            Filter::Errors => app.plans.iter().any(|p| p.repo_id == r.id && p.error.is_some())
+                && r.enabled
+                && !app.ignored_update_ids.contains(&r.id),
             Filter::Ignored => !r.enabled || app.ignored_update_ids.contains(&r.id),
         })
         .filter(|r| {
@@ -92,6 +94,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
     let error_count = app.repos.iter().filter(|r| {
         (if is_mods_tab { is_mod(r) } else { !is_mod(r) })
             && app.plans.iter().any(|p| p.repo_id == r.id && p.error.is_some())
+            && r.enabled
+            && !app.ignored_update_ids.contains(&r.id)
     }).count();
     let ignored_count = app.repos.iter().filter(|r| {
         (if is_mods_tab { is_mod(r) } else { !is_mod(r) })
@@ -130,13 +134,41 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
     .align_y(iced::Alignment::Center);
 
     let mut action_items: Vec<Element<Message>> = Vec::new();
-    action_items.push(
-        text_input("Search...", &app.project_search)
-            .on_input(Message::SetProjectSearch)
+    action_items.push({
+        let c2 = c;
+        let show_clear = !app.project_search.is_empty();
+        stack![
+            text_input("Search...", &app.project_search)
+                .on_input(Message::SetProjectSearch)
+                .width(180)
+                .padding(iced::Padding { top: 4.0, right: if show_clear { 26.0 } else { 10.0 }, bottom: 4.0, left: 10.0 }),
+            {
+                let clear_el: Element<Message> = if show_clear {
+                    button(text("\u{2715}").size(12).color(c2.muted))
+                        .on_press(Message::SetProjectSearch(String::new()))
+                        .padding([3, 7])
+                        .style(move |_t, _s| button::Style {
+                            background: None,
+                            text_color: c2.muted,
+                            border: iced::Border::default(),
+                            shadow: iced::Shadow::default(),
+                            snap: true,
+                        })
+                        .into()
+                } else {
+                    Space::new().into()
+                };
+                container(clear_el)
+            }
             .width(180)
-            .padding([4, 10])
-            .into(),
-    );
+            .height(Length::Fill)
+            .align_x(iced::Alignment::End)
+            .align_y(iced::Alignment::Center)
+            .padding(iced::Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 0.0 }),
+        ]
+        .width(180)
+        .into()
+    });
     if !is_mods_tab {
         let c2 = c;
         action_items.push(
@@ -252,18 +284,24 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         .center_y(Length::Shrink)
         .into()
     } else {
-        let rows: Vec<Element<Message>> = filtered_repos
-            .iter()
-            .map(|repo| {
-                if is_mods_tab {
-                    mod_row(app, repo, colors)
-                } else {
-                    addon_row(app, repo, colors)
+        let mut rows: Vec<Element<Message>> = Vec::new();
+        for repo in filtered_repos.iter() {
+            if is_mods_tab {
+                rows.push(mod_row(app, repo, colors));
+                // Inject child DLL rows when expanded
+                if repo.installed_dlls.len() > 1 && app.expanded_repo_ids.contains(&repo.id) {
+                    for (dll_name, dll_enabled) in &repo.installed_dlls {
+                        rows.push(dll_child_row(repo.id, dll_name, *dll_enabled, colors));
+                    }
                 }
-            })
-            .collect();
+            } else {
+                rows.push(addon_row(app, repo, colors));
+            }
+        }
         scrollable(column(rows).spacing(0).width(Length::Fill))
             .height(Length::Fill)
+            .direction(theme::vscroll_overlay())
+            .style(move |t, s| theme::scrollable_style(&c)(t, s))
             .into()
     };
 
@@ -320,7 +358,9 @@ fn mod_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a
     let enabled = repo.enabled;
 
     let update_ignored = app.ignored_update_ids.contains(&repo.id);
-    let name_col = name_cell(repo, colors);
+    let is_multi_dll = repo.installed_dlls.len() > 1;
+    let is_expanded = app.expanded_repo_ids.contains(&repo.id);
+    let name_col = name_cell_with_expand(repo, is_multi_dll, is_expanded, colors);
     let is_menu_open = app.open_menu == Some(repo.id);
     let menu_content = crate::inline_context_menu(app, repo, &c);
 
@@ -338,6 +378,59 @@ fn mod_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a
 
     let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(&c));
 
+    column![separator, row_content].into()
+}
+
+/// Indented child row for a single DLL within a multi-DLL mod.
+fn dll_child_row<'a>(
+    repo_id: i64,
+    dll_name: &'a str,
+    dll_enabled: bool,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let c = *colors;
+    let name_owned = dll_name.to_string();
+    let name_owned2 = dll_name.to_string();
+
+    let enable_cell = col_cell(
+        checkbox(dll_enabled)
+            .on_toggle(move |b| Message::ToggleDllEnabled(repo_id, name_owned.clone(), b)),
+        COL_ENABLED,
+    );
+
+    // Placeholder columns to keep alignment
+    let empty_current = col_cell(Space::new().width(Length::Fill), COL_CURRENT);
+    let empty_latest  = col_cell(Space::new().width(Length::Fill), COL_LATEST);
+    let empty_status  = col_cell(Space::new().width(Length::Fill), COL_STATUS);
+    let empty_actions = col_cell(Space::new().width(Length::Fill), COL_ACTIONS);
+
+    let name_cell: Element<Message> = container(
+        row![
+            // Indent
+            Space::new().width(28),
+            text(format!("↳ {}", name_owned2))
+                .size(12)
+                .color(if dll_enabled { c.muted } else { iced::Color { a: 0.35, ..c.muted } }),
+        ]
+        .align_y(iced::Alignment::Center)
+        .spacing(4),
+    )
+    .width(Length::Fill)
+    .into();
+
+    let row_content = row![
+        name_cell,
+        empty_current,
+        empty_latest,
+        enable_cell,
+        empty_status,
+        empty_actions,
+    ]
+    .spacing(0)
+    .padding([6, 12])
+    .align_y(iced::Alignment::Center);
+
+    let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(&c));
     column![separator, row_content].into()
 }
 
@@ -386,8 +479,18 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<
     column![separator, row_content].into()
 }
 
-/// Shared name cell (left-aligned, clickable title only — subtext is non-clickable plain text)
+/// Name cell used by addon rows (no expand chevron).
 fn name_cell<'a>(repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a, Message> {
+    name_cell_with_expand(repo, false, false, colors)
+}
+
+/// Name cell with optional expand chevron and DLL count badge for multi-DLL mod rows.
+fn name_cell_with_expand<'a>(
+    repo: &'a RepoRow,
+    is_multi_dll: bool,
+    is_expanded: bool,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
     let c = *colors;
     let url = repo.url.clone();
     let sub_text = if repo.enabled {
@@ -397,7 +500,6 @@ fn name_cell<'a>(repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a, Message
     };
     let name_font = crate::name_font(colors);
 
-    // Only the title is a clickable link — subtext is separate plain text below
     let title_btn = button(
         iced::widget::rich_text::<(), _, _, _>([
             iced::widget::span(repo.name.clone())
@@ -417,15 +519,74 @@ fn name_cell<'a>(repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a, Message
         snap: true,
     });
 
-    container(
-        column![
+    let rid = repo.id;
+    let dll_count = repo.installed_dlls.len();
+
+    let title_row: Element<Message> = if is_multi_dll {
+        let chevron_bytes: &[u8] = if is_expanded {
+            include_bytes!("../../icons/chevron-down.svg")
+        } else {
+            include_bytes!("../../icons/chevron-right.svg")
+        };
+        let chevron_handle = iced::widget::svg::Handle::from_memory(chevron_bytes);
+        let chevron_icon = iced::widget::svg(chevron_handle)
+            .width(14)
+            .height(14)
+            .style(move |_t, _s| iced::widget::svg::Style { color: Some(c.muted) });
+
+        let badge_label = format!("{} DLLs", dll_count);
+        let badge = container(text(badge_label).size(10).color(c.muted))
+            .padding([1, 5])
+            .style(move |_t| container::Style {
+                background: Some(iced::Background::Color(iced::Color { a: 0.12, ..c.muted })),
+                border: iced::Border {
+                    color: iced::Color { a: 0.2, ..c.muted },
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            });
+        row![
             title_btn,
+            Space::new().width(6),
+            chevron_icon,
+            Space::new().width(14),
+            badge,
+        ]
+        .align_y(iced::Alignment::Center)
+        .into()
+    } else {
+        title_btn.into()
+    };
+
+    let content = container(
+        column![
+            title_row,
             text(sub_text).size(12).color(colors.muted).font(colors.body_font),
         ]
         .spacing(2),
     )
-    .width(Length::Fill)
-    .into()
+    .width(Length::Fill);
+
+    if is_multi_dll {
+        // Transparent backdrop button fills the name cell area. The title_btn sits on top
+        // inside `content` and captures its own clicks (URL); all other clicks expand/collapse.
+        let backdrop = button(Space::new().width(Length::Fill).height(Length::Fill))
+            .on_press(Message::ToggleRepoExpanded(rid))
+            .padding(0)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_t, _s| button::Style {
+                background: None,
+                text_color: c.text,
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+                snap: true,
+            });
+        stack![backdrop, content].width(Length::Fill).into()
+    } else {
+        content.into()
+    }
 }
 
 /// Returns (label, text_color, bg_base_color) for a status badge.
@@ -436,12 +597,12 @@ fn status_info(
     update_ignored: bool,
     colors: &ThemeColors,
 ) -> (&'static str, iced::Color, iced::Color) {
-    if has_error {
-        ("Error", colors.bad, colors.bad)
+    if update_ignored {
+        ("Ignored", colors.muted, colors.muted)
     } else if !enabled {
         ("Ignored", colors.muted, colors.muted)
-    } else if update_ignored {
-        ("Ignored", colors.muted, colors.muted)
+    } else if has_error {
+        ("Error", colors.bad, colors.bad)
     } else if has_update {
         ("Update available", colors.warn, colors.warn)
     } else {

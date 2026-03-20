@@ -195,6 +195,8 @@ pub fn detect_repo(input: &str) -> Result<DetectedRepo> {
                 kind,
                 forge_str: if kind == ForgeKind::GitHub {
                     "github"
+                } else if host.eq_ignore_ascii_case("codeberg.org") {
+                    "codeberg"
                 } else {
                     "gitea"
                 },

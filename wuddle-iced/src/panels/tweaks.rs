@@ -96,8 +96,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         &c,
     );
 
-    // Camera section
-    let camera = settings_card(
+    // Camera section — height(Fill) stretches to match Rendering's natural height.
+    let camera = settings_card_fill(
         column![
             text("Camera").size(16).color(colors.title),
             tweak_row_check(
@@ -146,8 +146,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         &c,
     );
 
-    // System section
-    let system = settings_card(
+    // System section — height(Fill) stretches to match Audio's natural height.
+    let system = settings_card_fill(
         column![
             text("System").size(16).color(colors.title),
             tweak_row_check(
@@ -174,11 +174,19 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         .color(colors.muted);
 
     scrollable(
-        column![header, hint, rendering, camera, audio, system, footnote]
-            .spacing(8)
-            .width(Length::Fill),
+        column![
+            header,
+            hint,
+            row![rendering, camera].spacing(8).width(Length::Fill),
+            row![audio, system].spacing(8).width(Length::Fill),
+            footnote,
+        ]
+        .spacing(8)
+        .width(Length::Fill),
     )
     .height(Length::Fill)
+    .direction(theme::vscroll())
+    .style(move |t, s| theme::scrollable_style(&c)(t, s))
     .into()
 }
 
@@ -279,6 +287,20 @@ fn settings_card<'a>(
     let c = *colors;
     container(container(content).padding(16))
         .width(Length::Fill)
+        .style(move |_theme| theme::card_style(&c))
+        .into()
+}
+
+/// Like settings_card but fills the cross-axis height of its Row parent,
+/// so sibling cards in the same row always match the tallest card's height.
+fn settings_card_fill<'a>(
+    content: impl Into<Element<'a, Message>>,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let c = *colors;
+    container(container(content).padding(16))
+        .width(Length::Fill)
+        .height(Length::Fill)
         .style(move |_theme| theme::card_style(&c))
         .into()
 }
