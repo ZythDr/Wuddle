@@ -171,24 +171,41 @@ jobs:
           workspaces: |
             wuddle-iced -> target
             wuddle-engine -> target
+            wuddle-launcher -> target
 
-      - name: Build Wuddle (Iced)
-        run: cargo build --release --manifest-path wuddle-iced/Cargo.toml
+      - name: Build Wuddle (Iced) and launcher
+        run: |
+          cargo build --release --manifest-path wuddle-iced/Cargo.toml
+          cargo build --release --manifest-path wuddle-launcher/Cargo.toml
 
       - name: Package portable zip
         shell: pwsh
         run: |
           $tag = $env:GITHUB_REF_NAME
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item "wuddle-iced/target/release/wuddle.exe" "dist/Wuddle.exe" -Force
-          Set-Content "dist/README.txt" @"
+          # Launcher-layout: Wuddle.exe is the launcher, the Iced binary lives in
+          # versions/<tag>/Wuddle-bin.exe so Tauri v2's self-update flow works seamlessly.
+          $versionDir = "dist\versions\$tag"
+          New-Item -ItemType Directory -Path $versionDir -Force | Out-Null
+          Copy-Item "wuddle-launcher\target\release\wuddle-launcher.exe" "dist\Wuddle.exe" -Force
+          Copy-Item "wuddle-iced\target\release\wuddle.exe" "$versionDir\Wuddle-bin.exe" -Force
+          @{ current = $tag } | ConvertTo-Json | Set-Content "dist\current.json"
+          Set-Content "dist\README.txt" @"
           Wuddle (Windows, Iced v3 beta)
           ================================
           Run: Wuddle.exe
 
+          Layout:
+            Wuddle.exe                          <- launcher (run this)
+            versions\$tag\Wuddle-bin.exe        <- Iced v3 binary
+            current.json                        <- active version pointer
+
+          Upgrading from Wuddle v2 (Tauri):
+            If you already have a v2 portable install, just unzip this into the
+            same folder. The launcher will switch to v3 automatically.
+
           App data: %APPDATA%\wuddle  (shared with Wuddle v2 — no migration needed)
           "@
-          Compress-Archive -Path "dist/*" -DestinationPath "wuddle-$tag-windows-x86_64.zip" -Force
+          Compress-Archive -Path "dist\*" -DestinationPath "wuddle-$tag-windows-x86_64.zip" -Force
 
       - uses: actions/upload-artifact@v4
         with:
