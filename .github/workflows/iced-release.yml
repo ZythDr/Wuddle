@@ -216,27 +216,25 @@ jobs:
 
       - name: Extract changelog section
         run: |
-          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          NOTES_FILE="dist/RELEASE_BODY.md"
-
-          # Match the ## vX.Y.Z line (may have trailing text like "(Iced frontend)")
-          SECTION="$(awk -v ver="${VERSION}" '
-            /^## v/ && $0 ~ ver { found=1; next }
-            found && /^## / { exit }
-            found { print }
-          ' CHANGELOG.md | sed '/./,$!d' | sed -e :a -e '/[[:space:]]*$/{ $d; N; ba }')"
-
-          if [ -n "${SECTION}" ]; then
-            printf '%s\n' "${SECTION}" > "${NOTES_FILE}"
-          else
-            echo "See [CHANGELOG.md](https://github.com/ZythDr/Wuddle/blob/Wuddle-Iced-Dev/CHANGELOG.md) for details." > "${NOTES_FILE}"
-          fi
+          python3 - "${VERSION}" << 'PYEOF' > dist/RELEASE_BODY.md
+          import sys, re
+          version = sys.argv[1]
+          with open('CHANGELOG.md') as f:
+              text = f.read()
+          pattern = r'## v' + re.escape(version) + r'[^\n]*\n(.*?)(?=\n## v|\Z)'
+          m = re.search(pattern, text, re.DOTALL)
+          if m:
+              sys.stdout.write(m.group(1).strip() + '\n')
+          else:
+              sys.stdout.write(f'See CHANGELOG.md for v{version} release notes.\n')
+          PYEOF
 
       - name: Publish pre-release
         uses: softprops/action-gh-release@v2
         with:
           prerelease: true
+          generate_release_notes: false
           body_path: dist/RELEASE_BODY.md
           files: |
             dist/*.tar.gz
