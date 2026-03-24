@@ -11,6 +11,7 @@ export const OPT_FRIZ_FONT_KEY = "wuddle.opt.frizfont";
 export const OPT_AUTOCHECK_KEY = "wuddle.opt.autocheck";
 export const OPT_AUTOCHECK_MINUTES_KEY = "wuddle.opt.autocheck.minutes";
 export const OPT_DESKTOP_NOTIFY_KEY = "wuddle.opt.desktop.notify";
+export const OPT_UPDATE_CHANNEL_KEY = "wuddle.opt.update_channel";
 export const IGNORED_ERRORS_KEY = "wuddle.ignored.errors";
 export const IGNORED_UPDATES_KEY = "wuddle.ignored.updates";
 export const LOG_WRAP_KEY = "wuddle.log.wrap";
@@ -94,6 +95,7 @@ export const state = {
   aboutLatestVersion: null,
   aboutSelfUpdate: null,
   aboutSelfUpdateBusy: false,
+  updateChannel: "stable",
   launchDiagnostics: null,
   ignoredErrorRepoIds: new Set(),
   ignoredUpdateRepoIds: new Set(),

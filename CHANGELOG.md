@@ -2,6 +2,18 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.5.7
+
+### New Features
+
+- **Release channel selector** on the About tab — choose between **Stable** (latest non-pre-release) and **Beta** (includes pre-releases such as v3.0.0-beta.1) to control which version the update check reports. Defaults to Stable.
+- **Seamless upgrade path to Wuddle v3 (Iced beta)** — switching to the Beta channel and clicking Update will download and stage the Iced v3 portable build, then restart via the launcher into the new version. All settings and profiles carry over automatically.
+- **Settings written to `settings.json` on every startup** — preferences (theme, clock format, auto-check interval, etc.) are now synced to the shared data directory on launch, so Wuddle v3 (Iced) inherits them without requiring a manual save.
+
+### Changes
+
+- Update launcher now accepts both `Wuddle-bin.exe` and `wuddle.exe` inside version folders, making it forward-compatible with Iced release packages.
+
 ## v3.0.0-beta.1 (Iced frontend)
 
 First public beta of the Iced v3 frontend — a native GPU-rendered rewrite of Wuddle using [Iced 0.14](https://iced.rs). Replaces the Tauri/WebView stack with a pure Rust UI while sharing the same `wuddle-engine` backend. App data (profiles, tracked mods, settings) lives in the same location as v2 and is fully forward/backward compatible.

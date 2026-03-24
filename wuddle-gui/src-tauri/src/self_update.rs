@@ -45,15 +45,18 @@ struct GithubRelease {
     assets: Vec<GithubReleaseAsset>,
 }
 
-const WUDDLE_RELEASE_API_URL: &str = "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
+const WUDDLE_RELEASE_API_LATEST: &str =
+    "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
+const WUDDLE_RELEASE_API_ALL: &str =
+    "https://api.github.com/repos/ZythDr/Wuddle/releases?per_page=5";
 
-pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
+pub fn update_info(current_version: &str, beta_channel: bool) -> Result<SelfUpdateInfo, String> {
     #[cfg(target_os = "linux")]
     {
         let appimage = is_appimage();
         let supported = appimage.is_some();
 
-        let release = match fetch_latest_release_meta() {
+        let release = match fetch_release_meta(beta_channel) {
             Ok(v) => v,
             Err(err) => {
                 return Ok(SelfUpdateInfo {
@@ -109,7 +112,7 @@ pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
-        let latest_version = fetch_latest_release_meta()
+        let latest_version = fetch_release_meta(beta_channel)
             .ok()
             .map(|r| normalize_release_tag(&r.tag_name))
             .filter(|v| !v.is_empty());
@@ -132,7 +135,7 @@ pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
         let launcher = launcher_exe_path(&root);
         let launcher_layout = launcher.is_file() && is_versioned_runtime_layout(&root, &exe_path);
 
-        let release = match fetch_latest_release_meta() {
+        let release = match fetch_release_meta(beta_channel) {
             Ok(v) => v,
             Err(err) => {
                 return Ok(SelfUpdateInfo {
@@ -187,7 +190,7 @@ pub fn update_info(current_version: &str) -> Result<SelfUpdateInfo, String> {
     }
 }
 
-pub fn apply_update(current_version: &str) -> Result<OperationResult, String> {
+pub fn apply_update(current_version: &str, beta_channel: bool) -> Result<OperationResult, String> {
     #[cfg(target_os = "linux")]
     {
         let mut steps = Vec::new();
@@ -200,7 +203,7 @@ pub fn apply_update(current_version: &str) -> Result<OperationResult, String> {
         cleanup_stale_appimage_temps(&appimage_path);
 
         steps.push("Checking latest release metadata…".to_string());
-        let release = fetch_latest_release_meta()?;
+        let release = fetch_release_meta(beta_channel)?;
         let latest_version = normalize_release_tag(&release.tag_name);
         if latest_version.is_empty() {
             return Err("Latest release tag is empty.".to_string());
@@ -275,7 +278,7 @@ pub fn apply_update(current_version: &str) -> Result<OperationResult, String> {
         cleanup_stale_update_files(&root);
         steps.push(format!("Detected launcher root: {}", root.display()));
         steps.push("Checking latest release metadata…".to_string());
-        let release = fetch_latest_release_meta()?;
+        let release = fetch_release_meta(beta_channel)?;
         let latest_version = normalize_release_tag(&release.tag_name);
         if latest_version.is_empty() {
             return Err("Latest release tag is empty.".to_string());
@@ -470,14 +473,20 @@ fn github_api_token() -> Option<String> {
     crate::read_keychain_token().ok().flatten()
 }
 
-fn fetch_latest_release_meta() -> Result<GithubRelease, String> {
+fn fetch_release_meta(beta_channel: bool) -> Result<GithubRelease, String> {
+    let url = if beta_channel {
+        WUDDLE_RELEASE_API_ALL
+    } else {
+        WUDDLE_RELEASE_API_LATEST
+    };
+
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| format!("build http client: {e}"))?;
 
     let mut req = client
-        .get(WUDDLE_RELEASE_API_URL)
+        .get(url)
         .header("Accept", "application/vnd.github+json")
         .header(
             "User-Agent",
@@ -507,12 +516,26 @@ fn fetch_latest_release_meta() -> Result<GithubRelease, String> {
         };
         return Err(format!("{} (HTTP {})", message, code));
     }
-    resp.json::<GithubRelease>()
-        .map_err(|e| format!("parse release metadata: {e}"))
+
+    if beta_channel {
+        // /releases returns an array; take the first (most recent) entry
+        let mut releases = resp
+            .json::<Vec<GithubRelease>>()
+            .map_err(|e| format!("parse releases list: {e}"))?;
+        releases
+            .into_iter()
+            .next()
+            .ok_or_else(|| "No releases found.".to_string())
+    } else {
+        resp.json::<GithubRelease>()
+            .map_err(|e| format!("parse release metadata: {e}"))
+    }
 }
 
 #[cfg(target_os = "windows")]
 fn select_windows_portable_asset(release: &GithubRelease) -> Option<&GithubReleaseAsset> {
+    // Tauri releases: wuddle-<tag>-windows-portable.zip
+    // Iced releases:  wuddle-<tag>-windows-x86_64.zip
     release
         .assets
         .iter()
@@ -521,6 +544,12 @@ fn select_windows_portable_asset(release: &GithubRelease) -> Option<&GithubRelea
             release.assets.iter().find(|a| {
                 let name = a.name.to_ascii_lowercase();
                 name.contains("windows-portable") && name.ends_with(".zip")
+            })
+        })
+        .or_else(|| {
+            release.assets.iter().find(|a| {
+                let name = a.name.to_ascii_lowercase();
+                name.contains("windows") && name.ends_with(".zip")
             })
         })
 }

@@ -1,5 +1,5 @@
 // About tab: info display, self-update, version polling, changelog
-import { state, SELF_UPDATE_POLL_MINUTES } from "./state.js";
+import { state, SELF_UPDATE_POLL_MINUTES, OPT_UPDATE_CHANNEL_KEY } from "./state.js";
 import { $, formatTime, escapeHtml } from "./utils.js";
 import { safeInvoke } from "./commands.js";
 import { log, logOperationResult } from "./logs.js";
@@ -111,7 +111,7 @@ export async function refreshAboutInfo({ force = false } = {}) {
     const info = await safeInvoke("wuddle_about_info", {}, { timeoutMs: 4000 });
     state.aboutInfo = info && typeof info === "object" ? info : {};
     try {
-      const updateInfo = await safeInvoke("wuddle_self_update_info", {}, { timeoutMs: 12000 });
+      const updateInfo = await safeInvoke("wuddle_self_update_info", { betaChannel: state.updateChannel === "beta" }, { timeoutMs: 12000 });
       state.aboutSelfUpdate = updateInfo && typeof updateInfo === "object" ? updateInfo : null;
       state.aboutLatestVersion = String(state.aboutSelfUpdate?.latestVersion || "").trim() || null;
     } catch (selfUpdateErr) {
@@ -165,7 +165,7 @@ export async function updateWuddleInPlace() {
   state.aboutSelfUpdateBusy = true;
   renderAboutUpdateAction();
   try {
-    const result = await safeInvoke("wuddle_self_update_apply", {}, { timeoutMs: 180000 });
+    const result = await safeInvoke("wuddle_self_update_apply", { betaChannel: state.updateChannel === "beta" }, { timeoutMs: 180000 });
     await logOperationResult(result);
     log("Restarting Wuddle to finish update…");
     await safeInvoke("wuddle_self_update_restart", {}, { timeoutMs: 5000 });
@@ -184,7 +184,7 @@ export async function maybePollSelfUpdateInfo({ notify = false } = {}) {
   state.nextSelfUpdatePollAt = now + SELF_UPDATE_POLL_MINUTES * 60 * 1000;
 
   try {
-    const info = await safeInvoke("wuddle_self_update_info", {}, { timeoutMs: 12000 });
+    const info = await safeInvoke("wuddle_self_update_info", { betaChannel: state.updateChannel === "beta" }, { timeoutMs: 12000 });
     state.aboutSelfUpdate = info && typeof info === "object" ? info : null;
     const latest = String(state.aboutSelfUpdate?.latestVersion || "").trim();
     if (latest) state.aboutLatestVersion = latest;
@@ -202,6 +202,23 @@ export async function maybePollSelfUpdateInfo({ notify = false } = {}) {
   } catch (_) {
     // Silent by design to avoid repeated noisy errors on background polling.
   }
+}
+
+// ---------------------------------------------------------------------------
+// Channel selector
+// ---------------------------------------------------------------------------
+
+export function setUpdateChannel(channel) {
+  if (channel !== "stable" && channel !== "beta") return;
+  state.updateChannel = channel;
+  localStorage.setItem(OPT_UPDATE_CHANNEL_KEY, channel);
+  // Reset cached update info so next check uses the new channel
+  state.aboutSelfUpdate = null;
+  state.aboutLatestVersion = null;
+  state.aboutLoaded = false;
+  state.nextSelfUpdatePollAt = 0;
+  renderAboutInfo();
+  void refreshAboutInfo({ force: true });
 }
 
 // ---------------------------------------------------------------------------

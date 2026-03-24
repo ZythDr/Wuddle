@@ -1451,6 +1451,7 @@ async fn wuddle_sync_options_to_settings(
     optDesktopNotify: bool,
     logWrap: bool,
     logAutoscroll: bool,
+    updateChannel: String,
 ) -> Result<(), String> {
     run_blocking(move || {
         let dir = app_dir()?;
@@ -1476,6 +1477,9 @@ async fn wuddle_sync_options_to_settings(
         map.insert("opt_desktop_notify".to_string(), serde_json::Value::Bool(optDesktopNotify));
         map.insert("log_wrap".to_string(), serde_json::Value::Bool(logWrap));
         map.insert("log_autoscroll".to_string(), serde_json::Value::Bool(logAutoscroll));
+        // Persist channel so Iced v3 inherits it
+        let channel = if updateChannel == "beta" { "beta" } else { "stable" };
+        map.insert("update_channel".to_string(), serde_json::Value::String(channel.to_string()));
 
         let data = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
         fs::write(&settings_path, data).map_err(|e| e.to_string())?;
@@ -1603,13 +1607,13 @@ fn wuddle_about_info() -> AboutInfo {
 }
 
 #[tauri::command]
-async fn wuddle_self_update_info() -> Result<self_update::SelfUpdateInfo, String> {
-    run_blocking(|| self_update::update_info(env!("CARGO_PKG_VERSION"))).await
+async fn wuddle_self_update_info(beta_channel: bool) -> Result<self_update::SelfUpdateInfo, String> {
+    run_blocking(move || self_update::update_info(env!("CARGO_PKG_VERSION"), beta_channel)).await
 }
 
 #[tauri::command]
-async fn wuddle_self_update_apply() -> Result<OperationResult, String> {
-    run_blocking(|| self_update::apply_update(env!("CARGO_PKG_VERSION"))).await
+async fn wuddle_self_update_apply(beta_channel: bool) -> Result<OperationResult, String> {
+    run_blocking(move || self_update::apply_update(env!("CARGO_PKG_VERSION"), beta_channel)).await
 }
 
 #[tauri::command]

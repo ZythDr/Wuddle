@@ -632,9 +632,18 @@
               <div class="about-key">Current version:</div>
               <div id="aboutAppVersion" class="about-value about-mono">—</div>
             </div>
-            <div class="about-row">
+            <div class="about-row about-row-vcenter">
               <div class="about-key">Latest version:</div>
-              <button id="aboutLatestVersion" class="about-value about-mono about-link-btn" type="button">—</button>
+              <div class="about-channel-row">
+                <button id="aboutLatestVersion" class="about-mono about-link-btn" type="button">—</button>
+                <div class="about-channel-controls">
+                  <select id="aboutChannelSelect">
+                    <option value="stable">Stable</option>
+                    <option value="beta">Beta</option>
+                  </select>
+                  <button class="about-channel-help" type="button" title="Stable: checks for the latest non-pre-release build only.&#10;Beta: includes pre-release builds (e.g. v3.0.0-beta.1) in the version check.">?</button>
+                </div>
+              </div>
             </div>
             <div class="about-row">
               <div class="about-key">Package name</div>
