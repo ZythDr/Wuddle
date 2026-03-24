@@ -68,7 +68,10 @@ pub struct PlanRow {
 
 impl From<UpdatePlan> for PlanRow {
     fn from(p: UpdatePlan) -> Self {
-        let has_update = p.current.as_deref() != Some(&p.latest) && p.error.is_none();
+        // Use the engine's authoritative signal: asset_url is non-empty iff something
+        // needs to be downloaded. Exclude repair_needed (files missing but version
+        // current) since that is not an "update". Mirrors Tauri's !p.asset_url.is_empty().
+        let has_update = !p.asset_url.is_empty() && !p.repair_needed && p.error.is_none();
         Self {
             repo_id: p.repo_id,
             owner: p.owner,
@@ -353,6 +356,39 @@ pub async fn update_all(
         }
     }
     Ok(results)
+}
+
+/// Install a freshly-added repo, mirroring Tauri's add flow:
+/// try `update_repo` first; if it returns None (engine says nothing to do),
+/// fall back to `reinstall_repo` to force a fresh clone/download.
+pub async fn install_new_repo(
+    db_path: Option<PathBuf>,
+    id: i64,
+    wow_dir: String,
+    opts: InstallOptions,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        let wow_path = Path::new(&wow_dir);
+
+        let update_result = tokio::runtime::Handle::current()
+            .block_on(async { eng.update_repo(id, wow_path, None, opts.clone()).await })
+            .map_err(|e| e.to_string())?;
+
+        if let Some(plan) = update_result {
+            // update_repo returned a plan — installation happened
+            Ok(format!("Installed {}/{}.", plan.owner, plan.name))
+        } else {
+            // update_repo returned None (engine says up-to-date or nothing to fetch).
+            // Force a fresh install via reinstall_repo so the files actually land on disk.
+            let plan = tokio::runtime::Handle::current()
+                .block_on(async { eng.reinstall_repo(id, wow_path, None, opts).await })
+                .map_err(|e| e.to_string())?;
+            Ok(format!("Installed {}/{}.", plan.owner, plan.name))
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 pub async fn update_repo(
@@ -1504,7 +1540,8 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
 // Self-update: fetch latest GitHub release tag
 // ---------------------------------------------------------------------------
 
-const WUDDLE_RELEASE_API: &str = "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
+const WUDDLE_RELEASE_API_LATEST: &str = "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
+const WUDDLE_RELEASE_API_ALL: &str = "https://api.github.com/repos/ZythDr/Wuddle/releases?per_page=5";
 const CHANGELOG_URL: &str = "https://raw.githubusercontent.com/ZythDr/Wuddle/main/CHANGELOG.md";
 const CHANGELOG_EMBEDDED: &str = include_str!("../../CHANGELOG.md");
 
@@ -1523,7 +1560,11 @@ pub async fn fetch_changelog() -> Result<String, String> {
     }
 }
 
-pub async fn check_self_update() -> Result<String, String> {
+/// Check for the latest Wuddle release.
+/// `beta_channel`: when true, fetches all releases (including pre-releases) and
+/// returns the newest tag; when false, fetches `/releases/latest` which GitHub
+/// guarantees is the most recent non-pre-release.
+pub async fn check_self_update(beta_channel: bool) -> Result<String, String> {
     #[derive(Deserialize)]
     struct GhRelease { tag_name: String }
 
@@ -1533,11 +1574,11 @@ pub async fn check_self_update() -> Result<String, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
+    let url = if beta_channel { WUDDLE_RELEASE_API_ALL } else { WUDDLE_RELEASE_API_LATEST };
+
     let resp = tokio::time::timeout(
         Duration::from_secs(12),
-        client.get(WUDDLE_RELEASE_API)
-            .header("Accept", "application/vnd.github+json")
-            .send(),
+        client.get(url).header("Accept", "application/vnd.github+json").send(),
     )
     .await
     .map_err(|_| "Timed out checking for updates".to_string())?
@@ -1547,6 +1588,23 @@ pub async fn check_self_update() -> Result<String, String> {
         return Err(format!("GitHub API error: HTTP {}", resp.status()));
     }
 
-    let release: GhRelease = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(release.tag_name)
+    if beta_channel {
+        // Returns an array; GitHub sorts by created_at desc so the first entry is newest.
+        let releases: Vec<GhRelease> = resp.json().await.map_err(|e| e.to_string())?;
+        releases.into_iter().next()
+            .map(|r| r.tag_name)
+            .ok_or_else(|| "No releases found".to_string())
+    } else {
+        let release: GhRelease = resp.json().await.map_err(|e| e.to_string())?;
+        Ok(release.tag_name)
+    }
+}
+
+/// Write the generated dxvk.conf content to the given path.
+pub async fn save_dxvk_conf(path: std::path::PathBuf, content: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

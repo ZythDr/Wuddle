@@ -1,12 +1,13 @@
-use iced::widget::{button, column, container, row, text, tooltip, Space};
+use iced::widget::{button, column, container, pick_list, row, text, tooltip, Space};
 use iced::{Element, Length};
 
+use crate::settings::UpdateChannel;
 use crate::theme::{self, ThemeColors};
 use crate::{App, Message};
 
 const GITHUB_URL: &str = "https://github.com/ZythDr/Wuddle";
 const RELEASES_URL: &str = "https://github.com/ZythDr/Wuddle/releases";
-const APP_VERSION: &str = "3.0.0-alpha.3";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
@@ -43,7 +44,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         column![
             text("Application").size(16).color(colors.title),
             about_row("Current version:", APP_VERSION, colors),
-            about_row_btn("Latest version:", latest_display, Message::OpenUrl(RELEASES_URL.to_string()), colors),
+            latest_version_row(latest_display, app.update_channel, &c),
             about_row("Package name:", "wuddle-iced", colors),
         ]
         .spacing(8),
@@ -88,6 +89,70 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         .into()
 }
 
+fn latest_version_row<'a>(
+    latest: &str,
+    channel: UpdateChannel,
+    c: &ThemeColors,
+) -> Element<'a, Message> {
+    let c = *c;
+    let val_owned = String::from(latest);
+
+    let version_link = button(
+        iced::widget::rich_text::<(), _, _, _>([
+            iced::widget::span(val_owned)
+                .underline(true)
+                .color(c.link)
+                .size(13.0_f32),
+        ])
+    )
+    .on_press(Message::OpenUrl(RELEASES_URL.to_string()))
+    .padding(0)
+    .style(move |_theme, _status| button::Style {
+        background: None,
+        text_color: c.link,
+        border: iced::Border::default(),
+        shadow: iced::Shadow::default(),
+        snap: true,
+    });
+
+    let channel_tip = "Release channel — Beta runs this Iced v3 frontend and receives pre-release builds. Selecting Stable will restart Wuddle and launch the last stable Tauri release via the launcher.";
+    let tip_box = container(
+        text(String::from(channel_tip)).size(11).color(c.text)
+    )
+    .max_width(300)
+    .padding([6, 10])
+    .style(move |_t| crate::theme::tooltip_style(&c));
+
+    let channel_picker = pick_list(
+        &[UpdateChannel::Stable, UpdateChannel::Beta][..],
+        Some(channel),
+        Message::SetUpdateChannel,
+    )
+    .text_size(12)
+    .width(76);
+
+    let help_icon = tooltip(
+        container(
+            text("?").size(10).color(c.muted)
+        )
+        .padding([2, 5])
+        .style(move |_t| crate::theme::tooltip_style(&c)),
+        tip_box,
+        tooltip::Position::Bottom,
+    );
+
+    row![
+        text("Latest version:").size(13).color(c.muted).width(160),
+        version_link,
+        Space::new().width(Length::Fill),
+        channel_picker,
+        help_icon,
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
 fn about_row<'a>(key: &str, value: &str, colors: &ThemeColors) -> Element<'a, Message> {
     row![
         text(String::from(key)).size(13).color(colors.muted).width(160),
@@ -97,32 +162,6 @@ fn about_row<'a>(key: &str, value: &str, colors: &ThemeColors) -> Element<'a, Me
     .into()
 }
 
-fn about_row_btn<'a>(key: &str, value: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
-    let val_owned = String::from(value);
-    row![
-        text(String::from(key)).size(13).color(colors.muted).width(160),
-        button(
-            iced::widget::rich_text::<(), _, _, _>([
-                iced::widget::span(val_owned)
-                    .underline(true)
-                    .color(c.link)
-                    .size(13.0_f32),
-            ])
-        )
-        .on_press(msg)
-        .padding(0)
-        .style(move |_theme, _status| button::Style {
-            background: None,
-            text_color: c.link,
-            border: iced::Border::default(),
-            shadow: iced::Shadow::default(),
-            snap: true,
-        }),
-    ]
-    .spacing(8)
-    .into()
-}
 
 fn credit_row<'a>(
     key: &str,

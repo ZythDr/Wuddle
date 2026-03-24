@@ -9,6 +9,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let tv = &app.tweak_values;
     let t = &app.tweaks;
     let has_wow_dir = !app.wow_dir.is_empty();
+    let has_backup = has_wow_dir && crate::tweaks::has_backup(std::path::Path::new(&app.wow_dir));
 
     let header = row![
         column![
@@ -33,9 +34,14 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             .color(colors.warn)
             .into()
     } else {
-        text(format!("WoW directory: {}", app.wow_dir))
+        let backup_label = if has_backup {
+            format!("WoW directory: {}  ·  Backup: WoW.exe.bak ✓", app.wow_dir)
+        } else {
+            format!("WoW directory: {}  ·  No backup yet — Apply to create one", app.wow_dir)
+        };
+        text(backup_label)
             .size(13)
-            .color(colors.muted)
+            .color(if has_backup { colors.good } else { colors.muted })
             .into()
     };
 

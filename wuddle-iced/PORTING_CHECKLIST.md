@@ -14,7 +14,7 @@ Cross-reference of every Tauri/Svelte feature vs. the Iced 0.14 implementation.
 | 5 themes (Cata, Obsidian, Emerald, Ashen, WoWUI) | ✅ | ✅ | |
 | LifeCraft title font | ✅ | ✅ | |
 | Friz Quadrata body font toggle | ✅ | ✅ | requires restart; logs message |
-| 12-hour clock timestamps | ✅ | ❌ | `opt_clock12` stored but not applied to timestamps |
+| 12-hour clock timestamps | ✅ | 🔶 | applied to all new log entries; initial startup entries always 24h (settings not yet loaded at that point) |
 | Spinner/busy indicator | ✅ | ✅ | canvas-based, 80 ms tick |
 | Footer PLAY button | ✅ | ✅ | |
 | Footer status hint | ✅ | ✅ | |
@@ -73,7 +73,7 @@ Cross-reference of every Tauri/Svelte feature vs. the Iced 0.14 implementation.
 | Context menu → View Details (full dialog) | ✅ | ❌ | Tauri has a separate detail dialog per repo (README, releases, file tree); Iced only shows this in the Add dialog |
 | Addon conflict detection (probe before add) | ✅ | ❌ | `wuddle_probe_addon_repo` not ported |
 | SuperWoW AV risk acknowledgment dialog | ✅ | ❌ | |
-| Mark update as ignored per-repo | ✅ | ❌ | |
+| Mark update as ignored per-repo | ✅ | ✅ | context menu "Ignore Updates" / "Unignore Updates" |
 | Scroll fade at table edges | ✅ | 🔶 | iced scrollable has no built-in fade; omitted |
 
 ---
@@ -120,9 +120,9 @@ Cross-reference of every Tauri/Svelte feature vs. the Iced 0.14 implementation.
 | Apply Tweaks | ✅ | ✅ | always starts from .bak |
 | Restore Backup | ✅ | ✅ | |
 | Reset to Defaults | ✅ | ✅ | |
-| Backup status indicator (has backup?) | ✅ | ❌ | `has_backup()` exists but not shown in UI |
+| Backup status indicator (has backup?) | ✅ | ✅ | shown in hint line below header |
 | Disable all controls when no WoW dir | ✅ | ✅ | |
-| FOV degree display (radians → degrees label) | ✅ | ❌ | Iced shows raw float; Tauri shows degrees |
+| FOV degree display (radians → degrees label) | ✅ | ✅ | shows `{radians:.2} ({degrees:.0}°)` |
 
 ---
 
@@ -144,7 +144,7 @@ Cross-reference of every Tauri/Svelte feature vs. the Iced 0.14 implementation.
 | Auto-check interval (minutes) | ✅ | ✅ | stored in settings |
 | Desktop notifications toggle | ✅ | ✅ | |
 | Use symlinks toggle | ✅ | ✅ | |
-| 12-hour clock toggle | ✅ | 🔶 | persisted but not applied to timestamps |
+| 12-hour clock toggle | ✅ | 🔶 | applied to new log entries; initial startup entries use 24h |
 | Theme picker | ✅ | ✅ | |
 | Font picker (Friz Quadrata) | ✅ | ✅ | |
 | DMA-BUF toggle (Linux) | ✅ | ❌ | Linux-only GPU passthrough option |
@@ -174,7 +174,7 @@ Cross-reference of every Tauri/Svelte feature vs. the Iced 0.14 implementation.
 | Latest version display | ✅ | ✅ | |
 | Open Wuddle on GitHub link | ✅ | ✅ | |
 | Changelog link | ✅ | ✅ | |
-| Wuddle changelog viewer (in-app markdown) | ✅ | ❌ | Tauri renders Wuddle's own changelog in-app; Iced opens browser |
+| Wuddle changelog viewer (in-app markdown) | ✅ | ✅ | Dialog::Changelog — fetches remote, falls back to embedded; renders markdown |
 | Self-update apply (download + stage) | ✅ | ❌ | requires tauri updater API equivalent |
 | Self-update restart | ✅ | ❌ | requires tauri restart API |
 
@@ -187,7 +187,7 @@ Cross-reference of every Tauri/Svelte feature vs. the Iced 0.14 implementation.
 | Auto-check on launch (if enabled) | ✅ | ✅ | fires after repos loaded |
 | Periodic auto-check timer | ✅ | ✅ | `iced::time::every` subscription |
 | Notification on updates found | ✅ | ✅ | |
-| Wuddle self-update poll (60 min) | ✅ | ❌ | not implemented in subscription |
+| Wuddle self-update poll (60 min) | ✅ | ✅ | hourly `iced::time::every(3600s)` subscription fires `CheckSelfUpdate` |
 
 ---
 
@@ -208,20 +208,15 @@ Cross-reference of every Tauri/Svelte feature vs. the Iced 0.14 implementation.
 ## Priority Summary
 
 ### High Priority (visible feature gaps)
-1. **12-hour clock** — `opt_clock12` stored but `chrono_now()` ignores it. 1-line fix in `chrono_now()`.
-2. **Tweaks backup indicator** — show whether `.bak` exists in the Tweaks panel.
-3. **FOV degree display** — show degrees next to the radian slider value.
-4. **GitHub auth health status** — rate-limit info and keychain health feedback in Options.
-5. **Wuddle self-update poll** — add 60-min subscription in `subscription()`.
-6. **Wuddle changelog in-app** — render Wuddle release body in a dialog (reuse `fetch_releases` for the Wuddle repo).
+1. **GitHub auth health status** — rate-limit info and keychain health feedback in Options (Tauri shows detailed badges).
+2. **Per-repo "View Details" dialog** — open a full detail dialog (same 2-card layout) for already-tracked repos via the context menu.
 
 ### Medium Priority
-7. **Per-repo "View Details" dialog** — open a full detail dialog (same 2-card layout) for already-tracked repos via the context menu.
-8. **Ignored filter / mark-as-ignored** — allows suppressing specific update notifications.
-9. **Addon conflict warning** — probe before adding, show conflicting repos.
+3. **Addon conflict warning** — probe before adding, show conflicting repos.
+4. **12-hour clock for startup entries** — the two initial log lines at startup always use 24h format because settings haven't loaded yet; cosmetic only.
 
 ### Low Priority / Future
-10. **SuperWoW AV risk dialog** — one-time acknowledgment before adding SuperWoW.
-11. **DMA-BUF toggle** — Linux GPU passthrough option for gaming on Wayland.
-12. **Wuddle self-update apply/restart** — requires a non-Tauri update mechanism (e.g., self-replace binary).
-13. **GIF animation** — iced 0.14 doesn't support animated GIFs natively; custom canvas required.
+5. **SuperWoW AV risk dialog** — one-time acknowledgment before adding SuperWoW.
+6. **DMA-BUF toggle** — Linux GPU passthrough option for gaming on Wayland.
+7. **Wuddle self-update apply/restart** — requires a non-Tauri update mechanism (e.g., self-replace binary).
+8. **GIF animation** — iced 0.14 doesn't support animated GIFs natively; custom canvas required.

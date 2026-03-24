@@ -2,6 +2,40 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.0.0-beta.1 (Iced frontend)
+
+First public beta of the Iced v3 frontend — a native GPU-rendered rewrite of Wuddle using [Iced 0.14](https://iced.rs). Replaces the Tauri/WebView stack with a pure Rust UI while sharing the same `wuddle-engine` backend. App data (profiles, tracked mods, settings) lives in the same location as v2 and is fully forward/backward compatible.
+
+### New Features
+
+- **Native GPU-rendered UI** — no WebView, no Electron. Iced 0.14 renders directly via wgpu (Vulkan/Metal/DX12), resulting in a lighter process with no browser engine overhead.
+- **DXVK config generator** — interactive dialog to generate a `dxvk.conf` tailored for Turtle WoW. Includes syntax-highlighted file preview with selectable text, per-setting tooltips explaining each option, and a `dxvk.enableAsync` toggle for the gplasync fork (with a side-effect warning for 2D portrait users).
+- **Remove dialog with file preview** — before confirming removal, a scrollable file tree shows every installed file with type icons. An optional "also delete local files" checkbox controls whether files are removed from disk alongside the database entry.
+- **Multi-DLL mod support** — mods that install multiple DLLs (e.g. WeirdUtils) appear as expandable parent rows with per-DLL enable/disable toggles. `dlls.txt` block markers (`# == RepoName ==`) are written on install.
+- **Colored status badge pills** in the projects table: Up to date · Update available · Error · Disabled · Ignored.
+- **"Ignore Updates"** per-repo toggle accessible from the ⋮ context menu; ignored repos are excluded from update counts and filterable via a dedicated tab.
+- **In-app changelog dialog** — fetches content from GitHub on click with an embedded fallback for offline use.
+- **Self-update check** on launch, on About tab navigation, and on an hourly subscription when no token is set.
+- **Release channel selector** on the About tab — choose Stable (latest non-pre-release) or Beta (latest including pre-releases) to control which version the update check reports.
+
+### Changes
+
+- **Overlay-anchored context menus** — exact position, scroll-immune. No positional drift when scrolling the project list.
+- **Per-profile update plan cache** — switching profiles restores the previous update state instead of clearing it.
+- **Branch-fetch errors** condensed to human-readable messages including the repo name and numeric error code.
+- **Disabled repos fully skipped** during update checks — no git pull, no API call, no log entry generated.
+- **Codeberg repos labeled correctly** — repos previously mis-labeled as "gitea" are corrected on next load without re-adding.
+
+### Bug Fixes
+
+- Fixed ⋮ menu toggle/dismiss race condition where the menu could reopen immediately after being closed.
+- Fixed profile switching showing stale mod/addon data loaded from the previously active profile's database.
+- Fixed auto install mode failing for single-file DLL releases that ship no accompanying zip asset.
+
+### Engine (wuddle-engine)
+
+- **`prune_missing_repos(wow_dir)`** — removes database tracking entries for repos whose installed files no longer exist on disk. Database-only operation; never deletes user files. Ensures profile isolation when switching between instances with different WoW directories.
+
 ## v3.0.0-alpha.4 (Iced frontend)
 
 ### Multi-DLL Mod Support

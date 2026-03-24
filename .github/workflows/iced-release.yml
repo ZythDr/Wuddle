@@ -1,0 +1,205 @@
+name: Iced Release Build
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  # ------------------------------------------------------------------
+  # Guard: only proceed if the tag commit is reachable from
+  # Wuddle-Iced-Dev. This keeps the Iced workflow from firing on
+  # stable Tauri tags (which live on main).
+  # ------------------------------------------------------------------
+  guard:
+    name: Check tag is on Wuddle-Iced-Dev
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: check
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/Wuddle-Iced-Dev:refs/remotes/origin/Wuddle-Iced-Dev || true
+          TAG_SHA="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
+          if git show-ref --verify --quiet refs/remotes/origin/Wuddle-Iced-Dev && \
+             git merge-base --is-ancestor "${TAG_SHA}" origin/Wuddle-Iced-Dev; then
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+            echo "Tag ${GITHUB_REF_NAME} is on Wuddle-Iced-Dev — building Iced release."
+          else
+            echo "should_build=false" >> "${GITHUB_OUTPUT}"
+            echo "Tag ${GITHUB_REF_NAME} is not on Wuddle-Iced-Dev — skipping Iced build."
+          fi
+
+  # ------------------------------------------------------------------
+  # Linux portable tar.gz
+  # ------------------------------------------------------------------
+  build-linux:
+    needs: guard
+    if: needs.guard.outputs.should_build == 'true'
+    name: Linux (portable tar.gz)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            wuddle-iced -> target
+            wuddle-engine -> target
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libfontconfig1-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libasound2-dev \
+            libssl-dev \
+            libdbus-1-dev \
+            libsecret-1-dev \
+            pkg-config
+
+      - name: Build Wuddle (Iced)
+        run: cargo build --release --manifest-path wuddle-iced/Cargo.toml
+
+      - name: Package portable tar.gz
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          cp wuddle-iced/target/release/wuddle dist/wuddle-bin
+          chmod +x dist/wuddle-bin
+
+          cat > dist/wuddle << 'LAUNCH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          SELF="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+          BIN="${SELF}/wuddle-bin"
+          if [[ ! -x "${BIN}" ]]; then
+            echo "ERROR: ${BIN} not found" >&2
+            exit 1
+          fi
+          if [[ "${WUDDLE_FORCE_X11:-0}" == "1" ]]; then
+            exec env WINIT_UNIX_BACKEND=x11 "${BIN}" "$@"
+          fi
+          exec "${BIN}" "$@"
+          LAUNCH
+          chmod +x dist/wuddle
+
+          cat > dist/README.txt << 'DOC'
+          Wuddle Linux Portable (Iced v3 beta)
+          =====================================
+          Run:        ./wuddle
+          Force X11:  WUDDLE_FORCE_X11=1 ./wuddle
+
+          App data: ~/.local/share/wuddle  (shared with Wuddle v2 — no migration needed)
+          DOC
+
+          tar -C dist -czf "wuddle-${TAG}-linux-x86_64.tar.gz" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iced-linux
+          path: wuddle-*-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Windows portable zip
+  # ------------------------------------------------------------------
+  build-windows:
+    needs: guard
+    if: needs.guard.outputs.should_build == 'true'
+    name: Windows (portable zip)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            wuddle-iced -> target
+            wuddle-engine -> target
+
+      - name: Build Wuddle (Iced)
+        run: cargo build --release --manifest-path wuddle-iced/Cargo.toml
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item "wuddle-iced/target/release/wuddle.exe" "dist/Wuddle.exe" -Force
+          Set-Content "dist/README.txt" @"
+          Wuddle (Windows, Iced v3 beta)
+          ================================
+          Run: Wuddle.exe
+
+          App data: %APPDATA%\wuddle  (shared with Wuddle v2 — no migration needed)
+          "@
+          Compress-Archive -Path "dist/*" -DestinationPath "wuddle-$tag-windows-x86_64.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iced-windows
+          path: wuddle-*-windows-x86_64.zip
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Publish pre-release on GitHub
+  # ------------------------------------------------------------------
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: iced-*
+          path: dist
+          merge-multiple: true
+
+      - name: Extract changelog section
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES_FILE="dist/RELEASE_BODY.md"
+
+          # Match the ## vX.Y.Z line (may have trailing text like "(Iced frontend)")
+          SECTION="$(awk -v ver="${VERSION}" '
+            /^## v/ && $0 ~ ver { found=1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md | sed '/./,$!d' | sed -e :a -e '/[[:space:]]*$/{ $d; N; ba }')"
+
+          if [ -n "${SECTION}" ]; then
+            printf '%s\n' "${SECTION}" > "${NOTES_FILE}"
+          else
+            echo "See [CHANGELOG.md](https://github.com/ZythDr/Wuddle/blob/Wuddle-Iced-Dev/CHANGELOG.md) for details." > "${NOTES_FILE}"
+          fi
+
+      - name: Publish pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          body_path: dist/RELEASE_BODY.md
+          files: |
+            dist/*.tar.gz
+            dist/*.zip

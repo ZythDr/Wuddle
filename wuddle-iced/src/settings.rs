@@ -3,6 +3,23 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    Stable,
+    #[default]
+    Beta,
+}
+
+impl std::fmt::Display for UpdateChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateChannel::Stable => write!(f, "Stable"),
+            UpdateChannel::Beta => write!(f, "Beta"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProfileConfig {
@@ -50,6 +67,9 @@ pub struct AppSettings {
     pub opt_auto_check: bool,
     pub opt_desktop_notify: bool,
     pub opt_symlinks: bool,
+    pub opt_xattr: bool,
+    pub radio_auto_connect: bool,
+    pub radio_volume: f32,
     pub opt_clock12: bool,
     pub opt_friz_font: bool,
     pub log_wrap: bool,
@@ -57,6 +77,7 @@ pub struct AppSettings {
     pub auto_check_minutes: u32,
     pub profiles: Vec<ProfileConfig>,
     pub ignored_update_ids: Vec<i64>,
+    pub update_channel: UpdateChannel,
 }
 
 impl Default for AppSettings {
@@ -68,6 +89,9 @@ impl Default for AppSettings {
             opt_auto_check: false,
             opt_desktop_notify: false,
             opt_symlinks: false,
+            opt_xattr: true,
+            radio_auto_connect: false,
+            radio_volume: 0.25,
             opt_clock12: false,
             opt_friz_font: false,
             log_wrap: false,
@@ -75,6 +99,7 @@ impl Default for AppSettings {
             auto_check_minutes: 15,
             profiles: vec![ProfileConfig::default()],
             ignored_update_ids: Vec::new(),
+            update_channel: UpdateChannel::Beta,
         }
     }
 }

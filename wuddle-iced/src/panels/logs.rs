@@ -1,5 +1,6 @@
 use iced::widget::{button, checkbox, column, container, row, stack, text, text_editor, text_input, Space};
 use iced::{Element, Font, Length};
+use iced::advanced::text::Wrapping;
 
 use crate::theme::{self, ThemeColors};
 use crate::{App, LogFilter, LogLevel, Message};
@@ -119,23 +120,30 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 text_input("Search logs", &app.log_search)
                     .on_input(Message::SetLogSearch)
                     .width(180)
-                    .padding(iced::Padding { top: 6.0, right: if show_clear { 24.0 } else { 10.0 }, bottom: 6.0, left: 10.0 }),
-                container(
-                    button(text("\u{2715}").size(10).color(c2.muted))
-                        .on_press(Message::SetLogSearch(String::new()))
-                        .padding([5, 5])
-                        .style(move |_t, _s| button::Style {
-                            background: None,
-                            text_color: c2.muted,
-                            border: iced::Border::default(),
-                            shadow: iced::Shadow::default(),
-                            snap: true,
-                        })
-                )
+                    .padding(iced::Padding { top: 4.0, right: if show_clear { 26.0 } else { 10.0 }, bottom: 4.0, left: 10.0 }),
+                {
+                    let clear_el: Element<Message> = if show_clear {
+                        button(text("\u{2715}").size(12).color(c2.muted))
+                            .on_press(Message::SetLogSearch(String::new()))
+                            .padding([3, 7])
+                            .style(move |_t, _s| button::Style {
+                                background: None,
+                                text_color: c2.muted,
+                                border: iced::Border::default(),
+                                shadow: iced::Shadow::default(),
+                                snap: true,
+                            })
+                            .into()
+                    } else {
+                        Space::new().into()
+                    };
+                    container(clear_el)
+                }
                 .width(180)
+                .height(Length::Fill)
                 .align_x(iced::Alignment::End)
                 .align_y(iced::Alignment::Center)
-                .padding([0, 2]),
+                .padding(iced::Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 0.0 }),
             ]
             .width(180)
         },
@@ -170,6 +178,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         .size(12)
         .height(Length::Fill)
         .padding(12)
+        .wrapping(if app.log_wrap { Wrapping::Word } else { Wrapping::None })
         .highlight_with::<LogHighlighter>(c.bad, log_to_format)
         .style(move |theme, status| theme::log_editor_style(&c)(theme, status));
 

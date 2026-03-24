@@ -1285,6 +1285,13 @@ impl Engine {
         let needs_download = !installed_matches || missing_targets;
         let repair_needed = missing_targets && installed_matches;
 
+        // Clear the cached ETag when an update or repair is pending so that the
+        // next check re-fetches the release instead of getting a 304 (which would
+        // incorrectly report "up to date" while the update remains uninstalled).
+        if needs_download {
+            let _ = self.db.update_etag(r.id, None);
+        }
+
         Ok(UpdatePlan {
             repo_id: r.id,
             forge: r.forge.clone(),

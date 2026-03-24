@@ -1,6 +1,7 @@
 mod anchored_overlay;
 mod panels;
 mod service;
+mod radio;
 mod settings;
 #[allow(dead_code)]
 mod theme;
@@ -13,6 +14,7 @@ use std::sync::OnceLock;
 use iced::widget::{button, canvas, checkbox, column, container, row, rule, scrollable, stack, text, Space};
 use iced::{Element, Font, Length, Subscription, Task, Theme};
 use service::{PlanRow, RepoRow};
+use settings::UpdateChannel;
 use theme::{ThemeColors, WuddleTheme};
 
 const LIFECRAFT: Font = Font::with_name("LifeCraft");
@@ -252,11 +254,114 @@ pub enum InstanceField {
     CustomArgs(String),
 }
 
+// ---------------------------------------------------------------------------
+// DXVK config types
+// ---------------------------------------------------------------------------
+
+/// Three-state option: let DXVK auto-detect, force on, or force off.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TriState {
+    Auto,
+    True,
+    False,
+}
+
+/// How to handle d3d9.presentInterval (VSync override).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PresentInterval {
+    Default, // -1: do not override the in-game setting
+    NoSync,  // 0: always no VSync
+    Vsync,   // 1: always VSync
+    Half,    // 2: half refresh rate (e.g. 30 fps on 60 Hz)
+}
+
+/// Anisotropic filtering level for d3d9.samplerAnisotropy.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnisotropyLevel {
+    NoOverride, // -1: let the game / driver decide
+    Off,        // 0: force disabled
+    X2,
+    X4,
+    X8,
+    X16,
+}
+
+/// Field mutation carried by SetDxvkField messages.
+#[derive(Debug, Clone)]
+pub enum DxvkField {
+    MaxFrameRate(String),
+    MaxFrameLatency(String),
+    LatencySleep(TriState),
+    EnableDialogMode(bool),
+    DpiAware(bool),
+    PresentInterval(PresentInterval),
+    TearFree(TriState),
+    SamplerAnisotropy(AnisotropyLevel),
+    ClampNegativeLodBias(bool),
+    NumCompilerThreads(String),
+    EnableGpl(TriState),
+    TrackPipelineLifetime(TriState),
+    DeferSurfaceCreation(bool),
+    LenientClear(bool),
+    LogPath(String),
+    Hud(String),
+    EnableAsync(bool),
+}
+
+/// State held inside Dialog::DxvkConfig.
+#[derive(Debug, Clone)]
+pub struct DxvkConfig {
+    pub max_frame_rate: String,       // d3d9.maxFrameRate
+    pub max_frame_latency: String,    // d3d9.maxFrameLatency
+    pub latency_sleep: TriState,      // dxvk.latencySleep
+    pub enable_dialog_mode: bool,     // d3d9.enableDialogMode
+    pub dpi_aware: bool,              // d3d9.dpiAware
+    pub present_interval: PresentInterval, // d3d9.presentInterval
+    pub tear_free: TriState,          // dxvk.tearFree
+    pub sampler_anisotropy: AnisotropyLevel, // d3d9.samplerAnisotropy
+    pub clamp_negative_lod_bias: bool, // d3d9.clampNegativeLodBias
+    pub num_compiler_threads: String, // dxvk.numCompilerThreads
+    pub enable_gpl: TriState,         // dxvk.enableGraphicsPipelineLibrary
+    pub track_pipeline_lifetime: TriState, // dxvk.trackPipelineLifetime
+    pub defer_surface_creation: bool, // d3d9.deferSurfaceCreation
+    pub lenient_clear: bool,          // d3d9.lenientClear
+    pub log_path: String,             // dxvk.logPath
+    pub hud: String,                  // dxvk.hud
+    pub enable_async: bool,           // dxvk.enableAsync (gplasync fork)
+}
+
+impl Default for DxvkConfig {
+    fn default() -> Self {
+        Self {
+            max_frame_rate: "240".into(),
+            max_frame_latency: "1".into(),
+            latency_sleep: TriState::Auto,
+            enable_dialog_mode: true,
+            dpi_aware: false,
+            present_interval: PresentInterval::Default,
+            tear_free: TriState::Auto,
+            sampler_anisotropy: AnisotropyLevel::X16,
+            clamp_negative_lod_bias: false,
+            num_compiler_threads: "0".into(),
+            enable_gpl: TriState::Auto,
+            track_pipeline_lifetime: TriState::Auto,
+            defer_surface_creation: true,
+            lenient_clear: true,
+            log_path: ".".into(),
+            hud: String::new(),
+            enable_async: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone)]
 pub enum Dialog {
     AddRepo { url: String, mode: String, is_addons: bool, advanced: bool },
     RemoveRepo { id: i64, name: String, remove_files: bool, files: Vec<(String, String)> },
     Changelog { items: Vec<iced::widget::markdown::Item>, loading: bool },
+    DxvkConfig { config: DxvkConfig, show_preview: bool },
     InstanceSettings {
         is_new: bool,
         profile_id: String,
@@ -291,8 +396,16 @@ pub struct App {
     pub opt_auto_check: bool,
     pub opt_desktop_notify: bool,
     pub opt_symlinks: bool,
+    pub opt_xattr: bool,
     pub opt_clock12: bool,
     pub opt_friz_font: bool,
+    // Radio
+    pub radio_playing: bool,
+    pub radio_volume: f32,
+    pub radio_connecting: bool,
+    pub radio_auto_connect: bool,
+    pub radio_error: Option<String>,
+    pub radio_handle: Option<radio::RadioHandle>,
 
     // GitHub auth
     pub github_token_input: String,
@@ -315,6 +428,8 @@ pub struct App {
 
     // Context menu: which repo's menu is open
     pub open_menu: Option<i64>,
+    // "Add New" dropdown on the Home tab
+    pub add_new_menu_open: bool,
 
     // Branch data (cached per repo_id)
     pub branches: HashMap<i64, Vec<String>>,
@@ -375,15 +490,62 @@ pub struct App {
     // Selectable log view
     pub log_editor_content: iced::widget::text_editor::Content,
 
+    // Selectable DXVK config preview
+    pub dxvk_preview_content: iced::widget::text_editor::Content,
+
     // README source-view toggle (formatted markdown ↔ selectable raw text)
     pub readme_source_view: bool,
     pub readme_editor_content: iced::widget::text_editor::Content,
+
+    // Release channel
+    pub update_channel: UpdateChannel,
 }
 
 impl Default for WuddleTheme {
     fn default() -> Self {
         WuddleTheme::Cata
     }
+}
+
+// ---------------------------------------------------------------------------
+// Channel switching — writes current.json and exits so the launcher picks up
+// the highest stable version. Returns false if no stable version is found
+// locally (caller should open the releases page as a fallback).
+// ---------------------------------------------------------------------------
+
+fn switch_to_stable_channel() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false; };
+    // Expect layout: <launcher_dir>/versions/<version>/<binary>
+    let Some(launcher_dir) = exe.parent().and_then(|v| v.parent()).and_then(|v| v.parent()) else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(launcher_dir.join("versions")) else { return false; };
+
+    let mut stables: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| {
+            let l = n.to_lowercase();
+            !l.contains("alpha") && !l.contains("beta") && !l.contains("pre") && !l.contains("rc")
+        })
+        .collect();
+
+    if stables.is_empty() { return false; }
+
+    stables.sort_by(|a, b| semver_parts(b).cmp(&semver_parts(a)));
+    let best = &stables[0];
+    let json = format!("{{\"current\":\"{}\"}}\n", best);
+    if std::fs::write(launcher_dir.join("current.json"), json).is_err() { return false; }
+
+    std::process::exit(0);
+}
+
+fn semver_parts(s: &str) -> Vec<u64> {
+    s.trim_start_matches(|c: char| !c.is_ascii_digit())
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|seg| seg.parse::<u64>().ok())
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -398,10 +560,18 @@ pub enum Message {
 
     // Options toggles
     ToggleAutoCheck(bool),
+    SetAutoCheckMinutes(String),
     ToggleDesktopNotify(bool),
     ToggleSymlinks(bool),
+    ToggleXattr(bool),
     ToggleClock12(bool),
     ToggleFrizFont(bool),
+    // Radio
+    ToggleRadio,
+    RadioStarted(Result<radio::RadioHandle, String>),
+    SetRadioVolume(f32),
+    ToggleRadioAutoConnect(bool),
+    AutoConnectRadio,
     SetGithubTokenInput(String),
 
     // Tweaks
@@ -423,6 +593,7 @@ pub enum Message {
     // Context menu
     ToggleMenu(i64),
     CloseMenu,
+    ToggleAddNewMenu,
 
     // Engine data (Phase 2)
     ReposLoaded(Result<Vec<RepoRow>, String>),
@@ -434,6 +605,7 @@ pub enum Message {
     CheckUpdatesResult(Result<Vec<PlanRow>, String>),
     AddRepoSubmit,
     AddRepoResult(Result<i64, String>),
+    InstallAfterAddResult(Result<String, String>),
     RemoveRepoConfirm(i64, bool),
     ToggleRemoveFiles(bool),
     RemoveRepoFilesLoaded(Result<Vec<(String, String)>, String>),
@@ -530,6 +702,18 @@ pub enum Message {
     // README source toggle
     ToggleReadmeSourceView,
     ReadmeEditorAction(iced::widget::text_editor::Action),
+
+    // DXVK config dialog
+    OpenDxvkConfig,
+    SetDxvkField(DxvkField),
+    SaveDxvkConfig,
+    DxvkConfigSaved(Result<(), String>),
+    ToggleDxvkPreview,
+    DxvkPreviewEditorAction(iced::widget::text_editor::Action),
+
+    // Release channel
+    SetUpdateChannel(UpdateChannel),
+    SwitchToStableChannel,
 }
 
 // ---------------------------------------------------------------------------
@@ -773,12 +957,19 @@ impl App {
             opt_auto_check: false,
             opt_desktop_notify: false,
             opt_symlinks: false,
+            opt_xattr: true,
             opt_clock12: false,
             opt_friz_font: false,
+            radio_playing: false,
+            radio_volume: 0.25,
+            radio_connecting: false,
+            radio_auto_connect: false,
+            radio_error: None,
+            radio_handle: None,
             github_token_input: String::new(),
             tweaks: TweakState::default(),
             log_lines: vec![
-                LogLine { level: LogLevel::Info, text: "Wuddle v3.0.0-alpha.1 started".into(), timestamp: chrono_now() },
+                LogLine { level: LogLevel::Info, text: concat!("Wuddle v", env!("CARGO_PKG_VERSION"), " started").into(), timestamp: chrono_now() },
                 LogLine { level: LogLevel::Info, text: "Ready.".into(), timestamp: chrono_now() },
             ],
             log_filter: LogFilter::default(),
@@ -789,6 +980,7 @@ impl App {
             log_error_misc: true,
             dialog: None,
             open_menu: None,
+            add_new_menu_open: false,
             branches: HashMap::new(),
             repos: Vec::new(),
             plans: Vec::new(),
@@ -805,7 +997,7 @@ impl App {
             tweak_values: TweakValues::default(),
             latest_version: None,
             update_message: None,
-            auto_check_minutes: 15,
+            auto_check_minutes: 60,
             profiles: vec![settings::ProfileConfig::default()],
             spinner_tick: 0,
             add_repo_preview: None,
@@ -818,10 +1010,12 @@ impl App {
             ignored_update_ids: HashSet::new(),
             expanded_repo_ids: HashSet::new(),
             log_editor_content: iced::widget::text_editor::Content::with_text(
-                "[INFO] Wuddle v3.0.0-alpha.1 started\n[INFO] Ready."
+                concat!("[INFO] Wuddle v", env!("CARGO_PKG_VERSION"), " started\n[INFO] Ready.")
             ),
             readme_source_view: false,
             readme_editor_content: iced::widget::text_editor::Content::new(),
+            dxvk_preview_content: iced::widget::text_editor::Content::new(),
+            update_channel: UpdateChannel::Beta,
         };
 
         // Sync GitHub token from keychain/env at startup
@@ -876,6 +1070,9 @@ impl App {
             opt_auto_check: self.opt_auto_check,
             opt_desktop_notify: self.opt_desktop_notify,
             opt_symlinks: self.opt_symlinks,
+            opt_xattr: self.opt_xattr,
+            radio_auto_connect: self.radio_auto_connect,
+            radio_volume: self.radio_volume,
             opt_clock12: self.opt_clock12,
             opt_friz_font: self.opt_friz_font,
             log_wrap: self.log_wrap,
@@ -883,6 +1080,7 @@ impl App {
             auto_check_minutes: self.auto_check_minutes,
             profiles: self.profiles.clone(),
             ignored_update_ids: self.ignored_update_ids.iter().cloned().collect(),
+            update_channel: self.update_channel,
         };
         let _ = settings::save_settings(&s);
     }
@@ -915,6 +1113,11 @@ impl App {
             .collect::<Vec<_>>()
             .join("\n");
         self.log_editor_content = iced::widget::text_editor::Content::with_text(&text);
+        if self.log_autoscroll {
+            self.log_editor_content.perform(
+                iced::widget::text_editor::Action::Move(iced::widget::text_editor::Motion::DocumentEnd),
+            );
+        }
     }
 
     fn is_busy(&self) -> bool {
@@ -990,13 +1193,15 @@ impl App {
 
     pub fn mod_update_count(&self) -> usize {
         self.plans.iter().filter(|p| {
-            p.has_update && self.repos.iter().any(|r| r.id == p.repo_id && is_mod(r))
+            p.has_update && !self.ignored_update_ids.contains(&p.repo_id)
+                && self.repos.iter().any(|r| r.id == p.repo_id && is_mod(r))
         }).count()
     }
 
     pub fn addon_update_count(&self) -> usize {
         self.plans.iter().filter(|p| {
-            p.has_update && self.repos.iter().any(|r| r.id == p.repo_id && !is_mod(r))
+            p.has_update && !self.ignored_update_ids.contains(&p.repo_id)
+                && self.repos.iter().any(|r| r.id == p.repo_id && !is_mod(r))
         }).count()
     }
 
@@ -1006,7 +1211,7 @@ impl App {
                 self.active_tab = tab;
                 // Fire self-update check whenever the About tab becomes active
                 if tab == Tab::About {
-                    return Task::perform(service::check_self_update(), Message::CheckSelfUpdateResult);
+                    return Task::perform(service::check_self_update(self.update_channel == UpdateChannel::Beta), Message::CheckSelfUpdateResult);
                 }
             }
             Message::SetTheme(theme) => {
@@ -1032,13 +1237,104 @@ impl App {
 
             // Options
             Message::ToggleAutoCheck(b) => { self.opt_auto_check = b; self.save_settings(); }
+            Message::SetAutoCheckMinutes(s) => {
+                if let Ok(n) = s.parse::<u32>() {
+                    self.auto_check_minutes = n.max(1);
+                } else if s.is_empty() {
+                    self.auto_check_minutes = 1;
+                }
+                self.save_settings();
+            }
             Message::ToggleDesktopNotify(b) => { self.opt_desktop_notify = b; self.save_settings(); }
             Message::ToggleSymlinks(b) => { self.opt_symlinks = b; self.save_settings(); }
+            Message::ToggleXattr(b) => { self.opt_xattr = b; self.save_settings(); }
             Message::ToggleClock12(b) => { self.opt_clock12 = b; self.save_settings(); }
             Message::ToggleFrizFont(b) => {
                 self.opt_friz_font = b;
                 self.save_settings();
                 self.log(LogLevel::Info, "Friz Quadrata font setting saved. Restart Wuddle to apply.");
+            }
+            Message::ToggleRadio => {
+                if self.radio_connecting {
+                    return Task::none();
+                }
+                if self.radio_playing {
+                    // User pressed Stop — fade out, keep handle for instant resume
+                    self.radio_playing = false;
+                    self.log(LogLevel::Info, "Radio: stopped.");
+                    if let Some(h) = &self.radio_handle { h.fade_out(); }
+                    return Task::none();
+                } else if let Some(h) = &self.radio_handle {
+                    // Pre-connected — fade in instantly
+                    self.radio_playing = true;
+                    self.radio_error = None;
+                    h.fade_in(self.radio_volume);
+                    self.log(LogLevel::Info, "Radio: playing (instant resume).");
+                    return Task::none();
+                } else {
+                    // Need to connect — start silent, fade in after connect
+                    self.radio_playing = true;
+                    self.radio_connecting = true;
+                    self.radio_error = None;
+                    self.log(LogLevel::Info, "Radio: connecting…");
+                    let (tx, rx) = tokio::sync::oneshot::channel::<Result<radio::RadioHandle, String>>();
+                    std::thread::spawn(move || { let _ = tx.send(radio::start(0.0)); });
+                    return Task::perform(
+                        async move { rx.await.unwrap_or_else(|_| Err("Thread died".to_string())) },
+                        Message::RadioStarted,
+                    );
+                }
+            }
+            Message::RadioStarted(Ok(handle)) => {
+                self.radio_connecting = false;
+                if self.radio_playing {
+                    handle.fade_in(self.radio_volume);
+                    self.log(LogLevel::Info, "Radio: connected and playing.");
+                } else {
+                    self.log(LogLevel::Info, "Radio: pre-loaded (muted).");
+                }
+                self.radio_handle = Some(handle);
+            }
+            Message::RadioStarted(Err(e)) => {
+                self.radio_connecting = false;
+                self.radio_playing = false;
+                self.log(LogLevel::Error, &format!("Radio: connection failed — {e}"));
+                self.radio_error = Some(e);
+            }
+            Message::SetRadioVolume(v) => {
+                self.radio_volume = v;
+                if self.radio_playing {
+                    if let Some(handle) = &self.radio_handle {
+                        handle.set_volume(v);
+                    }
+                }
+            }
+            Message::ToggleRadioAutoConnect(b) => {
+                self.radio_auto_connect = b;
+                self.save_settings();
+                if b && self.radio_handle.is_none() && !self.radio_connecting {
+                    // Immediately start silent connection
+                    return Task::done(Message::AutoConnectRadio);
+                } else if !b && !self.radio_playing {
+                    // Disconnect the silent stream
+                    if let Some(h) = self.radio_handle.take() { h.stop(); }
+                }
+            }
+            Message::AutoConnectRadio => {
+                let like_turtles = self.profiles.iter()
+                    .find(|p| p.id == self.active_profile_id)
+                    .map(|p| p.like_turtles)
+                    .unwrap_or(true);
+                if like_turtles && self.radio_auto_connect && self.radio_handle.is_none() && !self.radio_connecting {
+                    self.radio_connecting = true;
+                    self.log(LogLevel::Info, "Radio: pre-loading in background…");
+                    let (tx, rx) = tokio::sync::oneshot::channel::<Result<radio::RadioHandle, String>>();
+                    std::thread::spawn(move || { let _ = tx.send(radio::start(0.0)); });
+                    return Task::perform(
+                        async move { rx.await.unwrap_or_else(|_| Err("Thread died".to_string())) },
+                        Message::RadioStarted,
+                    );
+                }
             }
             Message::SetGithubTokenInput(s) => self.github_token_input = s,
 
@@ -1072,6 +1368,7 @@ impl App {
             // Dialogs
             Message::OpenDialog(d) => {
                 self.open_menu = None;
+                self.add_new_menu_open = false;
                 let fetch_task = if let Dialog::RemoveRepo { id, .. } = &d {
                     let db = self.db_path.clone();
                     let repo_id = *id;
@@ -1110,8 +1407,16 @@ impl App {
                 } else {
                     self.open_menu = Some(id);
                 }
+                self.add_new_menu_open = false;
             }
-            Message::CloseMenu => self.open_menu = None,
+            Message::CloseMenu => {
+                self.open_menu = None;
+                self.add_new_menu_open = false;
+            }
+            Message::ToggleAddNewMenu => {
+                self.add_new_menu_open = !self.add_new_menu_open;
+                self.open_menu = None;
+            }
 
             // --- Phase 2: Data loading ---
             Message::SettingsLoaded(s) => {
@@ -1120,12 +1425,16 @@ impl App {
                 self.opt_auto_check = s.opt_auto_check;
                 self.opt_desktop_notify = s.opt_desktop_notify;
                 self.opt_symlinks = s.opt_symlinks;
+                self.opt_xattr = s.opt_xattr;
+                self.radio_auto_connect = s.radio_auto_connect;
+                self.radio_volume = s.radio_volume;
                 self.opt_clock12 = s.opt_clock12;
                 self.opt_friz_font = s.opt_friz_font;
                 self.log_wrap = s.log_wrap;
                 self.log_autoscroll = s.log_autoscroll;
                 self.auto_check_minutes = s.auto_check_minutes.max(1);
                 self.ignored_update_ids = s.ignored_update_ids.into_iter().collect();
+                self.update_channel = s.update_channel;
                 self.profiles = if s.profiles.is_empty() {
                     vec![settings::ProfileConfig::default()]
                 } else {
@@ -1138,7 +1447,11 @@ impl App {
                     .unwrap_or(s.wow_dir);
                 self.db_path = settings::profile_db_path(&self.active_profile_id).ok();
                 self.log(LogLevel::Info, &format!("Profile: {}", self.active_profile_id));
-                return self.refresh_repos_task();
+                let repos_task = self.refresh_repos_task();
+                if self.radio_auto_connect {
+                    return Task::batch([repos_task, Task::done(Message::AutoConnectRadio)]);
+                }
+                return repos_task;
             }
             Message::ReposLoaded(result) => {
                 self.loading = false;
@@ -1169,7 +1482,7 @@ impl App {
                             tasks.push(self.check_updates_task());
                         }
                         // Always fire self-update check on launch
-                        tasks.push(Task::perform(service::check_self_update(), Message::CheckSelfUpdateResult));
+                        tasks.push(Task::perform(service::check_self_update(self.update_channel == UpdateChannel::Beta), Message::CheckSelfUpdateResult));
                         if !tasks.is_empty() {
                             return Task::batch(tasks);
                         }
@@ -1197,7 +1510,16 @@ impl App {
                 self.checking_updates = false;
                 match result {
                     Ok(plans) => {
-                        let update_count = plans.iter().filter(|p| p.has_update).count();
+                        let update_count = plans.iter().filter(|p| p.has_update && !self.ignored_update_ids.contains(&p.repo_id)).count();
+                        for p in &plans {
+                            if let Some(err) = &p.error {
+                                // Suppress -16 (GIT_EAUTH): deleted/private repos the user
+                                // has acknowledged; they generate noise on every check.
+                                if !is_silenced_git_error(err) {
+                                    self.log(LogLevel::Error, &format!("{}/{} - {}", p.owner, p.name, simplify_git_error(err)));
+                                }
+                            }
+                        }
                         self.log(LogLevel::Info, &format!("Update check complete. {} updates available.", update_count));
                         self.plans = plans;
                         self.last_checked = Some(chrono_now_fmt(self.opt_clock12));
@@ -1237,6 +1559,23 @@ impl App {
                 match result {
                     Ok(id) => {
                         self.log(LogLevel::Info, &format!("Repo added (id={}).", id));
+                        // Auto-install mirrors Tauri: update first, reinstall if update
+                        // returns None (engine has nothing to fetch but files aren't on disk).
+                        // Do NOT run refresh_repos_task concurrently — prune_missing_repos
+                        // inside list_repos would delete the newly-added addon_git repo
+                        // (no worktree yet) before install can run, causing "Query returned
+                        // no rows". InstallAfterAddResult triggers the refresh after install.
+                        if !self.wow_dir.is_empty() {
+                            let db = self.db_path.clone();
+                            let wow = self.wow_dir.clone();
+                            let opts = self.install_options();
+                            self.log(LogLevel::Info, "Installing…");
+                            self.updating_repo_ids.insert(id);
+                            return Task::perform(
+                                service::install_new_repo(db, id, wow, opts),
+                                Message::InstallAfterAddResult,
+                            );
+                        }
                         return self.refresh_repos_task();
                     }
                     Err(e) => {
@@ -1244,6 +1583,14 @@ impl App {
                         self.error = Some(e);
                     }
                 }
+            }
+            Message::InstallAfterAddResult(result) => {
+                match result {
+                    Ok(msg) => self.log(LogLevel::Info, &msg),
+                    Err(e) => self.log(LogLevel::Error, &format!("Install failed: {}", e)),
+                }
+                self.updating_repo_ids.clear();
+                return self.refresh_repos_task();
             }
             Message::RemoveRepoConfirm(id, remove_files) => {
                 let db = self.db_path.clone();
@@ -1438,7 +1785,9 @@ impl App {
                             .find(|r| r.id == repo_id)
                             .map(|r| format!("{}/{}", r.owner, r.name))
                             .unwrap_or_else(|| format!("repo#{}", repo_id));
-                        self.log(LogLevel::Error, &format!("Failed to fetch branches for {}: {}", repo_name, simplify_git_error(&e)));
+                        if !is_silenced_git_error(&e) {
+                            self.log(LogLevel::Error, &format!("Failed to fetch branches for {}: {}", repo_name, simplify_git_error(&e)));
+                        }
                     }
                 }
             }
@@ -1752,6 +2101,75 @@ impl App {
                 self.log(LogLevel::Info, "Tweak values reset to defaults.");
             }
 
+            // --- DXVK config dialog ---
+            Message::OpenDxvkConfig => {
+                self.open_menu = None;
+                self.add_new_menu_open = false;
+                self.dialog = Some(Dialog::DxvkConfig { config: DxvkConfig::default(), show_preview: false });
+            }
+            Message::SetDxvkField(field) => {
+                if let Some(Dialog::DxvkConfig { ref mut config, .. }) = self.dialog {
+                    match field {
+                        DxvkField::MaxFrameRate(s) => config.max_frame_rate = s,
+                        DxvkField::MaxFrameLatency(s) => config.max_frame_latency = s,
+                        DxvkField::LatencySleep(v) => config.latency_sleep = v,
+                        DxvkField::EnableDialogMode(v) => config.enable_dialog_mode = v,
+                        DxvkField::DpiAware(v) => config.dpi_aware = v,
+                        DxvkField::PresentInterval(v) => config.present_interval = v,
+                        DxvkField::TearFree(v) => config.tear_free = v,
+                        DxvkField::SamplerAnisotropy(v) => config.sampler_anisotropy = v,
+                        DxvkField::ClampNegativeLodBias(v) => config.clamp_negative_lod_bias = v,
+                        DxvkField::NumCompilerThreads(s) => config.num_compiler_threads = s,
+                        DxvkField::EnableGpl(v) => config.enable_gpl = v,
+                        DxvkField::TrackPipelineLifetime(v) => config.track_pipeline_lifetime = v,
+                        DxvkField::DeferSurfaceCreation(v) => config.defer_surface_creation = v,
+                        DxvkField::LenientClear(v) => config.lenient_clear = v,
+                        DxvkField::LogPath(s) => config.log_path = s,
+                        DxvkField::Hud(s) => config.hud = s,
+                        DxvkField::EnableAsync(v) => config.enable_async = v,
+                    }
+                }
+                // If currently showing the preview, keep it in sync with settings changes
+                if let Some(Dialog::DxvkConfig { ref config, show_preview: true }) = self.dialog {
+                    let text = panels::dxvk_config::generate_conf(config);
+                    self.dxvk_preview_content = iced::widget::text_editor::Content::with_text(&text);
+                }
+            }
+            Message::SaveDxvkConfig => {
+                if let Some(Dialog::DxvkConfig { ref config, .. }) = self.dialog {
+                    let content = panels::dxvk_config::generate_conf(config);
+                    let path = std::path::Path::new(&self.wow_dir).join("dxvk.conf");
+                    return Task::perform(
+                        service::save_dxvk_conf(path, content),
+                        Message::DxvkConfigSaved,
+                    );
+                }
+            }
+            Message::DxvkConfigSaved(result) => {
+                match result {
+                    Ok(()) => {
+                        let path = std::path::Path::new(&self.wow_dir).join("dxvk.conf");
+                        self.log(LogLevel::Info, &format!("Saved dxvk.conf → {}", path.display()));
+                        self.dialog = None;
+                    }
+                    Err(e) => self.log(LogLevel::Error, &format!("Failed to save dxvk.conf: {}", e)),
+                }
+            }
+            Message::ToggleDxvkPreview => {
+                if let Some(Dialog::DxvkConfig { ref mut show_preview, ref config }) = self.dialog {
+                    *show_preview = !*show_preview;
+                    if *show_preview {
+                        let text = panels::dxvk_config::generate_conf(config);
+                        self.dxvk_preview_content = iced::widget::text_editor::Content::with_text(&text);
+                    }
+                }
+            }
+            Message::DxvkPreviewEditorAction(action) => {
+                if !action.is_edit() {
+                    self.dxvk_preview_content.perform(action);
+                }
+            }
+
             // Tweak read/apply/restore
             Message::ReadTweaks => {
                 if self.wow_dir.is_empty() {
@@ -1828,7 +2246,7 @@ impl App {
             // --- About ---
             Message::CheckSelfUpdate => {
                 self.log(LogLevel::Info, "Checking for Wuddle updates...");
-                return Task::perform(service::check_self_update(), Message::CheckSelfUpdateResult);
+                return Task::perform(service::check_self_update(self.update_channel == UpdateChannel::Beta), Message::CheckSelfUpdateResult);
             }
             Message::CheckSelfUpdateResult(result) => {
                 match result {
@@ -1990,6 +2408,16 @@ impl App {
                     return self.check_updates_task();
                 }
             }
+            Message::SetUpdateChannel(ch) => {
+                self.update_channel = ch;
+                self.save_settings();
+            }
+
+            Message::SwitchToStableChannel => {
+                if !switch_to_stable_channel() {
+                    let _ = open::that("https://github.com/ZythDr/Wuddle/releases");
+                }
+            }
         }
         Task::none()
     }
@@ -1997,7 +2425,7 @@ impl App {
     fn install_options(&self) -> wuddle_engine::InstallOptions {
         wuddle_engine::InstallOptions {
             use_symlinks: self.opt_symlinks,
-            set_xattr_comment: true,
+            set_xattr_comment: self.opt_xattr,
             replace_addon_conflicts: false,
             cache_keep_versions: 2,
         }
@@ -2058,6 +2486,16 @@ impl App {
                 container(self.view_dialog(dialog, &c))
                     .width(Length::Fill)
                     .height(Length::Fill)
+                    .into()
+            } else if matches!(dialog, Dialog::DxvkConfig { .. }) {
+                // DXVK config: two-column layout, constrained width, fills height
+                let c_dlg = c;
+                container(self.view_dialog(dialog, &c))
+                    .max_width(960u32)
+                    .padding(24)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(move |_theme| theme::dialog_style(&c_dlg))
                     .into()
             } else {
                 let (dialog_max_w, dialog_pad) = match dialog {
@@ -3146,6 +3584,9 @@ impl App {
                 .spacing(8)
                 .into()
             }
+            Dialog::DxvkConfig { config, show_preview } => {
+                panels::dxvk_config::view(config, &self.wow_dir, *show_preview, &self.dxvk_preview_content, colors)
+            }
         }
     }
 
@@ -3888,6 +4329,9 @@ pub fn inline_context_menu<'a>(app: &App, repo: &RepoRow, colors: &ThemeColors) 
         items.push(ctx_menu_item("\u{2193} Update", Message::UpdateRepo(rid), &c));
     }
     items.push(ctx_menu_item("Reinstall / Repair", Message::ReinstallRepo(rid), &c));
+    if panels::projects::is_dxvk_repo(&repo.name) {
+        items.push(ctx_menu_item("\u{2699} Configure DXVK\u{2026}", Message::OpenDxvkConfig, &c));
+    }
     if is_mod_val {
         let label = if enabled { "Disable" } else { "Enable" };
         items.push(ctx_menu_item(label, Message::ToggleRepoEnabled(rid, !enabled), &c));
@@ -4029,6 +4473,13 @@ impl<Message> canvas::Program<Message> for SpinnerCanvas {
 
         vec![frame.into_geometry()]
     }
+}
+
+/// Returns true for error codes the user has chosen to silence (e.g. -16 = GIT_EAUTH,
+/// produced by deleted or private repositories).  Callers should skip logging these.
+fn is_silenced_git_error(raw: &str) -> bool {
+    // "code=Auth (-16)" or "code=Something (-16)" anywhere in the raw error string.
+    raw.contains("(-16)")
 }
 
 /// Converts a verbose libgit2/network error chain into a short, human-readable message,

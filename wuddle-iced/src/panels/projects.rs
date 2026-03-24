@@ -370,7 +370,7 @@ fn mod_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a
         col_cell(text(latest_str).size(12).color(colors.muted), COL_LATEST),
         col_cell(checkbox(enabled).on_toggle(move |b| Message::ToggleRepoEnabled(rid, b)), COL_ENABLED),
         col_cell(status_badge(has_error, has_update, enabled, update_ignored, colors), COL_STATUS),
-        col_cell(action_buttons(repo, has_update, is_menu_open, menu_content, &c), COL_ACTIONS),
+        col_cell(action_buttons(repo, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
     .padding([9, 12])
@@ -468,7 +468,7 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<
         name_col,
         col_cell(branch_display, COL_BRANCH),
         col_cell(status_badge(has_error, has_update, enabled, update_ignored, colors), COL_STATUS),
-        col_cell(action_buttons(repo, has_update, is_menu_open, menu_content, &c), COL_ACTIONS),
+        col_cell(action_buttons(repo, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
     .padding([9, 12])
@@ -522,6 +522,8 @@ fn name_cell_with_expand<'a>(
     let rid = repo.id;
     let dll_count = repo.installed_dlls.len();
 
+    let show_dxvk_badge = is_dxvk_repo(&repo.name);
+
     let title_row: Element<Message> = if is_multi_dll {
         let chevron_bytes: &[u8] = if is_expanded {
             include_bytes!("../../icons/chevron-down.svg")
@@ -546,15 +548,35 @@ fn name_cell_with_expand<'a>(
                 },
                 ..Default::default()
             });
-        row![
-            title_btn,
-            Space::new().width(6),
-            chevron_icon,
-            Space::new().width(14),
-            badge,
-        ]
-        .align_y(iced::Alignment::Center)
-        .into()
+        let mut title_items: Vec<Element<Message>> = vec![
+            title_btn.into(),
+            Space::new().width(6).into(),
+            chevron_icon.into(),
+            Space::new().width(14).into(),
+            badge.into(),
+        ];
+        if show_dxvk_badge {
+            let c2 = c;
+            title_items.push(Space::new().width(6).into());
+            title_items.push(
+                button(text("\u{2699} DXVK conf").size(10).color(c2.link))
+                    .on_press(Message::OpenDxvkConfig)
+                    .padding([2, 6])
+                    .style(move |_t, status| dxvk_badge_style(status, c2))
+                    .into(),
+            );
+        }
+        row(title_items).align_y(iced::Alignment::Center).into()
+    } else if show_dxvk_badge {
+        // Non-multi-DLL DXVK repo: show the configure badge next to the title
+        let c2 = c;
+        let dxvk_badge = button(text("\u{2699} DXVK conf").size(10).color(c2.link))
+            .on_press(Message::OpenDxvkConfig)
+            .padding([2, 6])
+            .style(move |_t, status| dxvk_badge_style(status, c2));
+        row![title_btn, Space::new().width(8), dxvk_badge]
+            .align_y(iced::Alignment::Center)
+            .into()
     } else {
         title_btn.into()
     };
@@ -745,6 +767,29 @@ fn sort_header_button<'a>(label: &str, key: SortKey, colors: &ThemeColors) -> El
             },
         })
         .into()
+}
+
+/// Returns true if the repo is a DXVK distribution (any name containing "dxvk").
+/// Used to show the DXVK badge button and context-menu item.
+pub fn is_dxvk_repo(name: &str) -> bool {
+    name.to_lowercase().contains("dxvk")
+}
+
+/// Button style for the ⚙ DXVK conf badge, shared across multi-DLL and single-DLL rows.
+fn dxvk_badge_style(status: button::Status, c: crate::theme::ThemeColors) -> button::Style {
+    let alpha = if matches!(status, button::Status::Hovered) { 0.18 } else { 0.10 };
+    let border_alpha = if matches!(status, button::Status::Hovered) { 0.45 } else { 0.28 };
+    button::Style {
+        background: Some(iced::Background::Color(iced::Color { a: alpha, ..c.link })),
+        text_color: c.link,
+        border: iced::Border {
+            color: iced::Color { a: border_alpha, ..c.link },
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+        snap: true,
+    }
 }
 
 fn status_rank(app: &App, repo: &RepoRow) -> u8 {
