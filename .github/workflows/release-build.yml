@@ -9,7 +9,46 @@ on:
       - "v*"
 
 jobs:
+  # Guard: only build when the tag (or push) is on main or v2-dev.
+  # This prevents Iced-branch tags (e.g. v3.0.0-beta.1) from
+  # triggering a full Tauri build unnecessarily.
+  guard:
+    name: Check tag is on main or v2-dev
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: check
+        run: |
+          set -euo pipefail
+          # Branch pushes (not tag pushes) always build.
+          if [[ "${GITHUB_REF}" != refs/tags/* ]]; then
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+            echo "Branch push — building."
+            exit 0
+          fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags origin +refs/heads/v2-dev:refs/remotes/origin/v2-dev || true
+          TAG_SHA="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
+          if git merge-base --is-ancestor "${TAG_SHA}" origin/main; then
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+            echo "Tag ${GITHUB_REF_NAME} is on main — building Tauri release."
+          elif git show-ref --verify --quiet refs/remotes/origin/v2-dev && \
+               git merge-base --is-ancestor "${TAG_SHA}" origin/v2-dev; then
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+            echo "Tag ${GITHUB_REF_NAME} is on v2-dev — building Tauri release."
+          else
+            echo "should_build=false" >> "${GITHUB_OUTPUT}"
+            echo "Tag ${GITHUB_REF_NAME} is not on main or v2-dev — skipping Tauri build."
+          fi
+
   build-linux:
+    needs: guard
+    if: needs.guard.outputs.should_build == 'true'
     name: Linux Bundles
     runs-on: ubuntu-22.04
     defaults:
@@ -144,6 +183,8 @@ jobs:
           if-no-files-found: error
 
   build-windows:
+    needs: guard
+    if: needs.guard.outputs.should_build == 'true'
     name: Windows Portable
     runs-on: windows-latest
     defaults:
@@ -222,8 +263,8 @@ jobs:
 
   release:
     name: Publish GitHub Release (stable + pre-release)
-    needs: [build-linux, build-windows]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [guard, build-linux, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.guard.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
