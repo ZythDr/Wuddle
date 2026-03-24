@@ -237,5 +237,6 @@ jobs:
           generate_release_notes: false
           body_path: dist/RELEASE_BODY.md
           files: |
+            dist/*.AppImage
             dist/*.tar.gz
             dist/*.zip
