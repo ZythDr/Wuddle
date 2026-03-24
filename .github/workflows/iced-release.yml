@@ -69,10 +69,42 @@ jobs:
             libssl-dev \
             libdbus-1-dev \
             libsecret-1-dev \
+            libfuse2 \
             pkg-config
 
       - name: Build Wuddle (Iced)
         run: cargo build --release --manifest-path wuddle-iced/Cargo.toml
+
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+
+          wget -qO linuxdeploy.AppImage \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          wget -qO linuxdeploy-plugin-appimage.AppImage \
+            "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage"
+          chmod +x linuxdeploy.AppImage linuxdeploy-plugin-appimage.AppImage
+
+          cat > wuddle.desktop << 'DESKTOP'
+          [Desktop Entry]
+          Name=Wuddle
+          Exec=wuddle
+          Icon=wuddle
+          Type=Application
+          Categories=Utility;
+          DESKTOP
+
+          ./linuxdeploy.AppImage \
+            --appdir AppDir \
+            --executable wuddle-iced/target/release/wuddle \
+            --desktop-file wuddle.desktop \
+            --icon-file wuddle-iced/icons/128x128.png \
+            --output appimage
+
+          mv Wuddle-x86_64.AppImage "wuddle-${TAG}-linux-x86_64.AppImage"
 
       - name: Package portable tar.gz
         run: |
@@ -112,7 +144,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: iced-linux
-          path: wuddle-*-linux-x86_64.tar.gz
+          path: |
+            wuddle-*-linux-x86_64.AppImage
+            wuddle-*-linux-x86_64.tar.gz
           if-no-files-found: error
 
   # ------------------------------------------------------------------
