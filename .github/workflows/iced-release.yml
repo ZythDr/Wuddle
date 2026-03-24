@@ -97,11 +97,15 @@ jobs:
           Categories=Utility;
           DESKTOP
 
+          # linuxdeploy infers the icon name from the filename, so it must
+          # be named wuddle.png to match the Icon= entry in the desktop file.
+          cp wuddle-iced/icons/128x128.png wuddle.png
+
           ./linuxdeploy.AppImage \
             --appdir AppDir \
             --executable wuddle-iced/target/release/wuddle \
             --desktop-file wuddle.desktop \
-            --icon-file wuddle-iced/icons/128x128.png \
+            --icon-file wuddle.png \
             --output appimage
 
           mv Wuddle-x86_64.AppImage "wuddle-${TAG}-linux-x86_64.AppImage"

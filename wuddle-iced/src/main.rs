@@ -49,6 +49,11 @@ fn main() -> iced::Result {
     let saved = settings::load_settings();
     let default_font = if saved.opt_friz_font { FRIZ } else { NOTO };
 
+    let window_icon = iced::window::icon::from_file_data(
+        include_bytes!("../icons/128x128.png"),
+        None,
+    ).ok();
+
     iced::application(App::new, App::update, App::view)
         .title("Wuddle")
         .theme(App::theme)
@@ -59,6 +64,10 @@ fn main() -> iced::Result {
         .font(include_bytes!("../assets/fonts/NotoSans-Bold.ttf"))
         .default_font(default_font)
         .window_size((1100.0, 850.0))
+        .window(iced::window::Settings {
+            icon: window_icon,
+            ..Default::default()
+        })
         .run()
 }
 
