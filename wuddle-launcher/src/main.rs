@@ -74,10 +74,11 @@ fn collect_candidates(launcher_dir: &Path) -> Vec<Candidate> {
         }
 
         let name = entry.file_name().to_string_lossy().to_string();
-        let bin = path.join(app_binary_name());
-        if !bin.is_file() {
-            continue;
-        }
+        let bin = app_binary_names()
+            .iter()
+            .map(|n| path.join(n))
+            .find(|p| p.is_file());
+        let Some(bin) = bin else { continue };
 
         out.push(Candidate {
             version_name: name.clone(),
@@ -167,14 +168,15 @@ fn is_same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Candidate binary names inside a version folder, in preference order.
 #[cfg(target_os = "windows")]
-fn app_binary_name() -> &'static str {
-    "Wuddle-bin.exe"
+fn app_binary_names() -> &'static [&'static str] {
+    &["Wuddle-bin.exe", "wuddle.exe"]
 }
 
 #[cfg(not(target_os = "windows"))]
-fn app_binary_name() -> &'static str {
-    "wuddle-bin"
+fn app_binary_names() -> &'static [&'static str] {
+    &["wuddle-bin", "wuddle"]
 }
 
 #[cfg(target_os = "windows")]

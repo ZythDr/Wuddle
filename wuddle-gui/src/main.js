@@ -14,6 +14,7 @@ import {
   OPT_AUTOCHECK_KEY,
   OPT_AUTOCHECK_MINUTES_KEY,
   OPT_DESKTOP_NOTIFY_KEY,
+  OPT_UPDATE_CHANNEL_KEY,
   DEFAULT_USE_FRIZ_FONT,
   DEFAULT_AUTO_CHECK_ENABLED,
   DEFAULT_DESKTOP_NOTIFY,
@@ -122,6 +123,7 @@ import {
   updateWuddleInPlace,
   setAboutCallbacks,
   showChangelog,
+  setUpdateChannel,
 } from "./about.js";
 
 import { renderHome, launchGameFromHome, setHomeCallbacks } from "./home.js";
@@ -279,6 +281,10 @@ function loadSettings() {
   );
   const rawDesktopNotify = localStorage.getItem(OPT_DESKTOP_NOTIFY_KEY);
   const desktopNotifyEnabled = rawDesktopNotify === null ? DEFAULT_DESKTOP_NOTIFY : rawDesktopNotify === "true";
+  const savedChannel = localStorage.getItem(OPT_UPDATE_CHANNEL_KEY);
+  state.updateChannel = savedChannel === "beta" || savedChannel === "stable" ? savedChannel : "stable";
+  const channelSelect = $("aboutChannelSelect");
+  if (channelSelect) channelSelect.value = state.updateChannel;
   $("optSymlinks").checked = symlinks;
   $("optXattr").checked = xattr;
   $("optClock12").checked = clock12;
@@ -357,6 +363,19 @@ function saveOptionFlags() {
   renderLastChecked();
   render();
   renderLog();
+  // Sync to settings.json so the Iced frontend can share options
+  safeInvoke("wuddle_sync_options_to_settings", {
+    theme: selectedTheme,
+    optSymlinks: $("optSymlinks").checked,
+    optClock12: $("optClock12").checked,
+    optFrizFont: useFrizFont,
+    optAutoCheck: autoCheckEnabled,
+    autoCheckMinutes,
+    optDesktopNotify: desktopNotify,
+    logWrap: state.logWrap,
+    logAutoscroll: state.logAutoScroll,
+    updateChannel: state.updateChannel,
+  }).catch(() => {});
 }
 
 // ============================================================================
@@ -503,6 +522,9 @@ $("themePicker")?.addEventListener("click", (ev) => {
 $("btnConnectGithub").addEventListener("click", connectGithub);
 $("btnSaveGithubToken").addEventListener("click", saveGithubToken);
 $("btnClearGithubToken").addEventListener("click", clearGithubToken);
+$("aboutChannelSelect")?.addEventListener("change", (ev) => {
+  setUpdateChannel(ev.target.value);
+});
 $("btnAboutRefresh").addEventListener("click", () => {
   void refreshAboutInfo({ force: true });
 });
@@ -698,5 +720,18 @@ renderGithubAuth(null);
 renderAboutInfo();
 void refreshGithubAuthStatus();
 log("Ready.");
+// Write settings.json on every startup so Iced v3 always inherits current preferences.
+safeInvoke("wuddle_sync_options_to_settings", {
+  theme: state.theme,
+  optSymlinks: $("optSymlinks").checked,
+  optClock12: $("optClock12").checked,
+  optFrizFont: state.useFrizFont,
+  optAutoCheck: state.autoCheckEnabled,
+  autoCheckMinutes: state.autoCheckMinutes,
+  optDesktopNotify: state.desktopNotifyEnabled,
+  logWrap: state.logWrap,
+  logAutoscroll: state.logAutoScroll,
+  updateChannel: state.updateChannel,
+}).catch(() => {});
 refreshAll({ notify: true, source: "startup" });
 void maybePollSelfUpdateInfo({ notify: true });
