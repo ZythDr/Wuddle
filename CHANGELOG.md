@@ -2,6 +2,57 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.5.8
+
+### New Features
+
+- **Bidirectional settings sync with Iced v3** — `settings.json` is now the primary source of truth for both Tauri and Iced. On startup, Tauri reads profiles and options from `settings.json` (falling back to localStorage for first-time migration). All option saves write back to `settings.json` so changes made in either frontend are immediately visible to the other.
+- **Profile database fallback** — when a profile-specific database has no repos, Tauri now falls back to `wuddle.sqlite` (the default Iced profile DB), ensuring mods installed via either frontend remain visible after switching.
+- **`wuddle_load_settings_json` command** — new Tauri command that reads the shared `settings.json` so the JS frontend can bootstrap from it.
+- **`opt_xattr` synced to settings.json** — the extended-attributes option is now included in the options sync, closing a gap where Linux-specific settings were lost between frontends.
+
+### Changes
+
+- **Casing fix runs in background** — the one-time forge casing correction (`fix_repo_casing_from_forges`) now runs in a background thread with a `needs_casing_fix()` guard, preventing it from blocking `list_repos` responses on slow or unreachable forges.
+- **`loadSettings()` is now async** — the boot sequence awaits settings load before initializing the UI, ensuring profiles from `settings.json` are available before the first render.
+
+### Engine (wuddle-engine)
+
+- **Merge updates mode** — new per-repo `merge_installs` flag that keeps existing installed files and only overwrites matching ones during updates. Designed for repos that ship partial releases (e.g. only the changed DLLs in a bug-fix release).
+- **Version pinning** — new per-repo `pinned_version` field to lock a repo to a specific release tag. The latest version is still tracked for "update available" display.
+- **`list_releases()` API** — new paginated release listing for GitHub, GitLab, and Gitea/Codeberg forges, fetching all releases (newest first).
+- **DLL count tracking** — `UpdatePlan` now carries `previous_dll_count` and `new_dll_count` for detecting file count mismatches between releases.
+- **DB schema v7** — adds `merge_installs` and `pinned_version` columns to the `repos` table (backwards-compatible additive migration).
+
+## v3.0.0-beta.2 (Iced frontend)
+
+### New Features
+
+- **Merge updates mode** — per-repo toggle (via ⋮ context menu) that keeps existing installed files and only overwrites matching ones during updates. Designed for repos that ship partial releases where only changed DLLs are included (e.g. WeirdUtils bug-fix releases that ship 2 of 9 DLLs).
+- **Version pinning with inline dropdown** — each mod row now has a "Version" column with a dropdown selector (similar to the branch picker on the Addons tab). Defaults to "Latest"; selecting a specific release tag locks that mod to that version. The latest version is still tracked so "Update available" continues to show.
+- **DLL count mismatch warning** — when updating a repo and the number of DLL files differs between the old and new release, a dialog prompts the user to choose "Merge Update" (keep existing files, overwrite matches) or "Clean Update" (replace all files).
+- **Status badge tooltip** — hovering the "Update available" badge now shows `Latest: vX.Y.Z` so the target version is visible without opening the context menu.
+
+### Changes
+
+- **Column layout rework** — merged "Current" and "Latest" columns into a single narrower "Installed" column; added the inline "Version" dropdown column. Tightened the "Enabled" column width for a more balanced table layout.
+- **Column centering fix** — all column headers and cell content are now properly centered (fixed asymmetric left-only padding that shifted content rightward).
+- **Version auto-fetch** — release versions for all mod repos are fetched automatically after update checks complete, pre-populating the version dropdowns.
+- **Filter-aware empty state** — placeholder text in empty tables now reflects the active filter (e.g. "No mods match the chosen filter: Errors") instead of always showing "No mods yet."
+- **Removed "Load versions…" from context menu** — replaced by the always-visible inline dropdown column.
+
+### Settings Compatibility
+
+- **Bidirectional Tauri ↔ Iced sync** — `settings.json` is now the shared source of truth. On first launch, Iced imports Tauri's WebKit localStorage options. Tauri reads `settings.json` at startup and falls back to localStorage for migration. Profile databases fall back to `wuddle.sqlite` when a profile-specific DB is empty, ensuring mods are visible regardless of which frontend installed them.
+
+### Engine (wuddle-engine)
+
+- **Merge updates mode** — new per-repo `merge_installs` flag with additive `persist_installs_merge()` that skips stale-file cleanup.
+- **Version pinning** — new per-repo `pinned_version` field. `build_update_plan_for_repo` fetches both the pinned release (for download) and the latest tag (for update-available display).
+- **`list_releases()` API** — new paginated release listing for GitHub, GitLab, and Gitea/Codeberg forges.
+- **DLL count tracking** — `UpdatePlan` carries `previous_dll_count` / `new_dll_count` for mismatch detection.
+- **DB schema v7** — adds `merge_installs` and `pinned_version` columns (backwards-compatible migration).
+
 ## v2.5.7
 
 ### New Features

@@ -28,6 +28,8 @@ pub struct RepoRow {
     /// DLL files managed by this repo: (filename, is_enabled_in_dlls_txt).
     /// Empty for non-DLL repos. More than one entry means this is a multi-DLL mod.
     pub installed_dlls: Vec<(String, bool)>,
+    pub merge_installs: bool,
+    pub pinned_version: Option<String>,
 }
 
 impl From<Repo> for RepoRow {
@@ -49,6 +51,8 @@ impl From<Repo> for RepoRow {
             last_version: r.last_version,
             git_branch: r.git_branch,
             installed_dlls: Vec::new(),
+            merge_installs: r.merge_installs,
+            pinned_version: r.pinned_version,
         }
     }
 }
@@ -64,6 +68,8 @@ pub struct PlanRow {
     pub has_update: bool,
     pub repair_needed: bool,
     pub error: Option<String>,
+    pub previous_dll_count: usize,
+    pub new_dll_count: usize,
 }
 
 impl From<UpdatePlan> for PlanRow {
@@ -82,6 +88,8 @@ impl From<UpdatePlan> for PlanRow {
             has_update,
             repair_needed: p.repair_needed,
             error: p.error,
+            previous_dll_count: p.previous_dll_count,
+            new_dll_count: p.new_dll_count,
         }
     }
 }
@@ -458,6 +466,65 @@ pub async fn set_repo_branch(
         let branch_opt = if branch.is_empty() { None } else { Some(branch) };
         eng.set_repo_git_branch(repo_id, branch_opt).map_err(|e| e.to_string())?;
         Ok(repo_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn set_merge_installs(
+    db_path: Option<PathBuf>,
+    repo_id: i64,
+    merge: bool,
+) -> Result<i64, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_repo_merge_installs(repo_id, merge)
+            .map_err(|e| e.to_string())?;
+        Ok(repo_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn set_pinned_version(
+    db_path: Option<PathBuf>,
+    repo_id: i64,
+    version: Option<String>,
+) -> Result<i64, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_repo_pinned_version(repo_id, version)
+            .map_err(|e| e.to_string())?;
+        Ok(repo_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Release tag + name for the version picker dropdown.
+#[derive(Debug, Clone)]
+pub struct VersionItem {
+    pub tag: String,
+    pub name: Option<String>,
+}
+
+/// Fetch all release versions for a repo URL using the engine's forge API.
+pub async fn list_repo_versions(
+    db_path: Option<PathBuf>,
+    repo_url: String,
+) -> Result<Vec<VersionItem>, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        let releases = tokio::runtime::Handle::current()
+            .block_on(eng.list_releases(&repo_url))
+            .map_err(|e| e.to_string())?;
+        Ok(releases
+            .into_iter()
+            .map(|r| VersionItem {
+                tag: r.tag,
+                name: r.name,
+            })
+            .collect())
     })
     .await
     .map_err(|e| e.to_string())?

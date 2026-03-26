@@ -46,7 +46,7 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        const SCHEMA_VERSION: i32 = 6;
+        const SCHEMA_VERSION: i32 = 7;
 
         let current: i32 = self
             .conn
@@ -141,6 +141,22 @@ impl Db {
         // HTTP client) on next startup, then bumps to v6.
         if current < 5 {
             self.conn.execute_batch("PRAGMA user_version = 5")?;
+        }
+
+        // v6 → v7: add merge_installs and pinned_version columns.
+        if current < 7 {
+            // Use ensure_repo_columns style to be safe if columns already exist.
+            let cols = self.existing_repo_columns()?;
+            if !cols.contains("merge_installs") {
+                self.conn.execute_batch(
+                    "ALTER TABLE repos ADD COLUMN merge_installs INTEGER NOT NULL DEFAULT 0",
+                )?;
+            }
+            if !cols.contains("pinned_version") {
+                self.conn
+                    .execute_batch("ALTER TABLE repos ADD COLUMN pinned_version TEXT")?;
+            }
+            self.conn.execute_batch("PRAGMA user_version = 7")?;
         }
 
         Ok(())
@@ -241,12 +257,16 @@ impl Db {
         Ok(())
     }
 
-    fn ensure_repo_columns(&self) -> Result<()> {
+    fn existing_repo_columns(&self) -> Result<HashSet<String>> {
         let mut stmt = self.conn.prepare("PRAGMA table_info(repos)")?;
         let names = stmt
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let names: HashSet<String> = names.into_iter().collect();
+        Ok(names.into_iter().collect())
+    }
+
+    fn ensure_repo_columns(&self) -> Result<()> {
+        let names = self.existing_repo_columns()?;
 
         let ensure = |name: &str, sql: &str| -> Result<()> {
             if !names.contains(name) {
@@ -287,12 +307,12 @@ impl Db {
             INSERT INTO repos(
               url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
               installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
-              published_at_unix
+              published_at_unix, merge_installs, pinned_version
             )
             VALUES (
               ?1,  ?2,   ?3,   ?4,    ?5,   ?6,   ?7,      ?8,         ?9,         ?10,         ?11,
               ?12,               ?13,                 ?14,                  ?15,
-              ?16
+              ?16, ?17, ?18
             )
             "#,
             params![
@@ -311,7 +331,9 @@ impl Db {
                 repo.installed_asset_name,
                 repo.installed_asset_size,
                 repo.installed_asset_url,
-                repo.published_at_unix
+                repo.published_at_unix,
+                if repo.merge_installs { 1 } else { 0 },
+                repo.pinned_version,
             ],
         );
 
@@ -345,7 +367,7 @@ impl Db {
             SELECT
               id, url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
               installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
-              published_at_unix
+              published_at_unix, merge_installs, pinned_version
             FROM repos
             ORDER BY host, owner, name
             "#,
@@ -371,6 +393,8 @@ impl Db {
                 installed_asset_size: row.get(14)?,
                 installed_asset_url: row.get(15)?,
                 published_at_unix: row.get(16)?,
+                merge_installs: row.get::<_, i64>(17).unwrap_or(0) != 0,
+                pinned_version: row.get(18)?,
             })
         })?;
 
@@ -387,7 +411,7 @@ impl Db {
             SELECT
               id, url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
               installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
-              published_at_unix
+              published_at_unix, merge_installs, pinned_version
             FROM repos
             WHERE id=?1
             "#,
@@ -413,6 +437,8 @@ impl Db {
                 installed_asset_size: row.get(14)?,
                 installed_asset_url: row.get(15)?,
                 published_at_unix: row.get(16)?,
+                merge_installs: row.get::<_, i64>(17).unwrap_or(0) != 0,
+                pinned_version: row.get(18)?,
             })
         })?;
 
@@ -478,6 +504,22 @@ impl Db {
         self.conn.execute(
             r#"UPDATE repos SET published_at_unix=?1 WHERE id=?2"#,
             params![published_at_unix, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_merge_installs(&self, id: i64, merge: bool) -> Result<()> {
+        self.conn.execute(
+            r#"UPDATE repos SET merge_installs=?1 WHERE id=?2"#,
+            params![if merge { 1 } else { 0 }, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_pinned_version(&self, id: i64, version: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            r#"UPDATE repos SET pinned_version=?1 WHERE id=?2"#,
+            params![version, id],
         )?;
         Ok(())
     }

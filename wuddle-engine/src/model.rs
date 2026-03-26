@@ -67,6 +67,8 @@ pub struct Repo {
     pub installed_asset_size: Option<i64>,
     pub installed_asset_url: Option<String>,
     pub published_at_unix: Option<i64>, // latest release timestamp for adaptive frequency
+    pub merge_installs: bool, // keep existing files when updating (don't delete unmatched)
+    pub pinned_version: Option<String>, // lock to a specific release tag (None = latest)
 }
 
 #[allow(dead_code)]

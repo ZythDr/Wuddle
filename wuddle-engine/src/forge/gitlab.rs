@@ -29,6 +29,71 @@ struct GitLabLink {
     direct_asset_url: Option<String>,
 }
 
+/// Fetch all releases for a GitLab project (paginated, newest first).
+pub async fn list_releases(
+    client: &Client,
+    repo: &DetectedRepo,
+) -> Result<Vec<LatestRelease>> {
+    let encoded = urlencoding::encode(&repo.project_path);
+    let mut page = 1u32;
+    let mut all = Vec::new();
+    loop {
+        let url = format!(
+            "https://{}/api/v4/projects/{}/releases?per_page=100&page={}",
+            repo.host, encoded, page
+        );
+        let resp = client
+            .get(&url)
+            .header("User-Agent", "wuddle-engine")
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .context("gitlab list_releases request failed")?;
+        if resp.status() == StatusCode::NOT_FOUND {
+            break;
+        }
+        let resp = resp
+            .error_for_status()
+            .context("gitlab list_releases error")?;
+        let rels: Vec<GitLabRelease> = resp.json().await.context("invalid gitlab json")?;
+        if rels.is_empty() {
+            break;
+        }
+        for rel in &rels {
+            let assets = rel
+                .assets
+                .links
+                .iter()
+                .map(|l| {
+                    let url = l.direct_asset_url.as_deref().unwrap_or(&l.url);
+                    ReleaseAsset {
+                        id: None,
+                        name: l.name.clone(),
+                        download_url: url.to_string(),
+                        size: None,
+                        content_type: None,
+                        sha256: None,
+                    }
+                })
+                .collect();
+            all.push(LatestRelease {
+                tag: rel.tag_name.clone(),
+                name: rel.name.clone(),
+                assets,
+                published_at: rel
+                    .released_at
+                    .as_deref()
+                    .and_then(super::parse_rfc3339_unix),
+            });
+        }
+        if rels.len() < 100 {
+            break;
+        }
+        page += 1;
+    }
+    Ok(all)
+}
+
 pub async fn latest_release(
     client: &Client,
     repo: &DetectedRepo,

@@ -173,6 +173,40 @@ pub fn profile_db_path(profile_id: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// Like `profile_db_path`, but falls back to `wuddle.sqlite` when the
+/// profile-specific DB doesn't exist or has zero repos.  This ensures mods
+/// installed under the "default" profile remain visible when the active
+/// profile switches to a Tauri-originated ID like "wow1".
+pub fn resolve_profile_db_path(profile_id: &str) -> Result<PathBuf, String> {
+    let path = profile_db_path(profile_id)?;
+    if profile_id == "default" {
+        return Ok(path);
+    }
+    let should_fallback = if path.exists() {
+        // Check whether this DB has any repos
+        match rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) {
+            Ok(conn) => conn
+                .query_row("SELECT COUNT(*) FROM repos", [], |row| row.get::<_, i64>(0))
+                .unwrap_or(0)
+                == 0,
+            Err(_) => true,
+        }
+    } else {
+        true
+    };
+    if should_fallback {
+        let dir = app_dir()?;
+        let default_path = dir.join("wuddle.sqlite");
+        if default_path.exists() {
+            return Ok(default_path);
+        }
+    }
+    Ok(path)
+}
+
 fn settings_path() -> Result<PathBuf, String> {
     Ok(app_dir()?.join("settings.json"))
 }
@@ -182,10 +216,17 @@ pub fn load_settings() -> AppSettings {
         Ok(p) => p,
         Err(_) => return AppSettings::default(),
     };
+    let settings_existed = path.exists();
     let mut settings: AppSettings = match std::fs::read_to_string(&path) {
         Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
         Err(_) => AppSettings::default(),
     };
+
+    // On first launch (settings.json didn't exist yet), import everything
+    // from Tauri v2's WebKit localStorage so options carry over seamlessly.
+    if !settings_existed {
+        import_tauri_options(&mut settings);
+    }
 
     // Discover orphaned profile databases and import from Tauri localStorage
     if let Ok(dir) = app_dir() {
@@ -198,21 +239,31 @@ pub fn load_settings() -> AppSettings {
             import_tauri_active_profile(&mut settings);
         }
 
-        // Remove the Iced-only "default" profile if:
-        // - It uses the default wuddle.sqlite (no profile-specific DB)
-        // - Another profile from Tauri has the same wow_dir (it's the real profile)
-        // - The active profile is not "default"
-        if settings.active_profile_id != "default" {
+        // Remove the Iced-only "default" placeholder profile when real Tauri
+        // profiles exist. Two cases:
+        //   (a) The "default" profile has an empty wow_dir (it was never configured
+        //       in Iced) but at least one other profile has a real wow_dir.
+        //   (b) The "default" profile's wow_dir duplicates another profile's wow_dir
+        //       (the Tauri profile is the canonical one for that installation).
+        // In both cases the "default" placeholder is redundant and causes confusion.
+        {
             let default_wow = settings.profiles.iter()
                 .find(|p| p.id == "default")
                 .map(|p| p.wow_dir.clone());
             if let Some(ref dw) = default_wow {
-                if !dw.is_empty() {
-                    let has_duplicate = settings.profiles.iter().any(|p| {
-                        p.id != "default" && p.wow_dir == *dw
-                    });
-                    if has_duplicate {
-                        settings.profiles.retain(|p| p.id != "default");
+                let has_other_real = settings.profiles.iter()
+                    .any(|p| p.id != "default" && !p.wow_dir.is_empty());
+                let is_placeholder = dw.is_empty() && has_other_real;
+                let is_duplicate = !dw.is_empty() && settings.profiles.iter()
+                    .any(|p| p.id != "default" && p.wow_dir == *dw);
+                if is_placeholder || is_duplicate {
+                    settings.profiles.retain(|p| p.id != "default");
+                    // Switch active profile away from the removed placeholder
+                    if settings.active_profile_id == "default" {
+                        if let Some(first) = settings.profiles.first() {
+                            settings.active_profile_id = first.id.clone();
+                            settings.wow_dir = first.wow_dir.clone();
+                        }
                     }
                 }
             }
@@ -416,6 +467,94 @@ fn import_tauri_active_profile(settings: &mut AppSettings) {
     if let Some(p) = settings.profiles.iter().find(|p| p.id == settings.active_profile_id) {
         if !p.wow_dir.is_empty() {
             settings.wow_dir = p.wow_dir.clone();
+        }
+    }
+}
+
+/// Import option flags from Tauri's WebKit localStorage into settings.
+/// Called once on first launch (when settings.json didn't exist yet) so
+/// that theme, symlinks, auto-check, friz-font, etc. carry over seamlessly.
+fn import_tauri_options(settings: &mut AppSettings) {
+    let data_dir = match dirs::data_dir() {
+        Some(d) => d,
+        None => return,
+    };
+    let ls_path = data_dir
+        .join("io.github.zythdr.wuddle")
+        .join("localstorage")
+        .join("tauri_localhost_0.localstorage");
+    if !ls_path.exists() {
+        return;
+    }
+    let conn = match rusqlite::Connection::open_with_flags(
+        &ls_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    // Helper: read a UTF-16LE WebKit localStorage value by key.
+    let read_ls = |key: &str| -> Option<String> {
+        let blob: Vec<u8> = conn
+            .query_row(
+                "SELECT value FROM ItemTable WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .ok()?;
+        String::from_utf16(
+            &blob
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect::<Vec<u16>>(),
+        )
+        .ok()
+    };
+
+    if let Some(v) = read_ls("wuddle.opt.theme") {
+        let t = v.trim().trim_matches('"').to_string();
+        if !t.is_empty() {
+            settings.theme = t;
+        }
+    }
+    if let Some(v) = read_ls("wuddle.opt.symlinks") {
+        settings.opt_symlinks = v.trim().trim_matches('"') == "true";
+    }
+    if let Some(v) = read_ls("wuddle.opt.xattr") {
+        settings.opt_xattr = v.trim().trim_matches('"') == "true";
+    }
+    if let Some(v) = read_ls("wuddle.opt.clock12") {
+        settings.opt_clock12 = v.trim().trim_matches('"') == "true";
+    }
+    if let Some(v) = read_ls("wuddle.opt.frizfont") {
+        settings.opt_friz_font = v.trim().trim_matches('"') == "true";
+    }
+    if let Some(v) = read_ls("wuddle.opt.autocheck") {
+        settings.opt_auto_check = v.trim().trim_matches('"') == "true";
+    }
+    if let Some(v) = read_ls("wuddle.opt.autocheck.minutes") {
+        if let Ok(n) = v.trim().trim_matches('"').parse::<u32>() {
+            if n >= 1 && n <= 240 {
+                settings.auto_check_minutes = n;
+            }
+        }
+    }
+    if let Some(v) = read_ls("wuddle.opt.desktop.notify") {
+        settings.opt_desktop_notify = v.trim().trim_matches('"') == "true";
+    }
+    if let Some(v) = read_ls("wuddle.log.wrap") {
+        settings.log_wrap = v.trim().trim_matches('"') == "true";
+    }
+    if let Some(v) = read_ls("wuddle.log.autoscroll") {
+        settings.log_autoscroll = v.trim().trim_matches('"') == "true";
+    }
+    if let Some(v) = read_ls("wuddle.opt.update_channel") {
+        let ch = v.trim().trim_matches('"').to_string();
+        if ch == "beta" {
+            settings.update_channel = UpdateChannel::Beta;
+        } else if ch == "stable" {
+            settings.update_channel = UpdateChannel::Stable;
         }
     }
 }

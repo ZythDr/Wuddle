@@ -394,9 +394,10 @@ pub fn view<'a>(
                 section_card(
                     "Performance & Latency",
                     column![
-                        num_row(
+                        num_row_tip(
                             "Max Frame Rate",
-                            "Cap the frame rate (frames/sec). 0 = unlimited. Values above ~245 can cause physics and timer issues in vanilla WoW. A cap of 240 is recommended.",
+                            "Limits the frame rate (FPS). 0 = Unlimited, Recommended: Match monitor\u{2019}s refresh rate for energy savings, or set a custom limit up to 240 FPS*",
+                            "* Frame rates above 240 may increase the chances of weird behavior such as invisible Player & NPC models in some situations. This issue can still occur below 240 FPS, but is more likely to occur at higher frame rates.",
                             &cfg.max_frame_rate,
                             |s| Message::SetDxvkField(DxvkField::MaxFrameRate(s)),
                             &c,
@@ -460,7 +461,7 @@ pub fn view<'a>(
                     column![
                         check_row(
                             "Borderless Fullscreen (Dialog Mode)",
-                            "Creates a borderless-fullscreen window instead of an exclusive fullscreen. Improves alt-tab responsiveness and multi-monitor workflows.",
+                            "Enabling this setting will make DXVK run in Borderless Windowed Mode. Enable for a much better alt-tab experience. Most users will want this setting to be ON.",
                             cfg.enable_dialog_mode,
                             |b| Message::SetDxvkField(DxvkField::EnableDialogMode(b)),
                             &c,
@@ -474,7 +475,7 @@ pub fn view<'a>(
                         ),
                         pick_row(
                             "VSync / Present Interval",
-                            "Override the in-game VSync setting at the DXVK layer. \"Don't override\" honours whatever the game requests. Force-off may cause screen tearing; Force-on adds ~1 frame of latency.",
+                            "Override the VSync setting at the DXVK layer. Don\u{2019}t override: honours whatever the game requests. No VSync (0): forces VSync off, tearing may occur. VSync (1): forces VSync on, adds ~1 frame of latency. Half refresh (2): limits to half the monitor refresh rate (e.g. 30 fps on a 60 Hz display).",
                             &[
                                 PresentInterval::Default,
                                 PresentInterval::NoSync,
@@ -800,6 +801,32 @@ where
     .spacing(10)
     .align_y(iced::Alignment::Center);
     with_tip(inner, desc, c)
+}
+
+/// Number text-input row with a separate tooltip text (different from the inline description).
+fn num_row_tip<'a, F>(
+    label: &str,
+    desc: &str,
+    tip: &str,
+    value: &str,
+    on_input: F,
+    colors: &ThemeColors,
+) -> Element<'a, Message>
+where
+    F: 'a + Fn(String) -> Message,
+{
+    let c = *colors;
+    let inner = row![
+        label_desc(label, desc, colors),
+        Space::new().width(Length::FillPortion(3)),
+        text_input("", value)
+            .on_input(on_input)
+            .width(80)
+            .padding([5, 8]),
+    ]
+    .spacing(10)
+    .align_y(iced::Alignment::Center);
+    with_tip(inner, tip, c)
 }
 
 /// Text-input row (for string fields like logPath / hud).

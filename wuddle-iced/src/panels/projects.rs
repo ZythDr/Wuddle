@@ -1,4 +1,4 @@
-use iced::widget::{button, checkbox, column, container, pick_list, row, rule, scrollable, stack, text, text_input, Space};
+use iced::widget::{button, checkbox, column, container, pick_list, row, rule, scrollable, stack, text, text_input, tooltip, Space};
 use iced::{Element, Length};
 
 use crate::anchored_overlay::AnchoredOverlay;
@@ -9,12 +9,12 @@ use crate::{is_mod, App, Dialog, Filter, Message, SortDir, SortKey};
 // ---------------------------------------------------------------------------
 // Tauri CSS column widths (from styles.css)
 // ---------------------------------------------------------------------------
-// Mods:   minmax(280px,1fr) | 116 | 116 | 86 | 146 | 96
-// Addons: minmax(280px,1fr) | minmax(170,220) ≈ 190 | 146 | 96
-const COL_CURRENT: u32 = 116;
-const COL_LATEST: u32 = 116;
-const COL_ENABLED: u32 = 86;
-const COL_STATUS: u32 = 146;
+// Mods:   minmax(280px,1fr) | 100 (installed) | 120 (version picker) | 64 (enabled) | 130 (status) | 96 (actions)
+// Addons: minmax(280px,1fr) | minmax(170,220) ≈ 190 (branch) | 130 (status) | 96 (actions)
+const COL_INSTALLED: u32 = 100;
+const COL_VERSION: u32 = 120;
+const COL_ENABLED: u32 = 64;
+const COL_STATUS: u32 = 130;
 const COL_ACTIONS: u32 = 96;
 const COL_BRANCH: u32 = 200;
 
@@ -34,26 +34,26 @@ fn vdiv<'a>(alpha: f32, height: u32) -> Element<'a, Message> {
         .into()
 }
 
-/// Header cell: 1px divider + centered text, padding-left 10px (matches Tauri)
+/// Header cell: 1px divider + centered text.
 fn hdr_cell<'a>(content: impl Into<Element<'a, Message>>, width: u32) -> Element<'a, Message> {
     row![
         vdiv(0.06, 20),
         container(content)
-            .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 })
-            .center_x(width),
+            .center_x(width)
+            .center_y(Length::Shrink),
     ]
     .spacing(0)
     .align_y(iced::Alignment::Center)
     .into()
 }
 
-/// Body cell: 1px divider + centered content, padding-left 10px (matches Tauri)
+/// Body cell: 1px divider + centered content.
 fn col_cell<'a>(content: impl Into<Element<'a, Message>>, width: u32) -> Element<'a, Message> {
     row![
         vdiv(0.05, 34),
         container(content)
-            .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 })
-            .center_x(width),
+            .center_x(width)
+            .center_y(Length::Shrink),
     ]
     .spacing(0)
     .align_y(iced::Alignment::Center)
@@ -231,8 +231,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         let header_inner = if is_mods_tab {
             row![
                 name_hdr,
-                hdr_cell(text("Current").size(13).color(colors.muted), COL_CURRENT),
-                hdr_cell(text("Latest").size(13).color(colors.muted), COL_LATEST),
+                hdr_cell(text("Installed").size(13).color(colors.muted), COL_INSTALLED),
+                hdr_cell(text("Version").size(13).color(colors.muted), COL_VERSION),
                 hdr_cell(text("Enabled").size(13).color(colors.muted), COL_ENABLED),
                 hdr_cell(status_hdr, COL_STATUS),
                 hdr_cell(text("Actions").size(13).color(colors.muted), COL_ACTIONS),
@@ -272,8 +272,16 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         container(
             text(if app.loading {
                 format!("Loading {}...", label.to_lowercase())
-            } else {
+            } else if app.filter == Filter::All {
                 format!("No {} yet. Click \"+ Add\".", label.to_lowercase())
+            } else {
+                let filter_name = match app.filter {
+                    Filter::Updates => "Updates",
+                    Filter::Errors => "Errors",
+                    Filter::Ignored => if is_mods_tab { "Disabled" } else { "Ignored" },
+                    Filter::All => unreachable!(),
+                };
+                format!("No {} match the chosen filter: {}", label.to_lowercase(), filter_name)
             })
             .size(14)
             .color(colors.muted),
@@ -326,11 +334,32 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         Some(t) => format!("Last checked: {}", t),
         None => "Last checked: never".into(),
     };
+    let total_update_count = app.repos.iter().filter(|r| {
+        app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
+            && !app.ignored_update_ids.contains(&r.id)
+    }).count();
+    let update_all_btn: Element<Message> = {
+        let c2 = c;
+        let b = button(text("Update All").size(13)).padding([6, 14]);
+        if total_update_count > 0 {
+            b.on_press(Message::UpdateAll)
+                .style(move |_t, _s| theme::tab_button_active_style(&c2))
+                .into()
+        } else {
+            b.style(move |_t, _s| {
+                let mut s = theme::tab_button_style(&c2);
+                s.text_color = iced::Color::from_rgba(1.0, 1.0, 1.0, 0.25);
+                s
+            })
+            .into()
+        }
+    };
+
     let footer = row![
         text(last_checked_text).size(12).color(colors.muted),
         Space::new().width(Length::Fill),
-        btn("Retry Failed", Message::CheckUpdates, &c),
         btn("Check for updates", Message::CheckUpdates, &c),
+        update_all_btn,
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
@@ -343,8 +372,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         .into()
 }
 
-/// Mods row: Name | Current | Latest | Enabled | Status | Actions
-fn mod_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a, Message> {
+/// Mods row: Name | Installed | Version | Enabled | Status | Actions
+fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
     let plan = app.plans.iter().find(|p| p.repo_id == repo.id);
     let current_str = plan.and_then(|p| p.current.clone())
@@ -364,12 +393,15 @@ fn mod_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a
     let is_menu_open = app.open_menu == Some(repo.id);
     let menu_content = crate::inline_context_menu(app, repo, &c);
 
+    // Version picker dropdown — build options list with "Latest" as first entry
+    let version_picker = version_picker_cell(app, repo, colors);
+
     let row_content = row![
         name_col,
-        col_cell(text(current_str).size(12).color(colors.muted), COL_CURRENT),
-        col_cell(text(latest_str).size(12).color(colors.muted), COL_LATEST),
+        col_cell(text(current_str).size(12).color(colors.muted), COL_INSTALLED),
+        col_cell(version_picker, COL_VERSION),
         col_cell(checkbox(enabled).on_toggle(move |b| Message::ToggleRepoEnabled(rid, b)), COL_ENABLED),
-        col_cell(status_badge(has_error, has_update, enabled, update_ignored, colors), COL_STATUS),
+        col_cell(status_badge(has_error, has_update, enabled, update_ignored, &latest_str, colors), COL_STATUS),
         col_cell(action_buttons(repo, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
@@ -399,16 +431,16 @@ fn dll_child_row<'a>(
     );
 
     // Placeholder columns to keep alignment
-    let empty_current = col_cell(Space::new().width(Length::Fill), COL_CURRENT);
-    let empty_latest  = col_cell(Space::new().width(Length::Fill), COL_LATEST);
-    let empty_status  = col_cell(Space::new().width(Length::Fill), COL_STATUS);
-    let empty_actions = col_cell(Space::new().width(Length::Fill), COL_ACTIONS);
+    let empty_installed = col_cell(Space::new().width(Length::Fill), COL_INSTALLED);
+    let empty_version   = col_cell(Space::new().width(Length::Fill), COL_VERSION);
+    let empty_status    = col_cell(Space::new().width(Length::Fill), COL_STATUS);
+    let empty_actions   = col_cell(Space::new().width(Length::Fill), COL_ACTIONS);
 
     let name_cell: Element<Message> = container(
         row![
             // Indent
             Space::new().width(28),
-            text(format!("↳ {}", name_owned2))
+            text(format!("\u{21B3} {}", name_owned2))
                 .size(12)
                 .color(if dll_enabled { c.muted } else { iced::Color { a: 0.35, ..c.muted } }),
         ]
@@ -420,8 +452,8 @@ fn dll_child_row<'a>(
 
     let row_content = row![
         name_cell,
-        empty_current,
-        empty_latest,
+        empty_installed,
+        empty_version,
         enable_cell,
         empty_status,
         empty_actions,
@@ -434,12 +466,52 @@ fn dll_child_row<'a>(
     column![separator, row_content].into()
 }
 
+/// Version picker dropdown for a mod row.
+/// Shows "Latest" + all fetched version tags. Auto-fetches versions if not loaded yet.
+fn version_picker_cell<'a>(app: &'a App, repo: &'a RepoRow, _colors: &ThemeColors) -> Element<'a, Message> {
+    let rid = repo.id;
+
+    // Build options list: "Latest" first, then fetched version tags
+    let mut options: Vec<String> = vec!["Latest".to_string()];
+    if let Some(versions) = app.repo_versions.get(&rid) {
+        for v in versions {
+            options.push(v.tag.clone());
+        }
+    }
+
+    // Current selection: pinned_version or "Latest"
+    let selected = repo.pinned_version.clone().unwrap_or_else(|| "Latest".to_string());
+
+    let is_loading = app.repo_versions_loading.contains(&rid);
+
+    container(
+        pick_list(
+            options,
+            Some(selected),
+            move |chosen: String| {
+                if chosen == "Latest" {
+                    Message::SetPinnedVersion(rid, None)
+                } else {
+                    Message::SetPinnedVersion(rid, Some(chosen))
+                }
+            },
+        )
+        .placeholder(if is_loading { "Loading..." } else { "Latest" })
+        .text_size(11)
+        .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .padding(iced::Padding { top: 0.0, right: 8.0, bottom: 0.0, left: 8.0 })
+    .into()
+}
+
 /// Addons row: Name | Branch | Status | Actions
 fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
     let plan = app.plans.iter().find(|p| p.repo_id == repo.id);
     let has_update = plan.map(|p| p.has_update).unwrap_or(false);
     let has_error = plan.and_then(|p| p.error.as_ref()).is_some();
+    let latest_str = plan.map(|p| p.latest.clone()).unwrap_or_default();
     let enabled = repo.enabled;
 
     let current_branch = repo.git_branch.clone().unwrap_or_else(|| "master".to_string());
@@ -467,7 +539,7 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<
     let row_content = row![
         name_col,
         col_cell(branch_display, COL_BRANCH),
-        col_cell(status_badge(has_error, has_update, enabled, update_ignored, colors), COL_STATUS),
+        col_cell(status_badge(has_error, has_update, enabled, update_ignored, &latest_str, colors), COL_STATUS),
         col_cell(action_buttons(repo, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
@@ -633,17 +705,19 @@ fn status_info(
 }
 
 /// Colored badge pill matching Tauri's badge style.
+/// When an update is available, the badge has a tooltip showing the latest version.
 fn status_badge<'a>(
     has_error: bool,
     has_update: bool,
     enabled: bool,
     update_ignored: bool,
+    latest_str: &str,
     colors: &ThemeColors,
 ) -> Element<'a, Message> {
     let (label, text_color, base_color) = status_info(has_error, has_update, enabled, update_ignored, colors);
     let bg = iced::Color::from_rgba(base_color.r, base_color.g, base_color.b, 0.18);
     let border_color = iced::Color::from_rgba(base_color.r, base_color.g, base_color.b, 0.45);
-    container(
+    let badge = container(
         text(label).size(11).color(text_color),
     )
     .padding([2, 8])
@@ -653,8 +727,27 @@ fn status_badge<'a>(
         shadow: iced::Shadow::default(),
         text_color: None,
         snap: true,
-    })
-    .into()
+    });
+
+    if has_update && !update_ignored && !latest_str.is_empty() {
+        let c = *colors;
+        tooltip(
+            badge,
+            text(format!("Latest: {}", latest_str)).size(11).color(c.text),
+            tooltip::Position::Top,
+        )
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgba(0.1, 0.1, 0.1, 0.95))),
+            border: iced::Border { color: c.border, width: 1.0, radius: 4.0.into() },
+            shadow: iced::Shadow::default(),
+            text_color: Some(c.text),
+            snap: true,
+        })
+        .padding(6.0)
+        .into()
+    } else {
+        badge.into()
+    }
 }
 
 /// Action column: Update button + triple-dot menu button (with anchored overlay).

@@ -33,7 +33,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         {
             let c2 = c;
             let menu_open = app.add_new_menu_open;
-            let add_btn = button(text("+ Add new \u{25BE}").size(13)) // ▾
+            let add_btn = button(text("+ Add new").size(13))
                 .on_press(Message::ToggleAddNewMenu)
                 .padding([6, 14])
                 .style(move |_theme, status| match status {

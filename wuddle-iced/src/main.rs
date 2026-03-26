@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 use iced::widget::{button, canvas, checkbox, column, container, row, rule, scrollable, stack, text, Space};
 use iced::{Element, Font, Length, Subscription, Task, Theme};
 use service::{PlanRow, RepoRow};
+use wuddle_engine::CheckMode;
 use settings::UpdateChannel;
 use theme::{ThemeColors, WuddleTheme};
 
@@ -371,6 +372,12 @@ pub enum Dialog {
     RemoveRepo { id: i64, name: String, remove_files: bool, files: Vec<(String, String)> },
     Changelog { items: Vec<iced::widget::markdown::Item>, loading: bool },
     DxvkConfig { config: DxvkConfig, show_preview: bool },
+    DllCountWarning {
+        repo_id: i64,
+        repo_name: String,
+        previous_count: usize,
+        new_count: usize,
+    },
     InstanceSettings {
         is_new: bool,
         profile_id: String,
@@ -492,6 +499,10 @@ pub struct App {
 
     // Repos whose updates are being ignored
     pub ignored_update_ids: HashSet<i64>,
+
+    // Fetched version lists for the version picker, keyed by repo_id
+    pub repo_versions: HashMap<i64, Vec<service::VersionItem>>,
+    pub repo_versions_loading: HashSet<i64>,
 
     // Multi-DLL repos that are currently expanded in the project list
     pub expanded_repo_ids: HashSet<i64>,
@@ -677,6 +688,18 @@ pub enum Message {
     ResetTweaksToDefault,
 
     ToggleIgnoreUpdates(i64),
+
+    // Merge installs / version pinning
+    ToggleMergeInstalls(i64, bool),
+    ToggleMergeInstallsResult(Result<i64, String>),
+    FetchVersions(i64),
+    FetchVersionsResult((i64, Result<Vec<service::VersionItem>, String>)),
+    SetPinnedVersion(i64, Option<String>),
+    SetPinnedVersionResult(Result<i64, String>),
+
+    // DLL count change warning
+    /// User chose merge (keep existing DLLs) or clean (replace all) from the warning dialog.
+    DllCountWarningChoice { repo_id: i64, merge: bool },
 
     // About
     CheckSelfUpdate,
@@ -1017,6 +1040,8 @@ impl App {
             add_repo_release_notes: None,
             add_repo_show_releases: false,
             ignored_update_ids: HashSet::new(),
+            repo_versions: HashMap::new(),
+            repo_versions_loading: HashSet::new(),
             expanded_repo_ids: HashSet::new(),
             log_editor_content: iced::widget::text_editor::Content::with_text(
                 concat!("[INFO] Wuddle v", env!("CARGO_PKG_VERSION"), " started\n[INFO] Ready.")
@@ -1454,7 +1479,7 @@ impl App {
                 self.wow_dir = active_profile
                     .map(|p| p.wow_dir.clone())
                     .unwrap_or(s.wow_dir);
-                self.db_path = settings::profile_db_path(&self.active_profile_id).ok();
+                self.db_path = settings::resolve_profile_db_path(&self.active_profile_id).ok();
                 self.log(LogLevel::Info, &format!("Profile: {}", self.active_profile_id));
                 let repos_task = self.refresh_repos_task();
                 if self.radio_auto_connect {
@@ -1544,6 +1569,26 @@ impl App {
                                 .icon(notification_icon_path())
                                 .show();
                         }
+                        // Auto-fetch versions for all mod repos that haven't been loaded yet
+                        let mut version_tasks: Vec<iced::Task<Message>> = Vec::new();
+                        for repo in &self.repos {
+                            if is_mod(repo)
+                                && !self.repo_versions.contains_key(&repo.id)
+                                && !self.repo_versions_loading.contains(&repo.id)
+                            {
+                                let db = self.db_path.clone();
+                                let url = repo.url.clone();
+                                let id = repo.id;
+                                self.repo_versions_loading.insert(id);
+                                version_tasks.push(iced::Task::perform(
+                                    service::list_repo_versions(db, url),
+                                    move |result| Message::FetchVersionsResult((id, result)),
+                                ));
+                            }
+                        }
+                        if !version_tasks.is_empty() {
+                            return iced::Task::batch(version_tasks);
+                        }
                     }
                     Err(e) => {
                         self.error = Some(e.clone());
@@ -1632,6 +1677,79 @@ impl App {
                     self.ignored_update_ids.insert(id);
                 }
                 self.save_settings();
+            }
+            Message::ToggleMergeInstalls(id, merge) => {
+                let db = self.db_path.clone();
+                return iced::Task::perform(
+                    service::set_merge_installs(db, id, merge),
+                    Message::ToggleMergeInstallsResult,
+                );
+            }
+            Message::ToggleMergeInstallsResult(Ok(_id)) => {
+                return self.refresh_repos_task();
+            }
+            Message::ToggleMergeInstallsResult(Err(e)) => {
+                self.log(LogLevel::Error, &format!("Failed to toggle merge installs: {}", e));
+            }
+            Message::FetchVersions(id) => {
+                if let Some(repo) = self.repos.iter().find(|r| r.id == id) {
+                    let db = self.db_path.clone();
+                    let url = repo.url.clone();
+                    self.repo_versions_loading.insert(id);
+                    return iced::Task::perform(
+                        service::list_repo_versions(db, url),
+                        move |result| Message::FetchVersionsResult((id, result)),
+                    );
+                }
+            }
+            Message::FetchVersionsResult((id, Ok(versions))) => {
+                self.repo_versions_loading.remove(&id);
+                self.repo_versions.insert(id, versions);
+            }
+            Message::FetchVersionsResult((id, Err(e))) => {
+                self.repo_versions_loading.remove(&id);
+                self.log(LogLevel::Error, &format!("Failed to fetch versions: {}", e));
+            }
+            Message::SetPinnedVersion(id, version) => {
+                let db = self.db_path.clone();
+                return iced::Task::perform(
+                    service::set_pinned_version(db, id, version),
+                    Message::SetPinnedVersionResult,
+                );
+            }
+            Message::SetPinnedVersionResult(Ok(_id)) => {
+                // Re-check updates so the plan reflects the pinned version.
+                return self.refresh_repos_task().chain(
+                    iced::Task::perform(
+                        service::check_updates(
+                            self.db_path.clone(),
+                            Some(self.wow_dir.clone()),
+                            CheckMode::Force,
+                        ),
+                        Message::CheckUpdatesResult,
+                    ),
+                );
+            }
+            Message::SetPinnedVersionResult(Err(e)) => {
+                self.log(LogLevel::Error, &format!("Failed to pin version: {}", e));
+            }
+            Message::DllCountWarningChoice { repo_id, merge } => {
+                // User chose how to handle the DLL count change.
+                self.dialog = None;
+                self.updating_repo_ids.insert(repo_id);
+                let db = self.db_path.clone();
+                let db2 = self.db_path.clone();
+                let wow = self.wow_dir.clone();
+                let opts = self.install_options();
+                // Set merge_installs first, then perform the update directly
+                // (bypass UpdateRepo handler to avoid re-triggering the dialog).
+                return iced::Task::perform(
+                    async move {
+                        service::set_merge_installs(db, repo_id, merge).await.ok();
+                        service::update_repo(db2, repo_id, wow, opts).await
+                    },
+                    Message::UpdateRepoResult,
+                );
             }
             Message::ToggleRepoEnabled(id, enabled) => {
                 let db = self.db_path.clone();
@@ -1731,6 +1849,29 @@ impl App {
                 if self.wow_dir.is_empty() {
                     self.log(LogLevel::Error, "Set a WoW directory in Options first.");
                 } else {
+                    // Check for DLL count changes — show warning dialog if the count
+                    // differs and the repo doesn't already have merge_installs set.
+                    if let Some(plan) = self.plans.iter().find(|p| p.repo_id == id) {
+                        if plan.previous_dll_count > 0
+                            && plan.new_dll_count > 0
+                            && plan.previous_dll_count != plan.new_dll_count
+                        {
+                            let repo = self.repos.iter().find(|r| r.id == id);
+                            let already_merge = repo.map(|r| r.merge_installs).unwrap_or(false);
+                            if !already_merge {
+                                let repo_name = repo
+                                    .map(|r| format!("{}/{}", r.owner, r.name))
+                                    .unwrap_or_default();
+                                self.dialog = Some(Dialog::DllCountWarning {
+                                    repo_id: id,
+                                    repo_name,
+                                    previous_count: plan.previous_dll_count,
+                                    new_count: plan.new_dll_count,
+                                });
+                                return Task::none();
+                            }
+                        }
+                    }
                     self.updating_repo_ids.insert(id);
                     let db = self.db_path.clone();
                     let wow = self.wow_dir.clone();
@@ -1986,7 +2127,7 @@ impl App {
                         self.wow_dir = dir.clone(); // always update, even if empty
                         if is_new {
                             self.active_profile_id = profile_id.clone();
-                            self.db_path = settings::profile_db_path(&profile_id).ok();
+                            self.db_path = settings::resolve_profile_db_path(&profile_id).ok();
                         }
                         // Clear stale data from previous profile
                         self.repos.clear();
@@ -2010,7 +2151,7 @@ impl App {
                     let pdir = p.wow_dir.clone();
                     if pid != self.active_profile_id {
                         self.active_profile_id = pid.clone();
-                        self.db_path = settings::profile_db_path(&pid).ok();
+                        self.db_path = settings::resolve_profile_db_path(&pid).ok();
                         self.wow_dir = pdir;
                         // Restore cached plans for the new profile (or clear if never checked)
                         self.repos.clear();
@@ -3424,6 +3565,79 @@ impl App {
                 .spacing(12)
                 .into()
             }
+            Dialog::DllCountWarning { repo_id, repo_name, previous_count, new_count } => {
+                let rid = *repo_id;
+                let fewer = *new_count < *previous_count;
+                let description = if fewer {
+                    format!(
+                        "This release has {} DLL file{} but you currently have {} installed. \
+                         A clean update will remove {} existing DLL{}.",
+                        new_count,
+                        if *new_count == 1 { "" } else { "s" },
+                        previous_count,
+                        previous_count - new_count,
+                        if previous_count - new_count == 1 { "" } else { "s" },
+                    )
+                } else {
+                    format!(
+                        "This release has {} DLL file{} but you currently have {} installed.",
+                        new_count,
+                        if *new_count == 1 { "" } else { "s" },
+                        previous_count,
+                    )
+                };
+                column![
+                    row![
+                        text("DLL File Count Changed").size(18).color(colors.title),
+                        Space::new().width(Length::Fill),
+                        close_button(&c),
+                    ].align_y(iced::Alignment::Center),
+                    text(format!("\"{}\"", repo_name)).size(13).color(colors.text),
+                    text(description).size(13).color(colors.warn),
+                    text("How would you like to proceed?").size(13).color(colors.text),
+                    row![
+                        {
+                            let c2 = c;
+                            button(
+                                column![
+                                    text("Merge Update").size(13),
+                                    text("Keep existing DLLs, only overwrite matching files")
+                                        .size(11)
+                                        .color(c2.muted),
+                                ].spacing(2)
+                            )
+                            .on_press(Message::DllCountWarningChoice { repo_id: rid, merge: true })
+                            .padding([10, 16])
+                            .width(Length::FillPortion(1))
+                            .style(move |_theme, status| match status {
+                                button::Status::Hovered => theme::tab_button_hovered_style(&c2),
+                                _ => theme::tab_button_style(&c2),
+                            })
+                        },
+                        {
+                            let c2 = c;
+                            button(
+                                column![
+                                    text("Clean Update").size(13),
+                                    text("Remove old DLLs first, then install new release")
+                                        .size(11)
+                                        .color(c2.muted),
+                                ].spacing(2)
+                            )
+                            .on_press(Message::DllCountWarningChoice { repo_id: rid, merge: false })
+                            .padding([10, 16])
+                            .width(Length::FillPortion(1))
+                            .style(move |_theme, status| match status {
+                                button::Status::Hovered => theme::tab_button_hovered_style(&c2),
+                                _ => theme::tab_button_style(&c2),
+                            })
+                        },
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(12)
+                .into()
+            }
             Dialog::InstanceSettings {
                 is_new, profile_id, name, wow_dir, launch_method,
                 like_turtles, clear_wdb,
@@ -4347,6 +4561,13 @@ pub fn inline_context_menu<'a>(app: &App, repo: &RepoRow, colors: &ThemeColors) 
     }
     let ignore_label = if update_ignored { "Unignore Updates" } else { "Ignore Updates" };
     items.push(ctx_menu_item(ignore_label, Message::ToggleIgnoreUpdates(rid), &c));
+
+    // Merge installs toggle (for DLL/mixed repos)
+    if is_mod_val {
+        let merge_label = if repo.merge_installs { "\u{2713} Merge Updates" } else { "Merge Updates" };
+        items.push(ctx_menu_item(merge_label, Message::ToggleMergeInstalls(rid, !repo.merge_installs), &c));
+    }
+
     // Remove (danger)
     let c3 = c;
     items.push(
@@ -4373,7 +4594,7 @@ pub fn inline_context_menu<'a>(app: &App, repo: &RepoRow, colors: &ThemeColors) 
 
     container(column(items).spacing(2))
         .padding(6)
-        .width(170)
+        .width(200)
         .style(move |_theme| theme::context_menu_style(&c))
         .into()
 }
