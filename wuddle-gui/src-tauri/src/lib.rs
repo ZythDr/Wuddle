@@ -530,6 +530,28 @@ fn engine_for_profile(profile_id: &str) -> Result<Engine, String> {
         return Engine::open_default().map_err(|e| e.to_string());
     }
     let db_path = profile_db_path(profile_id)?;
+    // If the profile-specific DB does not exist, or exists but has zero repos,
+    // fall back to wuddle.sqlite so that mods installed via the Iced frontend
+    // (which uses the "default" profile) remain visible.
+    if db_path.exists() {
+        let eng = Engine::open(&db_path).map_err(|e| e.to_string())?;
+        let has_repos = eng
+            .db()
+            .list_repos()
+            .map(|r| !r.is_empty())
+            .unwrap_or(false);
+        if has_repos {
+            return Ok(eng);
+        }
+        // Profile DB exists but is empty — fall through to try wuddle.sqlite
+    }
+    // Fall back to wuddle.sqlite if available
+    if let Ok(default_path) = default_db_path() {
+        if default_path.exists() {
+            return Engine::open(&default_path).map_err(|e| e.to_string());
+        }
+    }
+    // Neither has data — open (or create) the profile-specific DB
     Engine::open(&db_path).map_err(|e| e.to_string())
 }
 
@@ -909,7 +931,16 @@ async fn wuddle_list_repos(wowDir: Option<String>) -> Result<Vec<RepoRow>, Strin
             let _ = eng.import_existing_addon_git_repos(wow_path);
             let _ = eng.dedup_addon_repos_by_folder(wow_path);
         }
-        fix_repo_casing_from_forges(&eng);
+        // Run the one-time casing fix in a background thread so it cannot
+        // block the list_repos response (it makes sequential HTTP requests
+        // which can hang on unreachable forges).
+        if eng.db().needs_casing_fix() {
+            std::thread::spawn(|| {
+                if let Ok(bg_eng) = engine() {
+                    fix_repo_casing_from_forges(&bg_eng);
+                }
+            });
+        }
         let repos = eng.db().list_repos().map_err(|e| e.to_string())?;
 
         Ok(repos
@@ -1362,8 +1393,24 @@ async fn wuddle_delete_profile(
     .await
 }
 
-/// Sync profiles from the frontend (localStorage) to settings.json so that
-/// non-WebView frontends (Iced) can share the same profile list.
+/// Read settings.json and return the full object so the frontend can use it
+/// as the primary source of truth for profiles and options (shared with Iced).
+#[tauri::command]
+async fn wuddle_load_settings_json() -> Result<serde_json::Value, String> {
+    run_blocking(|| {
+        let dir = app_dir()?;
+        let settings_path = dir.join("settings.json");
+        if !settings_path.exists() {
+            return Ok(serde_json::json!({}));
+        }
+        let data = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&data).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Write profiles to settings.json — full replacement so that deletions and
+/// edits from either frontend are respected.
 #[tauri::command]
 #[allow(non_snake_case)]
 async fn wuddle_sync_profiles_to_settings(
@@ -1409,6 +1456,9 @@ async fn wuddle_sync_profiles_to_settings(
             })
             .collect();
 
+        // Full replace — Tauri now reads from settings.json at startup, so
+        // its in-memory profile list is the authoritative copy. Deletions and
+        // edits from either frontend are preserved.
         map.insert(
             "profiles".to_string(),
             serde_json::to_value(&converted).map_err(|e| e.to_string())?,
@@ -1444,6 +1494,7 @@ async fn wuddle_sync_profiles_to_settings(
 async fn wuddle_sync_options_to_settings(
     theme: String,
     optSymlinks: bool,
+    optXattr: bool,
     optClock12: bool,
     optFrizFont: bool,
     optAutoCheck: bool,
@@ -1470,6 +1521,7 @@ async fn wuddle_sync_options_to_settings(
 
         map.insert("theme".to_string(), serde_json::Value::String(theme));
         map.insert("opt_symlinks".to_string(), serde_json::Value::Bool(optSymlinks));
+        map.insert("opt_xattr".to_string(), serde_json::Value::Bool(optXattr));
         map.insert("opt_clock12".to_string(), serde_json::Value::Bool(optClock12));
         map.insert("opt_friz_font".to_string(), serde_json::Value::Bool(optFrizFont));
         map.insert("opt_auto_check".to_string(), serde_json::Value::Bool(optAutoCheck));
@@ -2782,6 +2834,9 @@ pub fn run() {
             wuddle_set_repo_branch,
             wuddle_set_active_profile,
             wuddle_delete_profile,
+            wuddle_load_settings_json,
+            wuddle_sync_profiles_to_settings,
+            wuddle_sync_options_to_settings,
             wuddle_github_auth_status,
             wuddle_github_auth_set_token,
             wuddle_github_auth_clear_token,

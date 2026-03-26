@@ -2,6 +2,27 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.5.8
+
+### New Features
+
+- **Bidirectional settings sync with Iced v3** — `settings.json` is now the primary source of truth for both Tauri and Iced frontends. On startup, Tauri reads profiles and options from `settings.json` (falling back to localStorage for first-time migration). All option saves write back to `settings.json` so changes made in either frontend are immediately visible to the other.
+- **Profile database fallback** — when a profile-specific database has no repos, Tauri falls back to `wuddle.sqlite` (the default Iced profile DB), ensuring mods installed via either frontend remain visible after switching.
+- **`opt_xattr` synced to settings.json** — the extended-attributes option is now included in the options sync, closing a gap where Linux-specific settings were lost between frontends.
+
+### Changes
+
+- **Casing fix runs in background** — the one-time forge casing correction now runs in a background thread with a `needs_casing_fix()` guard, preventing it from blocking `list_repos` responses on slow or unreachable forges.
+- **`loadSettings()` is now async** — the boot sequence awaits settings load before initializing the UI, ensuring profiles from `settings.json` are available before the first render.
+
+### Engine (wuddle-engine)
+
+- **Merge updates mode** — new per-repo `merge_installs` flag that keeps existing installed files and only overwrites matching ones during updates. Designed for repos that ship partial releases (e.g. only the changed DLLs in a bug-fix release).
+- **Version pinning** — new per-repo `pinned_version` field to lock a repo to a specific release tag. The latest version is still tracked for "update available" display.
+- **`list_releases()` API** — new paginated release listing for GitHub, GitLab, and Gitea/Codeberg forges, fetching all releases (newest first).
+- **DLL count tracking** — `UpdatePlan` now carries `previous_dll_count` and `new_dll_count` for detecting file count mismatches between releases.
+- **DB schema v7** — adds `merge_installs` and `pinned_version` columns to the `repos` table (backwards-compatible additive migration).
+
 ## v2.5.7
 
 ### New Features

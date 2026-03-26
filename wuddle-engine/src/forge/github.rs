@@ -148,3 +148,64 @@ pub async fn latest_release(
 ) -> Result<(Option<String>, Option<LatestRelease>, bool)> {
     GitHub::latest_release(client, &repo.owner, &repo.name, etag).await
 }
+
+/// Fetch all releases for a GitHub repo (paginated, newest first).
+pub async fn list_releases(
+    client: &Client,
+    repo: &DetectedRepo,
+) -> Result<Vec<LatestRelease>> {
+    let mut page = 1u32;
+    let mut all = Vec::new();
+    loop {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/releases?per_page=100&page={}",
+            repo.owner, repo.name, page
+        );
+        let mut req = client
+            .get(&url)
+            .header("User-Agent", "wuddle-engine")
+            .header("Accept", "application/vnd.github+json");
+        if let Some(token) = crate::github_token() {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await.context("github list_releases request failed")?;
+        if resp.status() == StatusCode::NOT_FOUND {
+            break;
+        }
+        let resp = resp
+            .error_for_status()
+            .context("github list_releases error")?;
+        let rels: Vec<GhRelease> = resp.json().await.context("invalid github json")?;
+        if rels.is_empty() {
+            break;
+        }
+        for gh in &rels {
+            let assets = gh
+                .assets
+                .iter()
+                .map(|a| ReleaseAsset {
+                    id: a.id.map(|v| v.to_string()),
+                    name: a.name.clone(),
+                    download_url: a.browser_download_url.clone(),
+                    size: a.size,
+                    content_type: a.content_type.clone(),
+                    sha256: parse_sha256_digest(a.digest.as_deref()),
+                })
+                .collect();
+            all.push(LatestRelease {
+                tag: gh.tag_name.clone(),
+                name: gh.name.clone(),
+                assets,
+                published_at: gh
+                    .published_at
+                    .as_deref()
+                    .and_then(super::parse_rfc3339_unix),
+            });
+        }
+        if rels.len() < 100 {
+            break;
+        }
+        page += 1;
+    }
+    Ok(all)
+}

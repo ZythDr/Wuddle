@@ -269,6 +269,18 @@ pub async fn latest_release(
     Ok(out)
 }
 
+/// Fetch all releases for a repo (all pages, newest first).
+pub async fn list_releases(
+    client: &Client,
+    repo: &DetectedRepo,
+) -> Result<Vec<LatestRelease>> {
+    match repo.kind {
+        ForgeKind::GitHub => github::list_releases(client, repo).await,
+        ForgeKind::GitLab => gitlab::list_releases(client, repo).await,
+        ForgeKind::Gitea => gitea::list_releases(client, repo).await,
+    }
+}
+
 /// Helper for forges that support 304 Not Modified.
 pub(crate) fn etag_from_headers(resp: &reqwest::Response) -> Option<String> {
     resp.headers()

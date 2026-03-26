@@ -21,12 +21,11 @@ mod util;
 
 pub use db::Db;
 pub use install::InstallOptions;
-pub use model::{InstallMode, Repo};
+pub use model::{InstallMode, LatestRelease, ReleaseAsset, Repo};
 
 use crate::forge::detect_repo;
 use crate::forge::git_sync;
 use crate::forge::ForgeKind;
-use crate::model::{LatestRelease, ReleaseAsset};
 
 #[derive(Debug, Clone)]
 pub struct UpdatePlan {
@@ -53,6 +52,11 @@ pub struct UpdatePlan {
     pub not_modified: bool,
     pub applied: bool,
     pub error: Option<String>,
+
+    /// Number of DLL install entries currently tracked for this repo.
+    pub previous_dll_count: usize,
+    /// Number of DLL files in the new release (primary + extras).
+    pub new_dll_count: usize,
 }
 
 /// Controls how aggressively the engine checks for updates.
@@ -253,6 +257,8 @@ impl Engine {
             installed_asset_size: None,
             installed_asset_url: None,
             published_at_unix: None,
+            merge_installs: false,
+            pinned_version: None,
         };
 
         self.db.add_repo(&repo)
@@ -343,6 +349,8 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            previous_dll_count: 0,
+            new_dll_count: 0,
         }
     }
 
@@ -749,6 +757,8 @@ impl Engine {
                 installed_asset_size: None,
                 installed_asset_url: Some(det.canonical_url.clone()),
                 published_at_unix: None,
+                merge_installs: false,
+                pinned_version: None,
             };
             let repo_id = self.db.add_repo(&tracked)?;
 
@@ -946,6 +956,8 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            previous_dll_count: 0,
+            new_dll_count: 0,
         })
     }
 
@@ -1042,6 +1054,8 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            previous_dll_count: 0,
+            new_dll_count: 0,
         })
     }
 
@@ -1167,7 +1181,33 @@ impl Engine {
         };
 
         let mode = r.mode.clone();
-        let asset = match Self::pick_asset(&rel, mode.clone(), r.asset_regex.as_deref()) {
+
+        // If repo is pinned to a specific version and the latest release doesn't
+        // match the pin, fetch the pinned release from the full release list.
+        let (target_rel, latest_tag_for_display) = if let Some(ref pin) = r.pinned_version {
+            if rel.tag != *pin {
+                let pinned = match forge::list_releases(&self.client, &det).await {
+                    Ok(all) => all.into_iter().find(|r| r.tag == *pin),
+                    Err(_) => None,
+                };
+                match pinned {
+                    Some(pinned_rel) => {
+                        // latest_tag_for_display = actual latest so UI shows "update available"
+                        (pinned_rel, Some(rel.tag.clone()))
+                    }
+                    None => {
+                        // Pinned version not found — fall through to latest.
+                        (rel, None)
+                    }
+                }
+            } else {
+                (rel, None)
+            }
+        } else {
+            (rel, None)
+        };
+
+        let asset = match Self::pick_asset(&target_rel, mode.clone(), r.asset_regex.as_deref()) {
             Ok(asset) => asset,
             Err(e) => {
                 let mut p = Self::blank_plan(r);
@@ -1175,7 +1215,7 @@ impl Engine {
                 return Ok(p);
             }
         };
-        let latest_tag = Self::effective_latest_label(&rel.tag, &asset.name);
+        let latest_tag = Self::effective_latest_label(&target_rel.tag, &asset.name);
         let asset_id = Self::effective_asset_id(&asset);
         let asset_size_i64 = Self::size_u64_to_i64(asset.size);
 
@@ -1183,6 +1223,20 @@ impl Engine {
             Self::installed_matches(r, &latest_tag, &asset_id, &asset.name, asset_size_i64);
         let needs_download = !installed_matches || missing_targets;
         let repair_needed = missing_targets && installed_matches;
+
+        // DLL count detection — count currently installed DLLs vs new release DLLs.
+        let previous_dll_count = self.db.list_installs(r.id)
+            .map(|entries| entries.iter().filter(|e| e.kind == "dll").count())
+            .unwrap_or(0);
+        let new_dll_count = if asset.name.to_lowercase().ends_with(".dll") {
+            1
+        } else {
+            0
+        };
+
+        // When pinned, latest_tag_for_display holds the real latest tag so the UI
+        // can show "update available" even though we're downloading the pinned version.
+        let display_latest = latest_tag_for_display.unwrap_or_else(|| latest_tag.clone());
 
         Ok(UpdatePlan {
             repo_id: r.id,
@@ -1193,7 +1247,7 @@ impl Engine {
             url: r.url.clone(),
             mode,
             current: Self::normalized_current_version(r),
-            latest: latest_tag,
+            latest: display_latest,
             asset_id,
             asset_name: asset.name.clone(),
             asset_url: if needs_download {
@@ -1212,6 +1266,8 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            previous_dll_count,
+            new_dll_count,
         })
     }
 
@@ -1629,6 +1685,21 @@ impl Engine {
         Ok(())
     }
 
+    /// Like `persist_installs` but merges new records with existing ones instead
+    /// of replacing. Existing install entries not present in `records` are kept.
+    fn persist_installs_merge(
+        &self,
+        repo_id: i64,
+        wow_dir: &Path,
+        records: &[install::InstallRecord],
+    ) -> Result<()> {
+        for rec in records {
+            let manifest_path = Self::to_manifest_path(&rec.path, wow_dir);
+            self.db.add_install(repo_id, &manifest_path, rec.kind)?;
+        }
+        Ok(())
+    }
+
     /// Hash each installed file and store the digest in the DB for integrity checking.
     /// Only hashes regular files (not addon directories). Failures are non-fatal.
     fn hash_and_store_installs(
@@ -1987,6 +2058,30 @@ impl Engine {
         Ok(())
     }
 
+    pub fn set_repo_merge_installs(&self, repo_id: i64, merge: bool) -> Result<()> {
+        self.db.set_merge_installs(repo_id, merge)?;
+        Ok(())
+    }
+
+    pub fn set_repo_pinned_version(
+        &self,
+        repo_id: i64,
+        version: Option<String>,
+    ) -> Result<()> {
+        let normalized = version
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        self.db
+            .set_pinned_version(repo_id, normalized.as_deref())?;
+        Ok(())
+    }
+
+    /// Fetch the full list of releases for a repo (newest first).
+    pub async fn list_releases(&self, repo_url: &str) -> Result<Vec<LatestRelease>> {
+        let det = detect_repo(repo_url)?;
+        forge::list_releases(&self.client, &det).await
+    }
+
     pub fn list_repo_branches(&self, repo_id: i64) -> Result<Vec<String>> {
         let repo = self.db.get_repo(repo_id)?;
         if !matches!(repo.mode, InstallMode::AddonGit) {
@@ -2266,10 +2361,20 @@ impl Engine {
             }
         };
 
-        // Remove previously tracked addon targets that are no longer part of this release install
-        // (e.g. suffix variants like "-tbc"/"-wotlk" collapsing into one canonical addon folder).
-        self.cleanup_stale_addon_installs(plan.repo_id, wow_dir, &records)?;
-        self.persist_installs(plan.repo_id, wow_dir, &records)?;
+        // Check if this repo uses merge-mode (keep existing files on update).
+        let merge_mode = self.db.get_repo(plan.repo_id)
+            .map(|r| r.merge_installs)
+            .unwrap_or(false);
+
+        if merge_mode {
+            // Merge: keep existing install entries, only add/overwrite new ones.
+            self.persist_installs_merge(plan.repo_id, wow_dir, &records)?;
+        } else {
+            // Clean: remove previously tracked addon targets that are no longer
+            // part of this release (e.g. suffix variants collapsing).
+            self.cleanup_stale_addon_installs(plan.repo_id, wow_dir, &records)?;
+            self.persist_installs(plan.repo_id, wow_dir, &records)?;
+        }
         self.hash_and_store_installs(plan.repo_id, wow_dir, &records);
         self.db.set_installed_asset_state(
             plan.repo_id,
@@ -2406,6 +2511,8 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            previous_dll_count: 0,
+            new_dll_count: 0,
         };
 
         self.apply_one(&plan, wow_dir, raw_dest, opts).await?;

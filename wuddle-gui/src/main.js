@@ -222,28 +222,77 @@ function showProjectsPanel() {
 // loadSettings()
 // ============================================================================
 
-function loadSettings() {
-  let profiles = [];
-  const rawProfiles = localStorage.getItem(PROFILES_KEY);
+async function loadSettings() {
+  // ---------------------------------------------------------------------------
+  // Step 1 — Load settings.json (shared with Iced) as primary source of truth.
+  // Fall back to localStorage only for first-time migration.
+  // ---------------------------------------------------------------------------
+  let sj = null;
   try {
-    if (rawProfiles !== null) {
-      const parsed = JSON.parse(rawProfiles);
-      if (Array.isArray(parsed)) {
-        profiles = parsed.map((p) => ({
-          id: normalizeProfileId(p?.id || p?.name || "default"),
-          name: String(p?.name || "").trim() || "WoW",
-          wowDir: String(p?.wowDir || "").trim(),
-          launch: normalizeLaunchConfig(p?.launch),
-          likesTurtles: !!p?.likesTurtles,
-        }));
-      }
-    }
+    const raw = await safeInvoke("wuddle_load_settings_json");
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) sj = raw;
   } catch (_) {}
-  if (!profiles.length && rawProfiles === null) {
-    // Last-resort migration path from single-profile storage.
-    const wowDir = defaultProfileWowDir();
-    if (wowDir) profiles = [makeDefaultProfile()];
+
+  // Helpers: prefer settings.json field, fall back to localStorage, then default.
+  const sjBool = (key, lsKey, def) => {
+    if (sj && key in sj) return !!sj[key];
+    const ls = localStorage.getItem(lsKey);
+    if (ls !== null) return ls === "true";
+    return def;
+  };
+  const sjStr = (key, lsKey, def) => {
+    if (sj && sj[key] != null) return String(sj[key]);
+    return localStorage.getItem(lsKey) ?? def;
+  };
+
+  // ---------------------------------------------------------------------------
+  // Step 2 — Profiles
+  // ---------------------------------------------------------------------------
+  let profiles = [];
+
+  if (sj?.profiles?.length) {
+    // Convert snake_case (settings.json / Iced) → camelCase (Tauri frontend)
+    profiles = sj.profiles.map((p) => ({
+      id: normalizeProfileId(p.id || "default"),
+      name: String(p.name || "").trim() || "WoW",
+      wowDir: String(p.wow_dir || "").trim(),
+      launch: normalizeLaunchConfig({
+        method: p.launch_method,
+        lutrisTarget: p.lutris_target,
+        wineCommand: p.wine_command,
+        wineArgs: p.wine_args,
+        customCommand: p.custom_command,
+        customArgs: p.custom_args,
+        workingDir: p.working_dir,
+        envText: p.env_text,
+        clearWdb: p.clear_wdb,
+      }),
+      likesTurtles: !!p.like_turtles,
+    }));
+  } else {
+    // Fallback: try localStorage (first-time migration from old Tauri)
+    const rawProfiles = localStorage.getItem(PROFILES_KEY);
+    try {
+      if (rawProfiles !== null) {
+        const parsed = JSON.parse(rawProfiles);
+        if (Array.isArray(parsed)) {
+          profiles = parsed.map((p) => ({
+            id: normalizeProfileId(p?.id || p?.name || "default"),
+            name: String(p?.name || "").trim() || "WoW",
+            wowDir: String(p?.wowDir || "").trim(),
+            launch: normalizeLaunchConfig(p?.launch),
+            likesTurtles: !!p?.likesTurtles,
+          }));
+        }
+      }
+    } catch (_) {}
+    if (!profiles.length && rawProfiles === null) {
+      const wowDir = defaultProfileWowDir();
+      if (wowDir) profiles = [makeDefaultProfile()];
+    }
   }
+
+  // Dedup IDs
   const ids = new Set();
   for (const p of profiles) {
     let id = p.id;
@@ -255,7 +304,10 @@ function loadSettings() {
     ids.add(id);
   }
   state.profiles = profiles;
-  const wanted = normalizeProfileId(localStorage.getItem(ACTIVE_PROFILE_KEY) || "default");
+
+  // Active profile: prefer settings.json, fall back to localStorage
+  const wantedRaw = sj?.active_profile_id || localStorage.getItem(ACTIVE_PROFILE_KEY) || "default";
+  const wanted = normalizeProfileId(wantedRaw);
   state.activeProfileId = state.profiles.some((p) => p.id === wanted)
     ? wanted
     : (state.profiles[0]?.id || "");
@@ -267,22 +319,22 @@ function loadSettings() {
   setupReadmePreviewListener();
   initScrollFade();
   wireInputClearButtons();
-  const symlinks = localStorage.getItem(OPT_SYMLINKS_KEY) === "true";
-  const xattr = localStorage.getItem(OPT_XATTR_KEY) === "true";
-  const clock12 = localStorage.getItem(OPT_CLOCK12_KEY) === "true";
-  const savedTheme = normalizeThemeId(localStorage.getItem(OPT_THEME_KEY));
-  const rawFriz = localStorage.getItem(OPT_FRIZ_FONT_KEY);
-  const useFrizFont = rawFriz === null ? DEFAULT_USE_FRIZ_FONT : rawFriz === "true";
-  const rawAutoCheck = localStorage.getItem(OPT_AUTOCHECK_KEY);
-  const autoCheckEnabled =
-    rawAutoCheck === null ? DEFAULT_AUTO_CHECK_ENABLED : rawAutoCheck === "true";
+
+  // ---------------------------------------------------------------------------
+  // Step 3 — Options (settings.json preferred, localStorage fallback)
+  // ---------------------------------------------------------------------------
+  const symlinks = sjBool("opt_symlinks", OPT_SYMLINKS_KEY, false);
+  const xattr = sjBool("opt_xattr", OPT_XATTR_KEY, false);
+  const clock12 = sjBool("opt_clock12", OPT_CLOCK12_KEY, false);
+  const savedTheme = normalizeThemeId(sjStr("theme", OPT_THEME_KEY, "cata"));
+  const useFrizFont = sjBool("opt_friz_font", OPT_FRIZ_FONT_KEY, DEFAULT_USE_FRIZ_FONT);
+  const autoCheckEnabled = sjBool("opt_auto_check", OPT_AUTOCHECK_KEY, DEFAULT_AUTO_CHECK_ENABLED);
   const autoCheckMinutes = normalizeAutoCheckMinutes(
-    localStorage.getItem(OPT_AUTOCHECK_MINUTES_KEY),
+    sj?.auto_check_minutes ?? localStorage.getItem(OPT_AUTOCHECK_MINUTES_KEY),
   );
-  const rawDesktopNotify = localStorage.getItem(OPT_DESKTOP_NOTIFY_KEY);
-  const desktopNotifyEnabled = rawDesktopNotify === null ? DEFAULT_DESKTOP_NOTIFY : rawDesktopNotify === "true";
-  const savedChannel = localStorage.getItem(OPT_UPDATE_CHANNEL_KEY);
-  state.updateChannel = savedChannel === "beta" || savedChannel === "stable" ? savedChannel : "stable";
+  const desktopNotifyEnabled = sjBool("opt_desktop_notify", OPT_DESKTOP_NOTIFY_KEY, DEFAULT_DESKTOP_NOTIFY);
+  const rawChannel = sjStr("update_channel", OPT_UPDATE_CHANNEL_KEY, "stable");
+  state.updateChannel = rawChannel === "beta" || rawChannel === "stable" ? rawChannel : "stable";
   const channelSelect = $("aboutChannelSelect");
   if (channelSelect) channelSelect.value = state.updateChannel;
   $("optSymlinks").checked = symlinks;
@@ -311,7 +363,6 @@ function loadSettings() {
   if (isLinux) {
     $("optXattrLabel")?.classList.remove("hidden");
     $("optDmabufLabel")?.classList.remove("hidden");
-    // Load DMA-BUF toggle state from render probe file
     safeInvoke("wuddle_get_dmabuf_enabled").then((enabled) => {
       $("optDmabuf").checked = !!enabled;
     }).catch(() => {});
@@ -319,9 +370,8 @@ function loadSettings() {
 
   setTab("home");
 
-  const logWrap = localStorage.getItem(LOG_WRAP_KEY) === "true";
-  const logAutoScrollRaw = localStorage.getItem(LOG_AUTOSCROLL_KEY);
-  const logAutoScroll = logAutoScrollRaw === null ? true : logAutoScrollRaw === "true";
+  const logWrap = sjBool("log_wrap", LOG_WRAP_KEY, false);
+  const logAutoScroll = sjBool("log_autoscroll", LOG_AUTOSCROLL_KEY, true);
   const logLevel = localStorage.getItem(LOG_LEVEL_KEY) || "all";
   state.logWrap = logWrap;
   state.logAutoScroll = logAutoScroll;
@@ -367,6 +417,7 @@ function saveOptionFlags() {
   safeInvoke("wuddle_sync_options_to_settings", {
     theme: selectedTheme,
     optSymlinks: $("optSymlinks").checked,
+    optXattr: !!$("optXattr")?.checked,
     optClock12: $("optClock12").checked,
     optFrizFont: useFrizFont,
     optAutoCheck: autoCheckEnabled,
@@ -710,28 +761,31 @@ if (tableScroller instanceof HTMLElement) {
 // Boot
 // ============================================================================
 
-loadSettings();
-ensureThemedSelect($("mode"));
-ensureThemedSelect($("instanceSettingsLaunchMethod"));
-renderAddPresets();
-renderBusy();
-renderLog();
-renderGithubAuth(null);
-renderAboutInfo();
-void refreshGithubAuthStatus();
-log("Ready.");
-// Write settings.json on every startup so Iced v3 always inherits current preferences.
-safeInvoke("wuddle_sync_options_to_settings", {
-  theme: state.theme,
-  optSymlinks: $("optSymlinks").checked,
-  optClock12: $("optClock12").checked,
-  optFrizFont: state.useFrizFont,
-  optAutoCheck: state.autoCheckEnabled,
-  autoCheckMinutes: state.autoCheckMinutes,
-  optDesktopNotify: state.desktopNotifyEnabled,
-  logWrap: state.logWrap,
-  logAutoscroll: state.logAutoScroll,
-  updateChannel: state.updateChannel,
-}).catch(() => {});
-refreshAll({ notify: true, source: "startup" });
-void maybePollSelfUpdateInfo({ notify: true });
+(async () => {
+  await loadSettings();
+  ensureThemedSelect($("mode"));
+  ensureThemedSelect($("instanceSettingsLaunchMethod"));
+  renderAddPresets();
+  renderBusy();
+  renderLog();
+  renderGithubAuth(null);
+  renderAboutInfo();
+  void refreshGithubAuthStatus();
+  log("Ready.");
+  // Write current options back to settings.json so Iced inherits any localStorage-only changes.
+  safeInvoke("wuddle_sync_options_to_settings", {
+    theme: state.theme,
+    optSymlinks: $("optSymlinks").checked,
+    optXattr: !!$("optXattr")?.checked,
+    optClock12: $("optClock12").checked,
+    optFrizFont: state.useFrizFont,
+    optAutoCheck: state.autoCheckEnabled,
+    autoCheckMinutes: state.autoCheckMinutes,
+    optDesktopNotify: state.desktopNotifyEnabled,
+    logWrap: state.logWrap,
+    logAutoscroll: state.logAutoScroll,
+    updateChannel: state.updateChannel,
+  }).catch(() => {});
+  refreshAll({ notify: true, source: "startup" });
+  void maybePollSelfUpdateInfo({ notify: true });
+})();
