@@ -67,6 +67,7 @@ pub struct PlanRow {
     pub asset_name: String,
     pub has_update: bool,
     pub repair_needed: bool,
+    pub externally_modified: bool,
     pub error: Option<String>,
     pub previous_dll_count: usize,
     pub new_dll_count: usize,
@@ -87,6 +88,7 @@ impl From<UpdatePlan> for PlanRow {
             asset_name: p.asset_name,
             has_update,
             repair_needed: p.repair_needed,
+            externally_modified: p.externally_modified,
             error: p.error,
             previous_dll_count: p.previous_dll_count,
             new_dll_count: p.new_dll_count,
@@ -854,8 +856,9 @@ pub struct RepoPreviewInfo {
     pub license: String,
     pub readme_text: String,
     pub readme_items: Vec<iced::widget::markdown::Item>,
-    /// Fetched image bytes keyed by the URL as it appears in the markdown (may be absolute or relative).
-    pub image_cache: std::collections::HashMap<String, Vec<u8>>,
+    /// Decoded image handles keyed by URL. Handle IDs are stable so iced can cache decoded images
+    /// across renders without re-decoding on every frame.
+    pub image_cache: std::collections::HashMap<String, iced::widget::image::Handle>,
     pub files: Vec<RepoFileEntry>,
     /// Base URL for resolving relative image paths (e.g. "https://raw.githubusercontent.com/owner/repo/HEAD/")
     pub raw_base_url: String,
@@ -915,44 +918,57 @@ pub fn parse_forge_url(url: &str) -> Option<ForgeInfo> {
 // Image helpers
 // ---------------------------------------------------------------------------
 
-/// Collect image URLs from raw HTML `<img src="...">` tags in markdown text.
-/// Markdown-syntax images (`![alt](url)`) are handled by `Content::parse().images()` instead,
-/// which uses the same pulldown-cmark parser as iced's renderer (guaranteed URL match).
-fn collect_html_img_urls_from_text(markdown: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-
-    // --- HTML syntax: <img src="url"> or <img src='url'> ---
-    let mut hpos = 0;
-    while hpos < markdown.len() {
-        match markdown[hpos..].find("<img") {
-            None => break,
+/// Convert `<img src="..." alt="...">` HTML tags in markdown text to standard
+/// `![alt](url)` syntax so iced's pulldown-cmark parser creates `Item::Image` entries.
+/// Also strips `<p>`, `</p>`, and `<br>` tags that GitHub injects around images.
+pub fn convert_html_images_to_markdown(markdown: &str) -> String {
+    let mut result = String::with_capacity(markdown.len());
+    let mut pos = 0;
+    while pos < markdown.len() {
+        match markdown[pos..].find("<img") {
+            None => {
+                result.push_str(&markdown[pos..]);
+                break;
+            }
             Some(tag_offset) => {
-                let tag_start = hpos + tag_offset;
-                // Find the end of this tag
+                result.push_str(&markdown[pos..pos + tag_offset]);
+                let tag_start = pos + tag_offset;
                 let tag_end = markdown[tag_start..].find('>')
                     .map(|e| tag_start + e + 1)
                     .unwrap_or(markdown.len());
                 let tag_slice = &markdown[tag_start..tag_end];
-                // Find src= attribute inside tag
-                if let Some(src_pos) = tag_slice.find("src=") {
-                    let after_src = &tag_slice[src_pos + 4..];
-                    let quote = after_src.chars().next();
-                    if let Some(q @ ('"' | '\'')) = quote {
-                        let inner = &after_src[1..];
-                        if let Some(end_q) = inner.find(q) {
-                            let url = inner[..end_q].trim();
-                            if !url.is_empty() {
-                                urls.push(url.to_string());
-                            }
-                        }
-                    }
+                // Extract src= attribute
+                let src = extract_attr(tag_slice, "src");
+                let alt = extract_attr(tag_slice, "alt").unwrap_or_default();
+                if let Some(url) = src {
+                    result.push_str(&format!("![{}]({})", alt, url));
+                } else {
+                    result.push_str(tag_slice);
                 }
-                hpos = tag_start + 4; // skip past "<img"
+                pos = tag_end;
             }
         }
     }
+    // Strip <p>, </p>, <br>, <br/>, <br /> tags that GitHub wraps around images
+    let result = result.replace("<p>", "").replace("</p>", "").replace("<br>", "\n")
+        .replace("<br/>", "\n").replace("<br />", "\n");
+    result
+}
 
-    urls
+fn extract_attr<'a>(tag: &'a str, attr_name: &str) -> Option<String> {
+    let needle = format!("{}=", attr_name);
+    let attr_pos = tag.find(&needle)?;
+    let after = &tag[attr_pos + needle.len()..];
+    let q = after.chars().next()?;
+    if q == '"' || q == '\'' {
+        let inner = &after[1..];
+        let end = inner.find(q)?;
+        Some(inner[..end].trim().to_string())
+    } else {
+        // Unquoted attribute value — take until space or >
+        let end = after.find(|c: char| c.is_whitespace() || c == '>').unwrap_or(after.len());
+        Some(after[..end].trim().to_string())
+    }
 }
 
 /// Resolve a potentially-relative image URL against a raw base URL.
@@ -965,12 +981,15 @@ pub fn resolve_image_url(url: &str, raw_base_url: &str) -> String {
     }
 }
 
-/// Fetch image bytes for URLs found in the README. Limits: max 12 images, 5 MB each, 20 MB total.
+/// Fetch images for URLs found in the README, returning stable `Handle` objects.
+/// Handles are created once here so their IDs are fixed — iced can then cache the decoded
+/// pixels across renders without re-decoding on every frame.
+/// Limits: max 12 images, 5 MB each, 20 MB total.
 async fn fetch_images(
     client: &Client,
     image_urls: &[String],
     raw_base_url: &str,
-) -> std::collections::HashMap<String, Vec<u8>> {
+) -> std::collections::HashMap<String, iced::widget::image::Handle> {
     let mut cache = std::collections::HashMap::new();
     let mut total_bytes = 0usize;
 
@@ -1021,11 +1040,13 @@ async fn fetch_images(
         if let Ok(Ok(bytes)) = result {
             if !bytes.is_empty() && bytes.len() <= 5_000_000 {
                 total_bytes += bytes.len();
-                let data = bytes.to_vec();
+                // Create the handle once — its Id is fixed for the lifetime of this preview,
+                // so iced can cache the decoded image across renders.
+                let handle = iced::widget::image::Handle::from_bytes(bytes);
                 // Store by original URL (as seen in markdown) AND absolute URL
-                cache.insert(url.clone(), data.clone());
+                cache.insert(url.clone(), handle.clone());
                 if abs_url != *url {
-                    cache.insert(abs_url, data);
+                    cache.insert(abs_url, handle);
                 }
             }
         }
@@ -1307,13 +1328,11 @@ async fn fetch_github_preview(client: &Client, owner: &str, repo: &str) -> Resul
     };
 
     let raw_base = format!("https://raw.githubusercontent.com/{}/{}/HEAD/", owner, repo);
-    let md_content = iced::widget::markdown::Content::parse(&readme_text);
+    // Convert HTML <img> tags to markdown syntax so iced's parser creates Image items
+    let readme_md = convert_html_images_to_markdown(&readme_text);
+    let md_content = iced::widget::markdown::Content::parse(&readme_md);
     let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
-    // Use Content::images() for exact URL match with iced's renderer; add HTML <img> tags too
-    let mut image_urls: Vec<String> = md_content.images().iter().cloned().collect();
-    for url in collect_html_img_urls_from_text(&readme_text) {
-        if !image_urls.contains(&url) { image_urls.push(url); }
-    }
+    let image_urls: Vec<String> = md_content.images().iter().cloned().collect();
     let image_cache = fetch_images(client, &image_urls, &raw_base).await;
 
     let files = fetch_files(client, "github", "github.com", owner, repo, "https").await;
@@ -1365,12 +1384,10 @@ async fn fetch_gitlab_preview(client: &Client, owner: &str, repo: &str) -> Resul
     };
 
     let raw_base = format!("https://gitlab.com/{}/{}/raw/HEAD/", owner, repo);
-    let md_content = iced::widget::markdown::Content::parse(&readme_text);
+    let readme_md = convert_html_images_to_markdown(&readme_text);
+    let md_content = iced::widget::markdown::Content::parse(&readme_md);
     let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
-    let mut image_urls: Vec<String> = md_content.images().iter().cloned().collect();
-    for url in collect_html_img_urls_from_text(&readme_text) {
-        if !image_urls.contains(&url) { image_urls.push(url); }
-    }
+    let image_urls: Vec<String> = md_content.images().iter().cloned().collect();
     let image_cache = fetch_images(client, &image_urls, &raw_base).await;
     let files = fetch_files(client, "gitlab", "gitlab.com", owner, repo, "https").await;
 
@@ -1420,12 +1437,10 @@ async fn fetch_gitea_preview(client: &Client, host: &str, scheme: &str, owner: &
     };
 
     let raw_base = format!("{}://{}/{}/{}/raw/branch/{}/", scheme, host, owner, repo, branch);
-    let md_content = iced::widget::markdown::Content::parse(&readme_text);
+    let readme_md = convert_html_images_to_markdown(&readme_text);
+    let md_content = iced::widget::markdown::Content::parse(&readme_md);
     let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
-    let mut image_urls: Vec<String> = md_content.images().iter().cloned().collect();
-    for url in collect_html_img_urls_from_text(&readme_text) {
-        if !image_urls.contains(&url) { image_urls.push(url); }
-    }
+    let image_urls: Vec<String> = md_content.images().iter().cloned().collect();
     let image_cache = fetch_images(client, &image_urls, &raw_base).await;
     let files = fetch_files(client, "gitea", host, owner, repo, scheme).await;
 

@@ -1,4 +1,4 @@
-use iced::widget::{button, checkbox, column, container, row, scrollable, slider, text, text_input, Space};
+use iced::widget::{button, checkbox, column, container, row, scrollable, slider, text, text_input, tooltip, Space};
 use iced::{Element, Length};
 
 use crate::theme::{self, ThemeColors};
@@ -20,10 +20,10 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         ]
         .spacing(2),
         Space::new().width(Length::Fill),
-        btn("Read Current", Message::ReadTweaks, &c),
-        btn("Reset to Default", Message::ResetTweaksToDefault, &c),
-        btn("Restore", Message::RestoreTweaks, &c),
-        btn_primary("Apply", Message::ApplyTweaks, &c),
+        tip(btn("Read Current", Message::ReadTweaks, &c), "Read current tweak values from WoW.exe", tooltip::Position::Bottom, colors),
+        tip(btn("Reset to Default", Message::ResetTweaksToDefault, &c), "Reset all sliders to default values", tooltip::Position::Bottom, colors),
+        tip(btn("Restore", Message::RestoreTweaks, &c), "Restore WoW.exe from backup", tooltip::Position::Bottom, colors),
+        tip(btn_primary("Apply", Message::ApplyTweaks, &c), "Patch WoW.exe with selected tweaks (creates backup first)", tooltip::Position::Bottom, colors),
     ]
     .spacing(6)
     .align_y(iced::Alignment::Center);
@@ -309,6 +309,21 @@ fn settings_card_fill<'a>(
         .height(Length::Fill)
         .style(move |_theme| theme::card_style(&c))
         .into()
+}
+
+/// Wrap any element in a tooltip with consistent styling.
+fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+    let tip_str = String::from(tip_text);
+    tooltip(
+        content,
+        container(text(tip_str).size(13).color(c.text))
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(&c)),
+        pos,
+    )
+    .gap(4.0)
+    .into()
 }
 
 fn btn<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {

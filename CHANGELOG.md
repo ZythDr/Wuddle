@@ -24,6 +24,31 @@ All notable changes to Wuddle are documented in this file.
 - **DLL count tracking** — `UpdatePlan` now carries `previous_dll_count` and `new_dll_count` for detecting file count mismatches between releases.
 - **DB schema v7** — adds `merge_installs` and `pinned_version` columns to the `repos` table (backwards-compatible additive migration).
 
+## v3.0.0-beta.4 (Iced frontend)
+
+### New Features
+
+- **Descriptive tooltips on all buttons** — nearly every button in the app now shows a tooltip on hover explaining what it does. Covers Home, Mods, Addons, Tweaks, Logs, Options, About, DXVK Config panels, and all dialog buttons (Add, Remove, Browse, Save, etc.).
+- **"Modified" status badge** — mods whose files have been changed externally (outside of Wuddle) now show an amber "Modified" badge with a tooltip explaining the issue. Uses SHA256 hash comparison against stored install hashes.
+- **GitHub-flavored admonition rendering** — README previews now render `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, and `> [!CAUTION]` blocks with colored left-accent stripes, icons, and tinted backgrounds matching GitHub's dark theme.
+- **README source/formatted toggle** — moved to the content label row for cleaner layout; always visible when a README is loaded.
+
+### Bug Fixes
+
+- **Window size not applying** — fixed `window_size()` being overridden by `window(Settings { ..Default::default() })`. Size is now set inside the `Settings` struct directly.
+- **CMD window on Windows** — added `#![windows_subsystem = "windows"]` attribute to prevent a console window from appearing alongside the app on Windows release builds.
+- **Square corners on About page buttons** — the Update button (both active and disabled states) and README preview containers in the Add dialog now use square corners (radius 0) consistent with the rest of the UI.
+- **"Visit Wuddle on GitHub" button style** — removed permanent highlight/active style; now uses normal style with hover effect like other buttons.
+- **Addon branch dropdown centering** — fixed asymmetric padding (left: 0, right: 10 → left: 5, right: 5) that made the branch picker appear off-center in its column.
+- **Add dialog preview persistence** — re-opening the Add dialog after installing a mod now clears the stale preview immediately instead of briefly flashing old content.
+
+### Changes
+
+- **Tooltip font size increased to 13px** — all hover tooltip text increased by 2px across the entire frontend for better readability.
+- **Image handle caching** — README images now create stable `Handle` objects once during fetch, allowing iced to cache decoded pixels across renders instead of re-decoding every frame.
+- **HTML `<img>` tag conversion** — HTML image tags in READMEs are now converted to standard markdown syntax before parsing, so iced's pulldown-cmark parser handles them natively. Removes the separate HTML URL collector.
+- **Add dialog loading state** — the two-card layout now stays visible during preview fetches with a centered spinner, preventing the dialog from collapsing and jumping between states.
+
 ## v3.0.0-beta.3 (Iced frontend)
 
 ### New Features

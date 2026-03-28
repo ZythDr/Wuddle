@@ -175,8 +175,8 @@ Cross-reference of every Tauri/Svelte feature vs. the Iced 0.14 implementation.
 | Open Wuddle on GitHub link | ✅ | ✅ | |
 | Changelog link | ✅ | ✅ | |
 | Wuddle changelog viewer (in-app markdown) | ✅ | ✅ | Dialog::Changelog — fetches remote, falls back to embedded; renders markdown |
-| Self-update apply (download + stage) | ✅ | ❌ | requires tauri updater API equivalent |
-| Self-update restart | ✅ | ❌ | requires tauri restart API |
+| Self-update apply (download + stage) | ✅ | ✅ | Linux AppImage + Windows portable launcher layout |
+| Self-update restart | ✅ | ✅ | re-exec on Linux, launcher restart on Windows |
 
 ---
 
@@ -218,5 +218,4 @@ Cross-reference of every Tauri/Svelte feature vs. the Iced 0.14 implementation.
 ### Low Priority / Future
 5. **SuperWoW AV risk dialog** — one-time acknowledgment before adding SuperWoW.
 6. **DMA-BUF toggle** — Linux GPU passthrough option for gaming on Wayland.
-7. **Wuddle self-update apply/restart** — requires a non-Tauri update mechanism (e.g., self-replace binary).
-8. **GIF animation** — iced 0.14 doesn't support animated GIFs natively; custom canvas required.
+7. **GIF animation** — iced 0.14 doesn't support animated GIFs natively; custom canvas required.

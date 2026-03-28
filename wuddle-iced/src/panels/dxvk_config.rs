@@ -645,6 +645,32 @@ pub fn view<'a>(
         }
     };
 
+    let preview_tip = if show_preview { "Go back to DXVK settings" } else { "Preview the generated dxvk.conf file" };
+    let preview_toggle_btn = tooltip(
+        preview_toggle_btn,
+        container(text(String::from(preview_tip)).size(13).color(c.text))
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(&c)),
+        tooltip::Position::Top,
+    ).gap(4.0);
+
+    let copy_btn = tooltip(
+        copy_btn,
+        container(text("Copy the DXVK config to clipboard").size(13).color(c.text))
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(&c)),
+        tooltip::Position::Top,
+    ).gap(4.0);
+
+    let save_tip = if has_wow_dir { "Write dxvk.conf to your WoW directory" } else { "Set a WoW directory in Options first" };
+    let save_btn = tooltip(
+        save_btn,
+        container(text(String::from(save_tip)).size(13).color(c.text))
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(&c)),
+        tooltip::Position::Top,
+    ).gap(4.0);
+
     let footer = row![
         preview_toggle_btn,
         Space::new().width(Length::Fill),
@@ -711,7 +737,7 @@ fn with_tip<'a>(
     tip: &str,
     c: ThemeColors,
 ) -> Element<'a, Message> {
-    let tip_box = container(text(String::from(tip)).size(12).color(c.text))
+    let tip_box = container(text(String::from(tip)).size(13).color(c.text))
         .max_width(360)
         .padding([6, 10])
         .style(move |_t| theme::tooltip_style(&c));

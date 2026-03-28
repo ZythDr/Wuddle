@@ -17,29 +17,34 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         ]
         .spacing(2),
         Space::new().width(Length::Fill),
-        {
-            let c2 = c;
-            button(text("+ Add Instance").size(13))
-                .on_press(Message::OpenDialog(Dialog::InstanceSettings {
-                    is_new: true,
-                    profile_id: String::new(),
-                    name: String::new(),
-                    wow_dir: String::new(),
-                    launch_method: String::from("auto"),
-                    like_turtles: true,
-                    clear_wdb: false,
-                    lutris_target: String::new(),
-                    wine_command: String::from("wine"),
-                    wine_args: String::new(),
-                    custom_command: String::new(),
-                    custom_args: String::new(),
-                }))
-                .padding([6, 12])
-                .style(move |_theme, status| match status {
-                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                    _ => theme::tab_button_style(&c2),
-                })
-        },
+        tip(
+            {
+                let c2 = c;
+                button(text("+ Add Instance").size(13))
+                    .on_press(Message::OpenDialog(Dialog::InstanceSettings {
+                        is_new: true,
+                        profile_id: String::new(),
+                        name: String::new(),
+                        wow_dir: String::new(),
+                        launch_method: String::from("auto"),
+                        like_turtles: true,
+                        clear_wdb: false,
+                        lutris_target: String::new(),
+                        wine_command: String::from("wine"),
+                        wine_args: String::new(),
+                        custom_command: String::new(),
+                        custom_args: String::new(),
+                    }))
+                    .padding([6, 12])
+                    .style(move |_theme, status| match status {
+                        button::Status::Hovered => theme::tab_button_hovered_style(&c2),
+                        _ => theme::tab_button_style(&c2),
+                    })
+            },
+            "Create a new WoW instance profile",
+            tooltip::Position::Bottom,
+            colors,
+        ),
     ]
     .align_y(iced::Alignment::Center);
 
@@ -186,7 +191,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                         shadow: iced::Shadow::default(),
                         snap: true,
                     }),
-                container(text(t.label()).size(11).color(c2.text))
+                container(text(t.label()).size(13).color(c2.text))
                     .padding([3, 8])
                     .style(move |_| theme::tooltip_style(&c2)),
                 tooltip::Position::Bottom,
@@ -237,7 +242,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                                 button::Status::Hovered => theme::tab_button_hovered_style(&c2),
                                 _ => theme::tab_button_style(&c2),
                             }),
-                        container(text("Opens GitHub in your browser so you can create or manage a token.").size(11).color(c.text))
+                        container(text("Opens GitHub in your browser so you can create or manage a token.").size(13).color(c.text))
                             .padding([3, 8])
                             .style(move |_theme| theme::tooltip_style(&c2)),
                         tooltip::Position::Bottom,
@@ -286,24 +291,34 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                     ]
                     .width(Length::Fill)
                 },
-                {
-                    let c2 = c;
-                    button(text("Save token").size(13))
-                        .on_press(Message::SaveGithubToken)
-                        .padding([6, 12])
-                        .style(move |_theme, _status| theme::tab_button_active_style(&c2))
-                },
-                {
-                    let c2 = c;
-                    button(text("Forget").size(13).color(c.bad))
-                        .on_press(Message::ForgetGithubToken)
-                        .padding([6, 12])
-                        .style(move |_theme, _status| {
-                            let mut s = theme::tab_button_style(&c2);
-                            s.border.color = c2.bad;
-                            s
-                        })
-                },
+                tip(
+                    {
+                        let c2 = c;
+                        button(text("Save token").size(13))
+                            .on_press(Message::SaveGithubToken)
+                            .padding([6, 12])
+                            .style(move |_theme, _status| theme::tab_button_active_style(&c2))
+                    },
+                    "Store this token for authenticated GitHub API access",
+                    tooltip::Position::Top,
+                    colors,
+                ),
+                tip(
+                    {
+                        let c2 = c;
+                        button(text("Forget").size(13).color(c.bad))
+                            .on_press(Message::ForgetGithubToken)
+                            .padding([6, 12])
+                            .style(move |_theme, _status| {
+                                let mut s = theme::tab_button_style(&c2);
+                                s.border.color = c2.bad;
+                                s
+                            })
+                    },
+                    "Remove the saved GitHub token",
+                    tooltip::Position::Top,
+                    colors,
+                ),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
@@ -329,6 +344,21 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     .height(Length::Fill)
     .direction(theme::vscroll())
     .style(move |t, s| theme::scrollable_style(&c)(t, s))
+    .into()
+}
+
+/// Wrap any element in a tooltip with consistent styling.
+fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+    let tip_str = String::from(tip_text);
+    tooltip(
+        content,
+        container(text(tip_str).size(13).color(c.text))
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(&c)),
+        pos,
+    )
+    .gap(4.0)
     .into()
 }
 

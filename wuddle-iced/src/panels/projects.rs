@@ -172,32 +172,41 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
     if !is_mods_tab {
         let c2 = c;
         action_items.push(
-            button(text("\u{27F2}").size(14)) // ⟲ rescan
-                .on_press(Message::RefreshRepos)
-                .padding([4, 10])
-                .style(move |_theme, status| match status {
-                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                    _ => theme::tab_button_style(&c2),
-                })
-                .into(),
+            tip(
+                button(text("\u{27F2}").size(14)) // ⟲ rescan
+                    .on_press(Message::RefreshRepos)
+                    .padding([4, 10])
+                    .style(move |_theme, status| match status {
+                        button::Status::Hovered => theme::tab_button_hovered_style(&c2),
+                        _ => theme::tab_button_style(&c2),
+                    }),
+                "Rescan for new addons in your WoW directory",
+                tooltip::Position::Bottom,
+                colors,
+            ),
         );
     }
     {
         let c2 = c;
+        let add_tip = if is_mods_tab { "Add a new mod repository" } else { "Add a new addon repository" };
         action_items.push(
-            button(text("+ Add").size(13))
-                .on_press(Message::OpenDialog(Dialog::AddRepo {
-                    url: String::new(),
-                    mode: if is_mods_tab { String::from("auto") } else { String::from("addon_git") },
-                    is_addons: !is_mods_tab,
-                    advanced: false,
-                }))
-                .padding([4, 14])
-                .style(move |_theme, status| match status {
-                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                    _ => theme::tab_button_style(&c2),
-                })
-                .into(),
+            tip(
+                button(text("+ Add").size(13))
+                    .on_press(Message::OpenDialog(Dialog::AddRepo {
+                        url: String::new(),
+                        mode: if is_mods_tab { String::from("auto") } else { String::from("addon_git") },
+                        is_addons: !is_mods_tab,
+                        advanced: false,
+                    }))
+                    .padding([4, 14])
+                    .style(move |_theme, status| match status {
+                        button::Status::Hovered => theme::tab_button_hovered_style(&c2),
+                        _ => theme::tab_button_style(&c2),
+                    }),
+                add_tip,
+                tooltip::Position::Bottom,
+                colors,
+            ),
         );
     }
     let actions_part = row(action_items).spacing(8).align_y(iced::Alignment::Center);
@@ -341,7 +350,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
     let update_all_btn: Element<Message> = {
         let c2 = c;
         let b = button(text("Update All").size(13)).padding([6, 14]);
-        if total_update_count > 0 {
+        let btn_el: Element<Message> = if total_update_count > 0 {
             b.on_press(Message::UpdateAll)
                 .style(move |_t, _s| theme::tab_button_active_style(&c2))
                 .into()
@@ -352,13 +361,21 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
                 s
             })
             .into()
-        }
+        };
+        tip(btn_el, "Download and install all available updates", tooltip::Position::Top, colors)
     };
+
+    let check_btn = tip(
+        btn("Check for updates", Message::CheckUpdates, &c),
+        "Fetch the latest versions for all addons and mods",
+        tooltip::Position::Top,
+        colors,
+    );
 
     let footer = row![
         text(last_checked_text).size(12).color(colors.muted),
         Space::new().width(Length::Fill),
-        btn("Check for updates", Message::CheckUpdates, &c),
+        check_btn,
         update_all_btn,
     ]
     .spacing(8)
@@ -383,6 +400,7 @@ fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: &ThemeColors) -> Element
         .unwrap_or_else(|| String::from("\u{2014}"));
     let has_update = plan.map(|p| p.has_update).unwrap_or(false);
     let has_error = plan.and_then(|p| p.error.as_ref()).is_some();
+    let externally_modified = plan.map(|p| p.externally_modified).unwrap_or(false);
     let rid = repo.id;
     let enabled = repo.enabled;
 
@@ -401,7 +419,7 @@ fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: &ThemeColors) -> Element
         col_cell(text(current_str).size(12).color(colors.muted), COL_INSTALLED),
         col_cell(version_picker, COL_VERSION),
         col_cell(checkbox(enabled).on_toggle(move |b| Message::ToggleRepoEnabled(rid, b)), COL_ENABLED),
-        col_cell(status_badge(has_error, has_update, enabled, update_ignored, &latest_str, colors), COL_STATUS),
+        col_cell(status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, colors), COL_STATUS),
         col_cell(action_buttons(repo, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
@@ -511,6 +529,7 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<
     let plan = app.plans.iter().find(|p| p.repo_id == repo.id);
     let has_update = plan.map(|p| p.has_update).unwrap_or(false);
     let has_error = plan.and_then(|p| p.error.as_ref()).is_some();
+    let externally_modified = plan.map(|p| p.externally_modified).unwrap_or(false);
     let latest_str = plan.map(|p| p.latest.clone()).unwrap_or_default();
     let enabled = repo.enabled;
 
@@ -533,13 +552,13 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<
         .width(Length::Fill),
     )
     .width(Length::Fill)
-    .padding(iced::Padding { top: 0.0, right: 10.0, bottom: 0.0, left: 0.0 })
+    .padding(iced::Padding { top: 0.0, right: 5.0, bottom: 0.0, left: 5.0 })
     .into();
 
     let row_content = row![
         name_col,
         col_cell(branch_display, COL_BRANCH),
-        col_cell(status_badge(has_error, has_update, enabled, update_ignored, &latest_str, colors), COL_STATUS),
+        col_cell(status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, colors), COL_STATUS),
         col_cell(action_buttons(repo, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
@@ -687,6 +706,7 @@ fn name_cell_with_expand<'a>(
 fn status_info(
     has_error: bool,
     has_update: bool,
+    externally_modified: bool,
     enabled: bool,
     update_ignored: bool,
     colors: &ThemeColors,
@@ -697,6 +717,8 @@ fn status_info(
         ("Ignored", colors.muted, colors.muted)
     } else if has_error {
         ("Error", colors.bad, colors.bad)
+    } else if externally_modified {
+        ("Modified", colors.warn, colors.warn)
     } else if has_update {
         ("Update available", colors.warn, colors.warn)
     } else {
@@ -709,12 +731,13 @@ fn status_info(
 fn status_badge<'a>(
     has_error: bool,
     has_update: bool,
+    externally_modified: bool,
     enabled: bool,
     update_ignored: bool,
     latest_str: &str,
     colors: &ThemeColors,
 ) -> Element<'a, Message> {
-    let (label, text_color, base_color) = status_info(has_error, has_update, enabled, update_ignored, colors);
+    let (label, text_color, base_color) = status_info(has_error, has_update, externally_modified, enabled, update_ignored, colors);
     let bg = iced::Color::from_rgba(base_color.r, base_color.g, base_color.b, 0.18);
     let border_color = iced::Color::from_rgba(base_color.r, base_color.g, base_color.b, 0.45);
     let badge = container(
@@ -729,11 +752,16 @@ fn status_badge<'a>(
         snap: true,
     });
 
-    if has_update && !update_ignored && !latest_str.is_empty() {
+    if (has_update || externally_modified) && !update_ignored && !latest_str.is_empty() {
         let c = *colors;
+        let tip = if externally_modified {
+            "Modified externally. Reinstall or update to restore.".to_string()
+        } else {
+            format!("Latest: {}", latest_str)
+        };
         tooltip(
             badge,
-            text(format!("Latest: {}", latest_str)).size(11).color(c.text),
+            text(tip).size(13).color(c.text),
             tooltip::Position::Top,
         )
         .style(move |_theme| container::Style {
@@ -768,7 +796,7 @@ fn action_buttons<'a>(
         let c2 = c;
         let btn = button(text("\u{2193}").size(14)) // ↓
             .padding([4, 8]);
-        items.push(if has_update {
+        let btn_el: Element<Message> = if has_update {
             btn.on_press(Message::UpdateRepo(rid))
                 .style(move |_theme, _status| theme::tab_button_active_style(&c2))
                 .into()
@@ -779,7 +807,9 @@ fn action_buttons<'a>(
                 s
             })
             .into()
-        });
+        };
+        let dl_tip = if has_update { "Download and install this update" } else { "No update available" };
+        items.push(tip(btn_el, dl_tip, tooltip::Position::Top, colors));
     }
 
     // Triple-dot button wrapped in AnchoredOverlay so the popup is pinned
@@ -835,6 +865,21 @@ fn btn<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Messa
             _ => theme::tab_button_style(&c),
         })
         .into()
+}
+
+/// Wrap any element in a tooltip with consistent styling.
+fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+    let tip_str = String::from(tip_text);
+    tooltip(
+        content,
+        container(text(tip_str).size(13).color(c.text))
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(&c)),
+        pos,
+    )
+    .gap(4.0)
+    .into()
 }
 
 fn sort_header_button<'a>(label: &str, key: SortKey, colors: &ThemeColors) -> Element<'a, Message> {

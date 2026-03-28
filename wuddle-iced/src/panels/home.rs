@@ -75,11 +75,21 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             overlay
         },
         separator(&c),
-        btn_styled("Check for updates", Message::CheckUpdates, &c),
-        btn_styled(
-            &format!("Update All ({})", update_count),
-            Message::UpdateAll,
-            &c,
+        tip(
+            btn_styled("Check for updates", Message::CheckUpdates, &c),
+            "Fetch the latest versions for all addons and mods",
+            tooltip::Position::Bottom,
+            colors,
+        ),
+        tip(
+            btn_styled(
+                &format!("Update All ({})", update_count),
+                Message::UpdateAll,
+                &c,
+            ),
+            "Download and install all available updates",
+            tooltip::Position::Bottom,
+            colors,
         ),
     ]
     .spacing(8)
@@ -326,6 +336,21 @@ fn btn_styled<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a
         .into()
 }
 
+/// Wrap any element in a tooltip with consistent styling.
+fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+    let tip_str = String::from(tip_text);
+    tooltip(
+        content,
+        container(text(tip_str).size(13).color(c.text))
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(&c)),
+        pos,
+    )
+    .gap(4.0)
+    .into()
+}
+
 fn link_button<'a>(label: &str, url: &str, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
     let url_owned = String::from(url);
@@ -344,7 +369,7 @@ fn link_button<'a>(label: &str, url: &str, colors: &ThemeColors) -> Element<'a, 
     });
     tooltip(
         btn,
-        container(text(url_tip).size(11).color(c.text))
+        container(text(url_tip).size(13).color(c.text))
             .padding([3, 8])
             .style(move |_theme| crate::theme::tooltip_style(&c)),
         tooltip::Position::Top,
@@ -411,7 +436,7 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             .text_size(12)
             .on_toggle(Message::ToggleRadioAutoConnect),
         container(
-            text("Pre-connect silently so Play is instant").size(11).color(c3.text),
+            text("Pre-connect silently so Play is instant").size(13).color(c3.text),
         )
         .padding([3, 8])
         .style(move |_| crate::theme::tooltip_style(&c3)),
@@ -496,6 +521,9 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         };
         Message::SetRadioVolume((app.radio_volume + step).clamp(0.0, 1.0))
     });
+
+    let radio_tip = if app.radio_playing { "Stop the radio stream" } else { "Start the Everlook radio stream" };
+    let play_btn = tip(play_btn, radio_tip, tooltip::Position::Top, colors);
 
     let center_row = row![
         play_btn,

@@ -1,4 +1,4 @@
-use iced::widget::{button, checkbox, column, container, row, stack, text, text_editor, text_input, Space};
+use iced::widget::{button, checkbox, column, container, row, stack, text, text_editor, text_input, tooltip, Space};
 use iced::{Element, Font, Length};
 use iced::advanced::text::Wrapping;
 
@@ -76,27 +76,37 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         ]
         .spacing(2),
         Space::new().width(Length::Fill),
-        {
-            let c2 = c;
-            button(text("Clear").size(13))
-                .on_press(Message::ClearLogs)
-                .padding([6, 12])
-                .style(move |_theme, status| match status {
-                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                    _ => theme::tab_button_style(&c2),
-                })
-        },
-        {
-            let c2 = c;
-            let log_text_copy = build_log_text(app);
-            button(text("Copy Log").size(13))
-                .on_press(Message::CopyToClipboard(log_text_copy))
-                .padding([6, 12])
-                .style(move |_theme, status| match status {
-                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                    _ => theme::tab_button_style(&c2),
-                })
-        },
+        tip(
+            {
+                let c2 = c;
+                button(text("Clear").size(13))
+                    .on_press(Message::ClearLogs)
+                    .padding([6, 12])
+                    .style(move |_theme, status| match status {
+                        button::Status::Hovered => theme::tab_button_hovered_style(&c2),
+                        _ => theme::tab_button_style(&c2),
+                    })
+            },
+            "Clear all log messages",
+            tooltip::Position::Bottom,
+            colors,
+        ),
+        tip(
+            {
+                let c2 = c;
+                let log_text_copy = build_log_text(app);
+                button(text("Copy Log").size(13))
+                    .on_press(Message::CopyToClipboard(log_text_copy))
+                    .padding([6, 12])
+                    .style(move |_theme, status| match status {
+                        button::Status::Hovered => theme::tab_button_hovered_style(&c2),
+                        _ => theme::tab_button_style(&c2),
+                    })
+            },
+            "Copy all log output to clipboard",
+            tooltip::Position::Bottom,
+            colors,
+        ),
     ]
     .spacing(6)
     .align_y(iced::Alignment::Center);
@@ -205,6 +215,21 @@ pub fn build_log_text(app: &App) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Wrap any element in a tooltip with consistent styling.
+fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+    let tip_str = String::from(tip_text);
+    tooltip(
+        content,
+        container(text(tip_str).size(13).color(c.text))
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(&c)),
+        pos,
+    )
+    .gap(4.0)
+    .into()
 }
 
 fn filter_btn<'a>(

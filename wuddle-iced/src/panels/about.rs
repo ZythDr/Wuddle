@@ -164,7 +164,7 @@ fn latest_version_row<'a>(
 
     let channel_tip = "Release channel — Beta runs this Iced v3 frontend and receives pre-release builds. Selecting Stable will restart Wuddle and launch the last stable Tauri release via the launcher.";
     let tip_box = container(
-        text(String::from(channel_tip)).size(11).color(c.text)
+        text(String::from(channel_tip)).size(13).color(c.text)
     )
     .max_width(300)
     .padding([6, 10])
@@ -271,10 +271,13 @@ fn open_on_github_btn<'a>(url: &str, colors: &ThemeColors) -> Element<'a, Messag
     )
     .on_press(Message::OpenUrl(url_owned))
     .padding([6, 12])
-    .style(move |_theme, _status| theme::tab_button_active_style(&c));
+    .style(move |_theme, status| match status {
+        iced::widget::button::Status::Hovered => theme::tab_button_hovered_style(&c),
+        _ => theme::tab_button_style(&c),
+    });
     tooltip(
         btn,
-        container(text("Open the Wuddle repository on GitHub").size(11).color(c.text))
+        container(text("Open the Wuddle repository on GitHub").size(13).color(c.text))
             .padding([3, 8])
             .style(move |_theme| theme::tooltip_style(&c)),
         tooltip::Position::Bottom,
@@ -290,7 +293,7 @@ fn action_btn<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a
         .style(move |_theme, _status| iced::widget::button::Style {
             background: Some(iced::Background::Color(c.primary)),
             text_color: iced::Color::WHITE,
-            border: iced::Border { radius: 6.0.into(), ..Default::default() },
+            border: iced::Border { radius: 0.0.into(), ..Default::default() },
             shadow: iced::Shadow::default(),
             snap: true,
         })
@@ -304,12 +307,12 @@ fn btn_disabled<'a>(label: &str, tip: &str, colors: &ThemeColors) -> Element<'a,
         .padding([6, 14])
         .style(move |_t| container::Style {
             background: Some(iced::Background::Color(c.card)),
-            border: iced::Border { radius: 6.0.into(), color: c.border, width: 1.0 },
+            border: iced::Border { radius: 0.0.into(), color: c.border, width: 1.0 },
             ..Default::default()
         });
     tooltip(
         btn_container,
-        container(text(tip_str).size(11).color(c.text))
+        container(text(tip_str).size(13).color(c.text))
             .max_width(300)
             .padding([3, 8])
             .style(move |_theme| crate::theme::tooltip_style(&c)),
@@ -330,7 +333,7 @@ fn btn_tip<'a>(label: &str, tip: &str, msg: Message, colors: &ThemeColors) -> El
         });
     tooltip(
         btn,
-        container(text(tip_str).size(11).color(c.text))
+        container(text(tip_str).size(13).color(c.text))
             .padding([3, 8])
             .style(move |_theme| theme::tooltip_style(&c)),
         tooltip::Position::Bottom,

@@ -1,3 +1,5 @@
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 mod anchored_overlay;
 mod panels;
 mod service;
@@ -64,8 +66,8 @@ fn main() -> iced::Result {
         .font(include_bytes!("../assets/fonts/NotoSans-Regular.ttf"))
         .font(include_bytes!("../assets/fonts/NotoSans-Bold.ttf"))
         .default_font(default_font)
-        .window_size((1100.0, 850.0))
         .window(iced::window::Settings {
+            size: iced::Size::new(1100.0, 850.0),
             icon: window_icon,
             ..Default::default()
         })
@@ -825,11 +827,53 @@ fn highlight_theme() -> &'static syntect::highlighting::Theme {
 }
 
 // ---------------------------------------------------------------------------
+// GitHub-flavored markdown admonition detection
+// ---------------------------------------------------------------------------
+
+/// Returns `(icon, label, border_color, title_color)` for a GitHub admonition keyword.
+/// Colors match GitHub's dark theme exactly.
+fn admonition_style(keyword: &str) -> Option<(&'static str, &'static str, iced::Color, iced::Color)> {
+    match keyword {
+        "[!NOTE]" => Some((
+            "\u{2139}",  // ℹ information source
+            "Note",
+            iced::Color::from_rgb8(0x1f, 0x6f, 0xeb),
+            iced::Color::from_rgb8(0x58, 0xa6, 0xff),
+        )),
+        "[!TIP]" => Some((
+            "\u{1F4A1}", // 💡 light bulb
+            "Tip",
+            iced::Color::from_rgb8(0x23, 0x86, 0x36),
+            iced::Color::from_rgb8(0x3f, 0xb9, 0x50),
+        )),
+        "[!IMPORTANT]" => Some((
+            "\u{1F4AC}", // 💬 speech bubble
+            "Important",
+            iced::Color::from_rgb8(0x89, 0x57, 0xe5),
+            iced::Color::from_rgb8(0xa3, 0x71, 0xf7),
+        )),
+        "[!WARNING]" => Some((
+            "\u{26A0}",  // ⚠ warning sign
+            "Warning",
+            iced::Color::from_rgb8(0x9e, 0x6a, 0x03),
+            iced::Color::from_rgb8(0xd2, 0x99, 0x22),
+        )),
+        "[!CAUTION]" => Some((
+            "\u{26D4}",  // ⛔ no entry
+            "Caution",
+            iced::Color::from_rgb8(0xda, 0x36, 0x33),
+            iced::Color::from_rgb8(0xf8, 0x51, 0x49),
+        )),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Custom markdown viewer: cached images + bold headings + syntax highlighting
 // ---------------------------------------------------------------------------
 
 struct ImageViewer<'a> {
-    cache: &'a std::collections::HashMap<String, Vec<u8>>,
+    cache: &'a std::collections::HashMap<String, iced::widget::image::Handle>,
     raw_base_url: &'a str,
 }
 
@@ -897,18 +941,18 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for ImageViewer<'a> {
         _title: &'a str,
         _alt: &iced::widget::markdown::Text,
     ) -> Element<'a, Message> {
-        // Try original URL, then resolved absolute URL
-        let bytes = self.cache.get(url.as_str())
+        // Try original URL, then resolved absolute URL.
+        // Handles were created once during fetch — reusing the same handle ID lets iced
+        // cache the decoded image across renders and avoids per-frame re-decoding.
+        let handle = self.cache.get(url.as_str())
             .or_else(|| {
                 let abs = service::resolve_image_url(url, self.raw_base_url);
                 self.cache.get(abs.as_str())
             });
-        if let Some(bytes) = bytes {
+        if let Some(handle) = handle {
             container(
-                iced::widget::image(
-                    iced::widget::image::Handle::from_bytes(bytes.clone())
-                )
-                .width(Length::Fill)
+                iced::widget::image(handle.clone())
+                    .width(Length::Fill)
             )
             .width(Length::Fill)
             .padding([4, 0])
@@ -923,6 +967,90 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for ImageViewer<'a> {
             .padding([2, 0])
             .into()
         }
+    }
+
+    fn quote(
+        &self,
+        settings: iced::widget::markdown::Settings,
+        contents: &'a [iced::widget::markdown::Item],
+    ) -> Element<'a, Message> {
+        // Detect GitHub-flavored markdown admonitions: > [!NOTE], > [!WARNING], etc.
+        // When parsed, the first item is a Paragraph whose first span text is "[!TYPE]".
+        if let Some(iced::widget::markdown::Item::Paragraph(first_text)) = contents.first() {
+            let spans = first_text.spans(settings.style);
+            let first_span_text = spans.first().map(|s| s.text.trim()).unwrap_or("");
+            if let Some((icon, label, border_color, title_color)) = admonition_style(first_span_text) {
+                // Body spans: skip the "[!TYPE]" span and the following soft-break space span
+                let body_spans: Vec<iced::widget::text::Span<'static, iced::widget::markdown::Uri>> =
+                    spans.iter()
+                        .skip(1) // skip "[!TYPE]"
+                        .skip_while(|s| s.text.trim().is_empty()) // skip soft-break space
+                        .cloned()
+                        .collect();
+
+                let title_row = row![
+                    text(icon)
+                        .size(settings.text_size)
+                        .color(title_color),
+                    text(label)
+                        .size(settings.text_size)
+                        .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT })
+                        .color(title_color),
+                ]
+                .spacing(5)
+                .align_y(iced::Alignment::Center);
+
+                let mut body_col = column![title_row].spacing(4);
+
+                if !body_spans.is_empty() {
+                    body_col = body_col.push(
+                        iced::widget::rich_text(body_spans)
+                            .size(settings.text_size)
+                            .on_link_click(Self::on_link_click),
+                    );
+                }
+                // Render any additional items (paragraphs after the first)
+                for item in contents.iter().skip(1) {
+                    body_col = body_col.push(
+                        iced::widget::markdown::view_with(
+                            std::slice::from_ref(item),
+                            settings,
+                            self,
+                        )
+                    );
+                }
+
+                // Left-accent stripe + tinted background (matches GitHub dark admonition style).
+                // iced Border is uniform-width, so we build the left stripe with a colored
+                // container column instead.
+                let stripe = container(iced::widget::Space::new())
+                    .width(3)
+                    .height(Length::Fill)
+                    .style(move |_t| container::Style {
+                        background: Some(iced::Background::Color(border_color)),
+                        border: iced::Border { radius: 2.0.into(), ..Default::default() },
+                        ..Default::default()
+                    });
+                let content_box = container(body_col)
+                    .width(Length::Fill)
+                    .padding(iced::Padding { top: 6.0, right: 10.0, bottom: 6.0, left: 10.0 });
+                return container(
+                    row![stripe, content_box].spacing(0).height(Length::Shrink)
+                )
+                .width(Length::Fill)
+                .padding([4, 0])
+                .style(move |_t| container::Style {
+                    background: Some(iced::Background::Color(
+                        iced::Color { a: 0.06, ..border_color }
+                    )),
+                    border: iced::Border { radius: 4.0.into(), ..Default::default() },
+                    ..Default::default()
+                })
+                .into();
+            }
+        }
+        // Default blockquote rendering
+        iced::widget::markdown::quote(self, settings, contents)
     }
 
     fn code_block(
@@ -2622,6 +2750,10 @@ impl App {
                 let trimmed = url.trim().to_string();
                 if service::parse_forge_url(&trimmed).is_some() {
                     self.add_repo_preview_loading = true;
+                    self.add_repo_preview = None; // clear stale preview immediately to avoid flash of old content
+                    self.add_repo_file_preview = None;
+                    self.add_repo_show_releases = false;
+                    self.add_repo_release_notes = None;
                     return Task::perform(
                         service::fetch_repo_preview(trimmed),
                         Message::FetchRepoPreviewResult,
@@ -2813,9 +2945,11 @@ impl App {
             let dialog = self.dialog.as_ref().unwrap();
             let c = colors;
 
-            // Two-card layout for AddRepo with a loaded preview
-            let has_two_cards = matches!(dialog, Dialog::AddRepo { .. })
-                && self.add_repo_preview.is_some();
+            // Two-card layout for AddRepo with a loaded (or loading) preview
+            let has_two_cards = matches!(dialog, Dialog::AddRepo { url, .. }
+                if self.add_repo_preview.is_some()
+                    || (self.add_repo_preview_loading && service::parse_forge_url(url.trim()).is_some())
+            );
 
             // For AddRepo: whether the inner content needs full height
             let add_repo_use_fill_h = match dialog {
@@ -3099,7 +3233,7 @@ impl App {
                         let furl = p.forge_url.clone();
                         let icon_handle = forge_svg_handle(&p.forge, &p.forge_url);
                         let icon_color = c.text;
-                        button(
+                        let forge_btn = button(
                             row![
                                 text("Open on").size(12).color(c.text)
                                     .line_height(iced::widget::text::LineHeight::Relative(1.0)),
@@ -3118,25 +3252,25 @@ impl App {
                         .style(move |_t, s| match s {
                             button::Status::Hovered => theme::tab_button_hovered_style(&c),
                             _ => theme::tab_button_style(&c),
-                        })
-                        .into()
+                        });
+                        tip(forge_btn, "View this repository in your browser", iced::widget::tooltip::Position::Top, colors)
                     });
 
                     // Release Notes / README toggle button (shown when preview is loaded)
                     let release_notes: Option<Element<Message>> = self.add_repo_preview.as_ref().map(|_p| {
-                        let (label, msg) = if self.add_repo_show_releases {
-                            ("README", Message::ShowReadme)
+                        let (label, msg, rn_tip) = if self.add_repo_show_releases {
+                            ("README", Message::ShowReadme, "Switch back to README view")
                         } else {
-                            ("Release Notes", Message::FetchReleaseNotes)
+                            ("Release Notes", Message::FetchReleaseNotes, "View release notes and changelogs")
                         };
-                        button(text(label).size(12))
+                        let rn_btn = button(text(label).size(12))
                             .on_press(msg)
                             .padding([6, 10])
                             .style(move |_t, s| match s {
                                 button::Status::Hovered => theme::tab_button_hovered_style(&c),
                                 _ => theme::tab_button_style(&c),
-                            })
-                            .into()
+                            });
+                        tip(rn_btn, rn_tip, iced::widget::tooltip::Position::Top, colors)
                     });
 
                     let mut footer_row: Vec<Element<Message>> = Vec::new();
@@ -3154,17 +3288,24 @@ impl App {
                             })
                             .into()
                     );
-                    footer_row.push(
-                        button(text(if is_addons { "Add addon" } else { "Add mod" }).size(13))
+                    {
+                        let add_label = if is_addons { "Add addon" } else { "Add mod" };
+                        let add_tip_text = if is_addons { "Add this addon to Wuddle" } else { "Add this mod to Wuddle" };
+                        let add_btn = button(text(add_label).size(13))
                             .on_press(Message::AddRepoSubmit)
                             .padding([6, 14])
-                            .style(move |_t, _s| theme::tab_button_active_style(&c))
-                            .into()
-                    );
+                            .style(move |_t, _s| theme::tab_button_active_style(&c));
+                        footer_row.push(tip(add_btn, add_tip_text, iced::widget::tooltip::Position::Top, colors));
+                    }
                     row(footer_row).spacing(8).align_y(iced::Alignment::Center).into()
                 };
 
-                if let Some(ref preview) = self.add_repo_preview {
+                // Use two-card layout whenever there's a preview loaded OR we're actively
+                // fetching one — prevents the dialog from collapsing/jumping during loads.
+                let fetching_preview = self.add_repo_preview_loading
+                    && service::parse_forge_url(url.trim()).is_some();
+
+                if self.add_repo_preview.is_some() || fetching_preview {
                     // =========================================================
                     // TWO-CARD LAYOUT: floating side panel + main form card
                     // =========================================================
@@ -3176,6 +3317,7 @@ impl App {
                     // --- SIDE PANEL CARD (About + Files) ---
                     let mut sidebar_col: Vec<Element<Message>> = Vec::new();
 
+                    if let Some(ref preview) = self.add_repo_preview {
                     // About section header
                     sidebar_col.push(text("About").size(12).color(colors.muted).into());
                     sidebar_col.push(text(&preview.name).size(15).color(colors.text).into());
@@ -3380,16 +3522,37 @@ impl App {
                                 .into()
                         );
                     }
+                    } else {
+                        // Fetching: fill the sidebar with a centered spinner
+                        let tick = self.spinner_tick;
+                        let primary = colors.primary;
+                        sidebar_col.push(
+                            container(
+                                column![
+                                    canvas(SpinnerCanvas { tick, color: primary }).width(24).height(24),
+                                    text("Loading preview\u{2026}").size(14).color(colors.muted),
+                                ]
+                                .spacing(10)
+                                .align_x(iced::Alignment::Center)
+                            )
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .align_x(iced::Alignment::Center)
+                            .align_y(iced::Alignment::Center)
+                            .into()
+                        );
+                    }
 
                     let sidebar_card = container(
                         column(sidebar_col).spacing(6).width(Length::Fill).height(Length::Fill)
                     )
-                    .width(280)
+                    .width(250)
                     .height(Length::Fill)
                     .padding([16, 14])
                     .style(move |_theme| theme::dialog_style(&c_sp));
 
                     // --- MAIN FORM CARD ---
+                    // Build the content label row — includes source toggle when showing README
                     let content_label: Element<Message> = if let Some((ref fname, _)) = self.add_repo_file_preview {
                         let c_lbl = c_form;
                         let label = format!("\u{2190} {}", fname);
@@ -3405,9 +3568,30 @@ impl App {
                             })
                             .into()
                     } else if self.add_repo_show_releases {
-                        text("Release Notes").size(12).color(colors.muted).into()
+                        text("Release Notes").size(14).color(colors.muted).into()
                     } else {
-                        text("README").size(12).color(colors.muted).into()
+                        // README label + source toggle on the same row
+                        let readme_label = text("README").size(14).color(colors.muted);
+                        if self.add_repo_preview.is_some() {
+                            let source_label = if self.readme_source_view { "Source" } else { "Formatted" };
+                            let c2 = c_form;
+                            let source_btn = button(text(source_label).size(11))
+                                .on_press(Message::ToggleReadmeSourceView)
+                                .padding([3, 8])
+                                .style(move |_theme, status| match status {
+                                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
+                                    _ => theme::tab_button_style(&c2),
+                                });
+                            row![
+                                readme_label,
+                                Space::new().width(Length::Fill),
+                                source_btn,
+                            ]
+                            .align_y(iced::Alignment::Center)
+                            .into()
+                        } else {
+                            readme_label.into()
+                        }
                     };
 
                     let scrollable_content: Element<Message> = if let Some((_, ref content)) = self.add_repo_file_preview {
@@ -3431,7 +3615,7 @@ impl App {
                             border: iced::Border {
                                 color: c_form.border,
                                 width: 1.0,
-                                radius: iced::border::Radius::from(6),
+                                radius: iced::border::Radius::from(0),
                             },
                             ..Default::default()
                         });
@@ -3507,7 +3691,7 @@ impl App {
                             .padding([8, 0])
                             .into()
                         }
-                    } else {
+                    } else if let Some(ref preview) = self.add_repo_preview {
                         // Show README (or placeholder if empty)
                         let readme_is_source = self.readme_source_view;
                         let inner_scrollable: Element<Message> = if preview.readme_items.is_empty() {
@@ -3576,28 +3760,8 @@ impl App {
                                 .style(move |t, s| theme::scrollable_style(&c_form)(t, s))
                                 .into()
                         };
-                        // Source toggle button overlaid at top-right of readme area
-                        let source_label = if readme_is_source { "Formatted" } else { "Source" };
-                        let source_btn = {
-                            let c2 = c_form;
-                            button(text(source_label).size(11))
-                                .on_press(Message::ToggleReadmeSourceView)
-                                .padding([3, 8])
-                                .style(move |_theme, status| match status {
-                                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                                    _ => theme::tab_button_style(&c2),
-                                })
-                        };
-                        let readme_area = column![
-                            container(source_btn)
-                                .width(Length::Fill)
-                                .align_x(iced::Alignment::End)
-                                .padding(iced::Padding { top: 4.0, right: 4.0, bottom: 2.0, left: 4.0 }),
-                            inner_scrollable,
-                        ]
-                        .width(Length::Fill)
-                        .height(Length::Fill);
-                        container(readme_area)
+                        // Wrap the scrollable in a dark card (source toggle now lives on the label row)
+                        container(inner_scrollable)
                         .width(Length::Fill)
                         .height(Length::Fill)
                         .padding(8)
@@ -3608,7 +3772,36 @@ impl App {
                             border: iced::Border {
                                 color: c_form.border,
                                 width: 1.0,
-                                radius: iced::border::Radius::from(6),
+                                radius: iced::border::Radius::from(0),
+                            },
+                            ..Default::default()
+                        })
+                        .into()
+                    } else {
+                        // Loading state: centered spinner so layout stays stable at full size
+                        let tick = self.spinner_tick;
+                        let primary = colors.primary;
+                        container(
+                            column![
+                                canvas(SpinnerCanvas { tick, color: primary }).width(28).height(28),
+                                text("Loading\u{2026}").size(15).color(colors.muted),
+                            ]
+                            .spacing(12)
+                            .align_x(iced::Alignment::Center)
+                        )
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::Alignment::Center)
+                        .align_y(iced::Alignment::Center)
+                        .padding([12, 8])
+                        .style(move |_t| container::Style {
+                            background: Some(iced::Background::Color(
+                                iced::Color::from_rgba(0.0, 0.0, 0.0, 0.38)
+                            )),
+                            border: iced::Border {
+                                color: c_form.border,
+                                width: 1.0,
+                                radius: iced::border::Radius::from(0),
                             },
                             ..Default::default()
                         })
@@ -3627,6 +3820,7 @@ impl App {
                             rule::horizontal(1).style(move |_t| theme::update_line_style(&c_form)),
                             text(url_label).size(12).color(colors.text),
                             url_row,
+                            Space::new().height(4),
                             content_label,
                             // Scrollable content fills remaining space
                             scrollable_content,
@@ -3823,14 +4017,23 @@ impl App {
                                 button::Status::Hovered => theme::tab_button_hovered_style(&c),
                                 _ => theme::tab_button_style(&c),
                             }),
-                        button(text("Remove").size(13).color(c.bad))
-                            .on_press(Message::RemoveRepoConfirm(rid, rf))
-                            .padding([6, 12])
-                            .style(move |_theme, _status| {
-                                let mut s = theme::tab_button_style(&c);
-                                s.border.color = c.bad;
-                                s
-                            }),
+                        {
+                            let c2 = c;
+                            let rm_tip = if rf { "Remove and delete local files" } else { "Stop tracking this repository" };
+                            tip(
+                                button(text("Remove").size(13).color(c.bad))
+                                    .on_press(Message::RemoveRepoConfirm(rid, rf))
+                                    .padding([6, 12])
+                                    .style(move |_theme, _status| {
+                                        let mut s = theme::tab_button_style(&c2);
+                                        s.border.color = c2.bad;
+                                        s
+                                    }),
+                                rm_tip,
+                                iced::widget::tooltip::Position::Top,
+                                colors,
+                            )
+                        },
                     ]
                     .spacing(8),
                 ]
@@ -4001,13 +4204,21 @@ impl App {
                             .on_input(|s| Message::UpdateInstanceField(InstanceField::WowDir(s)))
                             .width(Length::Fill)
                             .padding([8, 12]),
-                        button(text("Browse").size(12))
-                            .on_press(Message::PickWowDirectory)
-                            .padding([8, 12])
-                            .style(move |_t, s| match s {
-                                button::Status::Hovered => theme::tab_button_hovered_style(&c),
-                                _ => theme::tab_button_style(&c),
-                            }),
+                        {
+                            let c2 = c;
+                            tip(
+                                button(text("Browse").size(12))
+                                    .on_press(Message::PickWowDirectory)
+                                    .padding([8, 12])
+                                    .style(move |_t, s| match s {
+                                        button::Status::Hovered => theme::tab_button_hovered_style(&c2),
+                                        _ => theme::tab_button_style(&c2),
+                                    }),
+                                "Pick the WoW installation folder",
+                                iced::widget::tooltip::Position::Top,
+                                colors,
+                            )
+                        },
                     ].spacing(6),
                     iced::widget::checkbox(*clear_wdb)
                         .label("Auto-clear WDB cache on launch")
@@ -4036,22 +4247,22 @@ impl App {
                                     });
                                 iced::widget::tooltip(
                                     dimmed_btn,
-                                    container(text("Cannot remove the active instance").size(11).color(c2.text))
+                                    container(text("Cannot remove the active instance").size(13).color(c2.text))
                                         .padding([4, 8])
                                         .style(move |_theme| theme::tooltip_style(&c2)),
                                     iced::widget::tooltip::Position::Top,
                                 )
                                 .into()
                             } else {
-                                button(text("Remove").size(13).color(c.bad))
+                                let rm_btn = button(text("Remove").size(13).color(c.bad))
                                     .on_press(Message::RemoveProfile(remove_id))
                                     .padding([6, 14])
                                     .style(move |_theme, _status| {
                                         let mut s = theme::tab_button_style(&c2);
                                         s.border.color = c2.bad;
                                         s
-                                    })
-                                    .into()
+                                    });
+                                tip(rm_btn, "Delete this instance profile", iced::widget::tooltip::Position::Top, colors)
                             };
                             footer_items.push(remove_el);
                         }
@@ -4067,11 +4278,15 @@ impl App {
                                 .into(),
                         );
                         footer_items.push(
-                            button(text("Save").size(13))
-                                .on_press(Message::SaveInstanceSettings)
-                                .padding([6, 14])
-                                .style(move |_theme, _status| theme::tab_button_active_style(&c))
-                                .into(),
+                            tip(
+                                button(text("Save").size(13))
+                                    .on_press(Message::SaveInstanceSettings)
+                                    .padding([6, 14])
+                                    .style(move |_theme, _status| theme::tab_button_active_style(&c)),
+                                "Save instance settings",
+                                iced::widget::tooltip::Position::Top,
+                                colors,
+                            ),
                         );
                         row(footer_items).spacing(8)
                     },
@@ -4264,7 +4479,7 @@ impl App {
         if is_icon || tab == Tab::About {
             iced::widget::tooltip(
                 styled_btn,
-                container(text(tab.tooltip()).size(11).color(c.text))
+                container(text(tab.tooltip()).size(13).color(c.text))
                     .padding([3, 8])
                     .style(move |_theme| theme::tooltip_style(&c)),
                 iced::widget::tooltip::Position::Bottom,
@@ -4335,7 +4550,7 @@ impl App {
                 ),
             };
             let tooltip_content = container(
-                text(tooltip_detail).size(11).color(colors.text)
+                text(tooltip_detail).size(13).color(colors.text)
             )
             .padding([6, 10]);
             iced::widget::tooltip(
@@ -4358,7 +4573,6 @@ impl App {
             button::Status::Hovered => theme::play_button_hovered_style(&c),
             _ => theme::play_button_style(&c),
         });
-
         let bar = row![
             hint,
             Space::new().width(Length::Fill),
@@ -4776,6 +4990,21 @@ fn tab_icon_svg(tab: Tab) -> iced::widget::svg::Handle {
         _ => r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"></svg>"#,
     };
     iced::widget::svg::Handle::from_memory(svg.as_bytes().to_vec())
+}
+
+/// Wrap any element in a tooltip with consistent styling.
+fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: iced::widget::tooltip::Position, colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+    let tip_str = String::from(tip_text);
+    iced::widget::tooltip(
+        content,
+        container(text(tip_str).size(13).color(c.text))
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(&c)),
+        pos,
+    )
+    .gap(4.0)
+    .into()
 }
 
 fn close_button<'a>(colors: &ThemeColors) -> Element<'a, Message> {
