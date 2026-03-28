@@ -229,7 +229,7 @@ async function loadSettings() {
   // ---------------------------------------------------------------------------
   let sj = null;
   try {
-    const raw = await safeInvoke("wuddle_load_settings_json");
+    const raw = await safeInvoke("wuddle_load_settings_json", {}, { timeoutMs: 5000 });
     if (raw && typeof raw === "object" && !Array.isArray(raw)) sj = raw;
   } catch (_) {}
 
@@ -762,7 +762,11 @@ if (tableScroller instanceof HTMLElement) {
 // ============================================================================
 
 (async () => {
-  await loadSettings();
+  try {
+    await loadSettings();
+  } catch (e) {
+    console.error("loadSettings failed, falling back to defaults:", e);
+  }
   ensureThemedSelect($("mode"));
   ensureThemedSelect($("instanceSettingsLaunchMethod"));
   renderAddPresets();

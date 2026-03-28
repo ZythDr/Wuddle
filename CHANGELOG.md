@@ -2,6 +2,12 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v2.5.9
+
+### Bug Fixes
+
+- **White screen on startup** — the async settings loader (`loadSettings`) blocked the entire UI boot behind a Tauri IPC call with no timeout. If the backend wasn't ready (common on Linux AppImage where WebKit initializes before Rust), the app hung on a white screen indefinitely. Fixed by adding a 5-second timeout to the IPC call and wrapping the boot sequence in error handling so the UI always renders, falling back to localStorage defaults if `settings.json` can't be read.
+
 ## v2.5.8
 
 ### New Features
