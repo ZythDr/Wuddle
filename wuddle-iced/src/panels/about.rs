@@ -12,28 +12,66 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
 
-    let update_label = app
-        .update_message
-        .as_deref()
-        .unwrap_or("Check for updates");
+    // Header action buttons — varies based on update state
+    let mut header_btns: Vec<Element<Message>> = Vec::new();
+    header_btns.push(btn_tip("Refresh", "Re-check for Wuddle updates", Message::CheckSelfUpdate, &c));
+    header_btns.push(btn_tip("Changelog", "View Wuddle changelog in-app", Message::ShowChangelog, &c));
 
-    // Header
-    let header = row![
-        column![
-            text("About").size(18).color(colors.title),
-            text("Wuddle — Addon & mod manager for Turtle WoW.")
-                .size(12)
-                .color(colors.muted),
+    if app.self_update_done {
+        header_btns.push(action_btn("Restart", Message::RestartAfterUpdate, &c));
+    } else if app.self_update_in_progress {
+        header_btns.push(btn_disabled("Updating\u{2026}", "Downloading and staging update\u{2026}", &c));
+    } else if app.self_update_available {
+        let label = if let Some(ref ver) = app.latest_version {
+            format!("Update to v{}", ver)
+        } else {
+            "Update Wuddle".to_string()
+        };
+        header_btns.push(action_btn(&label, Message::ApplySelfUpdate, &c));
+    } else if !app.self_update_supported && app.update_message.is_some() {
+        header_btns.push(btn_disabled(
+            "Update",
+            app.update_message.as_deref().unwrap_or("In-app updates are not supported for this install type."),
+            &c,
+        ));
+    } else if app.self_update_assets_pending {
+        let label = if let Some(ref ver) = app.latest_version {
+            format!("v{} building\u{2026}", ver)
+        } else {
+            "Update building\u{2026}".to_string()
+        };
+        header_btns.push(btn_disabled(&label, "Release assets are still being built by CI. Click Refresh to check again.", &c));
+    } else if app.latest_version.is_some() && !app.self_update_available {
+        header_btns.push(btn_disabled("Up to date", app.update_message.as_deref().unwrap_or("No newer release detected."), &c));
+    } else if app.update_message.is_some() {
+        // Fallback: version check failed or unknown state
+        header_btns.push(btn_disabled(
+            app.update_message.as_deref().unwrap_or("Check for updates"),
+            "Click Refresh to re-check.",
+            &c,
+        ));
+    } else {
+        header_btns.push(btn_tip("Check for updates", "Check if a newer Wuddle version is available", Message::CheckSelfUpdate, &c));
+    }
+
+    header_btns.push(open_on_github_btn(GITHUB_URL, &c));
+
+    let header = {
+        let mut r = row![
+            column![
+                text("About").size(18).color(colors.title),
+                text("Wuddle — Addon & mod manager for Turtle WoW.")
+                    .size(12)
+                    .color(colors.muted),
+            ]
+            .spacing(2),
+            Space::new().width(Length::Fill),
         ]
-        .spacing(2),
-        Space::new().width(Length::Fill),
-        btn_tip("Refresh", "Re-check for Wuddle updates", Message::CheckSelfUpdate, &c),
-        btn_tip("Changelog", "View Wuddle changelog in-app", Message::ShowChangelog, &c),
-        btn_tip(update_label, "Current update status of Wuddle", Message::CheckSelfUpdate, &c),
-        open_on_github_btn(GITHUB_URL, &c),
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center);
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+        for btn in header_btns { r = r.push(btn); }
+        r
+    };
 
     let latest_display = app.latest_version.as_deref().unwrap_or("\u{2014}");
 
@@ -74,11 +112,20 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         &c,
     );
 
+    // Update info section — mirrors Tauri's status line below the cards
+    let status_color = if app.self_update_assets_pending {
+        colors.warn
+    } else if app.update_message.as_deref().map(|m| m.starts_with("Version check failed")).unwrap_or(false) {
+        colors.bad
+    } else {
+        colors.muted
+    };
+
     let status_text = app
         .update_message
         .as_deref()
         .unwrap_or("Application details loaded.");
-    let status = text(status_text).size(12).color(colors.muted);
+    let status = text(status_text).size(12).color(status_color);
 
     let cards_row = row![app_card, credits_card].spacing(8).width(Length::Fill);
 
@@ -230,6 +277,42 @@ fn open_on_github_btn<'a>(url: &str, colors: &ThemeColors) -> Element<'a, Messag
         container(text("Open the Wuddle repository on GitHub").size(11).color(c.text))
             .padding([3, 8])
             .style(move |_theme| theme::tooltip_style(&c)),
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+fn action_btn<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+    button(text(String::from(label)).size(13).color(iced::Color::WHITE))
+        .on_press(msg)
+        .padding([6, 14])
+        .style(move |_theme, _status| iced::widget::button::Style {
+            background: Some(iced::Background::Color(c.primary)),
+            text_color: iced::Color::WHITE,
+            border: iced::Border { radius: 6.0.into(), ..Default::default() },
+            shadow: iced::Shadow::default(),
+            snap: true,
+        })
+        .into()
+}
+
+fn btn_disabled<'a>(label: &str, tip: &str, colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+    let tip_str = String::from(tip);
+    let btn_container = container(text(String::from(label)).size(13).color(c.muted))
+        .padding([6, 14])
+        .style(move |_t| container::Style {
+            background: Some(iced::Background::Color(c.card)),
+            border: iced::Border { radius: 6.0.into(), color: c.border, width: 1.0 },
+            ..Default::default()
+        });
+    tooltip(
+        btn_container,
+        container(text(tip_str).size(11).color(c.text))
+            .max_width(300)
+            .padding([3, 8])
+            .style(move |_theme| crate::theme::tooltip_style(&c)),
         tooltip::Position::Bottom,
     )
     .into()

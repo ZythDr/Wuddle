@@ -1627,46 +1627,6 @@ pub async fn fetch_changelog() -> Result<String, String> {
     }
 }
 
-/// Check for the latest Wuddle release.
-/// `beta_channel`: when true, fetches all releases (including pre-releases) and
-/// returns the newest tag; when false, fetches `/releases/latest` which GitHub
-/// guarantees is the most recent non-pre-release.
-pub async fn check_self_update(beta_channel: bool) -> Result<String, String> {
-    #[derive(Deserialize)]
-    struct GhRelease { tag_name: String }
-
-    let client = Client::builder()
-        .user_agent(concat!("wuddle/", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let url = if beta_channel { WUDDLE_RELEASE_API_ALL } else { WUDDLE_RELEASE_API_LATEST };
-
-    let resp = tokio::time::timeout(
-        Duration::from_secs(12),
-        client.get(url).header("Accept", "application/vnd.github+json").send(),
-    )
-    .await
-    .map_err(|_| "Timed out checking for updates".to_string())?
-    .map_err(|e| e.to_string())?;
-
-    if !resp.status().is_success() {
-        return Err(format!("GitHub API error: HTTP {}", resp.status()));
-    }
-
-    if beta_channel {
-        // Returns an array; GitHub sorts by created_at desc so the first entry is newest.
-        let releases: Vec<GhRelease> = resp.json().await.map_err(|e| e.to_string())?;
-        releases.into_iter().next()
-            .map(|r| r.tag_name)
-            .ok_or_else(|| "No releases found".to_string())
-    } else {
-        let release: GhRelease = resp.json().await.map_err(|e| e.to_string())?;
-        Ok(release.tag_name)
-    }
-}
-
 /// Write the generated dxvk.conf content to the given path.
 pub async fn save_dxvk_conf(path: std::path::PathBuf, content: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
@@ -1674,4 +1634,371 @@ pub async fn save_dxvk_conf(path: std::path::PathBuf, content: String) -> Result
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
+// Self-update: download, apply, restart
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct SelfUpdateStatus {
+    pub supported: bool,
+    pub update_available: bool,
+    pub assets_pending: bool,
+    pub latest_version: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhReleaseFull {
+    tag_name: String,
+    assets: Vec<GhReleaseAsset>,
+}
+
+fn normalize_tag(raw: &str) -> String {
+    raw.trim().trim_start_matches(['v', 'V']).trim().to_string()
+}
+
+fn parse_version_key(raw: &str) -> Vec<u64> {
+    normalize_tag(raw)
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<u64>().ok())
+        .collect()
+}
+
+fn is_version_newer(latest: &str, current: &str) -> bool {
+    let a = parse_version_key(latest);
+    let b = parse_version_key(current);
+    let max = a.len().max(b.len());
+    for i in 0..max {
+        let av = *a.get(i).unwrap_or(&0);
+        let bv = *b.get(i).unwrap_or(&0);
+        if av > bv { return true; }
+        if av < bv { return false; }
+    }
+    normalize_tag(latest) != normalize_tag(current)
+}
+
+async fn fetch_release_full(beta_channel: bool) -> Result<GhReleaseFull, String> {
+    let url = if beta_channel { WUDDLE_RELEASE_API_ALL } else { WUDDLE_RELEASE_API_LATEST };
+    let client = Client::builder()
+        .user_agent(concat!("wuddle/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = tokio::time::timeout(
+        Duration::from_secs(25),
+        client.get(url).header("Accept", "application/vnd.github+json").send(),
+    )
+    .await
+    .map_err(|_| "Timed out fetching release".to_string())?
+    .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API error: HTTP {}", resp.status()));
+    }
+
+    if beta_channel {
+        let releases: Vec<GhReleaseFull> = resp.json().await.map_err(|e| e.to_string())?;
+        releases.into_iter().next().ok_or_else(|| "No releases found".to_string())
+    } else {
+        resp.json().await.map_err(|e| e.to_string())
+    }
+}
+
+async fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let client = Client::builder()
+        .user_agent(concat!("wuddle/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .get(url)
+        .header("Accept", "application/octet-stream")
+        .send()
+        .await
+        .map_err(|e| format!("download: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("download HTTP {}", resp.status()));
+    }
+    resp.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+}
+
+/// Check whether self-update is supported and whether an update is available.
+pub async fn check_self_update_full(beta_channel: bool) -> Result<SelfUpdateStatus, String> {
+    let current = env!("CARGO_PKG_VERSION");
+    let supported = is_self_update_supported();
+
+    let release = match fetch_release_full(beta_channel).await {
+        Ok(r) => r,
+        Err(e) => return Ok(SelfUpdateStatus {
+            supported,
+            update_available: false,
+            assets_pending: false,
+            latest_version: None,
+            message: format!("Version check failed: {}", e),
+        }),
+    };
+
+    let latest = normalize_tag(&release.tag_name);
+    let newer = !latest.is_empty() && is_version_newer(&latest, current);
+    let has_asset = newer && pick_platform_asset(&release).is_some();
+
+    let message = if !supported {
+        format!("v{} — self-update not supported for this install type", latest)
+    } else if newer && !has_asset {
+        format!("v{} available but assets still building — try again shortly", latest)
+    } else if newer {
+        format!("Update available: v{}", latest)
+    } else {
+        "Up to date".to_string()
+    };
+
+    let assets_pending = newer && !has_asset;
+
+    Ok(SelfUpdateStatus {
+        supported,
+        update_available: has_asset && supported,
+        assets_pending,
+        latest_version: if latest.is_empty() { None } else { Some(latest) },
+        message,
+    })
+}
+
+fn is_self_update_supported() -> bool {
+    #[cfg(target_os = "linux")]
+    { return is_appimage().is_some(); }
+    #[cfg(target_os = "windows")]
+    { return detect_launcher_root().map(|r| r.1).unwrap_or(false); }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    { return false; }
+}
+
+fn pick_platform_asset(release: &GhReleaseFull) -> Option<&GhReleaseAsset> {
+    #[cfg(target_os = "linux")]
+    {
+        release.assets.iter().find(|a| {
+            let lower = a.name.to_ascii_lowercase();
+            lower.ends_with(".appimage")
+        })
+    }
+    #[cfg(target_os = "windows")]
+    {
+        release.assets.iter().find(|a| {
+            let lower = a.name.to_ascii_lowercase();
+            lower.contains("windows") && lower.ends_with(".zip")
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    { None }
+}
+
+/// Download and apply the latest release. Returns a status message.
+pub async fn apply_self_update(beta_channel: bool) -> Result<String, String> {
+    let current = env!("CARGO_PKG_VERSION");
+    let release = fetch_release_full(beta_channel).await?;
+    let latest = normalize_tag(&release.tag_name);
+
+    if latest.is_empty() {
+        return Err("Latest release tag is empty".to_string());
+    }
+    if !is_version_newer(&latest, current) {
+        return Ok(format!("Already up to date (v{}).", current));
+    }
+
+    let asset = pick_platform_asset(&release)
+        .ok_or_else(|| "No compatible asset found in release".to_string())?;
+    let url = asset.browser_download_url.clone();
+    let asset_name = asset.name.clone();
+
+    let bytes = download_bytes(&url).await?;
+
+    // Apply in a blocking task (filesystem I/O)
+    let latest_clone = latest.clone();
+    tokio::task::spawn_blocking(move || {
+        apply_downloaded_update(&bytes, &asset_name, &latest_clone)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn apply_downloaded_update(bytes: &[u8], _asset_name: &str, latest: &str) -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let appimage_path = is_appimage()
+            .ok_or_else(|| "Not running as AppImage; self-update unavailable.".to_string())?;
+
+        // Clean up stale temp files
+        if let Some(parent) = appimage_path.parent() {
+            if let Some(stem) = appimage_path.file_stem().and_then(|s| s.to_str()) {
+                if let Ok(entries) = std::fs::read_dir(parent) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        if name.starts_with(stem) && name.contains(".tmp-") {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let tmp_path = appimage_path.with_extension(format!("tmp-{}", stamp));
+
+        std::fs::write(&tmp_path, bytes)
+            .map_err(|e| format!("Failed to write temp file: {e}"))?;
+
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("Failed to chmod: {e}"))?;
+
+        std::fs::rename(&tmp_path, &appimage_path)
+            .map_err(|e| format!("Failed to replace AppImage: {e}"))?;
+
+        Ok(format!("Updated to v{}. Restart to apply.", latest))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let (root, launcher_layout) = detect_launcher_root()
+            .map_err(|e| format!("Cannot detect install layout: {e}"))?;
+        if !launcher_layout {
+            return Err("Launcher layout not detected. Install the latest portable package once to enable in-app updates.".to_string());
+        }
+
+        // Extract Wuddle-bin.exe from the zip into versions/<tag>/
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor)
+            .map_err(|e| format!("Failed to open zip: {e}"))?;
+
+        let sanitized = sanitize_version_name(latest);
+        let version_dir = root.join("versions").join(&sanitized);
+        std::fs::create_dir_all(&version_dir).map_err(|e| e.to_string())?;
+
+        let mut found_runtime = false;
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
+            if file.is_dir() { continue; }
+            let name = file.name().replace('\\', "/");
+            let lower = name.to_ascii_lowercase();
+            if lower.ends_with("/wuddle-bin.exe") || lower == "wuddle-bin.exe" {
+                let target = version_dir.join("Wuddle-bin.exe");
+                let mut out = std::fs::File::create(&target).map_err(|e| e.to_string())?;
+                std::io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
+                found_runtime = true;
+                break;
+            }
+        }
+        if !found_runtime {
+            return Err("Wuddle-bin.exe not found in update zip".to_string());
+        }
+
+        // Update current.json
+        let current_json = serde_json::json!({ "current": format!("v{}", sanitized) });
+        std::fs::write(root.join("current.json"), current_json.to_string().as_bytes())
+            .map_err(|e| format!("Failed to write current.json: {e}"))?;
+
+        Ok(format!("Staged v{}. Restart to apply.", latest))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (bytes, _asset_name, latest);
+        Err("Self-update not supported on this platform".to_string())
+    }
+}
+
+/// Restart the application after a successful update.
+pub fn restart_app() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let appimage_path = is_appimage()
+            .ok_or_else(|| "Not running as AppImage; cannot restart.".to_string())?;
+        Command::new(&appimage_path)
+            .spawn()
+            .map_err(|e| format!("Failed to relaunch: {e}"))?;
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::process::exit(0);
+        });
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let (root, _) = detect_launcher_root()
+            .map_err(|e| format!("Cannot detect launcher: {e}"))?;
+        let launcher = root.join("Wuddle.exe");
+        if !launcher.is_file() {
+            return Err(format!("Launcher not found at {}", launcher.display()));
+        }
+        Command::new(&launcher)
+            .current_dir(&root)
+            .spawn()
+            .map_err(|e| format!("Failed to relaunch: {e}"))?;
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::process::exit(0);
+        });
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Err("Restart not supported on this platform".to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_appimage() -> Option<PathBuf> {
+    let path = std::env::var("APPIMAGE").ok()?;
+    let p = PathBuf::from(path);
+    if p.is_file() { Some(p) } else { None }
+}
+
+#[cfg(target_os = "windows")]
+fn detect_launcher_root() -> Result<(PathBuf, bool), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // Walk up to find the root that contains Wuddle.exe (launcher) and versions/
+    let mut dir = exe.parent().map(|p| p.to_path_buf());
+    for _ in 0..4 {
+        if let Some(ref d) = dir {
+            let launcher = d.join("Wuddle.exe");
+            let versions = d.join("versions");
+            if launcher.is_file() && versions.is_dir() {
+                return Ok((d.clone(), true));
+            }
+            dir = d.parent().map(|p| p.to_path_buf());
+        } else {
+            break;
+        }
+    }
+    // No launcher layout found
+    let root = exe.parent().unwrap_or(Path::new(".")).to_path_buf();
+    Ok((root, false))
+}
+
+#[cfg(target_os = "windows")]
+fn sanitize_version_name(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+            out.push(ch);
+        }
+    }
+    if out.is_empty() { "latest".to_string() } else { out }
 }

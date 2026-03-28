@@ -24,6 +24,18 @@ All notable changes to Wuddle are documented in this file.
 - **DLL count tracking** — `UpdatePlan` now carries `previous_dll_count` and `new_dll_count` for detecting file count mismatches between releases.
 - **DB schema v7** — adds `merge_installs` and `pinned_version` columns to the `repos` table (backwards-compatible additive migration).
 
+## v3.0.0-beta.3 (Iced frontend)
+
+### New Features
+
+- **Self-update** — Wuddle can now download and apply updates in-place, then restart under the new version. Supports Linux AppImage (replace-in-place + re-exec) and Windows portable launcher layout (versioned `Wuddle-bin.exe` + `current.json`).
+- **In-app toast notifications** — floating banner notifications at the bottom of the window for key events: update checks, repo add/remove/update, clipboard, tweaks, self-update progress, and errors. Auto-dismiss after ~5 seconds (8 seconds for errors), manual dismiss via ✕ button. Matches the Tauri `showToast()` system.
+- **About panel update button states** — the Update button now reflects all possible states: "Update to vX.Y.Z" (primary, clickable), "Updating…" (disabled during download), "Up to date" (dimmed), "Update" (dimmed with tooltip when unsupported), "vX.Y.Z building…" (dimmed when CI assets pending), and "Restart" (after download completes). Status line below the cards shows color-coded update info.
+
+### Changes
+
+- **Windows `zip` dependency** — added `zip = "2"` (Windows-only) for extracting portable update archives.
+
 ## v3.0.0-beta.2 (Iced frontend)
 
 ### New Features

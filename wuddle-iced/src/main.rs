@@ -395,6 +395,22 @@ pub enum Dialog {
 }
 
 // ---------------------------------------------------------------------------
+// Toast notifications
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind { Info, Warn, Error }
+
+#[derive(Debug, Clone)]
+pub struct Toast {
+    pub id: usize,
+    pub message: String,
+    pub kind: ToastKind,
+    /// Remaining ticks before auto-dismiss (one tick = 80ms spinner period).
+    pub ttl: usize,
+}
+
+// ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
 
@@ -471,9 +487,14 @@ pub struct App {
     // Tweak values
     pub tweak_values: TweakValues,
 
-    // About
+    // About / self-update
     pub latest_version: Option<String>,
     pub update_message: Option<String>,
+    pub self_update_supported: bool,
+    pub self_update_available: bool,
+    pub self_update_assets_pending: bool,
+    pub self_update_in_progress: bool,
+    pub self_update_done: bool,
 
     // Auto-check
     pub auto_check_minutes: u32,
@@ -496,6 +517,10 @@ pub struct App {
     // Add-repo release notes (fetched on demand)
     pub add_repo_release_notes: Option<Vec<service::ReleaseItem>>,
     pub add_repo_show_releases: bool,
+
+    // Toast notifications
+    pub toasts: Vec<Toast>,
+    pub toast_counter: usize,
 
     // Repos whose updates are being ignored
     pub ignored_update_ids: HashSet<i64>,
@@ -606,6 +631,9 @@ pub enum Message {
     ToggleLogErrorMisc(bool),
     ClearLogs,
 
+    // Toast notifications
+    DismissToast(usize),
+
     // Dialogs
     OpenDialog(Dialog),
     CloseDialog,
@@ -703,7 +731,10 @@ pub enum Message {
 
     // About
     CheckSelfUpdate,
-    CheckSelfUpdateResult(Result<String, String>),
+    CheckSelfUpdateResult(Result<service::SelfUpdateStatus, String>),
+    ApplySelfUpdate,
+    ApplySelfUpdateResult(Result<String, String>),
+    RestartAfterUpdate,
     ShowChangelog,
     ChangelogLoaded(Result<String, String>),
 
@@ -1030,6 +1061,11 @@ impl App {
             tweak_values: TweakValues::default(),
             latest_version: None,
             update_message: None,
+            self_update_supported: false,
+            self_update_available: false,
+            self_update_assets_pending: false,
+            self_update_in_progress: false,
+            self_update_done: false,
             auto_check_minutes: 60,
             profiles: vec![settings::ProfileConfig::default()],
             spinner_tick: 0,
@@ -1040,6 +1076,8 @@ impl App {
             add_repo_file_preview: None,
             add_repo_release_notes: None,
             add_repo_show_releases: false,
+            toasts: Vec::new(),
+            toast_counter: 0,
             ignored_update_ids: HashSet::new(),
             repo_versions: HashMap::new(),
             repo_versions_loading: HashSet::new(),
@@ -1072,6 +1110,25 @@ impl App {
             timestamp: chrono_now_fmt(self.opt_clock12),
         });
         self.rebuild_log_content();
+    }
+
+    fn show_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
+        self.toast_counter += 1;
+        // ~5 seconds at 80ms per tick = 63 ticks
+        let ttl = match kind {
+            ToastKind::Error => 100, // ~8 seconds
+            _ => 63,
+        };
+        self.toasts.push(Toast {
+            id: self.toast_counter,
+            message: message.into(),
+            kind,
+            ttl,
+        });
+        // Keep max 5 toasts
+        while self.toasts.len() > 5 {
+            self.toasts.remove(0);
+        }
     }
 
     fn refresh_repos_task(&self) -> Task<Message> {
@@ -1183,7 +1240,7 @@ impl App {
             );
         }
 
-        if self.is_busy() {
+        if self.is_busy() || !self.toasts.is_empty() {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(80))
                     .map(|_| Message::SpinnerTick),
@@ -1246,7 +1303,7 @@ impl App {
                 self.active_tab = tab;
                 // Fire self-update check whenever the About tab becomes active
                 if tab == Tab::About {
-                    return Task::perform(service::check_self_update(self.update_channel == UpdateChannel::Beta), Message::CheckSelfUpdateResult);
+                    return Task::perform(service::check_self_update_full(self.update_channel == UpdateChannel::Beta), Message::CheckSelfUpdateResult);
                 }
             }
             Message::SetTheme(theme) => {
@@ -1524,7 +1581,7 @@ impl App {
                             tasks.push(self.check_updates_task());
                         }
                         // Always fire self-update check on launch
-                        tasks.push(Task::perform(service::check_self_update(self.update_channel == UpdateChannel::Beta), Message::CheckSelfUpdateResult));
+                        tasks.push(Task::perform(service::check_self_update_full(self.update_channel == UpdateChannel::Beta), Message::CheckSelfUpdateResult));
                         if !tasks.is_empty() {
                             return Task::batch(tasks);
                         }
@@ -1563,6 +1620,14 @@ impl App {
                             }
                         }
                         self.log(LogLevel::Info, &format!("Update check complete. {} updates available.", update_count));
+                        if update_count > 0 {
+                            self.show_toast(
+                                format!("{} update{} available.", update_count, if update_count == 1 { "" } else { "s" }),
+                                ToastKind::Info,
+                            );
+                        } else {
+                            self.show_toast("No updates available.", ToastKind::Info);
+                        }
                         self.plans = plans;
                         self.last_checked = Some(chrono_now_fmt(self.opt_clock12));
                         self.cached_plans.insert(
@@ -1601,6 +1666,7 @@ impl App {
                     Err(e) => {
                         self.error = Some(e.clone());
                         self.log(LogLevel::Error, &format!("Update check failed: {}", e));
+                        self.show_toast(format!("Update check failed: {}", e), ToastKind::Error);
                     }
                 }
             }
@@ -1642,6 +1708,7 @@ impl App {
                 match result {
                     Ok(id) => {
                         self.log(LogLevel::Info, &format!("Repo added (id={}).", id));
+                        self.show_toast("Repo added successfully.", ToastKind::Info);
                         // Auto-install mirrors Tauri: update first, reinstall if update
                         // returns None (engine has nothing to fetch but files aren't on disk).
                         // Do NOT run refresh_repos_task concurrently — prune_missing_repos
@@ -1663,6 +1730,7 @@ impl App {
                     }
                     Err(e) => {
                         self.log(LogLevel::Error, &format!("Add repo failed: {}", e));
+                        self.show_toast(format!("Add repo failed: {}", e), ToastKind::Error);
                         self.error = Some(e);
                     }
                 }
@@ -1694,9 +1762,13 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.log(LogLevel::Info, "Repo removed.");
+                        self.show_toast("Repo removed.", ToastKind::Info);
                         return self.refresh_repos_task();
                     }
-                    Err(e) => self.log(LogLevel::Error, &format!("Remove failed: {}", e)),
+                    Err(e) => {
+                        self.log(LogLevel::Error, &format!("Remove failed: {}", e));
+                        self.show_toast(format!("Remove failed: {}", e), ToastKind::Error);
+                    }
                 }
             }
             Message::ToggleIgnoreUpdates(id) => {
@@ -1865,12 +1937,17 @@ impl App {
                         }
                         if failed > 0 {
                             self.log(LogLevel::Error, &format!("Done. Updated {} repo(s); {} failed.", applied, failed));
+                            self.show_toast(format!("Updated {}; {} failed.", applied, failed), ToastKind::Warn);
                         } else {
                             self.log(LogLevel::Info, &format!("Done. Updated {} repo(s).", applied));
+                            self.show_toast(format!("Updated {} repo(s).", applied), ToastKind::Info);
                         }
                         return self.refresh_repos_task();
                     }
-                    Err(e) => self.log(LogLevel::Error, &format!("Update all failed: {}", e)),
+                    Err(e) => {
+                        self.log(LogLevel::Error, &format!("Update all failed: {}", e));
+                        self.show_toast(format!("Update all failed: {}", e), ToastKind::Error);
+                    }
                 }
             }
             Message::UpdateRepo(id) => {
@@ -1915,10 +1992,15 @@ impl App {
                 match result {
                     Ok(Some(plan)) => {
                         self.updating_repo_ids.remove(&plan.repo_id);
-                        self.log(LogLevel::Info, &format!("Updated {}/{}.", plan.owner, plan.name));
+                        let name = format!("{}/{}", plan.owner, plan.name);
+                        self.log(LogLevel::Info, &format!("Updated {}.", name));
+                        self.show_toast(format!("Updated {}.", name), ToastKind::Info);
                     }
                     Ok(None) => self.log(LogLevel::Info, "Repo already up to date."),
-                    Err(e) => self.log(LogLevel::Error, &format!("Update failed: {}", e)),
+                    Err(e) => {
+                        self.log(LogLevel::Error, &format!("Update failed: {}", e));
+                        self.show_toast(format!("Update failed: {}", e), ToastKind::Error);
+                    }
                 }
                 return self.refresh_repos_task();
             }
@@ -2010,8 +2092,14 @@ impl App {
             }
             Message::CopyToClipboard(text_val) => {
                 match copy_to_clipboard(&text_val) {
-                    Ok(()) => self.log(LogLevel::Info, "Copied to clipboard."),
-                    Err(e) => self.log(LogLevel::Error, &format!("Clipboard error: {}", e)),
+                    Ok(()) => {
+                        self.log(LogLevel::Info, "Copied to clipboard.");
+                        self.show_toast("Copied to clipboard.", ToastKind::Info);
+                    }
+                    Err(e) => {
+                        self.log(LogLevel::Error, &format!("Clipboard error: {}", e));
+                        self.show_toast(format!("Clipboard error: {}", e), ToastKind::Error);
+                    }
                 }
             }
             Message::LaunchGame => {
@@ -2044,7 +2132,10 @@ impl App {
             Message::LaunchGameResult(result) => {
                 match result {
                     Ok(msg) => self.log(LogLevel::Info, &msg),
-                    Err(e) => self.log(LogLevel::Error, &format!("Launch failed: {}", e)),
+                    Err(e) => {
+                        self.log(LogLevel::Error, &format!("Launch failed: {}", e));
+                        self.show_toast(format!("Launch failed: {}", e), ToastKind::Error);
+                    }
                 }
             }
 
@@ -2066,8 +2157,12 @@ impl App {
                     Ok(()) => {
                         self.github_token_input.clear();
                         self.log(LogLevel::Info, "GitHub token saved.");
+                        self.show_toast("GitHub token saved.", ToastKind::Info);
                     }
-                    Err(e) => self.log(LogLevel::Error, &format!("Save token failed: {}", e)),
+                    Err(e) => {
+                        self.log(LogLevel::Error, &format!("Save token failed: {}", e));
+                        self.show_toast(format!("Save token failed: {}", e), ToastKind::Error);
+                    }
                 }
             }
             Message::ForgetGithubToken => {
@@ -2079,8 +2174,14 @@ impl App {
             }
             Message::ForgetGithubTokenResult(result) => {
                 match result {
-                    Ok(()) => self.log(LogLevel::Info, "GitHub token cleared."),
-                    Err(e) => self.log(LogLevel::Error, &format!("Clear token failed: {}", e)),
+                    Ok(()) => {
+                        self.log(LogLevel::Info, "GitHub token cleared.");
+                        self.show_toast("GitHub token cleared.", ToastKind::Info);
+                    }
+                    Err(e) => {
+                        self.log(LogLevel::Error, &format!("Clear token failed: {}", e));
+                        self.show_toast(format!("Clear token failed: {}", e), ToastKind::Error);
+                    }
                 }
             }
 
@@ -2373,8 +2474,12 @@ impl App {
                         self.tweaks.large_address = vals.large_address_aware;
                         self.tweaks.camera_skip = vals.camera_skip_fix;
                         self.log(LogLevel::Info, "Tweak values read from WoW.exe.");
+                        self.show_toast("Tweak values read from WoW.exe.", ToastKind::Info);
                     }
-                    Err(e) => self.log(LogLevel::Error, &format!("Read tweaks failed: {}", e)),
+                    Err(e) => {
+                        self.log(LogLevel::Error, &format!("Read tweaks failed: {}", e));
+                        self.show_toast(format!("Read tweaks failed: {}", e), ToastKind::Error);
+                    }
                 }
             }
             Message::ApplyTweaks => {
@@ -2402,8 +2507,14 @@ impl App {
             }
             Message::ApplyTweaksResult(result) => {
                 match result {
-                    Ok(msg) => self.log(LogLevel::Info, &msg),
-                    Err(e) => self.log(LogLevel::Error, &format!("Apply tweaks failed: {}", e)),
+                    Ok(msg) => {
+                        self.log(LogLevel::Info, &msg);
+                        self.show_toast("Tweaks applied successfully.", ToastKind::Info);
+                    }
+                    Err(e) => {
+                        self.log(LogLevel::Error, &format!("Apply tweaks failed: {}", e));
+                        self.show_toast(format!("Apply tweaks failed: {}", e), ToastKind::Error);
+                    }
                 }
             }
             Message::RestoreTweaks => {
@@ -2417,30 +2528,76 @@ impl App {
             }
             Message::RestoreTweaksResult(result) => {
                 match result {
-                    Ok(msg) => self.log(LogLevel::Info, &msg),
-                    Err(e) => self.log(LogLevel::Error, &format!("Restore tweaks failed: {}", e)),
+                    Ok(msg) => {
+                        self.log(LogLevel::Info, &msg);
+                        self.show_toast("WoW.exe restored from backup.", ToastKind::Info);
+                    }
+                    Err(e) => {
+                        self.log(LogLevel::Error, &format!("Restore tweaks failed: {}", e));
+                        self.show_toast(format!("Restore failed: {}", e), ToastKind::Error);
+                    }
                 }
             }
 
             // --- About ---
             Message::CheckSelfUpdate => {
                 self.log(LogLevel::Info, "Checking for Wuddle updates...");
-                return Task::perform(service::check_self_update(self.update_channel == UpdateChannel::Beta), Message::CheckSelfUpdateResult);
+                return Task::perform(service::check_self_update_full(self.update_channel == UpdateChannel::Beta), Message::CheckSelfUpdateResult);
             }
             Message::CheckSelfUpdateResult(result) => {
                 match result {
-                    Ok(latest) => {
-                        let current = env!("CARGO_PKG_VERSION");
-                        let msg = if latest == current || latest.trim_start_matches('v') == current {
-                            "Up to date".to_string()
-                        } else {
-                            format!("Update available: v{}", latest.trim_start_matches('v'))
-                        };
-                        self.latest_version = Some(latest.trim_start_matches('v').to_string());
-                        self.update_message = Some(msg.clone());
-                        self.log(LogLevel::Info, &format!("Version check: {}", msg));
+                    Ok(status) => {
+                        self.self_update_supported = status.supported;
+                        self.self_update_available = status.update_available;
+                        self.self_update_assets_pending = status.assets_pending;
+                        self.latest_version = status.latest_version;
+                        self.update_message = Some(status.message.clone());
+                        self.log(LogLevel::Info, &format!("Version check: {}", status.message));
+                        if status.update_available {
+                            let ver = self.latest_version.as_deref().unwrap_or("new version");
+                            self.show_toast(format!("Wuddle {} is available.", ver), ToastKind::Info);
+                        }
                     }
-                    Err(e) => self.log(LogLevel::Error, &format!("Version check failed: {}", e)),
+                    Err(e) => {
+                        self.log(LogLevel::Error, &format!("Version check failed: {}", e));
+                        self.show_toast(format!("Version check failed: {}", e), ToastKind::Error);
+                    }
+                }
+            }
+            Message::ApplySelfUpdate => {
+                if self.self_update_in_progress { return Task::none(); }
+                self.self_update_in_progress = true;
+                self.update_message = Some("Downloading update...".to_string());
+                self.log(LogLevel::Info, "Downloading Wuddle update...");
+                let beta = self.update_channel == UpdateChannel::Beta;
+                return Task::perform(
+                    service::apply_self_update(beta),
+                    Message::ApplySelfUpdateResult,
+                );
+            }
+            Message::ApplySelfUpdateResult(result) => {
+                self.self_update_in_progress = false;
+                match result {
+                    Ok(msg) => {
+                        self.self_update_done = true;
+                        self.self_update_available = false;
+                        self.update_message = Some(msg.clone());
+                        self.log(LogLevel::Info, &msg);
+                        self.show_toast("Update downloaded — restart to apply.", ToastKind::Info);
+                    }
+                    Err(e) => {
+                        self.update_message = Some(format!("Update failed: {}", e));
+                        self.log(LogLevel::Error, &format!("Self-update failed: {}", e));
+                        self.show_toast(format!("Self-update failed: {}", e), ToastKind::Error);
+                    }
+                }
+            }
+            Message::RestartAfterUpdate => {
+                self.log(LogLevel::Info, "Restarting Wuddle...");
+                if let Err(e) = service::restart_app() {
+                    self.log(LogLevel::Error, &format!("Restart failed: {}", e));
+                    self.update_message = Some(format!("Restart failed: {}", e));
+                    self.show_toast(format!("Restart failed: {}", e), ToastKind::Error);
                 }
             }
             Message::ShowChangelog => {
@@ -2577,6 +2734,12 @@ impl App {
             // --- Spinner tick ---
             Message::SpinnerTick => {
                 self.spinner_tick = (self.spinner_tick + 1) % 36;
+                // Auto-dismiss toasts
+                for t in &mut self.toasts { t.ttl = t.ttl.saturating_sub(1); }
+                self.toasts.retain(|t| t.ttl > 0);
+            }
+            Message::DismissToast(id) => {
+                self.toasts.retain(|t| t.id != id);
             }
 
             // --- Auto-check tick ---
@@ -2735,13 +2898,93 @@ impl App {
                     .height(Length::Fill),
             );
 
-            stack![main_content, overlay]
+            let base: Element<Message> = stack![main_content, overlay]
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .into()
+                .into();
+            self.layer_toasts(base, &colors)
         } else {
-            main_content
+            self.layer_toasts(main_content, &colors)
         }
+    }
+
+    /// Renders the toast notification overlay on top of the given base element.
+    fn layer_toasts<'a>(&'a self, base: Element<'a, Message>, colors: &ThemeColors) -> Element<'a, Message> {
+        if self.toasts.is_empty() {
+            return base;
+        }
+        let c = *colors;
+
+        let toast_items: Vec<Element<Message>> = self.toasts.iter().map(|t| {
+            let accent = match t.kind {
+                ToastKind::Info => c.primary,
+                ToastKind::Warn => c.warn,
+                ToastKind::Error => c.bad,
+            };
+            let id = t.id;
+
+            let dismiss_btn = button(
+                text("\u{2715}").size(12).color(c.muted)   // ✕
+            )
+            .on_press(Message::DismissToast(id))
+            .padding([2, 6])
+            .style(move |_theme, _status| button::Style {
+                background: None,
+                text_color: c.muted,
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+                snap: true,
+            });
+
+            let toast_row = row![
+                text(t.message.clone()).size(13).color(c.text),
+                Space::new().width(Length::Fill),
+                dismiss_btn,
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+
+            let accent_color = accent;
+            container(toast_row)
+                .padding([8, 12])
+                .width(Length::Fill)
+                .style(move |_theme| container::Style {
+                    background: Some(iced::Background::Color(c.card)),
+                    border: iced::Border {
+                        radius: 4.0.into(),
+                        width: 1.0,
+                        color: accent_color,
+                    },
+                    shadow: iced::Shadow {
+                        color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+                        offset: iced::Vector::new(0.0, 4.0),
+                        blur_radius: 12.0,
+                    },
+                    text_color: None,
+                    snap: true,
+                })
+                .into()
+        }).collect();
+
+        let toast_col = column(toast_items)
+            .spacing(6)
+            .width(480);
+
+        // Position at bottom-center, above the footer (~86px from bottom)
+        let toast_overlay = container(
+            container(toast_col)
+                .center_x(Length::Fill)
+                .width(Length::Fill)
+                .align_bottom(Length::Fill)
+                .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 86.0, left: 0.0 }),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+        stack![base, toast_overlay]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     fn view_dialog<'a>(&'a self, dialog: &'a Dialog, colors: &ThemeColors) -> Element<'a, Message> {
