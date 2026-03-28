@@ -708,6 +708,7 @@ pub enum Message {
     ChangelogLoaded(Result<String, String>),
 
     // Add-repo preview
+    QuickInstallPreset(String),
     SetAddRepoUrl(String),
     FetchRepoPreview(String),
     FetchRepoPreviewResult(Result<service::RepoPreviewInfo, String>),
@@ -1411,6 +1412,13 @@ impl App {
                         Message::RemoveRepoFilesLoaded,
                     )
                 } else if matches!(d, Dialog::AddRepo { .. }) {
+                    self.add_repo_preview = None;
+                    self.add_repo_preview_loading = false;
+                    self.add_repo_release_notes = None;
+                    self.add_repo_show_releases = false;
+                    self.add_repo_file_preview = None;
+                    self.add_repo_expanded_dirs.clear();
+                    self.add_repo_dir_contents.clear();
                     iced::widget::operation::focus(iced::widget::Id::new("add_repo_url"))
                 } else {
                     Task::none()
@@ -1608,6 +1616,27 @@ impl App {
                         Message::AddRepoResult,
                     );
                 }
+            }
+            Message::QuickInstallPreset(url) => {
+                let mode = if let Some(Dialog::AddRepo { ref mode, .. }) = self.dialog {
+                    mode.clone()
+                } else {
+                    "auto".to_string()
+                };
+                let db = self.db_path.clone();
+                self.dialog = None;
+                self.add_repo_preview = None;
+                self.add_repo_preview_loading = false;
+                self.add_repo_release_notes = None;
+                self.add_repo_show_releases = false;
+                self.add_repo_file_preview = None;
+                self.add_repo_expanded_dirs.clear();
+                self.add_repo_dir_contents.clear();
+                self.log(LogLevel::Info, &format!("Adding repo: {}", url));
+                return Task::perform(
+                    service::add_repo(db, url, mode),
+                    Message::AddRepoResult,
+                );
             }
             Message::AddRepoResult(result) => {
                 match result {
@@ -4231,7 +4260,7 @@ fn build_quick_add_presets<'a>(repos: &[RepoRow], colors: &ThemeColors) -> Eleme
 
     let cards: Vec<Element<Message>> = QUICK_ADD_PRESETS.iter().map(|preset| {
         let already_installed = repos.iter().any(|r| {
-            r.url.trim_end_matches('/') == preset.url.trim_end_matches('/')
+            r.url.trim_end_matches('/').eq_ignore_ascii_case(preset.url.trim_end_matches('/'))
         });
 
         // Title link — clicking it fills the URL input (underlined blue link)
@@ -4363,7 +4392,7 @@ fn build_quick_add_presets<'a>(repos: &[RepoRow], colors: &ThemeColors) -> Eleme
         } else {
             let pu = preset.url.to_string();
             button(text("Add").size(12))
-                .on_press(Message::SetAddRepoUrl(pu))
+                .on_press(Message::QuickInstallPreset(pu))
                 .padding([4, 14])
                 .style(move |_t, _s| theme::tab_button_active_style(&c))
                 .into()
