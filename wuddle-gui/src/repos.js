@@ -2662,7 +2662,7 @@ export async function handleUpdateAction() {
     await updateAll();
     return;
   }
-  await refreshAll({ forceCheck: true, notify: true, source: "manual", checkMode: "manual" });
+  await refreshAll({ forceCheck: true, notify: true, source: "manual", checkMode: "force" });
 }
 
 export async function addRepo(urlOverride = null, modeOverride = null, label = "") {

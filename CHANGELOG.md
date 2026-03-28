@@ -10,6 +10,10 @@ All notable changes to Wuddle are documented in this file.
 - **Profile database fallback** — when a profile-specific database has no repos, Tauri falls back to `wuddle.sqlite` (the default Iced profile DB), ensuring mods installed via either frontend remain visible after switching.
 - **`opt_xattr` synced to settings.json** — the extended-attributes option is now included in the options sync, closing a gap where Linux-specific settings were lost between frontends.
 
+### Bug Fixes
+
+- **Update check now checks all repos when manually triggered** — clicking "Check for updates" previously used a reduced (adaptive) check mode that skipped repos whose last known release was more than 30 days old (e.g. VanillaFixes, nampower). The button now always performs a full check regardless of release age.
+
 ### Changes
 
 - **Casing fix runs in background** — the one-time forge casing correction now runs in a background thread with a `needs_casing_fix()` guard, preventing it from blocking `list_repos` responses on slow or unreachable forges.

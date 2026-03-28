@@ -466,7 +466,7 @@ $("tabTweaks").addEventListener("click", () => setTab("tweaks"));
 
 $("homeBtnUpdateAll").addEventListener("click", updateAll);
 $("homeBtnRefreshOnly").addEventListener("click", () =>
-  refreshAll({ forceCheck: true, notify: true, source: "manual", checkMode: "manual" }),
+  refreshAll({ forceCheck: true, notify: true, source: "manual", checkMode: "force" }),
 );
 $("homeBtnPlay").addEventListener("click", launchGameFromHome);
 $("homeBtnAddMod").addEventListener("click", () => {
