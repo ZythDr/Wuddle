@@ -33,6 +33,12 @@ All notable changes to Wuddle are documented in this file.
 - **DLL count mismatch warning** — when updating a repo and the number of DLL files differs between the old and new release, a dialog prompts the user to choose "Merge Update" (keep existing files, overwrite matches) or "Clean Update" (replace all files).
 - **Status badge tooltip** — hovering the "Update available" badge now shows `Latest: vX.Y.Z` so the target version is visible without opening the context menu.
 
+### Bug Fixes
+
+- **Quick Add "Add" buttons now directly install mods** — previously the Add button only filled the URL field and required a second click on the footer button; it now immediately adds and installs the mod.
+- **Quick Add "Installed" badge works correctly** — URL comparison is now case-insensitive, so repos like VanillaFixes (stored with canonical casing from the forge) are correctly detected as already installed.
+- **Add dialog preview no longer persists between sessions** — re-opening the Add dialog after installing a mod now shows the Quick Add list immediately instead of carrying over the previous readme/files preview.
+
 ### Changes
 
 - **Column layout rework** — merged "Current" and "Latest" columns into a single narrower "Installed" column; added the inline "Version" dropdown column. Tightened the "Enabled" column width for a more balanced table layout.
