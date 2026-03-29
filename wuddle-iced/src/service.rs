@@ -859,6 +859,8 @@ pub struct RepoPreviewInfo {
     /// Decoded image handles keyed by URL. Handle IDs are stable so iced can cache decoded images
     /// across renders without re-decoding on every frame.
     pub image_cache: std::collections::HashMap<String, iced::widget::image::Handle>,
+    /// Decoded GIF frames keyed by URL (for animated images in READMEs).
+    pub gif_cache: std::collections::HashMap<String, std::sync::Arc<iced_gif::Frames>>,
     pub files: Vec<RepoFileEntry>,
     /// Base URL for resolving relative image paths (e.g. "https://raw.githubusercontent.com/owner/repo/HEAD/")
     pub raw_base_url: String,
@@ -981,7 +983,8 @@ pub fn resolve_image_url(url: &str, raw_base_url: &str) -> String {
     }
 }
 
-/// Fetch images for URLs found in the README, returning stable `Handle` objects.
+/// Fetch images for URLs found in the README.
+/// Returns two caches: static image handles and animated GIF frames.
 /// Handles are created once here so their IDs are fixed — iced can then cache the decoded
 /// pixels across renders without re-decoding on every frame.
 /// Limits: max 12 images, 5 MB each, 20 MB total.
@@ -989,8 +992,12 @@ async fn fetch_images(
     client: &Client,
     image_urls: &[String],
     raw_base_url: &str,
-) -> std::collections::HashMap<String, iced::widget::image::Handle> {
-    let mut cache = std::collections::HashMap::new();
+) -> (
+    std::collections::HashMap<String, iced::widget::image::Handle>,
+    std::collections::HashMap<String, std::sync::Arc<iced_gif::Frames>>,
+) {
+    let mut image_cache = std::collections::HashMap::new();
+    let mut gif_cache = std::collections::HashMap::new();
     let mut total_bytes = 0usize;
 
     // Pre-resolve github.com/user-attachments/assets/UUID → signed CDN URLs.
@@ -1031,27 +1038,47 @@ async fn fetch_images(
                     return Err(reqwest::Error::from(resp.error_for_status().unwrap_err()));
                 }
                 if !ct.starts_with("image/") {
-                    return Ok(Default::default());
+                    return Ok((Default::default(), false));
                 }
-                resp.bytes().await
+                let is_gif = ct == "image/gif"
+                    || fetch_url.split('?').next().unwrap_or("").ends_with(".gif");
+                resp.bytes().await.map(|b| (b, is_gif))
             },
         ).await;
 
-        if let Ok(Ok(bytes)) = result {
+        if let Ok(Ok((bytes, is_gif))) = result {
             if !bytes.is_empty() && bytes.len() <= 5_000_000 {
                 total_bytes += bytes.len();
-                // Create the handle once — its Id is fixed for the lifetime of this preview,
-                // so iced can cache the decoded image across renders.
-                let handle = iced::widget::image::Handle::from_bytes(bytes);
-                // Store by original URL (as seen in markdown) AND absolute URL
-                cache.insert(url.clone(), handle.clone());
-                if abs_url != *url {
-                    cache.insert(abs_url, handle);
+                if is_gif {
+                    // Decode animated GIF frames for iced_gif widget.
+                    if let Ok(frames) = iced_gif::Frames::from_bytes(bytes.to_vec()) {
+                        let frames = std::sync::Arc::new(frames);
+                        gif_cache.insert(url.clone(), frames.clone());
+                        if abs_url != *url {
+                            gif_cache.insert(abs_url, frames);
+                        }
+                    } else {
+                        // Fall back to static handle if decoding fails.
+                        let handle = iced::widget::image::Handle::from_bytes(bytes);
+                        image_cache.insert(url.clone(), handle.clone());
+                        if abs_url != *url {
+                            image_cache.insert(abs_url, handle);
+                        }
+                    }
+                } else {
+                    // Create the handle once — its Id is fixed for the lifetime of this preview,
+                    // so iced can cache the decoded image across renders.
+                    let handle = iced::widget::image::Handle::from_bytes(bytes);
+                    // Store by original URL (as seen in markdown) AND absolute URL
+                    image_cache.insert(url.clone(), handle.clone());
+                    if abs_url != *url {
+                        image_cache.insert(abs_url, handle);
+                    }
                 }
             }
         }
     }
-    cache
+    (image_cache, gif_cache)
 }
 
 /// Resolve `github.com/user-attachments/assets/UUID` URLs to time-limited signed CDN URLs.
@@ -1333,7 +1360,7 @@ async fn fetch_github_preview(client: &Client, owner: &str, repo: &str) -> Resul
     let md_content = iced::widget::markdown::Content::parse(&readme_md);
     let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
     let image_urls: Vec<String> = md_content.images().iter().cloned().collect();
-    let image_cache = fetch_images(client, &image_urls, &raw_base).await;
+    let (image_cache, gif_cache) = fetch_images(client, &image_urls, &raw_base).await;
 
     let files = fetch_files(client, "github", "github.com", owner, repo, "https").await;
 
@@ -1350,6 +1377,7 @@ async fn fetch_github_preview(client: &Client, owner: &str, repo: &str) -> Resul
         readme_items,
         readme_text,
         image_cache,
+        gif_cache,
         files,
         raw_base_url: raw_base,
         forge: "github".into(),
@@ -1388,7 +1416,7 @@ async fn fetch_gitlab_preview(client: &Client, owner: &str, repo: &str) -> Resul
     let md_content = iced::widget::markdown::Content::parse(&readme_md);
     let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
     let image_urls: Vec<String> = md_content.images().iter().cloned().collect();
-    let image_cache = fetch_images(client, &image_urls, &raw_base).await;
+    let (image_cache, gif_cache) = fetch_images(client, &image_urls, &raw_base).await;
     let files = fetch_files(client, "gitlab", "gitlab.com", owner, repo, "https").await;
 
     Ok(RepoPreviewInfo {
@@ -1401,6 +1429,7 @@ async fn fetch_gitlab_preview(client: &Client, owner: &str, repo: &str) -> Resul
         readme_items,
         readme_text,
         image_cache,
+        gif_cache,
         files,
         raw_base_url: raw_base,
         forge: "gitlab".into(),
@@ -1441,7 +1470,7 @@ async fn fetch_gitea_preview(client: &Client, host: &str, scheme: &str, owner: &
     let md_content = iced::widget::markdown::Content::parse(&readme_md);
     let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
     let image_urls: Vec<String> = md_content.images().iter().cloned().collect();
-    let image_cache = fetch_images(client, &image_urls, &raw_base).await;
+    let (image_cache, gif_cache) = fetch_images(client, &image_urls, &raw_base).await;
     let files = fetch_files(client, "gitea", host, owner, repo, scheme).await;
 
     Ok(RepoPreviewInfo {
@@ -1454,6 +1483,7 @@ async fn fetch_gitea_preview(client: &Client, host: &str, scheme: &str, owner: &
         readme_items,
         readme_text,
         image_cache,
+        gif_cache,
         files,
         raw_base_url: raw_base,
         forge: "gitea".into(),

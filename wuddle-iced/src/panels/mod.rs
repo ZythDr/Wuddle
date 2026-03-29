@@ -4,4 +4,5 @@ pub mod home;
 pub mod logs;
 pub mod options;
 pub mod projects;
+pub mod radio;
 pub mod tweaks;

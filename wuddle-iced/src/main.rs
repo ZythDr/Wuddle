@@ -374,6 +374,7 @@ pub enum Dialog {
     RemoveRepo { id: i64, name: String, remove_files: bool, files: Vec<(String, String)> },
     Changelog { items: Vec<iced::widget::markdown::Item>, loading: bool },
     DxvkConfig { config: DxvkConfig, show_preview: bool },
+    RadioSettings { auto_connect: bool, auto_play: bool, buffer_size: String, custom_buffer: bool, persist_volume: bool },
     DllCountWarning {
         repo_id: i64,
         repo_name: String,
@@ -438,6 +439,9 @@ pub struct App {
     pub radio_volume: f32,
     pub radio_connecting: bool,
     pub radio_auto_connect: bool,
+    pub radio_auto_play: bool,
+    pub radio_buffer_size: usize,
+    pub radio_persist_volume: bool,
     pub radio_error: Option<String>,
     pub radio_handle: Option<radio::RadioHandle>,
 
@@ -619,6 +623,14 @@ pub enum Message {
     SetRadioVolume(f32),
     ToggleRadioAutoConnect(bool),
     AutoConnectRadio,
+    OpenRadioSettings,
+    CloseRadioSettings,
+    SetRadioAutoConnect(bool),
+    SetRadioAutoPlay(bool),
+    SetRadioBufferSize(String),
+    SetRadioCustomBuffer(bool),
+    SetRadioPersistVolume(bool),
+    SaveRadioSettings,
     SetGithubTokenInput(String),
 
     // Tweaks
@@ -874,6 +886,7 @@ fn admonition_style(keyword: &str) -> Option<(&'static str, &'static str, iced::
 
 struct ImageViewer<'a> {
     cache: &'a std::collections::HashMap<String, iced::widget::image::Handle>,
+    gif_cache: &'a std::collections::HashMap<String, std::sync::Arc<iced_gif::Frames>>,
     raw_base_url: &'a str,
 }
 
@@ -941,14 +954,26 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for ImageViewer<'a> {
         _title: &'a str,
         _alt: &iced::widget::markdown::Text,
     ) -> Element<'a, Message> {
-        // Try original URL, then resolved absolute URL.
+        let abs = service::resolve_image_url(url, self.raw_base_url);
+
+        // Check GIF cache first (animated images).
+        let gif_frames = self.gif_cache.get(url.as_str())
+            .or_else(|| self.gif_cache.get(abs.as_str()));
+        if let Some(frames) = gif_frames {
+            return container(
+                iced_gif::widget::gif(frames)
+                    .width(Length::Fill)
+            )
+            .width(Length::Fill)
+            .padding([4, 0])
+            .into();
+        }
+
+        // Fall back to static image handle.
         // Handles were created once during fetch — reusing the same handle ID lets iced
         // cache the decoded image across renders and avoids per-frame re-decoding.
         let handle = self.cache.get(url.as_str())
-            .or_else(|| {
-                let abs = service::resolve_image_url(url, self.raw_base_url);
-                self.cache.get(abs.as_str())
-            });
+            .or_else(|| self.cache.get(abs.as_str()));
         if let Some(handle) = handle {
             container(
                 iced::widget::image(handle.clone())
@@ -1156,6 +1181,9 @@ impl App {
             radio_volume: 0.25,
             radio_connecting: false,
             radio_auto_connect: false,
+            radio_auto_play: false,
+            radio_buffer_size: 4096,
+            radio_persist_volume: true,
             radio_error: None,
             radio_handle: None,
             github_token_input: String::new(),
@@ -1293,6 +1321,9 @@ impl App {
             opt_xattr: self.opt_xattr,
             radio_auto_connect: self.radio_auto_connect,
             radio_volume: self.radio_volume,
+            radio_auto_play: self.radio_auto_play,
+            radio_buffer_size: self.radio_buffer_size,
+            radio_persist_volume: self.radio_persist_volume,
             opt_clock12: self.opt_clock12,
             opt_friz_font: self.opt_friz_font,
             log_wrap: self.log_wrap,
@@ -1498,7 +1529,8 @@ impl App {
                     self.radio_error = None;
                     self.log(LogLevel::Info, "Radio: connecting…");
                     let (tx, rx) = tokio::sync::oneshot::channel::<Result<radio::RadioHandle, String>>();
-                    std::thread::spawn(move || { let _ = tx.send(radio::start(0.0)); });
+                    let buffer_size = self.radio_buffer_size;
+                    std::thread::spawn(move || { let _ = tx.send(radio::start(0.0, buffer_size)); });
                     return Task::perform(
                         async move { rx.await.unwrap_or_else(|_| Err("Thread died".to_string())) },
                         Message::RadioStarted,
@@ -1510,6 +1542,11 @@ impl App {
                 if self.radio_playing {
                     handle.fade_in(self.radio_volume);
                     self.log(LogLevel::Info, "Radio: connected and playing.");
+                } else if self.radio_auto_play {
+                    // Auto-play: start playing immediately after auto-connect
+                    self.radio_playing = true;
+                    handle.fade_in(self.radio_volume);
+                    self.log(LogLevel::Info, "Radio: auto-playing.");
                 } else {
                     self.log(LogLevel::Info, "Radio: pre-loaded (muted).");
                 }
@@ -1527,6 +1564,9 @@ impl App {
                     if let Some(handle) = &self.radio_handle {
                         handle.set_volume(v);
                     }
+                }
+                if self.radio_persist_volume {
+                    self.save_settings();
                 }
             }
             Message::ToggleRadioAutoConnect(b) => {
@@ -1549,7 +1589,8 @@ impl App {
                     self.radio_connecting = true;
                     self.log(LogLevel::Info, "Radio: pre-loading in background…");
                     let (tx, rx) = tokio::sync::oneshot::channel::<Result<radio::RadioHandle, String>>();
-                    std::thread::spawn(move || { let _ = tx.send(radio::start(0.0)); });
+                    let buffer_size = self.radio_buffer_size;
+                    std::thread::spawn(move || { let _ = tx.send(radio::start(0.0, buffer_size)); });
                     return Task::perform(
                         async move { rx.await.unwrap_or_else(|_| Err("Thread died".to_string())) },
                         Message::RadioStarted,
@@ -1557,6 +1598,63 @@ impl App {
                 }
             }
             Message::SetGithubTokenInput(s) => self.github_token_input = s,
+
+            // Radio settings dialog
+            Message::OpenRadioSettings => {
+                let is_custom = !crate::panels::radio::BUFFER_PRESETS.iter().any(|(v, _)| *v == self.radio_buffer_size);
+                self.dialog = Some(Dialog::RadioSettings {
+                    auto_connect: self.radio_auto_connect,
+                    auto_play: self.radio_auto_play,
+                    buffer_size: self.radio_buffer_size.to_string(),
+                    custom_buffer: is_custom,
+                    persist_volume: self.radio_persist_volume,
+                });
+            }
+            Message::CloseRadioSettings => {
+                self.dialog = None;
+            }
+            Message::SetRadioAutoConnect(b) => {
+                if let Some(Dialog::RadioSettings { ref mut auto_connect, .. }) = self.dialog {
+                    *auto_connect = b;
+                }
+            }
+            Message::SetRadioAutoPlay(b) => {
+                if let Some(Dialog::RadioSettings { ref mut auto_play, .. }) = self.dialog {
+                    *auto_play = b;
+                }
+            }
+            Message::SetRadioBufferSize(s) => {
+                if let Some(Dialog::RadioSettings { ref mut buffer_size, ref mut custom_buffer, .. }) = self.dialog {
+                    *buffer_size = s;
+                    // If user clicked a preset, disable custom mode
+                    let val: usize = buffer_size.parse().unwrap_or(0);
+                    if crate::panels::radio::BUFFER_PRESETS.iter().any(|(v, _)| *v == val) {
+                        *custom_buffer = false;
+                    }
+                }
+            }
+            Message::SetRadioCustomBuffer(b) => {
+                if let Some(Dialog::RadioSettings { ref mut custom_buffer, .. }) = self.dialog {
+                    *custom_buffer = b;
+                }
+            }
+            Message::SetRadioPersistVolume(b) => {
+                if let Some(Dialog::RadioSettings { ref mut persist_volume, .. }) = self.dialog {
+                    *persist_volume = b;
+                }
+            }
+            Message::SaveRadioSettings => {
+                if let Some(Dialog::RadioSettings { auto_connect, auto_play, buffer_size, persist_volume, .. }) = &self.dialog {
+                    self.radio_auto_connect = *auto_connect;
+                    self.radio_auto_play = *auto_play;
+                    self.radio_persist_volume = *persist_volume;
+                    if let Ok(size) = buffer_size.parse::<usize>() {
+                        self.radio_buffer_size = size.max(512).min(65536);
+                    }
+                    self.save_settings();
+                    self.dialog = None;
+                }
+            }
 
             // Tweaks
             Message::ToggleTweak(id, val) => self.tweaks.set(id, val),
@@ -1655,6 +1753,9 @@ impl App {
                 self.opt_xattr = s.opt_xattr;
                 self.radio_auto_connect = s.radio_auto_connect;
                 self.radio_volume = s.radio_volume;
+                self.radio_auto_play = s.radio_auto_play;
+                self.radio_buffer_size = s.radio_buffer_size;
+                self.radio_persist_volume = s.radio_persist_volume;
                 self.opt_clock12 = s.opt_clock12;
                 self.opt_friz_font = s.opt_friz_font;
                 self.log_wrap = s.log_wrap;
@@ -3728,6 +3829,7 @@ impl App {
                         } else {
                             let viewer = ImageViewer {
                                 cache: &preview.image_cache,
+                                gif_cache: &preview.gif_cache,
                                 raw_base_url: &preview.raw_base_url,
                             };
                             let mut md_style = iced::widget::markdown::Style::from(&current_theme);
@@ -4296,6 +4398,9 @@ impl App {
             }
             Dialog::DxvkConfig { config, show_preview } => {
                 panels::dxvk_config::view(config, &self.wow_dir, *show_preview, &self.dxvk_preview_content, colors)
+            }
+            Dialog::RadioSettings { auto_connect, auto_play, buffer_size, custom_buffer, persist_volume } => {
+                panels::radio::view(auto_connect, auto_play, buffer_size, *custom_buffer, persist_volume, colors)
             }
         }
     }

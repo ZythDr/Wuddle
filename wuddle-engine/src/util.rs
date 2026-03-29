@@ -16,8 +16,17 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(app_dir()?.join("wuddle.sqlite"))
 }
 
-pub fn cache_dir() -> Result<PathBuf> {
-    let d = app_dir()?.join("cache");
+/// Return the release-asset cache directory.
+///
+/// When `wow_dir` is provided the cache lives inside the WoW directory at
+/// `.wuddle/cache/` so that users only need to whitelist one folder (their
+/// WoW install) in security software.  Falls back to the standard app-data
+/// cache when no WoW directory is known.
+pub fn cache_dir(wow_dir: Option<&Path>) -> Result<PathBuf> {
+    let d = match wow_dir {
+        Some(w) => w.join(".wuddle").join("cache"),
+        None => app_dir()?.join("cache"),
+    };
     fs::create_dir_all(&d)?;
     Ok(d)
 }

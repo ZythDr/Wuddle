@@ -543,6 +543,9 @@ impl Engine {
     }
 
     fn addon_git_worktree_dir(&self, repo_id: i64, wow_dir: &Path, repo: &Repo) -> PathBuf {
+        // Check DB install entries for an existing valid git repo on disk.
+        // This covers both the new direct location (Interface/AddOns/{name})
+        // and any legacy staging paths from older Wuddle installs.
         if let Ok(entries) = self.db.list_installs(repo_id) {
             for entry in entries {
                 let Some(full) = Self::resolve_install_path(&entry.path, Some(wow_dir)) else {
@@ -556,7 +559,8 @@ impl Engine {
                 }
             }
         }
-        git_sync::addon_repo_staging_dir(wow_dir, &repo.host, &repo.owner, &repo.name)
+        // Default: clone directly into Interface/AddOns/{name} (GAM-compatible).
+        git_sync::addon_direct_dir(wow_dir, &repo.name)
     }
 
     fn repo_key(host: &str, owner: &str, name: &str) -> String {
@@ -767,9 +771,6 @@ impl Engine {
                 pinned_version: None,
             };
             let repo_id = self.db.add_repo(&tracked)?;
-
-            let raw_manifest = Self::to_manifest_path(&root, wow_dir);
-            self.db.add_install(repo_id, &raw_manifest, "raw")?;
 
             let mut addon_names = HashSet::<String>::new();
             for (_src_dir, addon_name) in detected_addons {
@@ -1750,8 +1751,8 @@ impl Engine {
         }
     }
 
-    fn release_cache_dir(plan: &UpdatePlan) -> Result<PathBuf> {
-        let dir = util::cache_dir()?
+    fn release_cache_dir(plan: &UpdatePlan, wow_dir: Option<&Path>) -> Result<PathBuf> {
+        let dir = util::cache_dir(wow_dir)?
             .join("releases")
             .join(Self::sanitize_for_fs(&plan.forge))
             .join(Self::sanitize_for_fs(&plan.host))
@@ -2313,6 +2314,47 @@ impl Engine {
         Ok(Some(plan))
     }
 
+    /// One-time migration: if a repo was previously cloned into the legacy
+    /// `.wuddle/addon_git/…` staging area, move it to the new direct location
+    /// (`Interface/AddOns/{name}`) so it becomes cross-compatible with GAM and
+    /// the TurtleWoW launcher.  Updates the DB install entries in-place.
+    /// Safe to call repeatedly — does nothing when the legacy path doesn't exist
+    /// or the target already exists.
+    fn migrate_staging_clone_if_needed(&self, wow_dir: &Path, repo: &Repo) -> Result<()> {
+        let legacy = git_sync::addon_repo_legacy_staging_dir(
+            wow_dir, &repo.host, &repo.owner, &repo.name,
+        );
+        if !legacy.is_dir() || !Self::has_local_git_marker(&legacy) {
+            return Ok(());
+        }
+        let direct = git_sync::addon_direct_dir(wow_dir, &repo.name);
+        if direct.is_dir() {
+            // Target already exists — nothing to move.
+            return Ok(());
+        }
+        if let Some(parent) = direct.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&legacy, &direct).with_context(|| {
+            format!("migrate addon clone {:?} -> {:?}", legacy, direct)
+        })?;
+
+        // Update any DB install entries that pointed at the old path.
+        let legacy_manifest = Self::to_manifest_path(&legacy, wow_dir);
+        let direct_manifest = Self::to_manifest_path(&direct, wow_dir);
+        if let Ok(entries) = self.db.list_installs(repo.id) {
+            for entry in entries {
+                if entry.path == legacy_manifest {
+                    let _ = self.db.update_install_path(repo.id, &entry.path, &direct_manifest);
+                } else if entry.path.starts_with(&legacy_manifest) {
+                    let new_path = direct_manifest.clone() + &entry.path[legacy_manifest.len()..];
+                    let _ = self.db.update_install_path(repo.id, &entry.path, &new_path);
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn apply_one(
         &self,
         plan: &UpdatePlan,
@@ -2322,6 +2364,10 @@ impl Engine {
     ) -> Result<()> {
         if matches!(plan.mode, InstallMode::AddonGit) {
             let repo = self.db.get_repo(plan.repo_id)?;
+
+            // Migrate legacy staging clones to the direct AddOns location on first encounter.
+            self.migrate_staging_clone_if_needed(wow_dir, &repo)?;
+
             let worktree_dir = self.addon_git_worktree_dir(plan.repo_id, wow_dir, &repo);
             let preferred_branch = repo
                 .git_branch
@@ -2332,9 +2378,8 @@ impl Engine {
             let synced = git_sync::sync_repo(&plan.url, &worktree_dir, Some(preferred_branch))
                 .with_context(|| format!("git sync {}", plan.url))?;
 
-            // Credit: deployment model inspired by GitAddonsManager's subfolder/.toc scan flow.
-            // Keep repo metadata/worktree in hidden staging area, then deploy only real addon roots
-            // (folders with .toc) directly into Interface/AddOns.
+            // Detect addon folders inside the cloned repo.
+            // detect_addons_in_tree returns (src_path, toc_name) pairs.
             let mut detected = install::detect_addons_in_tree(&worktree_dir);
             detected.sort_by_key(|(src, name)| (src.components().count(), name.clone()));
 
@@ -2353,19 +2398,53 @@ impl Engine {
                 );
             }
 
-            let addon_names: Vec<String> = chosen.iter().map(|(_, name)| name.clone()).collect();
-            let conflicts = self.addon_install_conflicts(plan.repo_id, wow_dir, &addon_names)?;
-            if !conflicts.is_empty() {
-                if !opts.replace_addon_conflicts {
-                    anyhow::bail!(Self::format_addon_conflict_message(&conflicts));
+            // GAM post-clone rename: if the repo directory name differs from the
+            // detected .toc name (single-addon case), rename the directory to match
+            // the .toc name — exactly as GAM's Control::clone() does after cloning.
+            // This ensures cross-compatibility when the repo slug ≠ addon name.
+            let worktree_dir = if chosen.len() == 1 {
+                let (ref src, ref toc_name) = chosen[0];
+                if src == &worktree_dir {
+                    // Single-addon repo: src is the repo root. Check if names match.
+                    let current_name = worktree_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    if !current_name.eq_ignore_ascii_case(toc_name) {
+                        let new_dir = worktree_dir.with_file_name(toc_name);
+                        if !new_dir.exists() {
+                            fs::rename(&worktree_dir, &new_dir).with_context(|| {
+                                format!("rename addon dir {:?} -> {:?}", worktree_dir, new_dir)
+                            })?;
+                            // Update DB install paths that pointed at the old location.
+                            let old_manifest = Self::to_manifest_path(&worktree_dir, wow_dir);
+                            let new_manifest = Self::to_manifest_path(&new_dir, wow_dir);
+                            if let Ok(entries) = self.db.list_installs(repo.id) {
+                                for entry in entries {
+                                    if entry.path == old_manifest || entry.path.starts_with(&(old_manifest.clone() + "/")) {
+                                        let updated = new_manifest.clone() + &entry.path[old_manifest.len()..];
+                                        let _ = self.db.update_install_path(repo.id, &entry.path, &updated);
+                                    }
+                                }
+                            }
+                            // Update chosen to reflect the new path.
+                            chosen[0].0 = new_dir.clone();
+                            new_dir
+                        } else {
+                            worktree_dir
+                        }
+                    } else {
+                        worktree_dir
+                    }
+                } else {
+                    worktree_dir
                 }
-                for conflict in &conflicts {
-                    let _ = Self::remove_any_target(&conflict.target_path)?;
-                }
-                self.clear_conflicting_addon_tracking(plan.repo_id, wow_dir, &conflicts)?;
-            }
+            } else {
+                worktree_dir
+            };
 
-            // Remove previously deployed addon directories for this repo before redeploy.
+            // Remove previously created sub-addon symlinks/copies for this repo
+            // (but never the worktree dir itself or anything inside it).
             for entry in self.db.list_installs(plan.repo_id)? {
                 if entry.kind != "addon" {
                     continue;
@@ -2378,39 +2457,81 @@ impl Engine {
                 }
             }
 
-            let comment = format!(
-                "{}/{} {} - managed by Wuddle",
-                plan.owner, plan.name, synced.short_oid
-            );
-            let mut records = Vec::<install::InstallRecord>::new();
-            records.push(install::InstallRecord {
-                path: worktree_dir.clone(),
-                kind: "raw",
+            // GAM subfolder collision: if a subfolder has the same name as the repo
+            // directory, rename the repo dir to "{name}.repo" first — exactly as
+            // GAM's Addon::unpackSubfolders() does — so the symlink can be created.
+            let repo_dir_name = worktree_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let has_collision = chosen.iter().any(|(src, name)| {
+                src != &worktree_dir && name.eq_ignore_ascii_case(&repo_dir_name)
             });
+            let worktree_dir = if has_collision {
+                let repo_dir = worktree_dir.with_file_name(format!("{}.repo", repo_dir_name));
+                if !repo_dir.exists() {
+                    fs::rename(&worktree_dir, &repo_dir).with_context(|| {
+                        format!("rename repo dir to .repo suffix {:?} -> {:?}", worktree_dir, repo_dir)
+                    })?;
+                    // Update src paths in chosen that pointed at the old worktree dir.
+                    for (src, _) in &mut chosen {
+                        if src.starts_with(&worktree_dir) {
+                            let rel = src.strip_prefix(&worktree_dir).unwrap_or(src.as_path());
+                            *src = repo_dir.join(rel);
+                        }
+                    }
+                }
+                repo_dir
+            } else {
+                worktree_dir
+            };
+
+            // Conflict check for sub-addon symlink targets only (not the repo dir itself).
+            let sub_addon_names: Vec<String> = chosen
+                .iter()
+                .filter(|(src, _)| *src != worktree_dir)
+                .map(|(_, name)| name.clone())
+                .collect();
+            if !sub_addon_names.is_empty() {
+                let conflicts = self.addon_install_conflicts(plan.repo_id, wow_dir, &sub_addon_names)?;
+                if !conflicts.is_empty() {
+                    if !opts.replace_addon_conflicts {
+                        anyhow::bail!(Self::format_addon_conflict_message(&conflicts));
+                    }
+                    for conflict in &conflicts {
+                        let _ = Self::remove_any_target(&conflict.target_path)?;
+                    }
+                    self.clear_conflicting_addon_tracking(plan.repo_id, wow_dir, &conflicts)?;
+                }
+            }
+
+            let mut records = Vec::<install::InstallRecord>::new();
+
             for (src_dir, addon_folder_name) in chosen {
                 let dst_dir = wow_dir
                     .join("Interface")
                     .join("AddOns")
                     .join(&addon_folder_name);
+
                 if src_dir == dst_dir {
+                    // Single-addon repo: the clone root is the addon folder — no symlink needed.
                     records.push(install::InstallRecord {
                         path: dst_dir,
                         kind: "addon",
                     });
-                    continue;
+                } else {
+                    // Multi-addon repo subfolder: create a symlink from AddOns/{name}
+                    // into the repo directory — matches GAM's unpackSubfolders().
+                    let rec = install::link_addon_subfolder(&src_dir, &dst_dir)?;
+                    records.push(rec);
                 }
-                let rec = install::install_addon_folder(
-                    &src_dir,
-                    wow_dir,
-                    &addon_folder_name,
-                    opts,
-                    &comment,
-                )?;
-                records.push(rec);
             }
 
+            // No kind='raw' worktree entry — GAM doesn't track anything beyond the
+            // addon folders themselves. The .git dir inside the addon folder is the
+            // ground truth; import_existing_addon_git_repos() will re-discover it.
             self.persist_installs(plan.repo_id, wow_dir, &records)?;
-            self.hash_and_store_installs(plan.repo_id, wow_dir, &records);
             self.db.set_installed_asset_state(
                 plan.repo_id,
                 Some(&synced.short_oid),
@@ -2426,7 +2547,7 @@ impl Engine {
             anyhow::bail!("No downloadable asset in update plan");
         }
 
-        let release_dir = Self::release_cache_dir(plan)?;
+        let release_dir = Self::release_cache_dir(plan, Some(wow_dir))?;
         let asset_name_fs = Path::new(&plan.asset_name)
             .file_name()
             .and_then(|s| s.to_str())
@@ -2561,20 +2682,20 @@ impl Engine {
             Some(&plan.asset_url),
         )?;
 
-        self.prune_release_cache(plan, opts.cache_keep_versions);
+        self.prune_release_cache(plan, opts.cache_keep_versions, Some(wow_dir));
 
         Ok(())
     }
 
     /// Remove old cached release versions for a repo, keeping the `keep_versions`
     /// most recent plus the currently-installed version. Non-fatal on any error.
-    fn prune_release_cache(&self, plan: &UpdatePlan, keep_versions: usize) {
+    fn prune_release_cache(&self, plan: &UpdatePlan, keep_versions: usize, wow_dir: Option<&Path>) {
         let repo = match self.db.get_repo(plan.repo_id) {
             Ok(r) => r,
             Err(_) => return,
         };
 
-        let repo_cache = match util::cache_dir() {
+        let repo_cache = match util::cache_dir(wow_dir) {
             Ok(c) => c
                 .join("releases")
                 .join(Self::sanitize_for_fs(&plan.forge))

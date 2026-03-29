@@ -1,4 +1,4 @@
-use iced::widget::{button, checkbox, column, container, mouse_area, row, rule, scrollable, slider, text, tooltip, Space};
+use iced::widget::{button, column, container, mouse_area, row, rule, scrollable, slider, text, tooltip, Space};
 use iced::{Element, Length};
 
 use crate::anchored_overlay::AnchoredOverlay;
@@ -428,27 +428,10 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         snap: true,
     });
 
-    // Left column: title + subtitle + auto-connect checkbox
-    let c3 = c;
-    let auto_connect_cb = tooltip(
-        checkbox(app.radio_auto_connect)
-            .label("Auto-connect")
-            .text_size(12)
-            .on_toggle(Message::ToggleRadioAutoConnect),
-        container(
-            text("Pre-connect silently so Play is instant").size(13).color(c3.text),
-        )
-        .padding([3, 8])
-        .style(move |_| crate::theme::tooltip_style(&c3)),
-        tooltip::Position::Top,
-    )
-    .gap(4.0);
-
+    // Left column: title + subtitle
     let left_col = column![
         text("Everlook Broadcasting Co.").size(15).color(colors.title),
         text("Turtle WoW in-game radio stream").size(11).color(colors.muted),
-        Space::new().height(4),
-        auto_connect_cb,
     ]
     .spacing(2);
 
@@ -525,7 +508,34 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let radio_tip = if app.radio_playing { "Stop the radio stream" } else { "Start the Everlook radio stream" };
     let play_btn = tip(play_btn, radio_tip, tooltip::Position::Top, colors);
 
+    let c5 = c;
+    let cogwheel_icon = iced::widget::svg(
+        iced::widget::svg::Handle::from_memory(
+            include_bytes!("../../icons/cogwheel.svg").to_vec(),
+        ),
+    )
+    .width(27)
+    .height(27)
+    .style(move |_t, _s| iced::widget::svg::Style { color: Some(c5.muted) });
+
+    let c5b = c;
+    let settings_btn = tip(
+        button(cogwheel_icon)
+            .on_press(Message::OpenRadioSettings)
+            .padding([6, 8])
+            .style(move |_theme, status| {
+                match status {
+                    button::Status::Hovered => theme::tab_button_hovered_style(&c5b),
+                    _ => theme::tab_button_style(&c5b),
+                }
+            }),
+        "Radio settings",
+        tooltip::Position::Top,
+        colors,
+    );
+
     let center_row = row![
+        settings_btn,
         play_btn,
         text("Vol").size(12).color(colors.muted),
         vol_scrollable,

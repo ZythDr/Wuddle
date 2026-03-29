@@ -10,10 +10,6 @@ use std::time::Duration;
 
 pub const STREAM_URL: &str = "https://radio.turtle-music.org/stream";
 
-/// How many bytes to pre-buffer so symphonia can seek during format detection.
-/// MP3 frame at 128 kbps ≈ 417 bytes; 3–5 frames is enough for detection.
-/// 4 KiB ≈ 0.25 s of audio at 128 kbps — keeps startup fast.
-const HEADER_BYTES: usize = 4_096;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -55,12 +51,22 @@ impl RadioHandle {
 ///
 /// Blocks until the stream is connected and the first audio chunk is decoded,
 /// then returns a `RadioHandle` and leaves a background thread running.
-pub fn start(volume: f32) -> Result<RadioHandle, String> {
+///
+/// `header_bytes`: how many bytes to pre-buffer for format detection (default ~4096).
+pub fn start(volume: f32, header_bytes: usize) -> Result<RadioHandle, String> {
     let (cmd_tx, cmd_rx) = mpsc::sync_channel::<RadioCmd>(16);
     let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), String>>(1);
 
     std::thread::spawn(move || {
-        // Audio device — must stay alive for the lifetime of playback.
+        // Kick off the HTTP connection in a background thread while we open
+        // the audio device — both operations are independent and each can
+        // take 1–3 s, so doing them in parallel halves the perceived startup time.
+        let http_thread = std::thread::spawn(|| {
+            reqwest::blocking::get(STREAM_URL).map_err(|e| e.to_string())
+        });
+
+        // Audio device — must be opened on the thread that will own it
+        // (rodio::OutputStream is !Send due to cpal raw pointers).
         let (_stream, stream_handle) = match rodio::OutputStream::try_default() {
             Ok(s) => s,
             Err(e) => {
@@ -69,8 +75,8 @@ pub fn start(volume: f32) -> Result<RadioHandle, String> {
             }
         };
 
-        // HTTP stream.
-        let response = match reqwest::blocking::get(STREAM_URL) {
+        // HTTP stream — join the background thread started above.
+        let response = match http_thread.join().unwrap_or_else(|_| Err("HTTP thread panicked".to_string())) {
             Ok(r) => r,
             Err(e) => {
                 let _ = ready_tx.send(Err(format!("Connect: {e}")));
@@ -79,7 +85,7 @@ pub fn start(volume: f32) -> Result<RadioHandle, String> {
         };
 
         // Pre-buffer header for symphonia format detection.
-        let reader = match RadioStreamReader::new(response) {
+        let reader = match RadioStreamReader::new(response, header_bytes) {
             Ok(r) => r,
             Err(e) => {
                 let _ = ready_tx.send(Err(format!("Buffer: {e}")));
@@ -105,10 +111,14 @@ pub fn start(volume: f32) -> Result<RadioHandle, String> {
             }
         };
         sink.set_volume(volume);
-        sink.append(decoder);
 
-        // Signal caller that we're ready.
+        // Signal caller that we're ready BEFORE appending the decoder.
+        // The decoder will start buffering/decoding in the background,
+        // and audio will play as frames become available. This lets the UI
+        // respond immediately rather than blocking on decoder init.
         let _ = ready_tx.send(Ok(()));
+
+        sink.append(decoder);
 
         // Command loop — keeps the thread (and _stream) alive.
         loop {
@@ -164,7 +174,7 @@ pub fn start(volume: f32) -> Result<RadioHandle, String> {
 
 /// Wraps a `reqwest::blocking::Response` so it satisfies `Read + Seek`.
 ///
-/// The first `HEADER_BYTES` are pre-read into a buffer so that symphonia's
+/// The first `header_bytes` are pre-read into a buffer so that symphonia's
 /// format prober can seek backwards during detection. Beyond that, only
 /// forward sequential reads are supported; seek requests past the buffer
 /// return `ErrorKind::Unsupported`, which symphonia handles gracefully for
@@ -177,8 +187,8 @@ struct RadioStreamReader {
 }
 
 impl RadioStreamReader {
-    fn new(mut response: reqwest::blocking::Response) -> io::Result<Self> {
-        let mut buf = vec![0u8; HEADER_BYTES];
+    fn new(mut response: reqwest::blocking::Response, header_bytes: usize) -> io::Result<Self> {
+        let mut buf = vec![0u8; header_bytes];
         let mut filled = 0;
         while filled < buf.len() {
             match response.read(&mut buf[filled..]) {

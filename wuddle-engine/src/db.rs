@@ -610,6 +610,15 @@ impl Db {
         Ok(())
     }
 
+    /// Update an install entry's path in-place (used for staging-area migration).
+    pub fn update_install_path(&self, repo_id: i64, old_path: &str, new_path: &str) -> Result<()> {
+        self.conn.execute(
+            r#"UPDATE installs SET path=?3 WHERE repo_id=?1 AND path=?2"#,
+            params![repo_id, old_path, new_path],
+        )?;
+        Ok(())
+    }
+
     /// Returns all addon install paths (lowercased) currently tracked across all repos.
     pub fn all_addon_install_paths(&self) -> Result<HashSet<String>> {
         let mut stmt = self.conn.prepare(

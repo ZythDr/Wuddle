@@ -654,6 +654,32 @@ fn walk_dir(root: &Path, cb: &mut dyn FnMut(&Path)) {
     }
 }
 
+/// Create a symlink (or directory junction on Windows) from `dst` pointing at
+/// `src` for a sub-addon folder inside a multi-addon git repository.
+///
+/// This matches GAM's `unpackSubfolders()` behaviour: a multi-addon repo lives
+/// at `Interface/AddOns/{repo_name}/` and each sub-addon appears as a sibling
+/// symlink `Interface/AddOns/{SubAddon}` → `{repo_name}/{SubAddon}/`.
+///
+/// Falls back to copying the directory if symlink creation fails (e.g. Windows
+/// without Developer Mode or SeCreateSymbolicLinkPrivilege).
+pub fn link_addon_subfolder(src: &Path, dst: &Path) -> Result<InstallRecord> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {:?}", parent))?;
+    }
+    remove_any_target(dst)?;
+
+    if symlink_path(src, dst).is_err() {
+        // Symlink failed — fall back to a full copy so the addon still works.
+        copy_dir_recursive(src, dst)?;
+    }
+
+    Ok(InstallRecord {
+        path: dst.to_path_buf(),
+        kind: "addon",
+    })
+}
+
 pub fn install_addon_folder(
     src_dir: &Path,
     wow_dir: &Path,

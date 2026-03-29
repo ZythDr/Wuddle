@@ -24,6 +24,29 @@ All notable changes to Wuddle are documented in this file.
 - **DLL count tracking** — `UpdatePlan` now carries `previous_dll_count` and `new_dll_count` for detecting file count mismatches between releases.
 - **DB schema v7** — adds `merge_installs` and `pinned_version` columns to the `repos` table (backwards-compatible additive migration).
 
+## v3.0.0-beta.5 (Iced frontend)
+
+### New Features
+
+- **Radio Settings dialog** — new gear-icon button on the Home tab opens a dedicated Radio Settings popup (replaces the inline auto-connect checkbox). Configurable options: Auto-connect, Auto-play when connected, persistent volume between sessions, and read-ahead buffer size with presets (512 B – 16 KB) or custom input.
+- **GIF animation in README previews** — addon/mod READMEs with animated GIFs now play inline using the `iced_gif` crate. Falls back to a static image if GIF decoding fails.
+- **Faster radio startup** — HTTP connection and audio device initialization now run in parallel, roughly halving perceived connect time. The UI responds as soon as the decoder is ready rather than waiting for the first audio frames to buffer.
+- **Auto-play radio** — when both Auto-connect and Auto-play are enabled, the radio stream begins playing automatically at launch instead of just pre-connecting silently.
+- **Volume persistence** — radio volume is now saved to `settings.json` on every slider change (when enabled in Radio Settings) and restored on next launch.
+
+### Changes
+
+- **Auto-connect checkbox removed from Home tab** — replaced by the Radio Settings dialog, keeping the Home tab cleaner.
+- **Configurable read-ahead buffer** — the radio pre-buffer size (used for Symphonia format detection) is now user-configurable from 512 bytes to 64 KB, with sensible presets. Smaller buffers trade stability for faster startup on fast connections.
+
+### Engine (wuddle-engine)
+
+- **GAM-compatible addon_git deployment** — git repos are now cloned directly into `Interface/AddOns/{name}/` (the `.git` folder lives inside the addon folder) instead of a hidden staging area. This matches the approach used by GitAddonsManager and the TurtleWoW launcher, making addons installed by any of these tools immediately cross-compatible with Wuddle — no repair step required.
+- **Multi-addon repo symlinks** — for repos containing multiple addon subfolders (each with their own `.toc`), Wuddle now creates symlinks from `Interface/AddOns/{SubAddon}` into the repo directory, matching GAM's subfolder unpacking behaviour. Falls back to copying if symlinks are unavailable (e.g. Windows without elevated privileges).
+- **Automatic staging-area migration** — existing clones from the old `.wuddle/addon_git/` staging area are automatically moved to the new direct location on first update, with DB paths updated in-place. No manual intervention required.
+- **Mod cache moved into WoW directory** — release asset downloads (ZIPs, DLLs) are now cached in `{wow_dir}/.wuddle/cache/` instead of the system app-data directory. Windows users only need to whitelist a single directory (their WoW folder) in security software such as Windows Defender to avoid false-positive blocks on mods like SuperWoW.
+- **`update_install_path` DB helper** — new `db.update_install_path()` for updating install entry paths in-place during migration.
+
 ## v3.0.0-beta.4 (Iced frontend)
 
 ### New Features

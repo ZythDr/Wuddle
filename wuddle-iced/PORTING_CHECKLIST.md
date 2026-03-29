@@ -217,5 +217,4 @@ Cross-reference of every Tauri/Svelte feature vs. the Iced 0.14 implementation.
 
 ### Low Priority / Future
 5. **SuperWoW AV risk dialog** — one-time acknowledgment before adding SuperWoW.
-6. **DMA-BUF toggle** — Linux GPU passthrough option for gaming on Wayland.
-7. **GIF animation** — iced 0.14 doesn't support animated GIFs natively; custom canvas required.
+6. ~~**GIF animation**~~ — ✅ Done via `iced_gif` crate; animated GIFs play in README previews.
