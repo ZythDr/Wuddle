@@ -437,6 +437,7 @@ pub struct App {
     // Radio
     pub radio_playing: bool,
     pub radio_volume: f32,
+    pub radio_pre_mute_volume: Option<f32>,
     pub radio_connecting: bool,
     pub radio_auto_connect: bool,
     pub radio_auto_play: bool,
@@ -535,6 +536,9 @@ pub struct App {
     // Repos whose updates are being ignored
     pub ignored_update_ids: HashSet<i64>,
 
+    // GitHub API rate limit info (fetched after update checks)
+    pub github_rate_info: Option<service::GitHubRateInfo>,
+
     // Fetched version lists for the version picker, keyed by repo_id
     pub repo_versions: HashMap<i64, Vec<service::VersionItem>>,
     pub repo_versions_loading: HashSet<i64>,
@@ -623,8 +627,10 @@ pub enum Message {
     ToggleFrizFont(bool),
     // Radio
     ToggleRadio,
+    ReconnectRadio,
     RadioStarted(Result<radio::RadioHandle, String>),
     SetRadioVolume(f32),
+    ToggleRadioMute,
     ToggleRadioAutoConnect(bool),
     AutoConnectRadio,
     OpenRadioSettings,
@@ -669,6 +675,7 @@ pub enum Message {
     // Operations (Phase 3)
     CheckUpdates,
     CheckUpdatesResult(Result<Vec<PlanRow>, String>),
+    GithubRateInfoResult(Option<service::GitHubRateInfo>),
     AddRepoSubmit,
     AddRepoResult(Result<i64, String>),
     InstallAfterAddResult(Result<String, String>),
@@ -1183,6 +1190,7 @@ impl App {
             opt_friz_font: false,
             radio_playing: false,
             radio_volume: 0.25,
+            radio_pre_mute_volume: None,
             radio_connecting: false,
             radio_auto_connect: false,
             radio_auto_play: false,
@@ -1241,6 +1249,7 @@ impl App {
             toasts: Vec::new(),
             toast_counter: 0,
             ignored_update_ids: HashSet::new(),
+            github_rate_info: None,
             repo_versions: HashMap::new(),
             repo_versions_loading: HashSet::new(),
             expanded_repo_ids: HashSet::new(),
@@ -1408,6 +1417,7 @@ impl App {
             || self.updating_all
             || !self.updating_repo_ids.is_empty()
             || self.add_repo_preview_loading
+            || self.radio_connecting
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -1591,6 +1601,26 @@ impl App {
                     );
                 }
             }
+            Message::ReconnectRadio => {
+                if self.radio_connecting {
+                    return Task::none();
+                }
+                // Drop existing handle and reconnect from scratch
+                if let Some(h) = self.radio_handle.take() {
+                    h.fade_out();
+                }
+                self.radio_playing = true;
+                self.radio_connecting = true;
+                self.radio_error = None;
+                self.log(LogLevel::Info, "Radio: reconnecting…");
+                let (tx, rx) = tokio::sync::oneshot::channel::<Result<radio::RadioHandle, String>>();
+                let buffer_size = self.radio_buffer_size;
+                std::thread::spawn(move || { let _ = tx.send(radio::start(0.0, buffer_size)); });
+                return Task::perform(
+                    async move { rx.await.unwrap_or_else(|_| Err("Thread died".to_string())) },
+                    Message::RadioStarted,
+                );
+            }
             Message::RadioStarted(Ok(handle)) => {
                 self.radio_connecting = false;
                 if self.radio_playing {
@@ -1621,6 +1651,19 @@ impl App {
                 }
                 if self.radio_persist_volume {
                     self.save_settings();
+                }
+            }
+            Message::ToggleRadioMute => {
+                if self.radio_volume > 0.0 {
+                    // Mute: save current volume and set to 0
+                    self.radio_pre_mute_volume = Some(self.radio_volume);
+                    return Task::done(Message::SetRadioVolume(0.0));
+                } else if let Some(prev) = self.radio_pre_mute_volume.take() {
+                    // Unmute: restore previous volume
+                    return Task::done(Message::SetRadioVolume(prev));
+                } else {
+                    // No previous volume stored, unmute to default
+                    return Task::done(Message::SetRadioVolume(0.25));
                 }
             }
             Message::ToggleRadioAutoConnect(b) => {
@@ -1970,9 +2013,12 @@ impl App {
                                 ));
                             }
                         }
-                        if !version_tasks.is_empty() {
-                            return iced::Task::batch(version_tasks);
-                        }
+                        // Fetch GitHub rate limit info for the API status tooltip
+                        version_tasks.push(iced::Task::perform(
+                            service::fetch_github_rate_limit(),
+                            Message::GithubRateInfoResult,
+                        ));
+                        return iced::Task::batch(version_tasks);
                     }
                     Err(e) => {
                         self.error = Some(e.clone());
@@ -1980,6 +2026,9 @@ impl App {
                         self.show_toast(format!("Update check failed: {}", e), ToastKind::Error);
                     }
                 }
+            }
+            Message::GithubRateInfoResult(info) => {
+                self.github_rate_info = info;
             }
             Message::AddRepoSubmit => {
                 if let Some(Dialog::AddRepo { ref url, ref mode, .. }) = self.dialog {
@@ -2264,6 +2313,11 @@ impl App {
                             self.log(LogLevel::Info, &format!("Done. Updated {} repo(s).", applied));
                             self.show_toast(format!("Updated {} repo(s).", applied), ToastKind::Info);
                         }
+                        // Only re-check updates if user has a GitHub token to avoid
+                        // burning unauthenticated rate limits on every update action.
+                        if wuddle_engine::github_token().is_some() {
+                            return self.refresh_repos_task().chain(self.check_updates_task());
+                        }
                         return self.refresh_repos_task();
                     }
                     Err(e) => {
@@ -2324,6 +2378,9 @@ impl App {
                         self.show_toast(format!("Update failed: {}", e), ToastKind::Error);
                     }
                 }
+                if wuddle_engine::github_token().is_some() {
+                    return self.refresh_repos_task().chain(self.check_updates_task());
+                }
                 return self.refresh_repos_task();
             }
             Message::ReinstallRepo(id) => {
@@ -2346,6 +2403,9 @@ impl App {
                 match result {
                     Ok(plan) => {
                         self.log(LogLevel::Info, &format!("Reinstalled {}/{}.", plan.owner, plan.name));
+                        if wuddle_engine::github_token().is_some() {
+                            return self.refresh_repos_task().chain(self.check_updates_task());
+                        }
                         return self.refresh_repos_task();
                     }
                     Err(e) => self.log(LogLevel::Error, &format!("Reinstall failed: {}", e)),

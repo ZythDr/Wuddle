@@ -110,6 +110,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         filter_button(&format!("{} ({})", if is_mods_tab { "Disabled" } else { "Ignored" }, ignored_count), Filter::Ignored, app.filter, &c),
         Space::new().width(8),
         {
+            let c2 = c;
             let has_token = wuddle_engine::github_token().is_some();
             let has_errors = app.plans.iter().any(|p| {
                 p.error.as_deref().map(|e| {
@@ -117,7 +118,12 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
                     e.contains("rate") || e.contains("403") || e.contains("429")
                 }).unwrap_or(false)
             });
-            let partial_errors = !has_errors && app.plans.iter().any(|p| p.error.is_some());
+            // Only count partial errors for repos that aren't ignored/disabled
+            let partial_errors = !has_errors && app.plans.iter().any(|p| {
+                p.error.is_some()
+                    && !app.ignored_update_ids.contains(&p.repo_id)
+                    && app.repos.iter().any(|r| r.id == p.repo_id && r.enabled)
+            });
             let (api_label, api_color) = if has_errors {
                 ("API status: rate limited", colors.bad)
             } else if partial_errors {
@@ -127,7 +133,36 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
             } else {
                 ("API status: anonymous", colors.muted)
             };
-            text(api_label).size(12).color(api_color)
+
+            // Build tooltip with rate limit details
+            let tip_text = if let Some(info) = &app.github_rate_info {
+                let now_epoch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let reset_secs = info.reset_epoch - now_epoch;
+                let reset_mins = (reset_secs / 60).max(0);
+                format!(
+                    "GitHub API: {}/{} requests remaining\nResets in {} min",
+                    info.remaining, info.limit, reset_mins,
+                )
+            } else if has_token {
+                "GitHub API: authenticated (5,000 req/hr)".to_string()
+            } else {
+                "GitHub API: anonymous (60 req/hr)\nAdd a token in Options for higher limits".to_string()
+            };
+
+            let tip_str = tip_text;
+            let label: Element<Message> = tooltip(
+                text(api_label).size(12).color(api_color),
+                container(text(tip_str).size(12).color(c2.text))
+                    .padding([4, 8])
+                    .style(move |_theme| crate::theme::tooltip_style(&c2)),
+                tooltip::Position::Bottom,
+            )
+            .gap(4.0)
+            .into();
+            label
         },
     ]
     .spacing(4)
@@ -679,8 +714,8 @@ fn name_cell_with_expand<'a>(
     let title_row: Element<Message> = if is_infrequent {
         let c_inf = c;
         let badge = container(text("\u{23F3}").size(10).color(c_inf.muted))
-            .padding([1, 4]);
-        let tip_text = "Infrequently updated \u{2014} checked every 4 hours instead of every auto-check cycle";
+            .padding([0, 4]);
+        let tip_text = "Infrequently updated \u{2014} checked once every 4h to avoid API rate limits";
         crate::tip(
             row![title_row, Space::new().width(6), badge]
                 .align_y(iced::Alignment::Center),

@@ -2,6 +2,28 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.0.0-beta.7 (Iced frontend)
+
+### New Features
+
+- **Redesigned radio controls** — replaced text buttons and volume slider with frameless SVG icon buttons: cogwheel (settings), refresh (reconnect), play/stop, volume speaker with +/− controls. Icons use a dim theme-tinted color when idle and brighten on hover. The play/stop and volume icons appear highlighted when active (radio playing / volume > 0%).
+- **Click-to-mute volume** — clicking the volume speaker icon toggles mute; the previous volume is restored on unmute. The icon appears bright when muted to draw attention.
+- **Scroll-to-adjust volume** — mouse wheel over the volume speaker icon adjusts volume in 5% steps.
+- **Reconnect button** — dedicated refresh icon button to reconnect to the radio stream without stopping and restarting manually.
+- **GitHub API rate limit tooltip** — hovering over the "API status" text in Mods/Addons tabs now shows remaining API requests, total limit, and time until reset.
+
+### Bug Fixes
+
+- **Status not updating after individual updates** — fixed a bug where the "Status" column for mods/addons wouldn't refresh to "Up to date" after clicking the individual update button. The update check is now chained after the repo refresh.
+- **Spinner not animating during reconnect** — the connecting spinner animation now correctly animates when using the reconnect button.
+- **Partial errors ignoring ignored repos** — the "API status: partial errors" yellow warning no longer triggers for repos that are ignored or disabled.
+
+### Changes
+
+- **Skip post-update API checks without token** — when no GitHub auth token is configured, Wuddle no longer re-checks all repos for updates after individual update, Update All, or reinstall operations. This conserves the limited unauthenticated API rate limit (60 req/hr). Update checks still occur on the auto-check interval and manual "Check for updates" button.
+- **Fixed-width play/stop area** — the play, stop, and connecting spinner all occupy a fixed 48px-wide area, preventing the surrounding icon clusters from shifting during state changes.
+- **Centered radio controls** — the play/stop button is now horizontally centered within the radio card, with settings/reconnect on the left and volume controls on the right.
+
 ## v3.0.0-beta.6 (Iced frontend)
 
 ### New Features

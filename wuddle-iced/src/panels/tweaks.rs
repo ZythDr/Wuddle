@@ -176,7 +176,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     );
 
     let footnote = text("* Raising this option too high can result in a severe loss of FPS/performance.")
-        .size(12)
+        .size(16)
         .color(colors.muted);
 
     scrollable(

@@ -70,7 +70,7 @@ pub fn view<'a>(
                 .label("Auto-play when connected")
                 .text_size(13),
             container(
-                text("Enable Auto-connect first").size(12).color(c2.text),
+                text("Enable Auto-connect first").size(13).color(c2.text),
             )
             .padding([3, 8])
             .style(move |_| crate::theme::tooltip_style(&c2)),
@@ -99,7 +99,7 @@ pub fn view<'a>(
         let active = !custom_buffer && val == current_val;
         let c3 = c;
         preset_row = preset_row.push(
-            button(text(label).size(12))
+            button(text(label).size(13))
                 .on_press(Message::SetRadioBufferSize(val.to_string()))
                 .padding([4, 8])
                 .style(move |_theme, status| {
@@ -118,7 +118,7 @@ pub fn view<'a>(
     // "Custom" button — toggles custom mode
     let c4 = c;
     preset_row = preset_row.push(
-        button(text("Custom").size(12))
+        button(text("Custom").size(13))
             .on_press(Message::SetRadioCustomBuffer(!custom_buffer))
             .padding([4, 8])
             .style(move |_theme, status| {
@@ -135,7 +135,7 @@ pub fn view<'a>(
 
     // Input field — always shown, but only editable when custom is selected
     let input_row = row![
-        text("Bytes:").size(12).color(c.muted),
+        text("Bytes:").size(13).color(c.muted),
         {
             let inp = text_input("4096", buffer_size).width(100);
             if custom_buffer {

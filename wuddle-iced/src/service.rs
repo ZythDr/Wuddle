@@ -2179,6 +2179,40 @@ fn detect_launcher_root() -> Result<(PathBuf, bool), String> {
     Ok((root, false))
 }
 
+// ---------------------------------------------------------------------------
+// GitHub rate limit info
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct GitHubRateInfo {
+    pub limit: u32,
+    pub remaining: u32,
+    pub reset_epoch: i64,
+}
+
+pub async fn fetch_github_rate_limit() -> Option<GitHubRateInfo> {
+    #[derive(Deserialize)]
+    struct RateLimitResponse { rate: RateCore }
+    #[derive(Deserialize)]
+    struct RateCore { limit: u32, remaining: u32, reset: i64 }
+
+    let mut req = reqwest::Client::new()
+        .get("https://api.github.com/rate_limit")
+        .header("User-Agent", concat!("Wuddle/", env!("CARGO_PKG_VERSION")));
+
+    if let Some(token) = wuddle_engine::github_token() {
+        req = req.bearer_auth(token);
+    }
+
+    let resp = req.send().await.ok()?;
+    let data: RateLimitResponse = resp.json().await.ok()?;
+    Some(GitHubRateInfo {
+        limit: data.rate.limit,
+        remaining: data.rate.remaining,
+        reset_epoch: data.rate.reset,
+    })
+}
+
 #[cfg(target_os = "windows")]
 fn sanitize_version_name(raw: &str) -> String {
     let mut out = String::new();

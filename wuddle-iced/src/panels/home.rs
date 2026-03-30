@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, mouse_area, row, rule, scrollable, slider, text, tooltip, Space};
+use iced::widget::{button, column, container, mouse_area, row, rule, scrollable, text, tooltip, Space};
 use iced::{Element, Length};
 
 use crate::anchored_overlay::AnchoredOverlay;
@@ -378,6 +378,89 @@ fn link_button<'a>(label: &str, url: &str, colors: &ThemeColors) -> Element<'a, 
     .into()
 }
 
+/// Frameless icon button: dim icon color when idle, bright on hover. No background.
+fn icon_btn_hover<'a>(
+    svg_bytes: &'static [u8],
+    size: u32,
+    msg: Message,
+    idle_color: iced::Color,
+    hover_color: iced::Color,
+) -> Element<'a, Message> {
+    let icon = iced::widget::svg(
+        iced::widget::svg::Handle::from_memory(svg_bytes.to_vec()),
+    )
+    .width(size)
+    .height(size)
+    .style(move |_t, status| iced::widget::svg::Style {
+        color: Some(match status {
+            iced::widget::svg::Status::Hovered => hover_color,
+            _ => idle_color,
+        }),
+    });
+
+    button(icon)
+        .on_press(msg)
+        .padding([4, 4])
+        .style(move |_theme, _status| button::Style {
+            background: None,
+            text_color: idle_color,
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        })
+        .into()
+}
+
+/// Like `icon_btn_hover` but with a fixed button width to prevent layout shift.
+fn icon_btn_fixed<'a>(
+    svg_bytes: &'static [u8],
+    icon_size: u32,
+    btn_width: u32,
+    msg: Message,
+    idle_color: iced::Color,
+    hover_color: iced::Color,
+) -> Element<'a, Message> {
+    let icon = iced::widget::svg(
+        iced::widget::svg::Handle::from_memory(svg_bytes.to_vec()),
+    )
+    .width(icon_size)
+    .height(icon_size)
+    .style(move |_t, status| iced::widget::svg::Style {
+        color: Some(match status {
+            iced::widget::svg::Status::Hovered => hover_color,
+            _ => idle_color,
+        }),
+    });
+
+    button(container(icon).center_x(Length::Fill))
+        .on_press(msg)
+        .width(btn_width)
+        .padding([4, 4])
+        .style(move |_theme, _status| button::Style {
+            background: None,
+            text_color: idle_color,
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        })
+        .into()
+}
+
+/// Choose the volume icon based on current level (0.0–1.0).
+fn volume_icon_bytes(volume: f32) -> &'static [u8] {
+    if volume <= 0.0 {
+        include_bytes!("../../icons/volume-mute.svg")
+    } else if volume <= 0.25 {
+        include_bytes!("../../icons/volume-off.svg")
+    } else if volume <= 0.50 {
+        include_bytes!("../../icons/volume-low.svg")
+    } else if volume <= 0.75 {
+        include_bytes!("../../icons/volume-medium.svg")
+    } else {
+        include_bytes!("../../icons/volume-high.svg")
+    }
+}
+
 fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
 
@@ -400,10 +483,7 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         )
     };
 
-    // Gradient wash that fills the full card height. The card has no outer padding;
-    // top/bottom padding is carried by the left-col and center containers instead,
-    // so live_right's height(Fill) reaches the card's actual top and bottom borders.
-    // 1px inset on top/right/bottom avoids overlapping the card border stroke.
+    // Gradient wash that fills the full card height.
     let live_right = container(
         container(text("● LIVE").size(16).color(live_text_color))
             .width(Length::Fill)
@@ -435,124 +515,203 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     ]
     .spacing(2);
 
-    // Center: Play/Stop button + volume slider
-    let btn_label = if is_connecting {
-        "Connecting..."
-    } else if app.radio_playing {
-        "■  Stop"
-    } else if app.radio_handle.is_some() {
-        "▶  Play"
-    } else {
-        "▶  Tune In"
+    // --- Icon colors ---
+    // Blend a hint of the theme accent into the grays so icons feel cohesive.
+    let accent = c.primary;
+    let mix = |gray: f32, a: f32| -> iced::Color {
+        // 80% gray + 20% accent
+        iced::Color::from_rgba(
+            gray * 0.80 + accent.r * 0.20,
+            gray * 0.80 + accent.g * 0.20,
+            gray * 0.80 + accent.b * 0.20,
+            a,
+        )
     };
+    let dim = mix(0.55, 0.55);
+    let extra_dim = mix(0.50, 0.40);
+    let hover_bright = mix(0.92, 1.0);
+    let active_bright = mix(0.88, 1.0);
 
-    let c2 = c;
-    let play_btn = button(text(btn_label).size(14))
-        .on_press(Message::ToggleRadio)
-        .padding([10, 22])
-        .style(move |_theme, status| {
-            if is_live {
-                match status {
-                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                    _ => theme::tab_button_active_style(&c2),
-                }
-            } else {
-                match status {
-                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                    _ => theme::tab_button_style(&c2),
-                }
-            }
-        });
-
-    let c4 = c;
-    let vol_slider = slider(0.0_f32..=1.0_f32, app.radio_volume, Message::SetRadioVolume)
-        .step(0.01_f32)
-        .width(150)
-        .style(move |_theme, status| {
-            use iced::widget::slider::{Rail, Status, Style};
-            let active = c4.primary;
-            let handle_color = match status {
-                Status::Hovered | Status::Dragged => active,
-                Status::Active => iced::Color::from_rgba(1.0, 1.0, 1.0, 0.80),
-            };
-            Style {
-                rail: Rail {
-                    backgrounds: (
-                        iced::Background::Color(active),
-                        iced::Background::Color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.12)),
-                    ),
-                    width: 5.0,
-                    border: iced::Border::default(),
-                },
-                handle: iced::widget::slider::Handle {
-                    shape: iced::widget::slider::HandleShape::Circle { radius: 9.0 },
-                    background: iced::Background::Color(handle_color),
-                    border_width: 0.0,
-                    border_color: iced::Color::TRANSPARENT,
-                },
-            }
-        });
-
-    // Wrap in a padded container so the scroll hitbox is taller than the thin rail
-    let vol_scrollable = mouse_area(
-        container(vol_slider).padding([10, 0]),
-    )
-    .on_scroll(move |delta| {
-        let step: f32 = match delta {
-            iced::mouse::ScrollDelta::Lines { y, .. } => y * 0.02,
-            iced::mouse::ScrollDelta::Pixels { y, .. } => y * 0.002,
-        };
-        Message::SetRadioVolume((app.radio_volume + step).clamp(0.0, 1.0))
-    });
-
-    let radio_tip = if app.radio_playing { "Stop the radio stream" } else { "Start the Everlook radio stream" };
-    let play_btn = tip(play_btn, radio_tip, tooltip::Position::Top, colors);
-
-    let c5 = c;
-    let cogwheel_icon = iced::widget::svg(
-        iced::widget::svg::Handle::from_memory(
-            include_bytes!("../../icons/cogwheel.svg").to_vec(),
-        ),
-    )
-    .width(27)
-    .height(27)
-    .style(move |_t, _s| iced::widget::svg::Style { color: Some(c5.muted) });
-
-    let c5b = c;
+    // Settings (cogwheel)
     let settings_btn = tip(
-        button(cogwheel_icon)
-            .on_press(Message::OpenRadioSettings)
-            .padding([6, 8])
-            .style(move |_theme, status| {
-                match status {
-                    button::Status::Hovered => theme::tab_button_hovered_style(&c5b),
-                    _ => theme::tab_button_style(&c5b),
-                }
-            }),
+        icon_btn_hover(
+            include_bytes!("../../icons/cogwheel.svg"),
+            20,
+            Message::OpenRadioSettings,
+            dim,
+            hover_bright,
+        ),
         "Radio settings",
         tooltip::Position::Top,
         colors,
     );
 
-    let center_row = row![
-        settings_btn,
-        play_btn,
-        text("Vol").size(12).color(colors.muted),
-        vol_scrollable,
+    // Refresh / reconnect — sits left of play/stop
+    let refresh_btn = tip(
+        icon_btn_hover(
+            include_bytes!("../../icons/refresh.svg"),
+            18,
+            Message::ReconnectRadio,
+            dim,
+            hover_bright,
+        ),
+        "Reconnect to the radio stream",
+        tooltip::Position::Top,
+        colors,
+    );
+
+    // Play / Stop / Connecting spinner — all use a fixed 44px button width
+    // so the layout never shifts between states.
+    let play_stop_btn: Element<Message> = if is_connecting {
+        let spinner_frames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+        let frame = spinner_frames[app.spinner_tick % spinner_frames.len()];
+        tip(
+            button(
+                container(text(format!("{}", frame)).size(36).color(dim))
+                    .center_x(Length::Fill)
+            )
+            .width(44)
+            .padding([4, 4])
+            .style(move |_theme, _status| button::Style {
+                background: None,
+                text_color: dim,
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+                snap: true,
+            }),
+            "Connecting to radio stream…",
+            tooltip::Position::Top,
+            colors,
+        )
+    } else if app.radio_playing {
+        tip(
+            icon_btn_fixed(
+                include_bytes!("../../icons/stop.svg"),
+                36, 44,
+                Message::ToggleRadio,
+                active_bright,
+                hover_bright,
+            ),
+            "Stop the radio stream",
+            tooltip::Position::Top,
+            colors,
+        )
+    } else {
+        tip(
+            icon_btn_fixed(
+                include_bytes!("../../icons/play.svg"),
+                36, 44,
+                Message::ToggleRadio,
+                dim,
+                hover_bright,
+            ),
+            if app.radio_handle.is_some() { "Play" } else { "Tune in to the radio stream" },
+            tooltip::Position::Top,
+            colors,
+        )
+    };
+
+    // Volume: [−] [speaker] [+]
+    let vol = app.radio_volume;
+    let vol_down = (vol - 0.05).clamp(0.0, 1.0);
+    let vol_up = (vol + 0.05).clamp(0.0, 1.0);
+
+    let minus_btn = icon_btn_hover(
+        include_bytes!("../../icons/minus.svg"),
+        10,
+        Message::SetRadioVolume(vol_down),
+        extra_dim,
+        hover_bright,
+    );
+
+    // Volume icon: bright when muted (to draw attention), dim otherwise
+    let is_muted = vol <= 0.0;
+    let vol_idle_color = if is_muted { active_bright } else { dim };
+    let vol_icon_bytes = volume_icon_bytes(vol);
+    let vol_icon = iced::widget::svg(
+        iced::widget::svg::Handle::from_memory(vol_icon_bytes.to_vec()),
+    )
+    .width(36)
+    .height(36)
+    .style(move |_t, status| iced::widget::svg::Style {
+        color: Some(match status {
+            iced::widget::svg::Status::Hovered => hover_bright,
+            _ => vol_idle_color,
+        }),
+    });
+
+    // Wrap in button for click-to-mute, then mouse_area for scroll-to-adjust
+    let vol_btn = button(vol_icon)
+        .on_press(Message::ToggleRadioMute)
+        .padding([2, 2])
+        .style(move |_theme, _status| button::Style {
+            background: None,
+            text_color: vol_idle_color,
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        });
+
+    let vol_icon_scrollable = mouse_area(vol_btn)
+        .on_scroll(move |delta| {
+            let step: f32 = match delta {
+                iced::mouse::ScrollDelta::Lines { y, .. } => y * 0.05,
+                iced::mouse::ScrollDelta::Pixels { y, .. } => y * 0.005,
+            };
+            Message::SetRadioVolume((vol + step).clamp(0.0, 1.0))
+        });
+
+    let vol_pct = format!("{}%", (vol * 100.0).round() as u32);
+    let mute_hint = if is_muted { "Click to unmute" } else { "Click to mute" };
+    let vol_icon_with_tip = tip(
+        vol_icon_scrollable,
+        &format!("Volume: {} — {} — scroll to adjust", vol_pct, mute_hint),
+        tooltip::Position::Top,
+        colors,
+    );
+
+    let plus_btn = icon_btn_hover(
+        include_bytes!("../../icons/plus.svg"),
+        10,
+        Message::SetRadioVolume(vol_up),
+        extra_dim,
+        hover_bright,
+    );
+
+    // Left half: title + [⚙ ↻], right-aligned so controls sit near center
+    let left_half = row![
+        container(left_col)
+            .width(Length::Fill)
+            .padding(iced::Padding { top: 12.0, right: 0.0, bottom: 12.0, left: 16.0 }),
+        row![settings_btn, refresh_btn]
+            .spacing(2)
+            .align_y(iced::Alignment::Center),
+        Space::new().width(20),
     ]
-    .spacing(10)
     .align_y(iced::Alignment::Center);
 
-    // Main row: left and center carry the 12px top/bottom padding so live_right
-    // (height Fill) reaches the card's top and bottom borders.
-    let main_row = row![
-        container(left_col)
-            .width(Length::FillPortion(1))
-            .padding(iced::Padding { top: 12.0, right: 0.0, bottom: 12.0, left: 16.0 }),
-        container(center_row)
-            .padding([12, 12])
+    // Right half: [− 🔊 +] + LIVE, left-aligned so controls sit near center
+    let right_half = row![
+        Space::new().width(20),
+        row![minus_btn, vol_icon_with_tip, plus_btn]
+            .spacing(2)
             .align_y(iced::Alignment::Center),
         live_right,
+    ]
+    .align_y(iced::Alignment::Center);
+
+    // Main row: [left_half (fill)] [▶/■] [right_half (fill)]
+    // Equal FillPortion on both sides centers the play button in the card.
+    let main_row = row![
+        container(left_half)
+            .width(Length::FillPortion(1))
+            .align_y(iced::Alignment::Center),
+        container(play_stop_btn)
+            .width(Length::Shrink)
+            .align_y(iced::Alignment::Center),
+        container(right_half)
+            .width(Length::FillPortion(1))
+            .align_y(iced::Alignment::Center),
     ]
     .align_y(iced::Alignment::Center);
 
@@ -564,7 +723,6 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         );
     }
 
-    // No outer padding — live_right fills edge-to-edge vertically
     container(card_col)
         .width(Length::Fill)
         .style(move |_| theme::card_style(&c))
