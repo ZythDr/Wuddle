@@ -2,6 +2,24 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.0.0-beta.6 (Iced frontend)
+
+### New Features
+
+- **Infrequent update checking** — repos whose latest release is older than 3 days are now categorized as "infrequently updated" and only checked for updates every 4 hours instead of every auto-check cycle. Repos with pending updates or recent releases continue to be checked at the normal interval. A full check of all repos is still performed on every app launch.
+- **Infrequent repo indicator** — repos in the infrequent category show an hourglass (⏳) badge next to their name in the Mods and Addons tables, with a tooltip explaining the reduced check frequency.
+- **Verbose logging** — nearly every user action now emits a log entry: tab switches, theme changes, settings toggles (auto-check, notifications, symlinks, xattr, 12-hour clock), radio settings saves, repo enable/disable, DLL enable/disable, version pinning, merge installs, update ignore/unignore, rescan, log clear, DXVK config open, and update channel changes.
+
+### Changes
+
+- **Repo casing fix on rescan only** — the one-time forge casing correction (fixing lowercased owner/name from a previous DB migration) now runs only on manual rescan (Refresh button), not on every app launch.
+- **Auto-check skip counts in logs** — auto-check log entries now report how many infrequent repos were skipped, giving visibility into the adaptive checking behavior.
+- **Cached plans merged for skipped repos** — when infrequent repos are skipped during an auto-check, their previous update plans are preserved and merged into the new results, preventing stale UI state.
+
+### Engine (wuddle-engine)
+
+- **`check_updates_with_wow_skip()`** — new engine method that accepts a set of repo IDs to skip during update checks, enabling the frontend to implement selective checking without modifying engine internals.
+
 ## v2.5.8
 
 ### New Features

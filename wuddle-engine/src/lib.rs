@@ -1468,6 +1468,10 @@ impl Engine {
     }
 
     pub async fn check_updates_with_wow(&self, wow_dir: Option<&Path>, check_mode: CheckMode) -> Result<Vec<UpdatePlan>> {
+        self.check_updates_with_wow_skip(wow_dir, check_mode, &HashSet::new()).await
+    }
+
+    pub async fn check_updates_with_wow_skip(&self, wow_dir: Option<&Path>, check_mode: CheckMode, skip_repo_ids: &HashSet<i64>) -> Result<Vec<UpdatePlan>> {
         if let Some(wow_dir) = wow_dir {
             let _ = self.import_existing_addon_git_repos(wow_dir);
             let _ = self.dedup_addon_repos_by_folder(wow_dir);
@@ -1477,8 +1481,8 @@ impl Engine {
         let mut git_repos = Vec::new();
         let mut release_repos = Vec::new();
         for repo in repos {
-            if !repo.enabled {
-                continue; // skip disabled repos — no git pull/clone, no API check
+            if !repo.enabled || skip_repo_ids.contains(&repo.id) {
+                continue; // skip disabled or explicitly skipped repos
             }
             if matches!(repo.mode, InstallMode::AddonGit) {
                 git_repos.push(repo);

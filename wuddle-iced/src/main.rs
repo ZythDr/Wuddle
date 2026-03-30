@@ -504,6 +504,10 @@ pub struct App {
 
     // Auto-check
     pub auto_check_minutes: u32,
+    /// Tracks when infrequent repos were last checked (wall-clock unix seconds).
+    pub last_infrequent_check_unix: i64,
+    /// Repos considered infrequently updated (last release > 3 days ago, no pending update).
+    pub infrequent_repo_ids: std::collections::HashSet<i64>,
 
     // Profiles/instances
     pub profiles: Vec<settings::ProfileConfig>,
@@ -1223,6 +1227,8 @@ impl App {
             self_update_in_progress: false,
             self_update_done: false,
             auto_check_minutes: 60,
+            last_infrequent_check_unix: 0,
+            infrequent_repo_ids: std::collections::HashSet::new(),
             profiles: vec![settings::ProfileConfig::default()],
             spinner_tick: 0,
             add_repo_preview: None,
@@ -1288,13 +1294,38 @@ impl App {
     }
 
     fn refresh_repos_task(&self) -> Task<Message> {
+        self.refresh_repos_task_inner(false)
+    }
+
+    fn refresh_repos_task_inner(&self, fix_casing: bool) -> Task<Message> {
         let db = self.db_path.clone();
         let wow = if self.wow_dir.is_empty() {
             None
         } else {
             Some(self.wow_dir.clone())
         };
-        Task::perform(service::list_repos(db, wow), Message::ReposLoaded)
+        Task::perform(service::list_repos(db, wow, fix_casing), Message::ReposLoaded)
+    }
+
+    /// Recompute which repos are "infrequently updated" based on current plans and repos.
+    fn recompute_infrequent_ids(&mut self) {
+        let now = now_unix();
+        let has_update: std::collections::HashSet<i64> = self.plans.iter()
+            .filter(|p| p.has_update)
+            .map(|p| p.repo_id)
+            .collect();
+        self.infrequent_repo_ids = self.repos.iter()
+            .filter(|r| {
+                if has_update.contains(&r.id) {
+                    return false;
+                }
+                match r.published_at_unix {
+                    Some(pub_at) => (now - pub_at) > INFREQUENT_THRESHOLD_SECS,
+                    None => false,
+                }
+            })
+            .map(|r| r.id)
+            .collect();
     }
 
     fn check_updates_task(&self) -> Task<Message> {
@@ -1460,6 +1491,7 @@ impl App {
         match message {
             Message::SetTab(tab) => {
                 self.active_tab = tab;
+                self.log(LogLevel::Info, &format!("Switched to tab: {:?}.", tab));
                 // Fire self-update check whenever the About tab becomes active
                 if tab == Tab::About {
                     return Task::perform(service::check_self_update_full(self.update_channel == UpdateChannel::Beta), Message::CheckSelfUpdateResult);
@@ -1468,6 +1500,7 @@ impl App {
             Message::SetTheme(theme) => {
                 self.wuddle_theme = theme;
                 self.save_settings();
+                self.log(LogLevel::Info, &format!("Theme changed to '{}'.", theme.key()));
             }
 
             // Projects
@@ -1487,7 +1520,11 @@ impl App {
             }
 
             // Options
-            Message::ToggleAutoCheck(b) => { self.opt_auto_check = b; self.save_settings(); }
+            Message::ToggleAutoCheck(b) => {
+                self.opt_auto_check = b;
+                self.save_settings();
+                self.log(LogLevel::Info, &format!("Auto-check updates: {}.", if b { "enabled" } else { "disabled" }));
+            }
             Message::SetAutoCheckMinutes(s) => {
                 if let Ok(n) = s.parse::<u32>() {
                     self.auto_check_minutes = n.max(1);
@@ -1495,11 +1532,28 @@ impl App {
                     self.auto_check_minutes = 1;
                 }
                 self.save_settings();
+                self.log(LogLevel::Info, &format!("Auto-check interval set to {} min.", self.auto_check_minutes));
             }
-            Message::ToggleDesktopNotify(b) => { self.opt_desktop_notify = b; self.save_settings(); }
-            Message::ToggleSymlinks(b) => { self.opt_symlinks = b; self.save_settings(); }
-            Message::ToggleXattr(b) => { self.opt_xattr = b; self.save_settings(); }
-            Message::ToggleClock12(b) => { self.opt_clock12 = b; self.save_settings(); }
+            Message::ToggleDesktopNotify(b) => {
+                self.opt_desktop_notify = b;
+                self.save_settings();
+                self.log(LogLevel::Info, &format!("Desktop notifications: {}.", if b { "enabled" } else { "disabled" }));
+            }
+            Message::ToggleSymlinks(b) => {
+                self.opt_symlinks = b;
+                self.save_settings();
+                self.log(LogLevel::Info, &format!("Symlinks: {}.", if b { "enabled" } else { "disabled" }));
+            }
+            Message::ToggleXattr(b) => {
+                self.opt_xattr = b;
+                self.save_settings();
+                self.log(LogLevel::Info, &format!("Extended attributes: {}.", if b { "enabled" } else { "disabled" }));
+            }
+            Message::ToggleClock12(b) => {
+                self.opt_clock12 = b;
+                self.save_settings();
+                self.log(LogLevel::Info, &format!("12-hour clock: {}.", if b { "enabled" } else { "disabled" }));
+            }
             Message::ToggleFrizFont(b) => {
                 self.opt_friz_font = b;
                 self.save_settings();
@@ -1653,6 +1707,10 @@ impl App {
                     }
                     self.save_settings();
                     self.dialog = None;
+                    self.log(LogLevel::Info, &format!(
+                        "Radio settings saved. Auto-connect: {}, Auto-play: {}, Persist volume: {}, Buffer: {} bytes.",
+                        self.radio_auto_connect, self.radio_auto_play, self.radio_persist_volume, self.radio_buffer_size
+                    ));
                 }
             }
 
@@ -1666,7 +1724,12 @@ impl App {
             Message::ToggleLogAutoScroll(b) => { self.log_autoscroll = b; self.save_settings(); }
             Message::ToggleLogErrorFetch(b) => { self.log_error_fetch = b; self.rebuild_log_content(); }
             Message::ToggleLogErrorMisc(b) => { self.log_error_misc = b; self.rebuild_log_content(); }
-            Message::ClearLogs => { self.log_lines.clear(); self.rebuild_log_content(); }
+            Message::ClearLogs => {
+                let count = self.log_lines.len();
+                self.log_lines.clear();
+                self.rebuild_log_content();
+                self.log(LogLevel::Info, &format!("Logs cleared ({} entries removed).", count));
+            }
             Message::LogEditorAction(action) => {
                 if !action.is_edit() {
                     self.log_editor_content.perform(action);
@@ -1837,7 +1900,25 @@ impl App {
             Message::CheckUpdatesResult(result) => {
                 self.checking_updates = false;
                 match result {
-                    Ok(plans) => {
+                    Ok(mut plans) => {
+                        // Merge in cached plans for repos that were skipped (infrequent).
+                        let returned_ids: std::collections::HashSet<i64> = plans.iter().map(|p| p.repo_id).collect();
+                        for old_plan in &self.plans {
+                            if !returned_ids.contains(&old_plan.repo_id) {
+                                plans.push(old_plan.clone());
+                            }
+                        }
+
+                        // Update infrequent check timestamp: if any infrequent repos
+                        // were actually checked this round, record the time.
+                        let now = now_unix();
+                        let skip_now = infrequent_skip_ids(&self.repos, &plans, self.last_infrequent_check_unix);
+                        // If skip set is empty, it means we just checked everything
+                        // (either the 4h window expired or this is a full check).
+                        if skip_now.is_empty() || self.last_infrequent_check_unix == 0 {
+                            self.last_infrequent_check_unix = now;
+                        }
+
                         let update_count = plans.iter().filter(|p| p.has_update && !self.ignored_update_ids.contains(&p.repo_id)).count();
                         for p in &plans {
                             if let Some(err) = &p.error {
@@ -1858,6 +1939,7 @@ impl App {
                             self.show_toast("No updates available.", ToastKind::Info);
                         }
                         self.plans = plans;
+                        self.recompute_infrequent_ids();
                         self.last_checked = Some(chrono_now_fmt(self.opt_clock12));
                         self.cached_plans.insert(
                             self.active_profile_id.clone(),
@@ -2001,14 +2083,19 @@ impl App {
                 }
             }
             Message::ToggleIgnoreUpdates(id) => {
-                if self.ignored_update_ids.contains(&id) {
+                let was_ignored = self.ignored_update_ids.contains(&id);
+                if was_ignored {
                     self.ignored_update_ids.remove(&id);
                 } else {
                     self.ignored_update_ids.insert(id);
                 }
                 self.save_settings();
+                let repo_name = self.repos.iter().find(|r| r.id == id).map(|r| r.name.as_str()).unwrap_or("?");
+                self.log(LogLevel::Info, &format!("Repo '{}': updates {}.", repo_name, if was_ignored { "unignored" } else { "ignored" }));
             }
             Message::ToggleMergeInstalls(id, merge) => {
+                let repo_name = self.repos.iter().find(|r| r.id == id).map(|r| r.name.clone()).unwrap_or_default();
+                self.log(LogLevel::Info, &format!("Repo '{}': merge installs {}.", repo_name, if merge { "enabled" } else { "disabled" }));
                 let db = self.db_path.clone();
                 return iced::Task::perform(
                     service::set_merge_installs(db, id, merge),
@@ -2041,6 +2128,9 @@ impl App {
                 self.log(LogLevel::Error, &format!("Failed to fetch versions: {}", e));
             }
             Message::SetPinnedVersion(id, version) => {
+                let repo_name = self.repos.iter().find(|r| r.id == id).map(|r| r.name.clone()).unwrap_or_default();
+                let label = version.as_deref().unwrap_or("Latest");
+                self.log(LogLevel::Info, &format!("Repo '{}': pinned to '{}'.", repo_name, label));
                 let db = self.db_path.clone();
                 return iced::Task::perform(
                     service::set_pinned_version(db, id, version),
@@ -2082,6 +2172,8 @@ impl App {
                 );
             }
             Message::ToggleRepoEnabled(id, enabled) => {
+                let repo_name = self.repos.iter().find(|r| r.id == id).map(|r| r.name.clone()).unwrap_or_default();
+                self.log(LogLevel::Info, &format!("Repo '{}': {}.", repo_name, if enabled { "enabled" } else { "disabled" }));
                 let db = self.db_path.clone();
                 let wow = self.wow_dir.clone();
                 return Task::perform(
@@ -2103,6 +2195,7 @@ impl App {
                 }
             }
             Message::ToggleDllEnabled(_repo_id, dll_name, enabled) => {
+                self.log(LogLevel::Info, &format!("DLL '{}': {}.", dll_name, if enabled { "enabled" } else { "disabled" }));
                 let db = self.db_path.clone();
                 let wow = self.wow_dir.clone();
                 return Task::perform(
@@ -2302,10 +2395,12 @@ impl App {
             }
             Message::RefreshRepos => {
                 self.loading = true;
-                return self.refresh_repos_task();
+                self.log(LogLevel::Info, "Rescanning for repos and fixing casing...");
+                return self.refresh_repos_task_inner(true);
             }
             Message::SaveSettings => {
                 self.save_settings();
+                self.log(LogLevel::Info, "Settings saved.");
             }
 
             // --- Shared actions ---
@@ -2615,6 +2710,7 @@ impl App {
                 self.open_menu = None;
                 self.add_new_menu_open = false;
                 self.dialog = Some(Dialog::DxvkConfig { config: DxvkConfig::default(), show_preview: false });
+                self.log(LogLevel::Info, "Opened DXVK Configurator.");
             }
             Message::SetDxvkField(field) => {
                 if let Some(Dialog::DxvkConfig { ref mut config, .. }) = self.dialog {
@@ -2979,16 +3075,31 @@ impl App {
             Message::AutoCheckTick => {
                 if self.opt_auto_check && !self.checking_updates {
                     self.checking_updates = true;
-                    self.log(LogLevel::Info, "Auto-checking for updates...");
-                    return self.check_updates_task();
+                    let skip = infrequent_skip_ids(&self.repos, &self.plans, self.last_infrequent_check_unix);
+                    let skipped = skip.len();
+                    if skipped > 0 {
+                        self.log(LogLevel::Info, &format!(
+                            "Auto-checking for updates ({} infrequent repos skipped)...", skipped
+                        ));
+                    } else {
+                        self.log(LogLevel::Info, "Auto-checking for updates...");
+                    }
+                    let db = self.db_path.clone();
+                    let wow = if self.wow_dir.is_empty() { None } else { Some(self.wow_dir.clone()) };
+                    return Task::perform(
+                        service::check_updates_skip(db, wow, wuddle_engine::CheckMode::Force, skip),
+                        Message::CheckUpdatesResult,
+                    );
                 }
             }
             Message::SetUpdateChannel(ch) => {
                 self.update_channel = ch;
                 self.save_settings();
+                self.log(LogLevel::Info, &format!("Update channel set to {:?}.", ch));
             }
 
             Message::SwitchToStableChannel => {
+                self.log(LogLevel::Info, "Switching to stable (Tauri) channel...");
                 if !switch_to_stable_channel() {
                     let _ = open::that("https://github.com/ZythDr/Wuddle/releases");
                 }
@@ -5401,4 +5512,48 @@ fn chrono_now_fmt(use_12h: bool) -> String {
 
 fn chrono_now() -> String {
     chrono_now_fmt(false)
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+/// 3 days in seconds — repos whose latest release is older than this are "infrequent".
+const INFREQUENT_THRESHOLD_SECS: i64 = 3 * 24 * 3600;
+/// 4 hours in seconds — minimum interval between infrequent repo checks.
+const INFREQUENT_CHECK_INTERVAL_SECS: i64 = 4 * 3600;
+
+/// Returns the set of repo IDs that should be skipped on this auto-check tick
+/// because they are infrequently updated and were checked recently enough.
+fn infrequent_skip_ids(repos: &[service::RepoRow], plans: &[service::PlanRow], last_infrequent_check_unix: i64) -> std::collections::HashSet<i64> {
+    let now = now_unix();
+    let recently_checked = (now - last_infrequent_check_unix) < INFREQUENT_CHECK_INTERVAL_SECS;
+
+    if !recently_checked {
+        // Time to check everything (infrequent window expired)
+        return std::collections::HashSet::new();
+    }
+
+    // Build set of repos that currently have a pending update — these are
+    // "recently active" and should always be checked frequently.
+    let has_update: std::collections::HashSet<i64> = plans.iter()
+        .filter(|p| p.has_update)
+        .map(|p| p.repo_id)
+        .collect();
+
+    repos.iter()
+        .filter(|r| {
+            if has_update.contains(&r.id) {
+                return false; // has pending update → always check
+            }
+            match r.published_at_unix {
+                Some(pub_at) => (now - pub_at) > INFREQUENT_THRESHOLD_SECS,
+                None => false, // unknown age → check normally
+            }
+        })
+        .map(|r| r.id)
+        .collect()
 }

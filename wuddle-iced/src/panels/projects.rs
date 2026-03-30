@@ -407,7 +407,8 @@ fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: &ThemeColors) -> Element
     let update_ignored = app.ignored_update_ids.contains(&repo.id);
     let is_multi_dll = repo.installed_dlls.len() > 1;
     let is_expanded = app.expanded_repo_ids.contains(&repo.id);
-    let name_col = name_cell_with_expand(repo, is_multi_dll, is_expanded, colors);
+    let is_infrequent = app.infrequent_repo_ids.contains(&repo.id);
+    let name_col = name_cell_with_expand(repo, is_multi_dll, is_expanded, is_infrequent, colors);
     let is_menu_open = app.open_menu == Some(repo.id);
     let menu_content = crate::inline_context_menu(app, repo, &c);
 
@@ -535,7 +536,8 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<
 
     let current_branch = repo.git_branch.clone().unwrap_or_else(|| "master".to_string());
     let update_ignored = app.ignored_update_ids.contains(&repo.id);
-    let name_col = name_cell(repo, colors);
+    let is_infrequent = app.infrequent_repo_ids.contains(&repo.id);
+    let name_col = name_cell(repo, is_infrequent, colors);
     let is_menu_open = app.open_menu == Some(repo.id);
     let menu_content = crate::inline_context_menu(app, repo, &c);
 
@@ -571,8 +573,8 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<
 }
 
 /// Name cell used by addon rows (no expand chevron).
-fn name_cell<'a>(repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a, Message> {
-    name_cell_with_expand(repo, false, false, colors)
+fn name_cell<'a>(repo: &'a RepoRow, is_infrequent: bool, colors: &ThemeColors) -> Element<'a, Message> {
+    name_cell_with_expand(repo, false, false, is_infrequent, colors)
 }
 
 /// Name cell with optional expand chevron and DLL count badge for multi-DLL mod rows.
@@ -580,6 +582,7 @@ fn name_cell_with_expand<'a>(
     repo: &'a RepoRow,
     is_multi_dll: bool,
     is_expanded: bool,
+    is_infrequent: bool,
     colors: &ThemeColors,
 ) -> Element<'a, Message> {
     let c = *colors;
@@ -670,6 +673,23 @@ fn name_cell_with_expand<'a>(
             .into()
     } else {
         title_btn.into()
+    };
+
+    // Infrequent badge: shown next to title for repos checked less often
+    let title_row: Element<Message> = if is_infrequent {
+        let c_inf = c;
+        let badge = container(text("\u{23F3}").size(10).color(c_inf.muted))
+            .padding([1, 4]);
+        let tip_text = "Infrequently updated \u{2014} checked every 4 hours instead of every auto-check cycle";
+        crate::tip(
+            row![title_row, Space::new().width(6), badge]
+                .align_y(iced::Alignment::Center),
+            tip_text,
+            tooltip::Position::Top,
+            colors,
+        ).into()
+    } else {
+        title_row
     };
 
     let content = container(

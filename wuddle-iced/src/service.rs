@@ -30,6 +30,7 @@ pub struct RepoRow {
     pub installed_dlls: Vec<(String, bool)>,
     pub merge_installs: bool,
     pub pinned_version: Option<String>,
+    pub published_at_unix: Option<i64>,
 }
 
 impl From<Repo> for RepoRow {
@@ -53,6 +54,7 @@ impl From<Repo> for RepoRow {
             installed_dlls: Vec::new(),
             merge_installs: r.merge_installs,
             pinned_version: r.pinned_version,
+            published_at_unix: r.published_at_unix,
         }
     }
 }
@@ -111,9 +113,137 @@ fn open_engine(db_path: Option<&Path>) -> Result<Engine, String> {
 // Repo queries
 // ---------------------------------------------------------------------------
 
+/// Best-effort fix: re-fetch correct owner/name casing from each forge API.
+/// Called during rescan so repos lowercased by the v4 migration get corrected.
+/// Only queries the API for repos whose owner or name are entirely lowercase
+/// (indicating they were likely lowercased by the v4 migration).
+fn fix_repo_casing_from_forges(eng: &Engine) {
+    let repos = match eng.db().list_repos() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    // Only fix repos that look like they were lowercased by the migration.
+    let needs_fix: Vec<&Repo> = repos
+        .iter()
+        .filter(|r| {
+            let owner_lower = r.owner == r.owner.to_ascii_lowercase()
+                && r.owner.chars().any(|c| c.is_ascii_alphabetic());
+            let name_lower = r.name == r.name.to_ascii_lowercase()
+                && r.name.chars().any(|c| c.is_ascii_alphabetic());
+            owner_lower || name_lower
+        })
+        .collect();
+
+    if needs_fix.is_empty() {
+        return;
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+    let ua = format!("Wuddle/{}", env!("CARGO_PKG_VERSION"));
+    let gh_token = wuddle_engine::github_token();
+
+    for repo in &needs_fix {
+        let (new_owner, new_name) = match repo.forge.as_str() {
+            "github" => {
+                let api_url = format!(
+                    "https://api.github.com/repos/{}/{}",
+                    repo.owner, repo.name
+                );
+                let mut req = client
+                    .get(&api_url)
+                    .header("User-Agent", &ua)
+                    .header("Accept", "application/vnd.github+json");
+                if let Some(ref token) = gh_token {
+                    req = req.bearer_auth(token);
+                }
+                match req.send() {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(json) = resp.json::<serde_json::Value>() {
+                            let owner = json["owner"]["login"]
+                                .as_str()
+                                .unwrap_or(&repo.owner)
+                                .to_string();
+                            let name = json["name"]
+                                .as_str()
+                                .unwrap_or(&repo.name)
+                                .to_string();
+                            (owner, name)
+                        } else {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+            "gitea" => {
+                let api_url = format!(
+                    "https://{}/api/v1/repos/{}/{}",
+                    repo.host, repo.owner, repo.name
+                );
+                let req = client.get(&api_url).header("User-Agent", &ua);
+                match req.send() {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(json) = resp.json::<serde_json::Value>() {
+                            let owner = json["owner"]["login"]
+                                .as_str()
+                                .unwrap_or(&repo.owner)
+                                .to_string();
+                            let name = json["name"]
+                                .as_str()
+                                .unwrap_or(&repo.name)
+                                .to_string();
+                            (owner, name)
+                        } else {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+            "gitlab" => {
+                let encoded =
+                    format!("{}/{}", repo.owner, repo.name).replace('/', "%2F");
+                let api_url =
+                    format!("https://{}/api/v4/projects/{}", repo.host, encoded);
+                let req = client.get(&api_url).header("User-Agent", &ua);
+                match req.send() {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(json) = resp.json::<serde_json::Value>() {
+                            if let Some(full_path) = json["path_with_namespace"].as_str()
+                            {
+                                let parts: Vec<&str> = full_path.rsplitn(2, '/').collect();
+                                if parts.len() == 2 {
+                                    (parts[1].to_string(), parts[0].to_string())
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        };
+
+        if new_owner != repo.owner || new_name != repo.name {
+            let _ = eng.db().update_repo_casing(repo.id, &new_owner, &new_name);
+        }
+    }
+}
+
 pub async fn list_repos(
     db_path: Option<PathBuf>,
     wow_dir: Option<String>,
+    fix_casing: bool,
 ) -> Result<Vec<RepoRow>, String> {
     tokio::task::spawn_blocking(move || {
         // No wow_dir means no WoW installation configured — return empty list
@@ -129,8 +259,11 @@ pub async fn list_repos(
         let _ = eng.import_existing_addon_git_repos(wow_path);
         // Remove duplicate tracking entries
         let _ = eng.dedup_addon_repos_by_folder(wow_path);
-        // One-time casing fix (v4 migration lowercased owner/name).
-        if eng.db().needs_casing_fix() {
+        // Fix repo owner/name casing from forge APIs (best-effort).
+        // On first launch after the v4 migration (needs_casing_fix), always run.
+        // Otherwise only run when explicitly requested (manual rescan).
+        if fix_casing || eng.db().needs_casing_fix() {
+            fix_repo_casing_from_forges(&eng);
             let _ = eng.db().mark_casing_fixed();
         }
         let repos = eng.db().list_repos().map_err(|e| e.to_string())?;
@@ -170,11 +303,20 @@ pub async fn check_updates(
     wow_dir: Option<String>,
     mode: CheckMode,
 ) -> Result<Vec<PlanRow>, String> {
+    check_updates_skip(db_path, wow_dir, mode, std::collections::HashSet::new()).await
+}
+
+pub async fn check_updates_skip(
+    db_path: Option<PathBuf>,
+    wow_dir: Option<String>,
+    mode: CheckMode,
+    skip_repo_ids: std::collections::HashSet<i64>,
+) -> Result<Vec<PlanRow>, String> {
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let plans = tokio::runtime::Handle::current()
             .block_on(async {
-                eng.check_updates_with_wow(wow_dir.as_deref().map(Path::new), mode)
+                eng.check_updates_with_wow_skip(wow_dir.as_deref().map(Path::new), mode, &skip_repo_ids)
                     .await
             })
             .map_err(|e| e.to_string())?;
