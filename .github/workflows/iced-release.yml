@@ -8,11 +8,11 @@ on:
 jobs:
   # ------------------------------------------------------------------
   # Guard: only proceed if the tag commit is reachable from
-  # Wuddle-Iced-Dev. This keeps the Iced workflow from firing on
+  # main. This keeps the Iced workflow from firing on
   # stable Tauri tags (which live on main).
   # ------------------------------------------------------------------
   guard:
-    name: Check tag is on Wuddle-Iced-Dev
+    name: Check tag is on main
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
@@ -24,15 +24,15 @@ jobs:
       - id: check
         run: |
           set -euo pipefail
-          git fetch --no-tags origin +refs/heads/Wuddle-Iced-Dev:refs/remotes/origin/Wuddle-Iced-Dev || true
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main || true
           TAG_SHA="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
-          if git show-ref --verify --quiet refs/remotes/origin/Wuddle-Iced-Dev && \
-             git merge-base --is-ancestor "${TAG_SHA}" origin/Wuddle-Iced-Dev; then
+          if git show-ref --verify --quiet refs/remotes/origin/main && \
+             git merge-base --is-ancestor "${TAG_SHA}" origin/main; then
             echo "should_build=true" >> "${GITHUB_OUTPUT}"
-            echo "Tag ${GITHUB_REF_NAME} is on Wuddle-Iced-Dev — building Iced release."
+            echo "Tag ${GITHUB_REF_NAME} is on main — building Iced release."
           else
             echo "should_build=false" >> "${GITHUB_OUTPUT}"
-            echo "Tag ${GITHUB_REF_NAME} is not on Wuddle-Iced-Dev — skipping Iced build."
+            echo "Tag ${GITHUB_REF_NAME} is not on main — skipping Iced build."
           fi
 
   # ------------------------------------------------------------------
@@ -135,7 +135,7 @@ jobs:
           chmod +x dist/wuddle
 
           cat > dist/README.txt << 'DOC'
-          Wuddle Linux Portable (Iced v3 beta)
+          Wuddle Linux Portable (Iced v3)
           =====================================
           Run:        ./wuddle
           Force X11:  WUDDLE_FORCE_X11=1 ./wuddle
@@ -190,7 +190,7 @@ jobs:
           Copy-Item "wuddle-iced\target\release\wuddle.exe" "$versionDir\Wuddle-bin.exe" -Force
           @{ current = $tag } | ConvertTo-Json | Set-Content "dist\current.json"
           Set-Content "dist\README.txt" @"
-          Wuddle (Windows, Iced v3 beta)
+          Wuddle (Windows, Iced v3)
           ================================
           Run: Wuddle.exe
 
@@ -250,7 +250,7 @@ jobs:
       - name: Publish pre-release
         uses: softprops/action-gh-release@v2
         with:
-          prerelease: true
+          prerelease: false
           generate_release_notes: false
           body_path: dist/RELEASE_BODY.md
           files: |

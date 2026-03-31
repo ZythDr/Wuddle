@@ -23,9 +23,9 @@ Wuddle has **two frontends** sharing the same engine and database:
 | | **Iced (v3)** | **Tauri (v2)** |
 |---|---|---|
 | Status | **Active development** | Maintenance only |
-| Branch | `Wuddle-Iced-Dev` | `main` |
+| Branch | `main` | `v2-dev` |
 | UI framework | [iced](https://iced.rs) 0.14 (pure Rust) | Tauri v2 (Rust + HTML/CSS/JS) |
-| Current version | `3.0.0-beta.8` | `2.5.8` |
+| Current version | `3.0.0` | `2.5.10` |
 | Crate | `wuddle-iced/` | `wuddle-gui/` |
 
 **The Iced frontend is the primary target for new work.** The Tauri version is retained for reference and backward compatibility.
@@ -184,7 +184,7 @@ wuddle-launcher/       Thin Windows launcher binary (version switcher for self-u
 
 ## Current State
 
-- **Active frontend**: Iced v3 (`wuddle-iced/`, version `3.0.0-beta.8`)
+- **Active frontend**: Iced v3 (`wuddle-iced/`, version `3.0.0`)
 - **Engine**: `wuddle-engine/`, shared by both frontends
 - **SQLite schema**: v7
 - **Iced framework**: 0.14 with features: markdown, image, svg, tokio, canvas, advanced

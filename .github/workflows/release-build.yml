@@ -4,16 +4,15 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - "main"
+      - "v2-dev"
     tags:
-      - "v*"
+      - "v2*"
 
 jobs:
-  # Guard: only build when the tag (or push) is on main or v2-dev.
-  # This prevents Iced-branch tags (e.g. v3.0.0-beta.1) from
-  # triggering a full Tauri build unnecessarily.
+  # Guard: only build when the tag (or push) is on v2-dev.
+  # Iced v3 now owns main — Tauri builds only run for v2 maintenance.
   guard:
-    name: Check tag is on main or v2-dev
+    name: Check tag is on v2-dev
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
@@ -31,19 +30,15 @@ jobs:
             echo "Branch push — building."
             exit 0
           fi
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           git fetch --no-tags origin +refs/heads/v2-dev:refs/remotes/origin/v2-dev || true
           TAG_SHA="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
-          if git merge-base --is-ancestor "${TAG_SHA}" origin/main; then
-            echo "should_build=true" >> "${GITHUB_OUTPUT}"
-            echo "Tag ${GITHUB_REF_NAME} is on main — building Tauri release."
-          elif git show-ref --verify --quiet refs/remotes/origin/v2-dev && \
-               git merge-base --is-ancestor "${TAG_SHA}" origin/v2-dev; then
+          if git show-ref --verify --quiet refs/remotes/origin/v2-dev && \
+             git merge-base --is-ancestor "${TAG_SHA}" origin/v2-dev; then
             echo "should_build=true" >> "${GITHUB_OUTPUT}"
             echo "Tag ${GITHUB_REF_NAME} is on v2-dev — building Tauri release."
           else
             echo "should_build=false" >> "${GITHUB_OUTPUT}"
-            echo "Tag ${GITHUB_REF_NAME} is not on main or v2-dev — skipping Tauri build."
+            echo "Tag ${GITHUB_REF_NAME} is not on v2-dev — skipping Tauri build."
           fi
 
   build-linux:
