@@ -26,6 +26,7 @@ pub use model::{InstallMode, LatestRelease, ReleaseAsset, Repo};
 use crate::forge::detect_repo;
 use crate::forge::git_sync;
 use crate::forge::ForgeKind;
+// LatestRelease and ReleaseAsset re-exported via `pub use model::` above.
 
 #[derive(Debug, Clone)]
 pub struct UpdatePlan {
@@ -52,6 +53,10 @@ pub struct UpdatePlan {
     pub not_modified: bool,
     pub applied: bool,
     pub error: Option<String>,
+
+    /// Additional assets to install alongside the primary one.
+    /// Only populated for Dll-mode repos that publish multiple individual .dll files.
+    pub extra_assets: Vec<ReleaseAsset>,
 
     /// Number of DLL install entries currently tracked for this repo.
     pub previous_dll_count: usize,
@@ -349,6 +354,7 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            extra_assets: Vec::new(),
             previous_dll_count: 0,
             new_dll_count: 0,
         }
@@ -537,6 +543,9 @@ impl Engine {
     }
 
     fn addon_git_worktree_dir(&self, repo_id: i64, wow_dir: &Path, repo: &Repo) -> PathBuf {
+        // Check DB install entries for an existing valid git repo on disk.
+        // This covers both the new direct location (Interface/AddOns/{name})
+        // and any legacy staging paths from older Wuddle installs.
         if let Ok(entries) = self.db.list_installs(repo_id) {
             for entry in entries {
                 let Some(full) = Self::resolve_install_path(&entry.path, Some(wow_dir)) else {
@@ -550,7 +559,8 @@ impl Engine {
                 }
             }
         }
-        git_sync::addon_repo_staging_dir(wow_dir, &repo.host, &repo.owner, &repo.name)
+        // Default: clone directly into Interface/AddOns/{name} (GAM-compatible).
+        git_sync::addon_direct_dir(wow_dir, &repo.name)
     }
 
     fn repo_key(host: &str, owner: &str, name: &str) -> String {
@@ -762,9 +772,6 @@ impl Engine {
             };
             let repo_id = self.db.add_repo(&tracked)?;
 
-            let raw_manifest = Self::to_manifest_path(&root, wow_dir);
-            self.db.add_install(repo_id, &raw_manifest, "raw")?;
-
             let mut addon_names = HashSet::<String>::new();
             for (_src_dir, addon_name) in detected_addons {
                 if !addon_names.insert(addon_name.to_ascii_lowercase()) {
@@ -881,6 +888,64 @@ impl Engine {
         Ok(removed)
     }
 
+    /// Remove repos from the database whose installed files no longer exist
+    /// on disk at the given `wow_dir`.  This only untracks them — it never
+    /// deletes any user files.
+    ///
+    /// A repo is pruned when it has **zero** install entries that resolve to
+    /// an existing path, OR when it has no install entries at all and is not
+    /// a manually-added (non-addon_git) repo that was never installed.
+    pub fn prune_missing_repos(&self, wow_dir: &Path) -> Result<usize> {
+        let repos = self.db.list_repos()?;
+        let mut pruned = 0usize;
+
+        for repo in &repos {
+            let entries = match self.db.list_installs(repo.id) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            // Repos with no install entries were never installed.
+            // For addon_git repos this means the clone is gone → prune.
+            // For other modes (manually added by URL) that were never
+            // installed, keep them — the user explicitly added them.
+            if entries.is_empty() {
+                if matches!(repo.mode, InstallMode::AddonGit) {
+                    // Check if the git worktree still exists
+                    let worktree = self.addon_git_worktree_dir(repo.id, wow_dir, repo);
+                    if !worktree.is_dir() {
+                        eprintln!("[prune] removing addon_git '{}' (no worktree at {:?})", repo.name, worktree);
+                        self.db.remove_repo(repo.id)?;
+                        pruned += 1;
+                    }
+                }
+                continue;
+            }
+
+            // Check if ANY installed path still exists on disk.
+            let any_present = entries.iter().any(|entry| {
+                let resolved = Self::resolve_install_path(&entry.path, Some(wow_dir));
+                let exists = resolved.as_ref().map(|full| full.exists()).unwrap_or(false);
+                if !exists {
+                    eprintln!("[prune] '{}' install entry '{}' -> {:?} exists={}", repo.name, entry.path, resolved, exists);
+                }
+                exists
+            });
+
+            if !any_present {
+                eprintln!("[prune] removing '{}' ({}) — no install entries found on disk", repo.name, repo.mode.as_str());
+                self.db.remove_repo(repo.id)?;
+                pruned += 1;
+            }
+        }
+
+        if pruned > 0 {
+            eprintln!("[prune] pruned {} repos from database", pruned);
+        }
+
+        Ok(pruned)
+    }
+
     fn build_git_addon_plan_for_repo(
         &self,
         r: &Repo,
@@ -956,6 +1021,7 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            extra_assets: Vec::new(),
             previous_dll_count: 0,
             new_dll_count: 0,
         })
@@ -1054,6 +1120,7 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            extra_assets: Vec::new(),
             previous_dll_count: 0,
             new_dll_count: 0,
         })
@@ -1186,6 +1253,7 @@ impl Engine {
         // match the pin, fetch the pinned release from the full release list.
         let (target_rel, latest_tag_for_display) = if let Some(ref pin) = r.pinned_version {
             if rel.tag != *pin {
+                // Fetch the pinned release from the full list.
                 let pinned = match forge::list_releases(&self.client, &det).await {
                     Ok(all) => all.into_iter().find(|r| r.tag == *pin),
                     Err(_) => None,
@@ -1201,10 +1269,33 @@ impl Engine {
                     }
                 }
             } else {
+                // Pinned version IS the latest — no extra fetch needed.
                 (rel, None)
             }
         } else {
             (rel, None)
+        };
+
+        // Collect ALL .dll assets for repos that publish individual DLL files (e.g. WeirdUtils).
+        // Applies to Dll mode always, and to Auto/Mixed when no zip asset is present (a zip
+        // would bundle all the DLLs itself, so we only need the zip in that case).
+        let has_zip_asset = target_rel.assets.iter().any(|a| {
+            a.name.to_lowercase().ends_with(".zip") && Self::is_asset_allowed(a, &mode)
+        });
+        let collect_all_dlls = matches!(mode, InstallMode::Dll)
+            || (!has_zip_asset && matches!(mode, InstallMode::Auto | InstallMode::Mixed));
+        let all_dll_assets: Vec<ReleaseAsset> = if collect_all_dlls {
+            target_rel
+                .assets
+                .iter()
+                .filter(|a| {
+                    a.name.to_lowercase().ends_with(".dll")
+                        && Self::is_asset_allowed(a, &mode)
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
         };
 
         let asset = match Self::pick_asset(&target_rel, mode.clone(), r.asset_regex.as_deref()) {
@@ -1215,28 +1306,50 @@ impl Engine {
                 return Ok(p);
             }
         };
-        let latest_tag = Self::effective_latest_label(&target_rel.tag, &asset.name);
+
+        // Extra assets = everything except the primary one (skip duplicates by name).
+        let extra_assets: Vec<ReleaseAsset> = all_dll_assets
+            .into_iter()
+            .filter(|a| !a.name.eq_ignore_ascii_case(&asset.name))
+            .collect();
+
+        // For version tracking of multi-asset repos, use the release tag so that the "version"
+        // represents the whole release rather than a specific DLL filename.
+        let target_tag = if extra_assets.is_empty() {
+            Self::effective_latest_label(&target_rel.tag, &asset.name)
+        } else {
+            // Use tag directly — individual asset names carry no shared version info.
+            target_rel.tag.clone()
+        };
         let asset_id = Self::effective_asset_id(&asset);
         let asset_size_i64 = Self::size_u64_to_i64(asset.size);
 
         let installed_matches =
-            Self::installed_matches(r, &latest_tag, &asset_id, &asset.name, asset_size_i64);
+            Self::installed_matches(r, &target_tag, &asset_id, &asset.name, asset_size_i64);
         let needs_download = !installed_matches || missing_targets;
         let repair_needed = missing_targets && installed_matches;
+
+        // Clear the cached ETag when an update or repair is pending so that the
+        // next check re-fetches the release instead of getting a 304 (which would
+        // incorrectly report "up to date" while the update remains uninstalled).
+        if needs_download {
+            let _ = self.db.update_etag(r.id, None);
+        }
 
         // DLL count detection — count currently installed DLLs vs new release DLLs.
         let previous_dll_count = self.db.list_installs(r.id)
             .map(|entries| entries.iter().filter(|e| e.kind == "dll").count())
             .unwrap_or(0);
+        // New count = primary asset (if DLL) + extra DLL assets.
         let new_dll_count = if asset.name.to_lowercase().ends_with(".dll") {
-            1
+            1 + extra_assets.len()
         } else {
-            0
+            extra_assets.len()
         };
 
         // When pinned, latest_tag_for_display holds the real latest tag so the UI
         // can show "update available" even though we're downloading the pinned version.
-        let display_latest = latest_tag_for_display.unwrap_or_else(|| latest_tag.clone());
+        let display_latest = latest_tag_for_display.unwrap_or_else(|| target_tag.clone());
 
         Ok(UpdatePlan {
             repo_id: r.id,
@@ -1266,6 +1379,7 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            extra_assets,
             previous_dll_count,
             new_dll_count,
         })
@@ -1354,6 +1468,10 @@ impl Engine {
     }
 
     pub async fn check_updates_with_wow(&self, wow_dir: Option<&Path>, check_mode: CheckMode) -> Result<Vec<UpdatePlan>> {
+        self.check_updates_with_wow_skip(wow_dir, check_mode, &HashSet::new()).await
+    }
+
+    pub async fn check_updates_with_wow_skip(&self, wow_dir: Option<&Path>, check_mode: CheckMode, skip_repo_ids: &HashSet<i64>) -> Result<Vec<UpdatePlan>> {
         if let Some(wow_dir) = wow_dir {
             let _ = self.import_existing_addon_git_repos(wow_dir);
             let _ = self.dedup_addon_repos_by_folder(wow_dir);
@@ -1363,6 +1481,9 @@ impl Engine {
         let mut git_repos = Vec::new();
         let mut release_repos = Vec::new();
         for repo in repos {
+            if !repo.enabled || skip_repo_ids.contains(&repo.id) {
+                continue; // skip disabled or explicitly skipped repos
+            }
             if matches!(repo.mode, InstallMode::AddonGit) {
                 git_repos.push(repo);
             } else {
@@ -1634,8 +1755,8 @@ impl Engine {
         }
     }
 
-    fn release_cache_dir(plan: &UpdatePlan) -> Result<PathBuf> {
-        let dir = util::cache_dir()?
+    fn release_cache_dir(plan: &UpdatePlan, wow_dir: Option<&Path>) -> Result<PathBuf> {
+        let dir = util::cache_dir(wow_dir)?
             .join("releases")
             .join(Self::sanitize_for_fs(&plan.forge))
             .join(Self::sanitize_for_fs(&plan.host))
@@ -1649,19 +1770,21 @@ impl Engine {
 
     async fn download_asset_to(&self, plan: &UpdatePlan, dest: &Path) -> Result<()> {
         Self::validate_asset_url(plan)?;
+        self.download_url_to(&plan.asset_url, dest).await
+    }
+
+    async fn download_url_to(&self, url: &str, dest: &Path) -> Result<()> {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-
         let bytes = self
             .client
-            .get(&plan.asset_url)
+            .get(url)
             .send()
             .await?
             .error_for_status()?
             .bytes()
             .await?;
-
         std::fs::write(dest, &bytes)?;
         Ok(())
     }
@@ -2044,6 +2167,19 @@ impl Engine {
         Ok(touched)
     }
 
+    /// Toggle a single DLL's enabled state in dlls.txt without touching the whole repo.
+    /// Returns `true` if dlls.txt was modified.
+    pub fn set_dll_enabled(
+        &self,
+        dll_name: &str,
+        enabled: bool,
+        wow_dir: &Path,
+    ) -> Result<bool> {
+        let names = vec![dll_name.to_string()];
+        let touched = Self::set_dlls_txt_entries_commented(wow_dir, &names, !enabled)?;
+        Ok(touched > 0)
+    }
+
     pub fn set_repo_git_branch(&self, repo_id: i64, git_branch: Option<String>) -> Result<()> {
         let repo = self.db.get_repo(repo_id)?;
         if !matches!(repo.mode, InstallMode::AddonGit) {
@@ -2182,6 +2318,47 @@ impl Engine {
         Ok(Some(plan))
     }
 
+    /// One-time migration: if a repo was previously cloned into the legacy
+    /// `.wuddle/addon_git/…` staging area, move it to the new direct location
+    /// (`Interface/AddOns/{name}`) so it becomes cross-compatible with GAM and
+    /// the TurtleWoW launcher.  Updates the DB install entries in-place.
+    /// Safe to call repeatedly — does nothing when the legacy path doesn't exist
+    /// or the target already exists.
+    fn migrate_staging_clone_if_needed(&self, wow_dir: &Path, repo: &Repo) -> Result<()> {
+        let legacy = git_sync::addon_repo_legacy_staging_dir(
+            wow_dir, &repo.host, &repo.owner, &repo.name,
+        );
+        if !legacy.is_dir() || !Self::has_local_git_marker(&legacy) {
+            return Ok(());
+        }
+        let direct = git_sync::addon_direct_dir(wow_dir, &repo.name);
+        if direct.is_dir() {
+            // Target already exists — nothing to move.
+            return Ok(());
+        }
+        if let Some(parent) = direct.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&legacy, &direct).with_context(|| {
+            format!("migrate addon clone {:?} -> {:?}", legacy, direct)
+        })?;
+
+        // Update any DB install entries that pointed at the old path.
+        let legacy_manifest = Self::to_manifest_path(&legacy, wow_dir);
+        let direct_manifest = Self::to_manifest_path(&direct, wow_dir);
+        if let Ok(entries) = self.db.list_installs(repo.id) {
+            for entry in entries {
+                if entry.path == legacy_manifest {
+                    let _ = self.db.update_install_path(repo.id, &entry.path, &direct_manifest);
+                } else if entry.path.starts_with(&legacy_manifest) {
+                    let new_path = direct_manifest.clone() + &entry.path[legacy_manifest.len()..];
+                    let _ = self.db.update_install_path(repo.id, &entry.path, &new_path);
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn apply_one(
         &self,
         plan: &UpdatePlan,
@@ -2191,6 +2368,10 @@ impl Engine {
     ) -> Result<()> {
         if matches!(plan.mode, InstallMode::AddonGit) {
             let repo = self.db.get_repo(plan.repo_id)?;
+
+            // Migrate legacy staging clones to the direct AddOns location on first encounter.
+            self.migrate_staging_clone_if_needed(wow_dir, &repo)?;
+
             let worktree_dir = self.addon_git_worktree_dir(plan.repo_id, wow_dir, &repo);
             let preferred_branch = repo
                 .git_branch
@@ -2201,9 +2382,8 @@ impl Engine {
             let synced = git_sync::sync_repo(&plan.url, &worktree_dir, Some(preferred_branch))
                 .with_context(|| format!("git sync {}", plan.url))?;
 
-            // Credit: deployment model inspired by GitAddonsManager's subfolder/.toc scan flow.
-            // Keep repo metadata/worktree in hidden staging area, then deploy only real addon roots
-            // (folders with .toc) directly into Interface/AddOns.
+            // Detect addon folders inside the cloned repo.
+            // detect_addons_in_tree returns (src_path, toc_name) pairs.
             let mut detected = install::detect_addons_in_tree(&worktree_dir);
             detected.sort_by_key(|(src, name)| (src.components().count(), name.clone()));
 
@@ -2222,19 +2402,53 @@ impl Engine {
                 );
             }
 
-            let addon_names: Vec<String> = chosen.iter().map(|(_, name)| name.clone()).collect();
-            let conflicts = self.addon_install_conflicts(plan.repo_id, wow_dir, &addon_names)?;
-            if !conflicts.is_empty() {
-                if !opts.replace_addon_conflicts {
-                    anyhow::bail!(Self::format_addon_conflict_message(&conflicts));
+            // GAM post-clone rename: if the repo directory name differs from the
+            // detected .toc name (single-addon case), rename the directory to match
+            // the .toc name — exactly as GAM's Control::clone() does after cloning.
+            // This ensures cross-compatibility when the repo slug ≠ addon name.
+            let worktree_dir = if chosen.len() == 1 {
+                let (ref src, ref toc_name) = chosen[0];
+                if src == &worktree_dir {
+                    // Single-addon repo: src is the repo root. Check if names match.
+                    let current_name = worktree_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    if !current_name.eq_ignore_ascii_case(toc_name) {
+                        let new_dir = worktree_dir.with_file_name(toc_name);
+                        if !new_dir.exists() {
+                            fs::rename(&worktree_dir, &new_dir).with_context(|| {
+                                format!("rename addon dir {:?} -> {:?}", worktree_dir, new_dir)
+                            })?;
+                            // Update DB install paths that pointed at the old location.
+                            let old_manifest = Self::to_manifest_path(&worktree_dir, wow_dir);
+                            let new_manifest = Self::to_manifest_path(&new_dir, wow_dir);
+                            if let Ok(entries) = self.db.list_installs(repo.id) {
+                                for entry in entries {
+                                    if entry.path == old_manifest || entry.path.starts_with(&(old_manifest.clone() + "/")) {
+                                        let updated = new_manifest.clone() + &entry.path[old_manifest.len()..];
+                                        let _ = self.db.update_install_path(repo.id, &entry.path, &updated);
+                                    }
+                                }
+                            }
+                            // Update chosen to reflect the new path.
+                            chosen[0].0 = new_dir.clone();
+                            new_dir
+                        } else {
+                            worktree_dir
+                        }
+                    } else {
+                        worktree_dir
+                    }
+                } else {
+                    worktree_dir
                 }
-                for conflict in &conflicts {
-                    let _ = Self::remove_any_target(&conflict.target_path)?;
-                }
-                self.clear_conflicting_addon_tracking(plan.repo_id, wow_dir, &conflicts)?;
-            }
+            } else {
+                worktree_dir
+            };
 
-            // Remove previously deployed addon directories for this repo before redeploy.
+            // Remove previously created sub-addon symlinks/copies for this repo
+            // (but never the worktree dir itself or anything inside it).
             for entry in self.db.list_installs(plan.repo_id)? {
                 if entry.kind != "addon" {
                     continue;
@@ -2247,39 +2461,81 @@ impl Engine {
                 }
             }
 
-            let comment = format!(
-                "{}/{} {} - managed by Wuddle",
-                plan.owner, plan.name, synced.short_oid
-            );
-            let mut records = Vec::<install::InstallRecord>::new();
-            records.push(install::InstallRecord {
-                path: worktree_dir.clone(),
-                kind: "raw",
+            // GAM subfolder collision: if a subfolder has the same name as the repo
+            // directory, rename the repo dir to "{name}.repo" first — exactly as
+            // GAM's Addon::unpackSubfolders() does — so the symlink can be created.
+            let repo_dir_name = worktree_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let has_collision = chosen.iter().any(|(src, name)| {
+                src != &worktree_dir && name.eq_ignore_ascii_case(&repo_dir_name)
             });
+            let worktree_dir = if has_collision {
+                let repo_dir = worktree_dir.with_file_name(format!("{}.repo", repo_dir_name));
+                if !repo_dir.exists() {
+                    fs::rename(&worktree_dir, &repo_dir).with_context(|| {
+                        format!("rename repo dir to .repo suffix {:?} -> {:?}", worktree_dir, repo_dir)
+                    })?;
+                    // Update src paths in chosen that pointed at the old worktree dir.
+                    for (src, _) in &mut chosen {
+                        if src.starts_with(&worktree_dir) {
+                            let rel = src.strip_prefix(&worktree_dir).unwrap_or(src.as_path());
+                            *src = repo_dir.join(rel);
+                        }
+                    }
+                }
+                repo_dir
+            } else {
+                worktree_dir
+            };
+
+            // Conflict check for sub-addon symlink targets only (not the repo dir itself).
+            let sub_addon_names: Vec<String> = chosen
+                .iter()
+                .filter(|(src, _)| *src != worktree_dir)
+                .map(|(_, name)| name.clone())
+                .collect();
+            if !sub_addon_names.is_empty() {
+                let conflicts = self.addon_install_conflicts(plan.repo_id, wow_dir, &sub_addon_names)?;
+                if !conflicts.is_empty() {
+                    if !opts.replace_addon_conflicts {
+                        anyhow::bail!(Self::format_addon_conflict_message(&conflicts));
+                    }
+                    for conflict in &conflicts {
+                        let _ = Self::remove_any_target(&conflict.target_path)?;
+                    }
+                    self.clear_conflicting_addon_tracking(plan.repo_id, wow_dir, &conflicts)?;
+                }
+            }
+
+            let mut records = Vec::<install::InstallRecord>::new();
+
             for (src_dir, addon_folder_name) in chosen {
                 let dst_dir = wow_dir
                     .join("Interface")
                     .join("AddOns")
                     .join(&addon_folder_name);
+
                 if src_dir == dst_dir {
+                    // Single-addon repo: the clone root is the addon folder — no symlink needed.
                     records.push(install::InstallRecord {
                         path: dst_dir,
                         kind: "addon",
                     });
-                    continue;
+                } else {
+                    // Multi-addon repo subfolder: create a symlink from AddOns/{name}
+                    // into the repo directory — matches GAM's unpackSubfolders().
+                    let rec = install::link_addon_subfolder(&src_dir, &dst_dir)?;
+                    records.push(rec);
                 }
-                let rec = install::install_addon_folder(
-                    &src_dir,
-                    wow_dir,
-                    &addon_folder_name,
-                    opts,
-                    &comment,
-                )?;
-                records.push(rec);
             }
 
+            // No kind='raw' worktree entry — GAM doesn't track anything beyond the
+            // addon folders themselves. The .git dir inside the addon folder is the
+            // ground truth; import_existing_addon_git_repos() will re-discover it.
             self.persist_installs(plan.repo_id, wow_dir, &records)?;
-            self.hash_and_store_installs(plan.repo_id, wow_dir, &records);
             self.db.set_installed_asset_state(
                 plan.repo_id,
                 Some(&synced.short_oid),
@@ -2295,7 +2551,7 @@ impl Engine {
             anyhow::bail!("No downloadable asset in update plan");
         }
 
-        let release_dir = Self::release_cache_dir(plan)?;
+        let release_dir = Self::release_cache_dir(plan, Some(wow_dir))?;
         let asset_name_fs = Path::new(&plan.asset_name)
             .file_name()
             .and_then(|s| s.to_str())
@@ -2325,7 +2581,7 @@ impl Engine {
             plan.owner, plan.name, plan.latest
         );
 
-        let records = if Self::looks_like_zip(&asset_path, &plan.asset_name) {
+        let mut records = if Self::looks_like_zip(&asset_path, &plan.asset_name) {
             let extract_dir = release_dir.join("unzip");
             install::install_from_zip(
                 &asset_path,
@@ -2361,6 +2617,51 @@ impl Engine {
             }
         };
 
+        // Download and install any additional .dll assets (multi-DLL repos like WeirdUtils).
+        for extra in &plan.extra_assets {
+            let extra_name_fs = Path::new(&extra.name)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("extra.dll")
+                .to_string();
+            let extra_path = release_dir.join(&extra_name_fs);
+            let needs_dl = match (extra_path.metadata().ok(), extra.size) {
+                (Some(meta), Some(expected)) => meta.len() != expected,
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            if needs_dl {
+                self.download_url_to(&extra.download_url, &extra_path).await?;
+            }
+            if extra_path.exists() {
+                records.push(install::install_dll(
+                    &extra_path,
+                    wow_dir,
+                    &extra.name,
+                    opts,
+                    &comment,
+                )?);
+            }
+        }
+
+        // For multi-DLL repos, do a consolidated update_dlls_txt call with ALL dll names so that
+        // block markers (# == RepoName == / # == /RepoName ==) get written around the group.
+        if !plan.extra_assets.is_empty() {
+            let all_dll_names: Vec<String> = records
+                .iter()
+                .filter(|r| r.kind == "dll")
+                .filter_map(|r| {
+                    std::path::Path::new(&r.path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+            if !all_dll_names.is_empty() {
+                install::update_dlls_txt(wow_dir, &plan.name, &all_dll_names)?;
+            }
+        }
+
         // Check if this repo uses merge-mode (keep existing files on update).
         let merge_mode = self.db.get_repo(plan.repo_id)
             .map(|r| r.merge_installs)
@@ -2385,20 +2686,20 @@ impl Engine {
             Some(&plan.asset_url),
         )?;
 
-        self.prune_release_cache(plan, opts.cache_keep_versions);
+        self.prune_release_cache(plan, opts.cache_keep_versions, Some(wow_dir));
 
         Ok(())
     }
 
     /// Remove old cached release versions for a repo, keeping the `keep_versions`
     /// most recent plus the currently-installed version. Non-fatal on any error.
-    fn prune_release_cache(&self, plan: &UpdatePlan, keep_versions: usize) {
+    fn prune_release_cache(&self, plan: &UpdatePlan, keep_versions: usize, wow_dir: Option<&Path>) {
         let repo = match self.db.get_repo(plan.repo_id) {
             Ok(r) => r,
             Err(_) => return,
         };
 
-        let repo_cache = match util::cache_dir() {
+        let repo_cache = match util::cache_dir(wow_dir) {
             Ok(c) => c
                 .join("releases")
                 .join(Self::sanitize_for_fs(&plan.forge))
@@ -2511,6 +2812,7 @@ impl Engine {
             not_modified: false,
             applied: false,
             error: None,
+            extra_assets: Vec::new(),
             previous_dll_count: 0,
             new_dll_count: 0,
         };

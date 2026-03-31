@@ -396,7 +396,27 @@ pub fn remote_branches(url: &str) -> Result<Vec<String>> {
     anyhow::bail!("list remote branches {}", url);
 }
 
-pub fn addon_repo_staging_dir(wow_dir: &Path, host: &str, owner: &str, repo_name: &str) -> PathBuf {
+/// Return the target directory for an addon_git clone.
+///
+/// Clones land directly in `Interface/AddOns/{repo_name}` — the same
+/// convention used by GitAddonsManager and the TurtleWoW launcher.  This
+/// makes addons installed by any of these tools immediately cross-compatible
+/// without requiring a repair step.
+///
+/// The old staging path (`Interface/AddOns/.wuddle/addon_git/…`) is kept as
+/// `addon_repo_legacy_staging_dir` for the one-time migration that moves
+/// existing clones to the new location.
+pub fn addon_direct_dir(wow_dir: &Path, repo_name: &str) -> PathBuf {
+    // Use the raw repo name, matching GAM's behaviour. Forge repo names are
+    // already filesystem-safe by the forge's own validation rules.
+    wow_dir
+        .join("Interface")
+        .join("AddOns")
+        .join(repo_name)
+}
+
+/// Legacy staging path — used only during the one-time migration.
+pub fn addon_repo_legacy_staging_dir(wow_dir: &Path, host: &str, owner: &str, repo_name: &str) -> PathBuf {
     wow_dir
         .join("Interface")
         .join("AddOns")
@@ -406,3 +426,4 @@ pub fn addon_repo_staging_dir(wow_dir: &Path, host: &str, owner: &str, repo_name
         .join(sanitize_fs_component(owner))
         .join(sanitize_fs_component(repo_name))
 }
+

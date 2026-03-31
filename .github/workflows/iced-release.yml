@@ -1,0 +1,259 @@
+name: Iced Release Build
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  # ------------------------------------------------------------------
+  # Guard: only proceed if the tag commit is reachable from
+  # main. This keeps the Iced workflow from firing on
+  # stable Tauri tags (which live on main).
+  # ------------------------------------------------------------------
+  guard:
+    name: Check tag is on main
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: check
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main || true
+          TAG_SHA="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
+          if git show-ref --verify --quiet refs/remotes/origin/main && \
+             git merge-base --is-ancestor "${TAG_SHA}" origin/main; then
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+            echo "Tag ${GITHUB_REF_NAME} is on main — building Iced release."
+          else
+            echo "should_build=false" >> "${GITHUB_OUTPUT}"
+            echo "Tag ${GITHUB_REF_NAME} is not on main — skipping Iced build."
+          fi
+
+  # ------------------------------------------------------------------
+  # Linux portable tar.gz
+  # ------------------------------------------------------------------
+  build-linux:
+    needs: guard
+    if: needs.guard.outputs.should_build == 'true'
+    name: Linux (portable tar.gz)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            wuddle-iced -> target
+            wuddle-engine -> target
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libfontconfig1-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libasound2-dev \
+            libssl-dev \
+            libdbus-1-dev \
+            libsecret-1-dev \
+            libfuse2 \
+            pkg-config
+
+      - name: Build Wuddle (Iced)
+        run: cargo build --release --manifest-path wuddle-iced/Cargo.toml
+
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+
+          wget -qO linuxdeploy.AppImage \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          wget -qO linuxdeploy-plugin-appimage.AppImage \
+            "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage"
+          chmod +x linuxdeploy.AppImage linuxdeploy-plugin-appimage.AppImage
+
+          cat > wuddle.desktop << 'DESKTOP'
+          [Desktop Entry]
+          Name=Wuddle
+          Exec=wuddle
+          Icon=wuddle
+          Type=Application
+          Categories=Utility;
+          DESKTOP
+
+          # linuxdeploy infers the icon name from the filename, so it must
+          # be named wuddle.png to match the Icon= entry in the desktop file.
+          cp wuddle-iced/icons/128x128.png wuddle.png
+
+          ./linuxdeploy.AppImage \
+            --appdir AppDir \
+            --executable wuddle-iced/target/release/wuddle \
+            --desktop-file wuddle.desktop \
+            --icon-file wuddle.png \
+            --output appimage
+
+          mv Wuddle-x86_64.AppImage "wuddle-${TAG}-linux-x86_64.AppImage"
+
+      - name: Package portable tar.gz
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          cp wuddle-iced/target/release/wuddle dist/wuddle-bin
+          chmod +x dist/wuddle-bin
+
+          cat > dist/wuddle << 'LAUNCH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          SELF="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+          BIN="${SELF}/wuddle-bin"
+          if [[ ! -x "${BIN}" ]]; then
+            echo "ERROR: ${BIN} not found" >&2
+            exit 1
+          fi
+          if [[ "${WUDDLE_FORCE_X11:-0}" == "1" ]]; then
+            exec env WINIT_UNIX_BACKEND=x11 "${BIN}" "$@"
+          fi
+          exec "${BIN}" "$@"
+          LAUNCH
+          chmod +x dist/wuddle
+
+          cat > dist/README.txt << 'DOC'
+          Wuddle Linux Portable (Iced v3)
+          =====================================
+          Run:        ./wuddle
+          Force X11:  WUDDLE_FORCE_X11=1 ./wuddle
+
+          App data: ~/.local/share/wuddle  (shared with Wuddle v2 — no migration needed)
+          DOC
+
+          tar -C dist -czf "wuddle-${TAG}-linux-x86_64.tar.gz" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iced-linux
+          path: |
+            wuddle-*-linux-x86_64.AppImage
+            wuddle-*-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Windows portable zip
+  # ------------------------------------------------------------------
+  build-windows:
+    needs: guard
+    if: needs.guard.outputs.should_build == 'true'
+    name: Windows (portable zip)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            wuddle-iced -> target
+            wuddle-engine -> target
+            wuddle-launcher -> target
+
+      - name: Build Wuddle (Iced) and launcher
+        run: |
+          cargo build --release --manifest-path wuddle-iced/Cargo.toml
+          cargo build --release --manifest-path wuddle-launcher/Cargo.toml
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          # Launcher-layout: Wuddle.exe is the launcher, the Iced binary lives in
+          # versions/<tag>/Wuddle-bin.exe so Tauri v2's self-update flow works seamlessly.
+          $versionDir = "dist\versions\$tag"
+          New-Item -ItemType Directory -Path $versionDir -Force | Out-Null
+          Copy-Item "wuddle-launcher\target\release\wuddle-launcher.exe" "dist\Wuddle.exe" -Force
+          Copy-Item "wuddle-iced\target\release\wuddle.exe" "$versionDir\Wuddle-bin.exe" -Force
+          @{ current = $tag } | ConvertTo-Json | Set-Content "dist\current.json"
+          Set-Content "dist\README.txt" @"
+          Wuddle (Windows, Iced v3)
+          ================================
+          Run: Wuddle.exe
+
+          Layout:
+            Wuddle.exe                          <- launcher (run this)
+            versions\$tag\Wuddle-bin.exe        <- Iced v3 binary
+            current.json                        <- active version pointer
+
+          Upgrading from Wuddle v2 (Tauri):
+            If you already have a v2 portable install, just unzip this into the
+            same folder. The launcher will switch to v3 automatically.
+
+          App data: %APPDATA%\wuddle  (shared with Wuddle v2 — no migration needed)
+          "@
+          Compress-Archive -Path "dist\*" -DestinationPath "wuddle-$tag-windows-x86_64.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iced-windows
+          path: wuddle-*-windows-x86_64.zip
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Publish pre-release on GitHub
+  # ------------------------------------------------------------------
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: iced-*
+          path: dist
+          merge-multiple: true
+
+      - name: Extract changelog section
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          python3 - "${VERSION}" << 'PYEOF' > dist/RELEASE_BODY.md
+          import sys, re
+          version = sys.argv[1]
+          with open('CHANGELOG.md') as f:
+              text = f.read()
+          pattern = r'## v' + re.escape(version) + r'[^\n]*\n(.*?)(?=\n## v|\Z)'
+          m = re.search(pattern, text, re.DOTALL)
+          if m:
+              sys.stdout.write(m.group(1).strip() + '\n')
+          else:
+              sys.stdout.write(f'See CHANGELOG.md for v{version} release notes.\n')
+          PYEOF
+
+      - name: Publish pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: false
+          generate_release_notes: false
+          body_path: dist/RELEASE_BODY.md
+          files: |
+            dist/*.AppImage
+            dist/*.tar.gz
+            dist/*.zip

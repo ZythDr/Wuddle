@@ -145,6 +145,7 @@ impl Db {
 
         // v6 → v7: add merge_installs and pinned_version columns.
         if current < 7 {
+            // Use ensure_repo_columns style to be safe if columns already exist.
             let cols = self.existing_repo_columns()?;
             if !cols.contains("merge_installs") {
                 self.conn.execute_batch(
@@ -605,6 +606,15 @@ impl Db {
         self.conn.execute(
             r#"DELETE FROM installs WHERE repo_id=?1 AND path=?2"#,
             params![repo_id, path],
+        )?;
+        Ok(())
+    }
+
+    /// Update an install entry's path in-place (used for staging-area migration).
+    pub fn update_install_path(&self, repo_id: i64, old_path: &str, new_path: &str) -> Result<()> {
+        self.conn.execute(
+            r#"UPDATE installs SET path=?3 WHERE repo_id=?1 AND path=?2"#,
+            params![repo_id, old_path, new_path],
         )?;
         Ok(())
     }

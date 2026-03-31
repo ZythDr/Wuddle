@@ -1,0 +1,349 @@
+use iced::widget::{button, column, container, pick_list, row, text, tooltip, Space};
+use iced::{Element, Length};
+
+use crate::settings::UpdateChannel;
+use crate::theme::{self, ThemeColors};
+use crate::{App, Message};
+
+const GITHUB_URL: &str = "https://github.com/ZythDr/Wuddle";
+const RELEASES_URL: &str = "https://github.com/ZythDr/Wuddle/releases";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+
+    // Header action buttons — varies based on update state
+    let mut header_btns: Vec<Element<Message>> = Vec::new();
+    header_btns.push(btn_tip("Refresh", "Re-check for Wuddle updates", Message::CheckSelfUpdate, &c));
+    header_btns.push(btn_tip("Changelog", "View Wuddle changelog in-app", Message::ShowChangelog, &c));
+
+    if app.self_update_done {
+        header_btns.push(action_btn("Restart", Message::RestartAfterUpdate, &c));
+    } else if app.self_update_in_progress {
+        header_btns.push(btn_disabled("Updating\u{2026}", "Downloading and staging update\u{2026}", &c));
+    } else if app.self_update_available {
+        let label = if let Some(ref ver) = app.latest_version {
+            format!("Update to v{}", ver)
+        } else {
+            "Update Wuddle".to_string()
+        };
+        header_btns.push(action_btn(&label, Message::ApplySelfUpdate, &c));
+    } else if !app.self_update_supported && app.update_message.is_some() {
+        header_btns.push(btn_disabled(
+            "Update",
+            app.update_message.as_deref().unwrap_or("In-app updates are not supported for this install type."),
+            &c,
+        ));
+    } else if app.self_update_assets_pending {
+        let label = if let Some(ref ver) = app.latest_version {
+            format!("v{} building\u{2026}", ver)
+        } else {
+            "Update building\u{2026}".to_string()
+        };
+        header_btns.push(btn_disabled(&label, "Release assets are still being built by CI. Click Refresh to check again.", &c));
+    } else if app.latest_version.is_some() && !app.self_update_available {
+        header_btns.push(btn_disabled("Up to date", app.update_message.as_deref().unwrap_or("No newer release detected."), &c));
+    } else if app.update_message.is_some() {
+        // Fallback: version check failed or unknown state
+        header_btns.push(btn_disabled(
+            app.update_message.as_deref().unwrap_or("Check for updates"),
+            "Click Refresh to re-check.",
+            &c,
+        ));
+    } else {
+        header_btns.push(btn_tip("Check for updates", "Check if a newer Wuddle version is available", Message::CheckSelfUpdate, &c));
+    }
+
+    header_btns.push(open_on_github_btn(GITHUB_URL, &c));
+
+    let header = {
+        let mut r = row![
+            column![
+                text("About").size(18).color(colors.title),
+                text("Wuddle — Addon & mod manager for Turtle WoW.")
+                    .size(12)
+                    .color(colors.muted),
+            ]
+            .spacing(2),
+            Space::new().width(Length::Fill),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+        for btn in header_btns { r = r.push(btn); }
+        r
+    };
+
+    let latest_display = app.latest_version.as_deref().unwrap_or("\u{2014}");
+
+    let app_card = card_fill(
+        column![
+            text("Application").size(16).color(colors.title),
+            about_row("Current version:", APP_VERSION, colors),
+            latest_version_row(latest_display, app.update_channel, &c),
+            about_row("Package name:", "wuddle-iced", colors),
+        ]
+        .spacing(8),
+        &c,
+    );
+
+    let credits_card = card_fill(
+        column![
+            text("Credits").size(16).color(colors.title),
+            credit_row(
+                "Addon management",
+                "GitAddonsManager by WobLight (GPLv3)",
+                "https://gitlab.com/woblight/GitAddonsManager",
+                colors,
+            ),
+            credit_row(
+                "WoW.exe patcher",
+                "vanilla-tweaks by brndd (MIT)",
+                "https://github.com/brndd/vanilla-tweaks",
+                colors,
+            ),
+        ]
+        .spacing(8),
+        &c,
+    );
+
+    // Update info section — mirrors Tauri's status line below the cards
+    let status_color = if app.self_update_assets_pending {
+        colors.warn
+    } else if app.update_message.as_deref().map(|m| m.starts_with("Version check failed")).unwrap_or(false) {
+        colors.bad
+    } else {
+        colors.muted
+    };
+
+    let status_text = app
+        .update_message
+        .as_deref()
+        .unwrap_or("Application details loaded.");
+    let status = text(status_text).size(12).color(status_color);
+
+    let cards_row = row![app_card, credits_card].spacing(8).width(Length::Fill).height(140);
+
+    column![header, cards_row, status]
+        .spacing(8)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+fn latest_version_row<'a>(
+    latest: &str,
+    channel: UpdateChannel,
+    c: &ThemeColors,
+) -> Element<'a, Message> {
+    let c = *c;
+    let val_owned = String::from(latest);
+
+    let version_link = button(
+        iced::widget::rich_text::<(), _, _, _>([
+            iced::widget::span(val_owned)
+                .underline(true)
+                .color(c.link)
+                .size(13.0_f32),
+        ])
+    )
+    .on_press(Message::OpenUrl(RELEASES_URL.to_string()))
+    .padding(0)
+    .style(move |_theme, _status| button::Style {
+        background: None,
+        text_color: c.link,
+        border: iced::Border::default(),
+        shadow: iced::Shadow::default(),
+        snap: true,
+    });
+
+    let channel_tip = "Release channel — Beta runs this Iced v3 frontend and receives pre-release builds. Selecting Stable will restart Wuddle and launch the last stable Tauri release via the launcher.";
+    let tip_box = container(
+        text(String::from(channel_tip)).size(13).color(c.text)
+    )
+    .max_width(300)
+    .padding([6, 10])
+    .style(move |_t| crate::theme::tooltip_style(&c));
+
+    let channel_picker = pick_list(
+        &[UpdateChannel::Stable, UpdateChannel::Beta][..],
+        Some(channel),
+        Message::SetUpdateChannel,
+    )
+    .text_size(12)
+    .width(76);
+
+    let help_icon = tooltip(
+        container(
+            text("?").size(10).color(c.muted)
+        )
+        .padding([2, 5])
+        .style(move |_t| crate::theme::tooltip_style(&c)),
+        tip_box,
+        tooltip::Position::Bottom,
+    );
+
+    row![
+        text("Latest version:").size(13).color(c.muted).width(160),
+        version_link,
+        Space::new().width(Length::Fill),
+        channel_picker,
+        help_icon,
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+fn about_row<'a>(key: &str, value: &str, colors: &ThemeColors) -> Element<'a, Message> {
+    row![
+        text(String::from(key)).size(13).color(colors.muted).width(160),
+        text(String::from(value)).size(13).color(colors.text),
+    ]
+    .spacing(8)
+    .into()
+}
+
+
+fn credit_row<'a>(
+    key: &str,
+    label: &str,
+    url: &str,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let c = *colors;
+    let url_owned = String::from(url);
+    row![
+        text(String::from(key)).size(13).color(colors.muted).width(160),
+        button(
+            iced::widget::rich_text::<(), _, _, _>([
+                iced::widget::span(String::from(label))
+                    .underline(true)
+                    .color(c.link)
+                    .size(13.0_f32),
+            ])
+        )
+        .on_press(Message::OpenUrl(url_owned))
+        .padding(0)
+        .style(move |_theme, _status| button::Style {
+            background: None,
+            text_color: c.link,
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        }),
+    ]
+    .spacing(8)
+    .into()
+}
+
+fn card<'a>(
+    content: impl Into<Element<'a, Message>>,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let c = *colors;
+    container(container(content).padding(16))
+        .width(Length::Fill)
+        .style(move |_theme| theme::card_style(&c))
+        .into()
+}
+
+fn card_fill<'a>(
+    content: impl Into<Element<'a, Message>>,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let c = *colors;
+    container(container(content).padding(16))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_theme| theme::card_style(&c))
+        .into()
+}
+
+fn open_on_github_btn<'a>(url: &str, colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+    let url_owned = url.to_string();
+    let icon = crate::forge_svg_handle("github", url);
+    let icon_color = c.text;
+    let btn = button(
+        row![
+            text("Open Wuddle on").size(13).color(c.text),
+            iced::widget::svg(icon)
+                .width(14)
+                .height(14)
+                .style(move |_t, _s| iced::widget::svg::Style { color: Some(icon_color) }),
+        ]
+        .spacing(5)
+        .align_y(iced::Alignment::Center),
+    )
+    .on_press(Message::OpenUrl(url_owned))
+    .padding([6, 12])
+    .style(move |_theme, status| match status {
+        iced::widget::button::Status::Hovered => theme::tab_button_hovered_style(&c),
+        _ => theme::tab_button_style(&c),
+    });
+    tooltip(
+        btn,
+        container(text("Open the Wuddle repository on GitHub").size(13).color(c.text))
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(&c)),
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+fn action_btn<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+    button(text(String::from(label)).size(13).color(iced::Color::WHITE))
+        .on_press(msg)
+        .padding([6, 14])
+        .style(move |_theme, _status| iced::widget::button::Style {
+            background: Some(iced::Background::Color(c.primary)),
+            text_color: iced::Color::WHITE,
+            border: iced::Border { radius: 0.0.into(), ..Default::default() },
+            shadow: iced::Shadow::default(),
+            snap: true,
+        })
+        .into()
+}
+
+fn btn_disabled<'a>(label: &str, tip: &str, colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+    let tip_str = String::from(tip);
+    let btn_container = container(text(String::from(label)).size(13).color(c.muted))
+        .padding([6, 14])
+        .style(move |_t| container::Style {
+            background: Some(iced::Background::Color(c.card)),
+            border: iced::Border { radius: 0.0.into(), color: c.border, width: 1.0 },
+            ..Default::default()
+        });
+    tooltip(
+        btn_container,
+        container(text(tip_str).size(13).color(c.text))
+            .max_width(300)
+            .padding([3, 8])
+            .style(move |_theme| crate::theme::tooltip_style(&c)),
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+fn btn_tip<'a>(label: &str, tip: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
+    let c = *colors;
+    let tip_str = String::from(tip);
+    let btn = button(text(String::from(label)).size(13))
+        .on_press(msg)
+        .padding([6, 12])
+        .style(move |_theme, status| match status {
+            button::Status::Hovered => theme::tab_button_hovered_style(&c),
+            _ => theme::tab_button_style(&c),
+        });
+    tooltip(
+        btn,
+        container(text(tip_str).size(13).color(c.text))
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(&c)),
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+

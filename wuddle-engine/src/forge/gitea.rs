@@ -25,7 +25,7 @@ struct GiteaAsset {
 pub async fn list_releases(
     client: &Client,
     repo: &DetectedRepo,
-) -> Result<Vec<LatestRelease>> {
+) -> Result<Vec<crate::model::LatestRelease>> {
     let mut page = 1u32;
     let mut all = Vec::new();
     loop {
@@ -63,7 +63,7 @@ pub async fn list_releases(
                     sha256: None,
                 })
                 .collect();
-            all.push(LatestRelease {
+            all.push(crate::model::LatestRelease {
                 tag: rel.tag_name.clone(),
                 name: rel.name.clone(),
                 assets,
