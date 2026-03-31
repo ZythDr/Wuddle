@@ -1,6 +1,7 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod anchored_overlay;
+mod monitor;
 mod panels;
 mod service;
 mod radio;
@@ -45,7 +46,24 @@ fn notification_icon_path() -> &'static str {
     })
 }
 
+/// Detect UI scale factor based on monitor resolution.
+/// Monitors at 1080p or below get scaled to 75% so the UI fits comfortably.
+static UI_SCALE: OnceLock<f32> = OnceLock::new();
+
+fn detect_ui_scale() -> f32 {
+    if let Some((_w, h)) = monitor::primary_monitor_size() {
+        if h <= 1080 {
+            return 0.75;
+        }
+    }
+    1.0
+}
+
 fn main() -> iced::Result {
+    // Detect monitor resolution before iced starts
+    let scale = detect_ui_scale();
+    UI_SCALE.set(scale).ok();
+
     // Read settings early so we can set the default font.
     // Noto Sans is the default UI font (matches Tauri's system-ui stack on Linux);
     // Friz Quadrata overrides it when the user opts in.
@@ -71,6 +89,7 @@ fn main() -> iced::Result {
             icon: window_icon,
             ..Default::default()
         })
+        .scale_factor(|app| app.ui_scale)
         .run()
 }
 
@@ -558,6 +577,7 @@ pub struct App {
 
     // Release channel
     pub update_channel: UpdateChannel,
+    pub ui_scale: f32,
 }
 
 impl Default for WuddleTheme {
@@ -1200,10 +1220,22 @@ impl App {
             radio_handle: None,
             github_token_input: String::new(),
             tweaks: TweakState::default(),
-            log_lines: vec![
-                LogLine { level: LogLevel::Info, text: concat!("Wuddle v", env!("CARGO_PKG_VERSION"), " started").into(), timestamp: chrono_now() },
-                LogLine { level: LogLevel::Info, text: "Ready.".into(), timestamp: chrono_now() },
-            ],
+            log_lines: {
+                let mut lines = vec![
+                    LogLine { level: LogLevel::Info, text: concat!("Wuddle v", env!("CARGO_PKG_VERSION"), " started").into(), timestamp: chrono_now() },
+                ];
+                let scale = *UI_SCALE.get().unwrap_or(&1.0);
+                if scale != 1.0 {
+                    let pct = (scale * 100.0) as u32;
+                    if let Some((w, h)) = monitor::primary_monitor_size() {
+                        lines.push(LogLine { level: LogLevel::Info, text: format!("Monitor {w}x{h} detected — UI scaled to {pct}%").into(), timestamp: chrono_now() });
+                    } else {
+                        lines.push(LogLine { level: LogLevel::Info, text: format!("UI scaled to {pct}%").into(), timestamp: chrono_now() });
+                    }
+                }
+                lines.push(LogLine { level: LogLevel::Info, text: "Ready.".into(), timestamp: chrono_now() });
+                lines
+            },
             log_filter: LogFilter::default(),
             log_search: String::new(),
             log_wrap: false,
@@ -1260,16 +1292,19 @@ impl App {
             readme_editor_content: iced::widget::text_editor::Content::new(),
             dxvk_preview_content: iced::widget::text_editor::Content::new(),
             update_channel: UpdateChannel::Beta,
+            ui_scale: *UI_SCALE.get().unwrap_or(&1.0),
         };
 
         // Sync GitHub token from keychain/env at startup
         service::sync_github_token();
 
         // Load settings synchronously (fast, local JSON), then kick off async repo load
-        let task = Task::perform(
+        let settings_task = Task::perform(
             async { settings::load_settings() },
             Message::SettingsLoaded,
         );
+
+        let task = settings_task;
 
         (app, task)
     }
@@ -1941,6 +1976,9 @@ impl App {
                 return self.check_updates_task();
             }
             Message::CheckUpdatesResult(result) => {
+                // If checking_updates is true, this was a user-initiated or auto-check;
+                // if false, it was a silent post-update refresh — skip toasts/notifications.
+                let is_explicit_check = self.checking_updates;
                 self.checking_updates = false;
                 match result {
                     Ok(mut plans) => {
@@ -1973,13 +2011,15 @@ impl App {
                             }
                         }
                         self.log(LogLevel::Info, &format!("Update check complete. {} updates available.", update_count));
-                        if update_count > 0 {
-                            self.show_toast(
-                                format!("{} update{} available.", update_count, if update_count == 1 { "" } else { "s" }),
-                                ToastKind::Info,
-                            );
-                        } else {
-                            self.show_toast("No updates available.", ToastKind::Info);
+                        if is_explicit_check {
+                            if update_count > 0 {
+                                self.show_toast(
+                                    format!("{} update{} available.", update_count, if update_count == 1 { "" } else { "s" }),
+                                    ToastKind::Info,
+                                );
+                            } else {
+                                self.show_toast("No updates available.", ToastKind::Info);
+                            }
                         }
                         self.plans = plans;
                         self.recompute_infrequent_ids();
@@ -1988,7 +2028,7 @@ impl App {
                             self.active_profile_id.clone(),
                             (self.plans.clone(), self.last_checked.clone()),
                         );
-                        if self.opt_desktop_notify && update_count > 0 {
+                        if is_explicit_check && self.opt_desktop_notify && update_count > 0 {
                             let _ = notify_rust::Notification::new()
                                 .appname("Wuddle")
                                 .summary("Wuddle")

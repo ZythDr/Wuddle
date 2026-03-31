@@ -2,6 +2,16 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.0.0-beta.8 (Iced frontend)
+
+### New Features
+
+- **Auto-scaling for smaller monitors** — Wuddle now detects the primary monitor resolution at startup. On 1080p or smaller screens, the entire UI is automatically scaled to 75% so the window fits comfortably. Detection uses native platform APIs: X11/RandR on Linux (with xrandr CLI fallback) and Win32 GDI on Windows. The detected resolution and scale factor are logged on startup.
+
+### Bug Fixes
+
+- **Duplicate update notifications** — silent post-update re-checks (triggered after updating a mod or using Update All) no longer produce toast messages or desktop notifications. Only user-initiated checks and auto-check intervals show notifications.
+
 ## v3.0.0-beta.7 (Iced frontend)
 
 ### New Features
