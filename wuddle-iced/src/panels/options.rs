@@ -1,6 +1,7 @@
 use iced::widget::{button, checkbox, column, container, row, scrollable, stack, text, text_input, tooltip, Space};
 use iced::{Element, Length};
 
+use crate::settings::UiScaleMode;
 use crate::theme::{self, ThemeColors, WuddleTheme};
 use crate::{App, Dialog, Message};
 
@@ -106,7 +107,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     );
 
     // --- Behavior section ---
-    let behavior_section = settings_card(
+    let behavior_section = settings_card_fill(
         column![
             text("Behavior").size(18).color(colors.title),
             checkbox(app.opt_auto_check)
@@ -201,6 +202,33 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         })
         .collect();
 
+    // --- UI Scale buttons ---
+    let scale_buttons: Vec<Element<Message>> = UiScaleMode::ALL
+        .iter()
+        .map(|&mode| {
+            let c2 = c;
+            let is_active = mode == app.ui_scale_mode;
+            tooltip(
+                button(text(mode.label()).size(12))
+                    .on_press(Message::SetUiScaleMode(mode))
+                    .padding([6, 12])
+                    .style(move |_theme, _status| {
+                        if is_active {
+                            theme::tab_button_active_style(&c2)
+                        } else {
+                            theme::tab_button_style(&c2)
+                        }
+                    }),
+                container(text(mode.tooltip()).size(13).color(c2.text))
+                    .padding([3, 8])
+                    .style(move |_| theme::tooltip_style(&c2)),
+                tooltip::Position::Bottom,
+            )
+            .gap(4.0)
+            .into()
+        })
+        .collect();
+
     let display_section = settings_card_fill(
         column![
             text("Time and display").size(18).color(colors.title),
@@ -210,6 +238,9 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             checkbox(app.opt_friz_font)
                 .label("Use Friz Quadrata font")
                 .on_toggle(Message::ToggleFrizFont),
+            Space::new().height(4),
+            text("UI Scale").size(14).color(colors.text),
+            row(scale_buttons).spacing(6),
             Space::new().height(4),
             text("Theme").size(14).color(colors.text),
             row(theme_buttons).spacing(6),
@@ -335,7 +366,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 behavior_section,
                 display_section,
             ]
-            .spacing(8),
+            .spacing(8)
+            .height(280),
             github_section,
         ]
         .spacing(8)

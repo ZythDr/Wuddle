@@ -11,6 +11,62 @@ pub enum UpdateChannel {
     Beta,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UiScaleMode {
+    #[default]
+    Auto,
+    Smaller,
+    Small,
+    Medium,
+    Large,
+    Larger,
+}
+
+impl UiScaleMode {
+    pub const ALL: &[UiScaleMode] = &[
+        UiScaleMode::Auto,
+        UiScaleMode::Smaller,
+        UiScaleMode::Small,
+        UiScaleMode::Medium,
+        UiScaleMode::Large,
+        UiScaleMode::Larger,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            UiScaleMode::Auto => "Auto",
+            UiScaleMode::Smaller => "Smaller",
+            UiScaleMode::Small => "Small",
+            UiScaleMode::Medium => "Medium",
+            UiScaleMode::Large => "Large",
+            UiScaleMode::Larger => "Larger",
+        }
+    }
+
+    pub fn factor(self) -> f32 {
+        match self {
+            UiScaleMode::Auto => 0.0, // sentinel — resolved at runtime
+            UiScaleMode::Smaller => 0.75,
+            UiScaleMode::Small => 0.85,
+            UiScaleMode::Medium => 1.0,
+            UiScaleMode::Large => 1.10,
+            UiScaleMode::Larger => 1.20,
+        }
+    }
+
+    pub fn tooltip(self) -> &'static str {
+        match self {
+            UiScaleMode::Auto => "Automatic — scales based on monitor resolution",
+            UiScaleMode::Smaller => "Scale: 75%",
+            UiScaleMode::Small => "Scale: 85%",
+            UiScaleMode::Medium => "Scale: 100%",
+            UiScaleMode::Large => "Scale: 110%",
+            UiScaleMode::Larger => "Scale: 120%",
+        }
+    }
+}
+
 impl std::fmt::Display for UpdateChannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -81,6 +137,7 @@ pub struct AppSettings {
     pub profiles: Vec<ProfileConfig>,
     pub ignored_update_ids: Vec<i64>,
     pub update_channel: UpdateChannel,
+    pub ui_scale_mode: UiScaleMode,
 }
 
 impl Default for AppSettings {
@@ -106,6 +163,7 @@ impl Default for AppSettings {
             profiles: vec![ProfileConfig::default()],
             ignored_update_ids: Vec::new(),
             update_channel: UpdateChannel::Beta,
+            ui_scale_mode: UiScaleMode::Auto,
         }
     }
 }

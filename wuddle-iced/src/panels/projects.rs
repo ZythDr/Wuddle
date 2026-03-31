@@ -849,8 +849,9 @@ fn action_buttons<'a>(
     // Download/update button — always shown, active only when update available
     {
         let c2 = c;
-        let btn = button(text("\u{2193}").size(14)) // ↓
-            .padding([4, 8]);
+        let btn = button(container(text("\u{2193}").size(14)).center_x(Length::Fill)) // ↓
+            .padding([4, 0])
+            .width(30);
         let btn_el: Element<Message> = if has_update {
             btn.on_press(Message::UpdateRepo(rid))
                 .style(move |_theme, _status| theme::tab_button_active_style(&c2))
@@ -870,9 +871,10 @@ fn action_buttons<'a>(
     // Triple-dot button wrapped in AnchoredOverlay so the popup is pinned
     // to the button's actual screen position via Iced's overlay system.
     let c2 = c;
-    let dots_btn = button(text("\u{22EE}").size(14)) // ⋮
+    let dots_btn = button(container(text("\u{22EE}").size(14)).center_x(Length::Fill)) // ⋮
         .on_press(Message::ToggleMenu(rid))
-        .padding([4, 8])
+        .padding([4, 0])
+        .width(30)
         .style(move |_theme, status| match status {
             button::Status::Hovered => theme::tab_button_hovered_style(&c2),
             _ => theme::tab_button_style(&c2),

@@ -75,10 +75,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
 
     let latest_display = app.latest_version.as_deref().unwrap_or("\u{2014}");
 
-    // Application card — height(Shrink), acts as the row's cross-axis anchor.
-    // Credits card — height(Fill), stretches to match the Application card.
-    // This works because Iced's Row sets Fill children to the max Shrink-child height.
-    let app_card = card(
+    let app_card = card_fill(
         column![
             text("Application").size(16).color(colors.title),
             about_row("Current version:", APP_VERSION, colors),
@@ -89,15 +86,13 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         &c,
     );
 
-    // Space(17) + gap(8) = 25px ≈ 1 missing row (size-13 text ~17px at 1.3 line-height) + 1 spacing,
-    // making the Credits card the same height as the Application card.
-    let credits_card = card(
+    let credits_card = card_fill(
         column![
             text("Credits").size(16).color(colors.title),
             credit_row(
                 "Addon management",
                 "GitAddonsManager by WobLight (GPLv3)",
-                "https://github.com/WobLight/GitAddonsManager",
+                "https://gitlab.com/woblight/GitAddonsManager",
                 colors,
             ),
             credit_row(
@@ -106,7 +101,6 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 "https://github.com/brndd/vanilla-tweaks",
                 colors,
             ),
-            Space::new().height(17.0),
         ]
         .spacing(8),
         &c,
@@ -127,7 +121,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         .unwrap_or("Application details loaded.");
     let status = text(status_text).size(12).color(status_color);
 
-    let cards_row = row![app_card, credits_card].spacing(8).width(Length::Fill);
+    let cards_row = row![app_card, credits_card].spacing(8).width(Length::Fill).height(140);
 
     column![header, cards_row, status]
         .spacing(8)
@@ -249,6 +243,18 @@ fn card<'a>(
     let c = *colors;
     container(container(content).padding(16))
         .width(Length::Fill)
+        .style(move |_theme| theme::card_style(&c))
+        .into()
+}
+
+fn card_fill<'a>(
+    content: impl Into<Element<'a, Message>>,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let c = *colors;
+    container(container(content).padding(16))
+        .width(Length::Fill)
+        .height(Length::Fill)
         .style(move |_theme| theme::card_style(&c))
         .into()
 }

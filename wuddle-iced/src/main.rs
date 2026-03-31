@@ -46,23 +46,30 @@ fn notification_icon_path() -> &'static str {
     })
 }
 
-/// Detect UI scale factor based on monitor resolution.
-/// Monitors at 1080p or below get scaled to 75% so the UI fits comfortably.
-static UI_SCALE: OnceLock<f32> = OnceLock::new();
+/// Auto-detected scale factor based on monitor resolution.
+/// Monitors at 1080p or below get scaled to 85%.
+static AUTO_UI_SCALE: OnceLock<f32> = OnceLock::new();
 
-fn detect_ui_scale() -> f32 {
+fn detect_auto_scale() -> f32 {
     if let Some((_w, h)) = monitor::primary_monitor_size() {
         if h <= 1080 {
-            return 0.75;
+            return 0.85;
         }
     }
     1.0
 }
 
+fn resolve_ui_scale(mode: settings::UiScaleMode) -> f32 {
+    match mode {
+        settings::UiScaleMode::Auto => *AUTO_UI_SCALE.get().unwrap_or(&1.0),
+        other => other.factor(),
+    }
+}
+
 fn main() -> iced::Result {
     // Detect monitor resolution before iced starts
-    let scale = detect_ui_scale();
-    UI_SCALE.set(scale).ok();
+    let auto_scale = detect_auto_scale();
+    AUTO_UI_SCALE.set(auto_scale).ok();
 
     // Read settings early so we can set the default font.
     // Noto Sans is the default UI font (matches Tauri's system-ui stack on Linux);
@@ -430,6 +437,8 @@ pub struct Toast {
     pub kind: ToastKind,
     /// Remaining ticks before auto-dismiss (one tick = 80ms spinner period).
     pub ttl: usize,
+    /// Optional message to fire when the toast body is clicked.
+    pub on_click: Option<Message>,
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +587,7 @@ pub struct App {
     // Release channel
     pub update_channel: UpdateChannel,
     pub ui_scale: f32,
+    pub ui_scale_mode: settings::UiScaleMode,
 }
 
 impl Default for WuddleTheme {
@@ -645,6 +655,7 @@ pub enum Message {
     ToggleXattr(bool),
     ToggleClock12(bool),
     ToggleFrizFont(bool),
+    SetUiScaleMode(settings::UiScaleMode),
     // Radio
     ToggleRadio,
     ReconnectRadio,
@@ -1224,13 +1235,11 @@ impl App {
                 let mut lines = vec![
                     LogLine { level: LogLevel::Info, text: concat!("Wuddle v", env!("CARGO_PKG_VERSION"), " started").into(), timestamp: chrono_now() },
                 ];
-                let scale = *UI_SCALE.get().unwrap_or(&1.0);
-                if scale != 1.0 {
-                    let pct = (scale * 100.0) as u32;
+                let auto = *AUTO_UI_SCALE.get().unwrap_or(&1.0);
+                if auto != 1.0 {
+                    let pct = (auto * 100.0) as u32;
                     if let Some((w, h)) = monitor::primary_monitor_size() {
-                        lines.push(LogLine { level: LogLevel::Info, text: format!("Monitor {w}x{h} detected — UI scaled to {pct}%").into(), timestamp: chrono_now() });
-                    } else {
-                        lines.push(LogLine { level: LogLevel::Info, text: format!("UI scaled to {pct}%").into(), timestamp: chrono_now() });
+                        lines.push(LogLine { level: LogLevel::Info, text: format!("Monitor {w}x{h} detected — auto scale {pct}%").into(), timestamp: chrono_now() });
                     }
                 }
                 lines.push(LogLine { level: LogLevel::Info, text: "Ready.".into(), timestamp: chrono_now() });
@@ -1292,7 +1301,8 @@ impl App {
             readme_editor_content: iced::widget::text_editor::Content::new(),
             dxvk_preview_content: iced::widget::text_editor::Content::new(),
             update_channel: UpdateChannel::Beta,
-            ui_scale: *UI_SCALE.get().unwrap_or(&1.0),
+            ui_scale: *AUTO_UI_SCALE.get().unwrap_or(&1.0),
+            ui_scale_mode: settings::UiScaleMode::Auto,
         };
 
         // Sync GitHub token from keychain/env at startup
@@ -1319,6 +1329,14 @@ impl App {
     }
 
     fn show_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
+        self.push_toast(message, kind, None);
+    }
+
+    fn show_toast_with_action(&mut self, message: impl Into<String>, kind: ToastKind, on_click: Message) {
+        self.push_toast(message, kind, Some(on_click));
+    }
+
+    fn push_toast(&mut self, message: impl Into<String>, kind: ToastKind, on_click: Option<Message>) {
         self.toast_counter += 1;
         // ~5 seconds at 80ms per tick = 63 ticks
         let ttl = match kind {
@@ -1330,6 +1348,7 @@ impl App {
             message: message.into(),
             kind,
             ttl,
+            on_click,
         });
         // Keep max 5 toasts
         while self.toasts.len() > 5 {
@@ -1407,6 +1426,7 @@ impl App {
             profiles: self.profiles.clone(),
             ignored_update_ids: self.ignored_update_ids.iter().cloned().collect(),
             update_channel: self.update_channel,
+            ui_scale_mode: self.ui_scale_mode,
         };
         let _ = settings::save_settings(&s);
     }
@@ -1603,6 +1623,12 @@ impl App {
                 self.opt_friz_font = b;
                 self.save_settings();
                 self.log(LogLevel::Info, "Friz Quadrata font setting saved. Restart Wuddle to apply.");
+            }
+            Message::SetUiScaleMode(mode) => {
+                self.ui_scale_mode = mode;
+                self.ui_scale = resolve_ui_scale(mode);
+                self.save_settings();
+                self.log(LogLevel::Info, &format!("UI scale set to {} ({}%)", mode.label(), (self.ui_scale * 100.0) as u32));
             }
             Message::ToggleRadio => {
                 if self.radio_connecting {
@@ -1904,6 +1930,8 @@ impl App {
                 self.auto_check_minutes = s.auto_check_minutes.max(1);
                 self.ignored_update_ids = s.ignored_update_ids.into_iter().collect();
                 self.update_channel = s.update_channel;
+                self.ui_scale_mode = s.ui_scale_mode;
+                self.ui_scale = resolve_ui_scale(s.ui_scale_mode);
                 self.profiles = if s.profiles.is_empty() {
                     vec![settings::ProfileConfig::default()]
                 } else {
@@ -2980,7 +3008,11 @@ impl App {
                         self.log(LogLevel::Info, &format!("Version check: {}", status.message));
                         if status.update_available {
                             let ver = self.latest_version.as_deref().unwrap_or("new version");
-                            self.show_toast(format!("Wuddle {} is available.", ver), ToastKind::Info);
+                            self.show_toast_with_action(
+                                format!("Wuddle {} is available. Click to view.", ver),
+                                ToastKind::Info,
+                                Message::SetTab(Tab::About),
+                            );
                         }
                     }
                     Err(e) => {
@@ -3008,7 +3040,8 @@ impl App {
                         self.self_update_available = false;
                         self.update_message = Some(msg.clone());
                         self.log(LogLevel::Info, &msg);
-                        self.show_toast("Update downloaded — restart to apply.", ToastKind::Info);
+                        self.show_toast("Update downloaded — restarting...", ToastKind::Info);
+                        return Task::done(Message::RestartAfterUpdate);
                     }
                     Err(e) => {
                         self.update_message = Some(format!("Update failed: {}", e));
@@ -3382,8 +3415,27 @@ impl App {
                 snap: true,
             });
 
+            let msg_element: Element<Message> = if let Some(ref action) = t.on_click {
+                button(text(t.message.clone()).size(13).color(c.text))
+                    .on_press(action.clone())
+                    .padding(0)
+                    .style(move |_theme, status| {
+                        let underline = matches!(status, button::Status::Hovered);
+                        button::Style {
+                            background: None,
+                            text_color: if underline { c.link } else { c.text },
+                            border: iced::Border::default(),
+                            shadow: iced::Shadow::default(),
+                            snap: true,
+                        }
+                    })
+                    .into()
+            } else {
+                text(t.message.clone()).size(13).color(c.text).into()
+            };
+
             let toast_row = row![
-                text(t.message.clone()).size(13).color(c.text),
+                msg_element,
                 Space::new().width(Length::Fill),
                 dismiss_btn,
             ]
