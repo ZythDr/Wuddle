@@ -1852,17 +1852,28 @@ fn normalize_tag(raw: &str) -> String {
     raw.trim().trim_start_matches(['v', 'V']).trim().to_string()
 }
 
-fn parse_version_key(raw: &str) -> Vec<u64> {
-    normalize_tag(raw)
-        .split(|c: char| !c.is_ascii_alphanumeric())
+/// Split a version string into its numeric core and whether it has a
+/// pre-release suffix (alpha, beta, rc, etc.).
+fn parse_version_parts(raw: &str) -> (Vec<u64>, bool) {
+    let tag = normalize_tag(raw);
+    let is_prerelease = tag.contains("alpha")
+        || tag.contains("beta")
+        || tag.contains("rc")
+        || tag.contains("dev");
+    let nums: Vec<u64> = tag
+        .split(|c: char| !c.is_ascii_digit())
         .filter(|s| !s.is_empty())
         .filter_map(|s| s.parse::<u64>().ok())
-        .collect()
+        .collect();
+    // For pre-release tags, only keep the first 3 segments (major.minor.patch)
+    // so that e.g. "3.0.0-beta.8" compares as [3,0,0] pre-release, not [3,0,0,8].
+    let core = if is_prerelease { nums.into_iter().take(3).collect() } else { nums };
+    (core, is_prerelease)
 }
 
 fn is_version_newer(latest: &str, current: &str) -> bool {
-    let a = parse_version_key(latest);
-    let b = parse_version_key(current);
+    let (a, a_pre) = parse_version_parts(latest);
+    let (b, b_pre) = parse_version_parts(current);
     let max = a.len().max(b.len());
     for i in 0..max {
         let av = *a.get(i).unwrap_or(&0);
@@ -1870,7 +1881,10 @@ fn is_version_newer(latest: &str, current: &str) -> bool {
         if av > bv { return true; }
         if av < bv { return false; }
     }
-    normalize_tag(latest) != normalize_tag(current)
+    // Same numeric core: a stable release is newer than a pre-release.
+    // e.g. 3.0.0 is newer than 3.0.0-beta.8
+    if !a_pre && b_pre { return true; }
+    false
 }
 
 async fn fetch_release_full(beta_channel: bool) -> Result<GhReleaseFull, String> {
