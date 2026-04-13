@@ -99,7 +99,7 @@ jobs:
 
           # linuxdeploy infers the icon name from the filename, so it must
           # be named wuddle.png to match the Icon= entry in the desktop file.
-          cp wuddle-iced/icons/128x128.png wuddle.png
+          cp wuddle-iced/assets/icons/128x128.png wuddle.png
 
           ./linuxdeploy.AppImage \
             --appdir AppDir \
