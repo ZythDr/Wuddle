@@ -241,6 +241,9 @@ fn fix_repo_casing_from_forges(eng: &Engine) {
         if new_owner != repo.owner || new_name != repo.name {
             let _ = eng.db().update_repo_casing(repo.id, &new_owner, &new_name);
         }
+
+        // Rate limit: 1.5s delay between requests to avoid hammering APIs
+        std::thread::sleep(Duration::from_millis(1500));
     }
 }
 
@@ -257,18 +260,36 @@ pub async fn list_repos(
         };
         let eng = open_engine(db_path.as_deref())?;
         let wow_path = Path::new(dir);
-        // Prune repos whose files no longer exist on disk (DB only, never deletes files)
-        let _ = eng.prune_missing_repos(wow_path);
-        // Auto-import newly discovered addon git repos
-        let _ = eng.import_existing_addon_git_repos(wow_path);
-        // Remove duplicate tracking entries
-        let _ = eng.dedup_addon_repos_by_folder(wow_path);
+
+        // Restore correct capitalization from disk (.toc files/folders for addons).
+        // This is fast and runs on every refresh to satisfy the requirement that
+        // the list matches disk casing.
+        let _ = eng.fix_repo_casing_from_disk(wow_path);
+
+        // Heavy maintenance tasks: only run during a full rescan or the one-time v4 migration.
+        // This keeps the standard launch and refresh cycles fast and prevents
+        // deleted repos from being automatically re-imported.
+        if fix_casing || eng.db().needs_casing_fix() {
+            // Prune repos whose files no longer exist on disk
+            let _ = eng.prune_missing_repos(wow_path);
+            // Auto-import newly discovered addon git repos
+            let _ = eng.import_existing_addon_git_repos(wow_path);
+            // Remove duplicate tracking entries
+            let _ = eng.dedup_addon_repos_by_folder(wow_path);
+        }
+
         // Fix repo owner/name casing from forge APIs (best-effort).
         // On first launch after the v4 migration (needs_casing_fix), always run.
         // Otherwise only run when explicitly requested (manual rescan).
+        // Spawning in a background thread to avoid blocking the main rescan loop.
         if fix_casing || eng.db().needs_casing_fix() {
-            fix_repo_casing_from_forges(&eng);
-            let _ = eng.db().mark_casing_fixed();
+            let db_clone = db_path.clone();
+            std::thread::spawn(move || {
+                if let Ok(e) = open_engine(db_clone.as_deref()) {
+                    fix_repo_casing_from_forges(&e);
+                    let _ = e.db().mark_casing_fixed();
+                }
+            });
         }
         let repos = eng.db().list_repos().map_err(|e| e.to_string())?;
 

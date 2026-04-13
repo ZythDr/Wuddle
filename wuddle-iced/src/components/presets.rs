@@ -10,7 +10,7 @@ use iced::{Element, Length};
 use crate::Message;
 use crate::service::RepoRow;
 use crate::theme::{self, ThemeColors};
-use crate::components::helpers::badge_tag;
+use crate::components::helpers::{badge_tag, tip};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -60,7 +60,7 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
             description: "A client modification for World of Warcraft 1.6.1-1.12.1 to eliminate stutter and animation lag. VanillaFixes also acts as a launcher (start game via VanillaFixes.exe instead of Wow.exe) and DLL mod loader which loads DLL files listed in dlls.txt found in the WoW install directory.",
             categories: &["Performance"],
             recommended: true,
-            warning: Some("Known issue: VanillaFixes may trigger antivirus false-positive alerts on Windows."),
+            warning: Some("VanillaFixes may trigger antivirus false-positive alerts on Windows."),
             companion_links: &[],
             expanded_notes: &[],
             is_addon: false,
@@ -82,7 +82,7 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
             description: "Adds optional camera offset, proper nameplates (showing only with LoS), improved tab-targeting keybind behavior, LoS and distance checks in Lua, screenshot format options, network tweaks, background notifications, and additional QoL features.",
             categories: &["QoL", "API"],
             recommended: true,
-            warning: Some("Known issue: UnitXP_SP3 may trigger antivirus false-positive alerts on Windows."),
+            warning: Some("UnitXP_SP3 may trigger antivirus false-positive alerts on Windows."),
             companion_links: &[],
             expanded_notes: &[],
             is_addon: true,
@@ -104,7 +104,7 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
             description: "Client mod for WoW 1.12.1 that fixes engine/client bugs and expands the Lua API used by addons. Some addons require SuperWoW directly, and many others gain improved functionality when it is present.",
             categories: &["QoL", "API"],
             recommended: true,
-            warning: Some("Known issue: SuperWoW may trigger antivirus false-positive alerts on Windows."),
+            warning: Some("SuperWoW may trigger antivirus false-positive alerts on Windows."),
             companion_links: &[
                 ("SuperAPI", "https://github.com/balakethelock/SuperAPI"),
                 ("SuperAPI_Castlib", "https://github.com/balakethelock/SuperAPI_Castlib"),
@@ -207,29 +207,42 @@ pub fn build_quick_add_presets<'a>(repos: &[RepoRow], colors: &ThemeColors) -> E
             ));
         }
         if preset.warning.is_some() {
-            tags.push(badge_tag(
-                "AV false-positive",
-                iced::Color::from_rgb8(0xfc, 0xa5, 0xa5),
-                iced::Color::from_rgb8(0xef, 0x44, 0x44),
+            tags.push(tip(
+                badge_tag(
+                    "AV false-positive",
+                    iced::Color::from_rgb8(0xfc, 0xa5, 0xa5),
+                    iced::Color::from_rgb8(0xef, 0x44, 0x44),
+                ),
+                "This mod is known to trigger an antivirus false-positive.",
+                iced::widget::tooltip::Position::Top,
+                colors,
             ));
         }
         for cat in preset.categories {
-            let (text_col, base_col) = match *cat {
+            let (text_col, base_col, tooltip_text) = match *cat {
                 "Performance" => (
                     iced::Color::from_rgb8(0xc4, 0xb5, 0xfd),
                     iced::Color::from_rgb8(0xa8, 0x55, 0xf7),
+                    "This mod aims to increase the game's performance.",
                 ),
                 "QoL" => (
                     iced::Color::from_rgb8(0x93, 0xc5, 0xfd),
                     iced::Color::from_rgb8(0x3b, 0x82, 0xf6),
+                    "This mod adds Quality of Life improvements to the game.",
                 ),
                 "API" => (
                     iced::Color::from_rgb8(0xfd, 0xe6, 0x8a),
                     iced::Color::from_rgb8(0xfa, 0xcc, 0x15),
+                    "Adds new API which certain addons may rely on to improve their functionality.",
                 ),
-                _ => (c.muted, c.muted),
+                _ => (c.muted, c.muted, ""),
             };
-            tags.push(badge_tag(cat, text_col, base_col));
+            let badge = badge_tag(cat, text_col, base_col);
+            if !tooltip_text.is_empty() {
+                tags.push(tip(badge, tooltip_text, iced::widget::tooltip::Position::Top, colors));
+            } else {
+                tags.push(badge);
+            }
         }
 
         let tags_row = row(tags).spacing(4).align_y(iced::Alignment::Center);
@@ -248,11 +261,6 @@ pub fn build_quick_add_presets<'a>(repos: &[RepoRow], colors: &ThemeColors) -> E
                 .into()
             );
         }
-        if let Some(_warn) = preset.warning {
-            desc_col.push(
-                text("Known issue:").size(19).color(iced::Color::from_rgb8(0xfc, 0xa5, 0xa5)).into()
-            );
-        }
         if !preset.companion_links.is_empty() {
             let companions: Vec<Element<Message>> = preset.companion_links.iter().map(|(label, lurl)| {
                 let l = lurl.to_string();
@@ -261,7 +269,7 @@ pub fn build_quick_add_presets<'a>(repos: &[RepoRow], colors: &ThemeColors) -> E
                         iced::widget::span(*label)
                             .underline(true)
                             .color(c.link)
-                            .size(19.0_f32),
+                            .size(16.0_f32),
                     ])
                 )
                 .on_press(Message::OpenUrl(l))
@@ -277,7 +285,7 @@ pub fn build_quick_add_presets<'a>(repos: &[RepoRow], colors: &ThemeColors) -> E
             }).collect();
             desc_col.push(
                 row![
-                    text("Companion addons:").size(19).color(c.muted),
+                    text("Companion addons:").size(16).color(c.muted),
                     row(companions).spacing(8),
                 ].spacing(4).into()
             );

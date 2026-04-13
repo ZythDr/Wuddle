@@ -344,20 +344,44 @@ impl Db {
             Err(e) => return Err(e.into()),
         }
 
-        let existing_id = self
+        let (existing_id, existing_owner, existing_name) = self
             .conn
             .query_row(
-                r#"SELECT id FROM repos WHERE host=?1 AND owner=?2 AND name=?3 LIMIT 1"#,
+                r#"SELECT id, owner, name FROM repos WHERE host=?1 COLLATE NOCASE AND owner=?2 COLLATE NOCASE AND name=?3 COLLATE NOCASE LIMIT 1"#,
                 params![repo.host, repo.owner, repo.name],
-                |row| row.get::<_, i64>(0),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
             )
             .or_else(|_| {
                 self.conn.query_row(
-                    r#"SELECT id FROM repos WHERE forge=?1 AND host=?2 AND owner=?3 AND name=?4 LIMIT 1"#,
+                    r#"SELECT id, owner, name FROM repos WHERE forge=?1 COLLATE NOCASE AND host=?2 COLLATE NOCASE AND owner=?3 COLLATE NOCASE AND name=?4 COLLATE NOCASE LIMIT 1"#,
                     params![repo.forge, repo.host, repo.owner, repo.name],
-                    |row| row.get::<_, i64>(0),
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
                 )
             })?;
+
+        // Best-casing strategy: if the user adds a repo with "better" casing 
+        // (mixed/upper) than what we have (all-lowercase from v4 migration), update it.
+        let mut update_owner = None;
+        let mut update_name = None;
+
+        let has_upper = |s: &str| s.chars().any(|c| c.is_uppercase());
+        let is_lower  = |s: &str| s == s.to_lowercase() && s.chars().any(|c| c.is_alphabetic());
+
+        if has_upper(&repo.owner) && is_lower(&existing_owner) {
+            update_owner = Some(&repo.owner);
+        }
+        if has_upper(&repo.name) && is_lower(&existing_name) {
+            update_name = Some(&repo.name);
+        }
+
+        if update_owner.is_some() || update_name.is_some() {
+            let _ = self.update_repo_casing(
+                existing_id,
+                update_owner.unwrap_or(&existing_owner),
+                update_name.unwrap_or(&existing_name),
+            );
+        }
+
         Ok(existing_id)
     }
 

@@ -102,6 +102,7 @@ pub struct App {
     pub self_update_done: bool,
 
     // Auto-check
+    pub autocheck_done: bool,
     pub auto_check_minutes: u32,
     /// Tracks when infrequent repos were last checked (wall-clock unix seconds).
     pub last_infrequent_check_unix: i64,
@@ -235,6 +236,7 @@ impl App {
             self_update_assets_pending: false,
             self_update_in_progress: false,
             self_update_done: false,
+            autocheck_done: false,
             auto_check_minutes: 60,
             last_infrequent_check_unix: 0,
             infrequent_repo_ids: std::collections::HashSet::new(),
@@ -552,9 +554,7 @@ impl App {
                         Message::RemoveRepoFilesLoaded,
                     )
                 } else if matches!(d, Dialog::AddRepo { .. }) {
-                    // Only clear the preview state if the AddRepo dialog is being
-                    // opened for the first time, NOT when just updating its internal state
-                    // (e.g. toggling Advanced or changing Mode/URL).
+                    let mut tasks = vec![iced::widget::operation::focus(iced::widget::Id::new("add_repo_url"))];
                     if !matches!(self.dialog, Some(Dialog::AddRepo { .. })) {
                         self.add_repo_preview = None;
                         self.add_repo_preview_loading = false;
@@ -563,8 +563,13 @@ impl App {
                         self.add_repo_file_preview = None;
                         self.add_repo_expanded_dirs.clear();
                         self.add_repo_dir_contents.clear();
+                        if let Dialog::AddRepo { url, .. } = &d {
+                            if !url.trim().is_empty() {
+                                tasks.push(Task::done(Message::FetchRepoPreview(url.clone())));
+                            }
+                        }
                     }
-                    iced::widget::operation::focus(iced::widget::Id::new("add_repo_url"))
+                    Task::batch(tasks)
                 } else {
                     Task::none()
                 };
@@ -1164,12 +1169,26 @@ impl App {
                             .into()
                     );
                     {
-                        let add_label = if is_addons { "Add addon" } else { "Add mod" };
-                        let add_tip_text = if is_addons { "Add this addon to Wuddle" } else { "Add this mod to Wuddle" };
-                        let add_btn = button(text(add_label).size(13))
-                            .on_press(Message::AddRepoSubmit)
+                        let is_installed = self.repos.iter().any(|r| {
+                            let r_url = r.url.trim().trim_end_matches('/').to_lowercase();
+                            let d_url = url.trim().trim_end_matches('/').to_lowercase();
+                            !d_url.is_empty() && (r_url == d_url || r_url == format!("{}.git", d_url) || format!("{}.git", r_url) == d_url)
+                        });
+
+                        let add_label = if is_installed { "Installed" } else if is_addons { "Add addon" } else { "Add mod" };
+                        let add_tip_text = if is_installed { "This repository is already managed by Wuddle" } else if is_addons { "Add this addon to Wuddle" } else { "Add this mod to Wuddle" };
+
+                        let mut add_btn = button(text(add_label).size(13))
                             .padding([6, 14])
-                            .style(move |_t, _s| theme::tab_button_active_style(&c));
+                            .style(move |_t, _s| if is_installed {
+                                theme::tab_button_style(&c)
+                            } else {
+                                theme::tab_button_active_style(&c)
+                            });
+
+                        if !is_installed {
+                            add_btn = add_btn.on_press(Message::AddRepoSubmit);
+                        }
                         footer_row.push(tip(add_btn, add_tip_text, iced::widget::tooltip::Position::Top, colors));
                     }
                     row(footer_row).spacing(8).align_y(iced::Alignment::Center).into()

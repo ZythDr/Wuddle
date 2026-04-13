@@ -735,7 +735,12 @@ fn name_cell_with_expand<'a>(
                     .style(move |_t, _s| iced::widget::svg::Style { color: Some(c.muted) });
 
                 let help_btn: Element<Message> = button(help_icon)
-                    .on_press(Message::OpenModFileInfo("weirdutils.dll".to_string()))
+                    .on_press(Message::OpenDialog(Dialog::AddRepo {
+                        url: repo.url.clone(),
+                        mode: repo.mode.clone(),
+                        is_addons: false,
+                        advanced: false,
+                    }))
                     .padding(0)
                     .style(move |_theme, _status| button::Style {
                         background: None,

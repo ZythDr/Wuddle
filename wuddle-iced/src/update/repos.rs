@@ -40,8 +40,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             )
                         })
                         .collect();
-                    // Auto-check on launch if the option is enabled
-                    if app.opt_auto_check && !app.repos.is_empty() && !app.checking_updates {
+                    // Auto-check on launch if the option is enabled (only once per session)
+                    if app.opt_auto_check && !app.repos.is_empty() && !app.checking_updates && !app.autocheck_done {
+                        app.autocheck_done = true;
                         app.checking_updates = true;
                         app.log(LogLevel::Info, "Auto-checking for updates on launch...");
                         tasks.push(check_updates_task(app));
@@ -376,10 +377,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.show_toast(format!("Update failed: {}", e), ToastKind::Error);
                 }
             }
-            if wuddle_engine::github_token().is_some() {
-                return Some(refresh_repos_task(app).chain(check_updates_task(app)));
-            }
-            Some(refresh_repos_task(app))
+            return Some(refresh_repos_task(app));
         }
         Message::ToggleRepoEnabled(id, enabled) => {
             let db = app.db_path.clone();
@@ -465,9 +463,6 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         app.log(LogLevel::Info, &format!("Done. Updated {} repo(s).", applied));
                         app.show_toast(format!("Updated {} repo(s).", applied), ToastKind::Info);
                     }
-                    if wuddle_engine::github_token().is_some() {
-                        return Some(refresh_repos_task(app).chain(check_updates_task(app)));
-                    }
                     return Some(refresh_repos_task(app));
                 }
                 Err(e) => {
@@ -498,9 +493,6 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             match result {
                 Ok(plan) => {
                     app.log(LogLevel::Info, &format!("Reinstalled {}/{}.", plan.owner, plan.name));
-                    if wuddle_engine::github_token().is_some() {
-                        return Some(refresh_repos_task(app).chain(check_updates_task(app)));
-                    }
                     return Some(refresh_repos_task(app));
                 }
                 Err(e) => app.log(LogLevel::Error, &format!("Reinstall failed: {}", e)),
@@ -818,8 +810,14 @@ pub fn check_updates_task(app: &App) -> Task<Message> {
     } else {
         Some(app.wow_dir.clone())
     };
+    let skip = if wuddle_engine::github_token().is_none() {
+        infrequent_skip_ids(&app.repos, &app.plans, app.last_infrequent_check_unix)
+    } else {
+        HashSet::new()
+    };
+
     Task::perform(
-        service::check_updates(db, wow, wuddle_engine::CheckMode::Force),
+        service::check_updates_skip(db, wow, wuddle_engine::CheckMode::Force, skip),
         Message::CheckUpdatesResult,
     )
 }

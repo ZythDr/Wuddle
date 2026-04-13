@@ -7204,7 +7204,7 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
 name = "wuddle-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -7225,7 +7225,7 @@ dependencies = [
 
 [[package]]
 name = "wuddle-iced"
-version = "3.0.2"
+version = "3.0.3"
 dependencies = [
  "arboard",
  "dirs 6.0.0",

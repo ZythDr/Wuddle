@@ -301,7 +301,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::AutoCheckTick => {
             if app.opt_auto_check && !app.checking_updates {
                 app.checking_updates = true;
-                let skip = crate::update::repos::infrequent_skip_ids(&app.repos, &app.plans, app.last_infrequent_check_unix);
+                let skip = if wuddle_engine::github_token().is_some() {
+                    std::collections::HashSet::new()
+                } else {
+                    crate::update::repos::infrequent_skip_ids(&app.repos, &app.plans, app.last_infrequent_check_unix)
+                };
                 let skipped = skip.len();
                 if skipped > 0 {
                     app.log(LogLevel::Info, &format!(

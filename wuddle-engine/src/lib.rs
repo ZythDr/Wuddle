@@ -888,6 +888,48 @@ impl Engine {
         Ok(removed)
     }
 
+    /// Update repository naming capitalization by checking .toc files or folder
+    /// names on disk. If a repo's name is all-lowercase (legacy from v4
+    /// migration) but is found on disk with better casing, update the DB.
+    pub fn fix_repo_casing_from_disk(&self, wow_dir: &Path) -> Result<usize> {
+        let repos = self.db.list_repos()?;
+        let mut updated = 0;
+
+        let has_upper = |s: &str| s.chars().any(|c| c.is_uppercase());
+        let is_lower = |s: &str| s == s.to_lowercase() && s.chars().any(|c| c.is_alphabetic());
+
+        for repo in repos {
+            // Only attempt fix if name looks lowercased.
+            if !is_lower(&repo.name) {
+                continue;
+            }
+
+            let installs = self.db.list_installs(repo.id)?;
+            for entry in installs {
+                if entry.kind != "addon" {
+                    continue;
+                }
+                let full = match Self::resolve_install_path(&entry.path, Some(wow_dir)) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if !full.is_dir() {
+                    continue;
+                }
+
+                // Check folder name for Repo Name fix
+                if let Some(folder_name) = full.file_name().and_then(|s| s.to_str()) {
+                    if folder_name.eq_ignore_ascii_case(&repo.name) && has_upper(folder_name) {
+                        let _ = self.db.update_repo_casing(repo.id, &repo.owner, folder_name);
+                        updated += 1;
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(updated)
+    }
+
     /// Remove repos from the database whose installed files no longer exist
     /// on disk at the given `wow_dir`.  This only untracks them — it never
     /// deletes any user files.
