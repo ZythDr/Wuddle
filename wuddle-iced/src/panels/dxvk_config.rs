@@ -591,7 +591,7 @@ pub fn view<'a>(
         let icon_color = c2.text;
         let file_icon = iced::widget::svg(
             iced::widget::svg::Handle::from_memory(
-                include_bytes!("../../icons/file.svg").to_vec(),
+                include_bytes!("../../assets/icons/file.svg").to_vec(),
             ),
         )
         .width(14)

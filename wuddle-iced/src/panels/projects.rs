@@ -4,7 +4,9 @@ use iced::{Element, Length};
 use crate::anchored_overlay::AnchoredOverlay;
 use crate::service::RepoRow;
 use crate::theme::{self, ThemeColors};
-use crate::{is_mod, App, Dialog, Filter, Message, SortDir, SortKey};
+use crate::{App, Dialog, Filter, Message, SortDir, SortKey};
+use crate::service::is_mod;
+use crate::theme::name_font;
 
 // ---------------------------------------------------------------------------
 // Tauri CSS column widths (from styles.css)
@@ -17,6 +19,13 @@ const COL_ENABLED: u32 = 64;
 const COL_STATUS: u32 = 130;
 const COL_ACTIONS: u32 = 96;
 const COL_BRANCH: u32 = 200;
+
+// WEIRD_UTILS_DLLS moved to components::presets
+
+fn is_weird_utils_item(repo_url: &str, dll_name: &str) -> bool {
+    repo_url.to_lowercase().contains("weirdutils") || 
+    crate::components::presets::WEIRD_UTILS_DLLS.iter().any(|&d| d.eq_ignore_ascii_case(dll_name))
+}
 
 /// 1px vertical divider as a colored container with fixed height.
 /// Using a container instead of rule::vertical because rule::vertical expands
@@ -343,14 +352,21 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
                 // Inject child DLL rows when expanded
                 if repo.installed_dlls.len() > 1 && app.expanded_repo_ids.contains(&repo.id) {
                     for (dll_name, dll_enabled) in &repo.installed_dlls {
-                        rows.push(dll_child_row(repo.id, dll_name, *dll_enabled, colors));
+                        rows.push(dll_child_row(repo.id, &repo.url, dll_name, *dll_enabled, colors));
                     }
                 }
             } else {
                 rows.push(addon_row(app, repo, colors));
             }
         }
+        let scroll_id = if label == "Mods" {
+            iced::widget::Id::new("mods_projects_scrollable")
+        } else {
+            iced::widget::Id::new("addons_projects_scrollable")
+        };
+
         scrollable(column(rows).spacing(0).width(Length::Fill))
+            .id(scroll_id)
             .height(Length::Fill)
             .direction(theme::vscroll_overlay())
             .style(move |t, s| theme::scrollable_style(&c)(t, s))
@@ -470,6 +486,7 @@ fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: &ThemeColors) -> Element
 /// Indented child row for a single DLL within a multi-DLL mod.
 fn dll_child_row<'a>(
     repo_id: i64,
+    repo_url: &str,
     dll_name: &'a str,
     dll_enabled: bool,
     colors: &ThemeColors,
@@ -497,9 +514,35 @@ fn dll_child_row<'a>(
             text(format!("\u{21B3} {}", name_owned2))
                 .size(12)
                 .color(if dll_enabled { c.muted } else { iced::Color { a: 0.35, ..c.muted } }),
+            
+            // Help button for WeirdUtils DLLs - check name against list
+            if is_weird_utils_item(repo_url, dll_name) {
+                let dll_name_for_msg = dll_name.to_string();
+                let help_bytes = include_bytes!("../../assets/icons/help.svg");
+                let help_handle = iced::widget::svg::Handle::from_memory(help_bytes);
+                let help_icon = iced::widget::svg(help_handle)
+                    .width(16)
+                    .height(16)
+                    .style(move |_t, _s| iced::widget::svg::Style { color: Some(c.muted) });
+                
+                let help_btn: Element<Message> = button(help_icon)
+                    .on_press(Message::OpenModFileInfo(dll_name_for_msg))
+                    .padding(0)
+                    .style(move |_theme, _status| button::Style {
+                        background: None,
+                        text_color: c.muted,
+                        border: iced::Border::default(),
+                        shadow: iced::Shadow::default(),
+                        snap: true,
+                    })
+                    .into();
+                help_btn
+            } else {
+                Space::new().width(0).into()
+            }
         ]
         .align_y(iced::Alignment::Center)
-        .spacing(4),
+        .spacing(6),
     )
     .width(Length::Fill)
     .into();
@@ -627,7 +670,7 @@ fn name_cell_with_expand<'a>(
     } else {
         format!("{} \u{2022} {} \u{2022} disabled", repo.owner, repo.forge)
     };
-    let name_font = crate::name_font(colors);
+    let name_font = name_font(colors);
 
     let title_btn = button(
         iced::widget::rich_text::<(), _, _, _>([
@@ -654,10 +697,9 @@ fn name_cell_with_expand<'a>(
     let show_dxvk_badge = is_dxvk_repo(&repo.name);
 
     let title_row: Element<Message> = if is_multi_dll {
-        let chevron_bytes: &[u8] = if is_expanded {
-            include_bytes!("../../icons/chevron-down.svg")
-        } else {
-            include_bytes!("../../icons/chevron-right.svg")
+        let chevron_bytes: &[u8] = match is_expanded {
+            true => include_bytes!("../../assets/icons/chevron-down.svg"),
+            false => include_bytes!("../../assets/icons/chevron-right.svg"),
         };
         let chevron_handle = iced::widget::svg::Handle::from_memory(chevron_bytes);
         let chevron_icon = iced::widget::svg(chevron_handle)
@@ -683,6 +725,30 @@ fn name_cell_with_expand<'a>(
             chevron_icon.into(),
             Space::new().width(14).into(),
             badge.into(),
+            // Help button for WeirdUtils parent row
+            if is_weird_utils_item(&repo.url, &repo.name) || is_weird_utils_item(&repo.url, "weirdutils.dll") {
+                let help_bytes = include_bytes!("../../assets/icons/help.svg");
+                let help_handle = iced::widget::svg::Handle::from_memory(help_bytes);
+                let help_icon = iced::widget::svg(help_handle)
+                    .width(16)
+                    .height(16)
+                    .style(move |_t, _s| iced::widget::svg::Style { color: Some(c.muted) });
+
+                let help_btn: Element<Message> = button(help_icon)
+                    .on_press(Message::OpenModFileInfo("weirdutils.dll".to_string()))
+                    .padding(0)
+                    .style(move |_theme, _status| button::Style {
+                        background: None,
+                        text_color: c.muted,
+                        border: iced::Border::default(),
+                        shadow: iced::Shadow::default(),
+                        snap: true,
+                    })
+                    .into();
+                row![Space::new().width(8), help_btn].into()
+            } else {
+                Space::new().width(0).into()
+            },
         ];
         if show_dxvk_badge {
             let c2 = c;

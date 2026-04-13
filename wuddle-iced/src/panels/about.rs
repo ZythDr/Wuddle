@@ -236,6 +236,7 @@ fn credit_row<'a>(
     .into()
 }
 
+#[allow(dead_code)]
 fn card<'a>(
     content: impl Into<Element<'a, Message>>,
     colors: &ThemeColors,

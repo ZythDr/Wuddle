@@ -2,6 +2,24 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.0.2
+
+### New Features
+
+- **Live WeirdUtils Documentation** — Wuddle now pulls "live" documentation for individual WeirdUtils modules directly from the project's README on Codeberg. Usage instructions and commands will now always be up-to-date.
+- **Expanded WeirdUtils Recognition** — Added native support for `worldmarkers.dll`, which now correctly displays its help icon and live documentation.
+
+### Improvements
+
+- **Major Architecture Refactor** — The monolithic application logic has been modularized into specialized components (`src/app/`, `src/types/`, `src/components/`, etc.). This significantly improves codebase transparency and maintenance for future contributors.
+- **Decoupled Radio Spinner** — The radio connection status spinner is now decoupled from the global UI update loop, ensuring smoother interface performance during network negotiations.
+- **Unified Logic Consolidation** — Shared logic for font selection (`name_font`), mod detection (`is_mod`), and component-specific presets has been moved to centralized service and theme modules.
+
+### Bug Fixes
+
+- **Project List Scroll Stability** — Resolved an issue where clicking inline code blocks (e.g. commands) in repository descriptions could trigger unwanted scrolling in the project list.
+- **Font Rendering Fallbacks** — Optimized bold weight fallbacks for Noto Sans fonts consistently across all themes.
+
 ## v3.0.1
 
 ### Bug Fixes

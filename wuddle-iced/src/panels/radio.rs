@@ -1,4 +1,5 @@
-use crate::{Message, ThemeColors};
+use crate::message::Message;
+use crate::theme::ThemeColors;
 use iced::widget::{button, checkbox, column, container, row, rule, text, text_input, tooltip, Space};
 use iced::{Element, Length};
 use crate::theme;

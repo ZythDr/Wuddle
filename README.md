@@ -28,7 +28,17 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **GitHub auth token (optional):** helps avoid anonymous API limits
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New In v3.0
+### What's New In v3.0.2
+
+- **Live DLL Documentation** — Wuddle now pulls "live" documentation for individual WeirdUtils modules directly from the project's README on Codeberg. Usage instructions and commands will now always be up-to-date.
+- **Improved Codebase Architecture** — Complete refactor into a professional, modular structure for better maintenance and transparency.
+- **Fixed Scroll Stability** — Resolved a persistent issue where clicking inline code blocks in descriptions would trigger unwanted list scrolling.
+- **Decoupled System Feedback** — Radio connection states and other background tasks are now decoupled from the main UI thread for a smoother experience.
+
+<details>
+<summary><strong>v3.0.x Changelog</strong></summary>
+
+### v3.0
 
 Wuddle v3 is a complete frontend rewrite from Tauri/WebView to [Iced 0.14](https://iced.rs), rendering natively via wgpu (Vulkan/Metal/DX12). No WebView, no browser engine overhead.
 
@@ -43,6 +53,8 @@ Wuddle v3 is a complete frontend rewrite from Tauri/WebView to [Iced 0.14](https
 - **Auto-scaling for smaller monitors** — detects monitor resolution and scales the UI automatically, with manual scale buttons (75%–120%) in Options.
 - **GAM-compatible addon deployment** — addons are now cross-compatible with GitAddonsManager and the TurtleWoW launcher out of the box.
 - **Mod cache in WoW directory** — simplifies antivirus whitelisting on Windows.
+
+</details>
 
 <details>
 <summary><strong>v2.x Changelog</strong></summary>

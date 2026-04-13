@@ -3,7 +3,8 @@ use iced::{Element, Length};
 
 use crate::anchored_overlay::AnchoredOverlay;
 use crate::theme::{self, ThemeColors};
-use crate::{is_mod, App, Dialog, Message};
+use crate::{App, Dialog, Message};
+use crate::service::is_mod;
 
 // Turtle WoW official links
 const URL_HOMEPAGE: &str = "https://turtlecraft.gg/";
@@ -449,15 +450,15 @@ fn icon_btn_fixed<'a>(
 /// Choose the volume icon based on current level (0.0–1.0).
 fn volume_icon_bytes(volume: f32) -> &'static [u8] {
     if volume <= 0.0 {
-        include_bytes!("../../icons/volume-mute.svg")
+        include_bytes!("../../assets/icons/volume-mute.svg")
     } else if volume <= 0.25 {
-        include_bytes!("../../icons/volume-off.svg")
+        include_bytes!("../../assets/icons/volume-off.svg")
     } else if volume <= 0.50 {
-        include_bytes!("../../icons/volume-low.svg")
+        include_bytes!("../../assets/icons/volume-low.svg")
     } else if volume <= 0.75 {
-        include_bytes!("../../icons/volume-medium.svg")
+        include_bytes!("../../assets/icons/volume-medium.svg")
     } else {
-        include_bytes!("../../icons/volume-high.svg")
+        include_bytes!("../../assets/icons/volume-high.svg")
     }
 }
 
@@ -535,7 +536,7 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     // Settings (cogwheel)
     let settings_btn = tip(
         icon_btn_hover(
-            include_bytes!("../../icons/cogwheel.svg"),
+            include_bytes!("../../assets/icons/cogwheel.svg"),
             20,
             Message::OpenRadioSettings,
             dim,
@@ -549,7 +550,7 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     // Refresh / reconnect — sits left of play/stop
     let refresh_btn = tip(
         icon_btn_hover(
-            include_bytes!("../../icons/refresh.svg"),
+            include_bytes!("../../assets/icons/refresh.svg"),
             18,
             Message::ReconnectRadio,
             dim,
@@ -586,7 +587,7 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     } else if app.radio_playing {
         tip(
             icon_btn_fixed(
-                include_bytes!("../../icons/stop.svg"),
+                include_bytes!("../../assets/icons/stop.svg"),
                 36, 44,
                 Message::ToggleRadio,
                 active_bright,
@@ -599,7 +600,7 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     } else {
         tip(
             icon_btn_fixed(
-                include_bytes!("../../icons/play.svg"),
+                include_bytes!("../../assets/icons/play.svg"),
                 36, 44,
                 Message::ToggleRadio,
                 dim,
@@ -617,7 +618,7 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let vol_up = (vol + 0.05).clamp(0.0, 1.0);
 
     let minus_btn = icon_btn_hover(
-        include_bytes!("../../icons/minus.svg"),
+        include_bytes!("../../assets/icons/minus.svg"),
         10,
         Message::SetRadioVolume(vol_down),
         extra_dim,
@@ -671,7 +672,7 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     );
 
     let plus_btn = icon_btn_hover(
-        include_bytes!("../../icons/plus.svg"),
+        include_bytes!("../../assets/icons/plus.svg"),
         10,
         Message::SetRadioVolume(vol_up),
         extra_dim,

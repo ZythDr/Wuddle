@@ -7,6 +7,11 @@ use iced::widget::rule;
 use iced::widget::text_editor;
 use iced::{Border, Color, Font, Gradient, Radians, Shadow, Theme, Vector};
 
+
+pub const LIFECRAFT: Font = Font::with_name("LifeCraft");
+pub const FRIZ: Font = Font::with_name("Friz Quadrata Std");
+pub const NOTO: Font = Font::with_name("Noto Sans");
+
 /// Wuddle's 5 custom themes, ported from the CSS variables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WuddleTheme {
@@ -15,6 +20,12 @@ pub enum WuddleTheme {
     Emerald,
     Ashen,
     WowUi,
+}
+
+impl Default for WuddleTheme {
+    fn default() -> Self {
+        WuddleTheme::Cata
+    }
 }
 
 /// Extended color palette for Wuddle themes — covers gradients, borders, etc.
@@ -754,6 +765,14 @@ pub fn tooltip_style(colors: &ThemeColors) -> container::Style {
         },
         text_color: Some(colors.text),
         snap: true,
+    }
+}
+
+pub fn name_font(colors: &ThemeColors) -> Font {
+    if colors.body_font == FRIZ {
+        FRIZ
+    } else {
+        Font { weight: iced::font::Weight::Bold, ..colors.body_font }
     }
 }
 

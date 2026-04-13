@@ -102,6 +102,10 @@ impl From<UpdatePlan> for PlanRow {
 // Engine helpers
 // ---------------------------------------------------------------------------
 
+pub fn is_mod(repo: &RepoRow) -> bool {
+    !matches!(repo.mode.as_str(), "addon" | "addon_git")
+}
+
 fn open_engine(db_path: Option<&Path>) -> Result<Engine, String> {
     match db_path {
         Some(p) => Engine::open(p).map_err(|e| e.to_string()),
@@ -345,6 +349,31 @@ pub async fn add_repo(
     .map_err(|e| e.to_string())?
 }
 
+pub async fn probe_conflicts(
+    db_path: Option<PathBuf>,
+    url: String,
+    wow_dir: String,
+) -> Result<wuddle_engine::AddonProbeResult, String> {
+    // NOTE: probe_addon_repo_conflicts is async, so we can't simply call it inside
+    // spawn_blocking. Using Handle::current().block_on() inside spawn_blocking would
+    // deadlock because both sides wait on the same Tokio runtime. Instead we build a
+    // fresh, isolated current-thread runtime inside the blocking task.
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?
+            .block_on(async {
+                eng.probe_addon_repo_conflicts(&url, Path::new(&wow_dir), None).await
+            })
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r)
+}
+
 pub async fn remove_repo(
     db_path: Option<PathBuf>,
     id: i64,
@@ -423,6 +452,7 @@ pub async fn set_dll_enabled(
 /// Result for a single repo updated as part of update-all.
 #[derive(Debug, Clone)]
 pub struct UpdateOneResult {
+    pub repo_id: i64,
     pub owner: String,
     pub name: String,
     /// The updated plan, or None if already up to date.
@@ -474,11 +504,11 @@ pub async fn update_all(
                 Err(e) => {
                     let err = e.to_string();
                     log.push(format!("{}/{}: error — {}", owner, name, err));
-                    Ok(UpdateOneResult { owner, name, plan: None, log_lines: log, error: Some(err) })
+                    Ok(UpdateOneResult { repo_id: id, owner, name, plan: None, log_lines: log, error: Some(err) })
                 }
                 Ok(None) => {
                     log.push(format!("{}/{}: already up to date.", owner, name));
-                    Ok(UpdateOneResult { owner, name, plan: None, log_lines: log, error: None })
+                    Ok(UpdateOneResult { repo_id: id, owner, name, plan: None, log_lines: log, error: None })
                 }
                 Ok(Some(plan)) => {
                     if plan.mode.as_str() == "addon_git" {
@@ -488,6 +518,7 @@ pub async fn update_all(
                     }
                     log.push(format!("{}/{}: update complete.", plan.owner, plan.name));
                     Ok(UpdateOneResult {
+                        repo_id: plan.repo_id,
                         owner: plan.owner.clone(),
                         name: plan.name.clone(),
                         plan: Some(PlanRow::from(plan)),
@@ -1633,6 +1664,64 @@ async fn fetch_gitea_preview(client: &Client, host: &str, scheme: &str, owner: &
         repo_name: repo.into(),
         forge_url: format!("{}://{}/{}/{}", scheme, host, owner, repo),
     })
+}
+
+// ---------------------------------------------------------------------------
+// WeirdUtils Dynamic Info
+// ---------------------------------------------------------------------------
+
+/// Fetch and parse the WeirdUtils README to find a live description for a specific DLL.
+pub async fn fetch_dll_description(dll_name: String) -> Result<(String, String), String> {
+    let url = "https://codeberg.org/MarcelineVQ/WeirdUtils/raw/branch/main/README.md";
+    let client = Client::builder()
+        .user_agent("wuddle-iced")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let readme = client.get(url).send().await
+        .map_err(|e| format!("Network error: {}", e))?
+        .text().await
+        .map_err(|e| format!("Read error: {}", e))?;
+
+    if let Some(desc) = extract_dll_info_from_readme(&readme, &dll_name) {
+        Ok((dll_name, desc))
+    } else {
+        Err(format!("No documentation found for '{}' in WeirdUtils README.", dll_name))
+    }
+}
+
+fn extract_dll_info_from_readme(readme: &str, target_dll: &str) -> Option<String> {
+    // WeirdUtils README uses --- to separate feature blocks.
+    let segments: Vec<&str> = readme.split("---").collect();
+    let target_base = target_dll.to_lowercase().replace(".dll", "");
+
+    for segment in segments {
+        let lower = segment.to_lowercase();
+        if lower.contains(&format!("**dll:** `{}`", target_dll.to_lowercase())) || 
+           lower.contains(&format!("**dll:** `{}`", target_base)) {
+            
+            let lines: Vec<&str> = segment.lines().collect();
+            let mut start_idx = 0;
+            let mut end_idx = lines.len();
+
+            for (i, line) in lines.iter().enumerate() {
+                if line.trim().starts_with("### ") && start_idx == 0 {
+                    start_idx = i;
+                }
+                if line.to_lowercase().contains("**dll:**") {
+                    end_idx = i + 1;
+                    break;
+                }
+            }
+
+            let extracted = lines[start_idx..end_idx].join("\n").trim().to_string();
+            if !extracted.is_empty() {
+                return Some(extracted);
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

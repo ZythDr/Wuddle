@@ -1,7 +1,8 @@
-//! Persistent settings (JSON file in app data dir).
-
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+pub static AUTO_UI_SCALE: OnceLock<f32> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -627,4 +628,20 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
     let path = settings_path()?;
     let data = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
     std::fs::write(&path, data).map_err(|e| e.to_string())
+}
+
+pub fn detect_auto_scale() -> f32 {
+    if let Some((_w, h)) = crate::monitor::primary_monitor_size() {
+        if h <= 1080 {
+            return 0.85;
+        }
+    }
+    1.0
+}
+
+pub fn resolve_ui_scale(mode: UiScaleMode) -> f32 {
+    match mode {
+        UiScaleMode::Auto => *AUTO_UI_SCALE.get().unwrap_or(&1.0),
+        other => other.factor(),
+    }
 }
