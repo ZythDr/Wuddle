@@ -10,7 +10,8 @@ Wuddle is a desktop WoW launcher/manager primarily focusing Vanilla clients, wit
 > [!WARNING]
 > Please scroll down and read the Important Note before downloading.
 
-<img width="1099" height="904" alt="image" src="https://github.com/user-attachments/assets/b827cd42-7b6c-47b2-b85b-01b75f171665" />
+[Screencast_20260414_150926.webm](https://github.com/user-attachments/assets/231d99f9-1809-49e8-b6ba-6117876c08bc)
+
 
 # Important Note (Anti-virus + SuperWoW)
 SuperWoW is known to trigger false-positives in many antivirus products.
