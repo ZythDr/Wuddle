@@ -163,6 +163,14 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
     ]
 }
 
+/// Returns true if the given URL corresponds to a preset with an "AV false-positive" warning.
+pub fn is_av_false_positive(url: &str) -> bool {
+    let url = url.trim_end_matches('/');
+    create_quick_add_presets().iter().any(|p| {
+        p.url.trim_end_matches('/').eq_ignore_ascii_case(url) && p.warning.is_some()
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------

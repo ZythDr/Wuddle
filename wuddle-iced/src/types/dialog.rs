@@ -121,4 +121,6 @@ pub enum Dialog {
         custom_command: String,
         custom_args: String,
     },
+    AvWarning { url: String, mode: String },
+    AddonConflict { url: String, mode: String, conflicts: Vec<wuddle_engine::AddonProbeConflict> },
 }

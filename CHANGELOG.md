@@ -2,6 +2,18 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.0.5
+
+### Security & Safety
+- **Anti-Virus False-Positive Warnings** — Restored and generalized the warning dialog for mods known to frequently trigger security heuristics (SuperWoW, VanillaFixes, UnitXP_SP3). 
+- **Informed Installation Flow** — Safety warnings are now integrated into both the "Quick Add" catalog and the manual "Add Repo" workflows. Installation is blocked until the user explicitly acknowledges the potential for false-positive detections.
+
+### UI/UX
+- **Optimized Dialog Layout** — Increased the warning dialog width to **650px** and refined internal padding to improve readability and eliminate unnecessary line wrapping for detailed warning text.
+
+### Developer Experience
+- **Architecture Documentation** — Expanded `ICED_DOCUMENTATION.md` with technical details on the generalized AV detection logic and the Iced dialog sizing system.
+
 ## v3.0.4
 
 ### Artwork & Aesthetics

@@ -2,7 +2,7 @@ use iced::Task;
 use crate::{App, Message, LogLevel, Dialog, ToastKind};
 use crate::settings::UpdateChannel;
 use crate::service;
-use crate::components::presets::{WEIRD_UTILS_DESCRIPTIONS, WEIRD_UTILS_DLLS};
+use crate::components::presets::{WEIRD_UTILS_DESCRIPTIONS, WEIRD_UTILS_DLLS, is_av_false_positive};
 use wuddle_engine;
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -186,6 +186,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if let Some(Dialog::AddRepo { ref url, ref mode, .. }) = app.dialog {
                 let url = url.clone();
                 let mode = mode.clone();
+
+                // Check if this mod requires an AV warning
+                if is_av_false_positive(&url) {
+                    app.dialog = Some(Dialog::AvWarning { url, mode });
+                    return Some(Task::none());
+                }
+
                 let db = app.db_path.clone();
                 app.dialog = None;
                 app.log(LogLevel::Info, &format!("Adding repo: {}", url));
@@ -229,6 +236,22 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             app.updating_repo_ids.clear();
             Some(refresh_repos_task(app))
+        }
+        Message::InstallRepoOverride { url, mode } => {
+            let db = app.db_path.clone();
+            app.dialog = None;
+            app.add_repo_preview = None;
+            app.add_repo_preview_loading = false;
+            app.add_repo_release_notes = None;
+            app.add_repo_show_releases = false;
+            app.add_repo_file_preview = None;
+            app.add_repo_expanded_dirs.clear();
+            app.add_repo_dir_contents.clear();
+            app.log(LogLevel::Info, &format!("Adding repo (override): {}", url));
+            Some(Task::perform(
+                service::add_repo(db, url, mode),
+                Message::AddRepoResult,
+            ))
         }
         Message::RemoveRepoConfirm(id, remove_files) => {
             let db = app.db_path.clone();
@@ -699,6 +722,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             } else {
                 "auto".to_string()
             };
+
+            // Check if this mod requires an AV warning
+            if is_av_false_positive(&url) {
+                app.dialog = Some(Dialog::AvWarning { url, mode });
+                return Some(Task::none());
+            }
+
             let db = app.db_path.clone();
             app.dialog = None;
             app.add_repo_preview = None;

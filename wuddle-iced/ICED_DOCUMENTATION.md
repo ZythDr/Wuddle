@@ -1145,3 +1145,13 @@ image = { version = "0.25", features = ["jpeg", "png", "webp"] }
 ```
 
 ---
+
+### Anti-Virus Warning Dialog (Restored from Tauri)
+- **Mod Intersection**: Any modification install (Quick Add or Manual) that matches a known preset with `warning: Some(...)` will now trigger an `AvWarning` dialog.
+- **`is_av_false_positive`**: A helper in `presets.rs` that checks the hardcoded preset list by URL.
+- **Confirmation Flow**: The warning calls `Message::InstallRepoOverride`, which bypasses the AV check and proceeds with the installation. This ensures users are aware of potential AV issues before files are downloaded and potentially deleted by system security.
+
+### Dialog Overlays
+- **`Dialog` enum**: Used for managing all modal states.
+- **Center layers**: The overlay logic in `app/mod.rs` follows the glassmorphism aesthetic, using high-alpha containers to block interaction with the background content.
+- **Handling Overrides**: Messages like `InstallRepoOverride` are pattern boosters to allow re-entry into state-mutating logic after a confirmation step.

@@ -8,8 +8,8 @@ use crate::{Message, theme};
 use crate::components::helpers::close_button;
 use theme::ThemeColors;
 
-/// Anti-virus warning shown before installing SuperWoW.
-pub fn super_wow_warning<'a>(
+/// Anti-virus warning shown before installing certain mods.
+pub fn av_false_positive_warning<'a>(
     url: &'a str,
     mode: &'a str,
     colors: &ThemeColors,
