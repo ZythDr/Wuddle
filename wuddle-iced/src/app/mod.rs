@@ -417,6 +417,11 @@ impl App {
             );
         }
 
+        subs.push(
+            iced::time::every(std::time::Duration::from_secs(60))
+                .map(|_| Message::GithubRateTick),
+        );
+
         if self.dialog.is_some() {
             subs.push(iced::event::listen_with(|event, _status, _window| {
                 match event {

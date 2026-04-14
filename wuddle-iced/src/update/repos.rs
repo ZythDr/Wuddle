@@ -80,6 +80,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.checking_updates = true;
             Some(check_updates_task(app))
         }
+        Message::GithubRateTick => {
+            return Some(Task::perform(
+                service::fetch_github_rate_limit(),
+                Message::GithubRateInfoResult,
+            ));
+        }
+
         Message::CheckUpdatesResult(result) => {
             // If checking_updates is true, this was a user-initiated or auto-check;
             // if false, it was a silent post-update refresh — skip toasts/notifications.

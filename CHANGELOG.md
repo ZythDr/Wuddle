@@ -2,6 +2,22 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.0.4
+
+### Artwork & Aesthetics
+- **Restored UI Artwork** — The Turtle WoW background artwork is now fully restored on the Home tab's "Quick Links" section when the "I like turtles" preset is enabled.
+- **Atmospheric Vignette** — Implemented a triple-layered linear gradient system (Vertical + Horizontal + Base) that creates a premium, theme-aware radial fade.
+- **Glass-Frame Polish** — Refined the "Quick Links" section with a 10% opacity border that sits on top of the artwork for a crisp, framed glass effect, matching the current theme correctly.
+- **Dynamic Clipping** — Enabled hardware-accelerated clipping to ensure background images stay perfectly within UI card boundaries.
+
+### Performance & Stability
+- **Race-Free Image Loading** — Implemented a `OnceLock` singleton pattern for the turtle artwork, resolving intermittent cold-start rendering issues and flickering.
+- **Cargo Optimization** — Enabled hardware-accelerated `jpeg` and `png` decoding features in the build configuration.
+- **API Intelligence** — Integrated a 60-second background subscription to monitor GitHub API rate limits, keeping rate-limit tooltips accurate without consuming user quota.
+
+### Developer Experience
+- **Iced Knowledge Base** — Expanded `ICED_DOCUMENTATION.md` with new sections on background image handling, simulated radial gradients, and border-occlusion strategies for future Iced 0.14 development.
+
 ## v3.0.2
 
 ### New Features

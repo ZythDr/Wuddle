@@ -98,6 +98,7 @@ pub enum Message {
     ReinstallRepo(i64),
     ReinstallRepoResult(Result<PlanRow, String>),
     FetchBranches(i64),
+    GithubRateTick,
     FetchBranchesResult((i64, Result<Vec<String>, String>)),
     SetRepoBranch(i64, String),
     SetRepoBranchResult(Result<i64, String>),

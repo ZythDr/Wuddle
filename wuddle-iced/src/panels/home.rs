@@ -1,10 +1,14 @@
-use iced::widget::{button, column, container, mouse_area, row, rule, scrollable, text, tooltip, Space};
-use iced::{Element, Length};
+use iced::gradient::Linear;
+use iced::widget::{
+    button, column, container, image, mouse_area, row, rule, scrollable, stack, text, tooltip,
+    Space,
+};
+use iced::{Color, Element, Gradient, Length, Radians};
 
 use crate::anchored_overlay::AnchoredOverlay;
+use crate::service::is_mod;
 use crate::theme::{self, ThemeColors};
 use crate::{App, Dialog, Message};
-use crate::service::is_mod;
 
 // Turtle WoW official links
 const URL_HOMEPAGE: &str = "https://turtlecraft.gg/";
@@ -22,10 +26,21 @@ const URL_WOWAUCTIONS: &str = "https://www.wowauctions.net/";
 const URL_RAIDRES: &str = "https://raidres.top/";
 const URL_TURTLOGS: &str = "https://www.turtlogs.com/";
 
+pub fn turtle_artwork() -> &'static image::Handle {
+    static HANDLE: std::sync::OnceLock<image::Handle> = std::sync::OnceLock::new();
+    HANDLE.get_or_init(|| {
+        image::Handle::from_bytes(&include_bytes!("../../assets/artwork/turtle-bg.jpg")[..])
+    })
+}
+
 pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
 
-    let update_count = app.plans.iter().filter(|p| p.has_update && !app.ignored_update_ids.contains(&p.repo_id)).count();
+    let update_count = app
+        .plans
+        .iter()
+        .filter(|p| p.has_update && !app.ignored_update_ids.contains(&p.repo_id))
+        .count();
 
     // --- Updates card header ---
     let header = row![
@@ -39,7 +54,13 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 .padding([6, 14])
                 .style(move |_theme, status| match status {
                     button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                    _ => if menu_open { theme::tab_button_active_style(&c2) } else { theme::tab_button_style(&c2) },
+                    _ => {
+                        if menu_open {
+                            theme::tab_button_active_style(&c2)
+                        } else {
+                            theme::tab_button_style(&c2)
+                        }
+                    }
                 });
             let menu_items: Element<Message> = container(
                 column![
@@ -101,7 +122,9 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         .plans
         .iter()
         .filter(|p| {
-            p.has_update && !app.ignored_update_ids.contains(&p.repo_id) && app.repos.iter().any(|r| r.id == p.repo_id && is_mod(r))
+            p.has_update
+                && !app.ignored_update_ids.contains(&p.repo_id)
+                && app.repos.iter().any(|r| r.id == p.repo_id && is_mod(r))
         })
         .collect();
 
@@ -180,7 +203,9 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         .plans
         .iter()
         .filter(|p| {
-            p.has_update && !app.ignored_update_ids.contains(&p.repo_id) && app.repos.iter().any(|r| r.id == p.repo_id && !is_mod(r))
+            p.has_update
+                && !app.ignored_update_ids.contains(&p.repo_id)
+                && app.repos.iter().any(|r| r.id == p.repo_id && !is_mod(r))
         })
         .collect();
 
@@ -254,21 +279,19 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         .style(move |_theme| theme::update_col_style(&c2))
     };
 
-    let updates_row = row![mods_col, addons_col]
-        .spacing(12)
-        .height(200);
+    let updates_row = row![mods_col, addons_col].spacing(12).height(200);
 
     let updates_card = {
         let c2 = c;
-        container(
-            column![header, updates_row].spacing(12).padding(18),
-        )
-        .width(Length::Fill)
-        .style(move |_theme| theme::card_style(&c2))
+        container(column![header, updates_row].spacing(12).padding(18))
+            .width(Length::Fill)
+            .style(move |_theme| theme::card_style(&c2))
     };
 
     // Show Turtle WoW links only when the active profile has "I like turtles!" enabled
-    let like_turtles = app.profiles.iter()
+    let like_turtles = app
+        .profiles
+        .iter()
         .find(|p| p.id == app.active_profile_id)
         .map(|p| p.like_turtles)
         .unwrap_or(true);
@@ -306,9 +329,83 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
 
         let links_card = {
             let c2 = c;
-            container(row![official_links, community_links].spacing(16).padding(18))
+            // Background artwork - explicit height (340px) to prevent truncation of links
+            let bg_image = image(turtle_artwork().clone())
                 .width(Length::Fill)
-                .style(move |_theme| theme::card_style(&c2))
+                .height(Length::Fill)
+                .content_fit(iced::ContentFit::Cover);
+
+            // Base overlay - 20% opacity everywhere
+            let base_overlay = container(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(Color { a: 0.2, ..c2.card }.into()),
+                    ..Default::default()
+                });
+
+            // Vertical vignette fringe - adds another 70% at the very top/bottom (total 90%)
+            let v_overlay = container(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(move |_| {
+                    let gradient = Linear::new(0.0)
+                        .add_stop(0.0, Color { a: 0.7, ..c2.card })
+                        .add_stop(0.4, Color::TRANSPARENT)
+                        .add_stop(0.6, Color::TRANSPARENT)
+                        .add_stop(1.0, Color { a: 0.7, ..c2.card });
+
+                    container::Style {
+                        background: Some(iced::Background::Gradient(Gradient::Linear(gradient))),
+                        ..Default::default()
+                    }
+                });
+
+            // Horizontal vignette fringe - adds another 70% at the very left/right (total 90%)
+            let h_overlay = container(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(move |_| {
+                    let gradient = Linear::new(Radians::PI / 2.0)
+                        .add_stop(0.0, Color { a: 0.7, ..c2.card })
+                        .add_stop(0.1, Color::TRANSPARENT)
+                        .add_stop(0.9, Color::TRANSPARENT)
+                        .add_stop(1.0, Color { a: 0.7, ..c2.card });
+
+                    container::Style {
+                        background: Some(iced::Background::Gradient(Gradient::Linear(gradient))),
+                        ..Default::default()
+                    }
+                });
+
+            // Border overlay - must be on top of the image to be visible
+            let border_overlay = container(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(move |_| theme::card_artwork_style(&c2));
+
+            let content = row![official_links, community_links]
+                .spacing(16)
+                .padding(18)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_y(iced::Alignment::Center);
+
+            container(
+                stack![
+                    bg_image,
+                    base_overlay,
+                    v_overlay,
+                    h_overlay,
+                    border_overlay,
+                    content
+                ]
+                .width(Length::Fill)
+                .height(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(340)
+            .clip(true)
         };
 
         page_items.push(links_card.into());
@@ -338,7 +435,12 @@ fn btn_styled<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a
 }
 
 /// Wrap any element in a tooltip with consistent styling.
-fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: &ThemeColors) -> Element<'a, Message> {
+fn tip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    tip_text: &str,
+    pos: tooltip::Position,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
     let c = *colors;
     let tip_str = String::from(tip_text);
     tooltip(
@@ -387,17 +489,15 @@ fn icon_btn_hover<'a>(
     idle_color: iced::Color,
     hover_color: iced::Color,
 ) -> Element<'a, Message> {
-    let icon = iced::widget::svg(
-        iced::widget::svg::Handle::from_memory(svg_bytes.to_vec()),
-    )
-    .width(size)
-    .height(size)
-    .style(move |_t, status| iced::widget::svg::Style {
-        color: Some(match status {
-            iced::widget::svg::Status::Hovered => hover_color,
-            _ => idle_color,
-        }),
-    });
+    let icon = iced::widget::svg(iced::widget::svg::Handle::from_memory(svg_bytes.to_vec()))
+        .width(size)
+        .height(size)
+        .style(move |_t, status| iced::widget::svg::Style {
+            color: Some(match status {
+                iced::widget::svg::Status::Hovered => hover_color,
+                _ => idle_color,
+            }),
+        });
 
     button(icon)
         .on_press(msg)
@@ -421,17 +521,15 @@ fn icon_btn_fixed<'a>(
     idle_color: iced::Color,
     hover_color: iced::Color,
 ) -> Element<'a, Message> {
-    let icon = iced::widget::svg(
-        iced::widget::svg::Handle::from_memory(svg_bytes.to_vec()),
-    )
-    .width(icon_size)
-    .height(icon_size)
-    .style(move |_t, status| iced::widget::svg::Style {
-        color: Some(match status {
-            iced::widget::svg::Status::Hovered => hover_color,
-            _ => idle_color,
-        }),
-    });
+    let icon = iced::widget::svg(iced::widget::svg::Handle::from_memory(svg_bytes.to_vec()))
+        .width(icon_size)
+        .height(icon_size)
+        .style(move |_t, status| iced::widget::svg::Style {
+            color: Some(match status {
+                iced::widget::svg::Status::Hovered => hover_color,
+                _ => idle_color,
+            }),
+        });
 
     button(container(icon).center_x(Length::Fill))
         .on_press(msg)
@@ -489,13 +587,23 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         container(text("● LIVE").size(16).color(live_text_color))
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(iced::Padding { top: 0.0, right: 16.0, bottom: 0.0, left: 0.0 })
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 16.0,
+                bottom: 0.0,
+                left: 0.0,
+            })
             .align_x(iced::Alignment::End)
             .align_y(iced::Alignment::Center),
     )
     .width(Length::FillPortion(1))
     .height(Length::Fill)
-    .padding(iced::Padding { top: 1.0, right: 1.0, bottom: 1.0, left: 0.0 })
+    .padding(iced::Padding {
+        top: 1.0,
+        right: 1.0,
+        bottom: 1.0,
+        left: 0.0,
+    })
     .style(move |_| container::Style {
         background: Some(iced::Background::Gradient(iced::Gradient::Linear(
             iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI / 2.0))
@@ -511,8 +619,12 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
 
     // Left column: title + subtitle
     let left_col = column![
-        text("Everlook Broadcasting Co.").size(15).color(colors.title),
-        text("Turtle WoW in-game radio stream").size(11).color(colors.muted),
+        text("Everlook Broadcasting Co.")
+            .size(15)
+            .color(colors.title),
+        text("Turtle WoW in-game radio stream")
+            .size(11)
+            .color(colors.muted),
     ]
     .spacing(2);
 
@@ -564,12 +676,11 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     // Play / Stop / Connecting spinner — all use a fixed 44px button width
     // so the layout never shifts between states.
     let play_stop_btn: Element<Message> = if is_connecting {
-        let spinner_frames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+        let spinner_frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
         let frame = spinner_frames[app.spinner_tick % spinner_frames.len()];
         tip(
             button(
-                container(text(format!("{}", frame)).size(36).color(dim))
-                    .center_x(Length::Fill)
+                container(text(format!("{}", frame)).size(36).color(dim)).center_x(Length::Fill),
             )
             .width(44)
             .padding([4, 4])
@@ -588,7 +699,8 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         tip(
             icon_btn_fixed(
                 include_bytes!("../../assets/icons/stop.svg"),
-                36, 44,
+                36,
+                44,
                 Message::ToggleRadio,
                 active_bright,
                 hover_bright,
@@ -601,12 +713,17 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         tip(
             icon_btn_fixed(
                 include_bytes!("../../assets/icons/play.svg"),
-                36, 44,
+                36,
+                44,
                 Message::ToggleRadio,
                 dim,
                 hover_bright,
             ),
-            if app.radio_handle.is_some() { "Play" } else { "Tune in to the radio stream" },
+            if app.radio_handle.is_some() {
+                "Play"
+            } else {
+                "Tune in to the radio stream"
+            },
             tooltip::Position::Top,
             colors,
         )
@@ -629,9 +746,9 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let is_muted = vol <= 0.0;
     let vol_idle_color = if is_muted { active_bright } else { dim };
     let vol_icon_bytes = volume_icon_bytes(vol);
-    let vol_icon = iced::widget::svg(
-        iced::widget::svg::Handle::from_memory(vol_icon_bytes.to_vec()),
-    )
+    let vol_icon = iced::widget::svg(iced::widget::svg::Handle::from_memory(
+        vol_icon_bytes.to_vec(),
+    ))
     .width(36)
     .height(36)
     .style(move |_t, status| iced::widget::svg::Style {
@@ -653,17 +770,20 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             snap: true,
         });
 
-    let vol_icon_scrollable = mouse_area(vol_btn)
-        .on_scroll(move |delta| {
-            let step: f32 = match delta {
-                iced::mouse::ScrollDelta::Lines { y, .. } => y * 0.05,
-                iced::mouse::ScrollDelta::Pixels { y, .. } => y * 0.005,
-            };
-            Message::SetRadioVolume((vol + step).clamp(0.0, 1.0))
-        });
+    let vol_icon_scrollable = mouse_area(vol_btn).on_scroll(move |delta| {
+        let step: f32 = match delta {
+            iced::mouse::ScrollDelta::Lines { y, .. } => y * 0.05,
+            iced::mouse::ScrollDelta::Pixels { y, .. } => y * 0.005,
+        };
+        Message::SetRadioVolume((vol + step).clamp(0.0, 1.0))
+    });
 
     let vol_pct = format!("{}%", (vol * 100.0).round() as u32);
-    let mute_hint = if is_muted { "Click to unmute" } else { "Click to mute" };
+    let mute_hint = if is_muted {
+        "Click to unmute"
+    } else {
+        "Click to mute"
+    };
     let vol_icon_with_tip = tip(
         vol_icon_scrollable,
         &format!("Volume: {} — {} — scroll to adjust", vol_pct, mute_hint),
@@ -683,7 +803,12 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let left_half = row![
         container(left_col)
             .width(Length::Fill)
-            .padding(iced::Padding { top: 12.0, right: 0.0, bottom: 12.0, left: 16.0 }),
+            .padding(iced::Padding {
+                top: 12.0,
+                right: 0.0,
+                bottom: 12.0,
+                left: 16.0
+            }),
         row![settings_btn, refresh_btn]
             .spacing(2)
             .align_y(iced::Alignment::Center),
@@ -719,8 +844,17 @@ fn radio_card<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let mut card_col = column![main_row];
     if let Some(e) = &app.radio_error {
         card_col = card_col.push(
-            container(text(format!("Could not connect: {e}")).size(11).color(colors.bad))
-                .padding(iced::Padding { top: 0.0, right: 16.0, bottom: 8.0, left: 16.0 }),
+            container(
+                text(format!("Could not connect: {e}"))
+                    .size(11)
+                    .color(colors.bad),
+            )
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 16.0,
+                bottom: 8.0,
+                left: 16.0,
+            }),
         );
     }
 

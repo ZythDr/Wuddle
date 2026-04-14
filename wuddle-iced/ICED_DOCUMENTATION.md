@@ -1070,3 +1070,78 @@ for consistent link styling.
 | `centered_dialog.padding(40)` + dialog_box `width/height(Fill)` | Dialog fills ~90% of window, compact dialogs still center correctly |
 | `md_style.link_color = colors.link` before markdown settings | All links use consistent app link color |
 | Loading both `NotoSans-Regular.ttf` and `NotoSans-Bold.ttf` | Iced selects bold automatically for `Weight::Bold` requests |
+
+---
+
+## Background Artwork & Vignettes
+
+### Image Stability & Singleton Pattern
+
+**Problem:** Dynamically creating an `image::Handle` from raw bytes inside the `view()` function (which runs every frame) can lead to resource race conditions and intermittent flickering, especially on app startup.
+
+**Solution:** Use a `OnceLock` singleton to decode the image exactly once.
+
+```rust
+pub fn my_artwork() -> &'static image::Handle {
+    static HANDLE: std::sync::OnceLock<image::Handle> = std::sync::OnceLock::new();
+    HANDLE.get_or_init(|| {
+        image::Handle::from_bytes(&include_bytes!("../assets/my_image.jpg")[..])
+    })
+}
+
+// In view():
+let bg = image(my_artwork().clone()).content_fit(ContentFit::Cover);
+```
+
+### Simulated Radial Vignettes (Cross-Linear Layering)
+
+Iced 0.14 does not yet support native radial gradients for container backgrounds. To achieve a "vignette" effect where an image fades into the theme background, stack two cross-oriented linear gradients:
+
+```rust
+// Layer 1: Vertical Fade
+let v_fade = container(Space::new()).style(|_| {
+    let g = Linear::new(0.0)
+        .add_stop(0.0, Color { a: 0.9, ..c.card }) // Theme color at edges
+        .add_stop(0.4, Color::TRANSPARENT)        // Clear in center
+        .add_stop(0.6, Color::TRANSPARENT)
+        .add_stop(1.0, Color { a: 0.9, ..c.card });
+    container::Style { background: Some(g.into()), ..Default::default() }
+});
+
+// Layer 2: Horizontal Fade
+let h_fade = container(Space::new()).style(|_| {
+    let g = Linear::new(Radians::PI / 2.0)
+        .add_stop(0.0, Color { a: 0.9, ..c.card })
+        .add_stop(0.1, Color::TRANSPARENT)
+        .add_stop(0.9, Color::TRANSPARENT)
+        .add_stop(1.0, Color { a: 0.9, ..c.card });
+    container::Style { background: Some(g.into()), ..Default::default() }
+});
+
+stack![bg_image, v_fade, h_fade, content]
+```
+
+### Border Occlusion Pitfall
+
+**Problem:** When a child (like a background image with `ContentFit::Cover`) fills a container, it is drawn **on top** of the container's own border, effectively hiding it.
+
+**Solution:** Move the border into the `stack![]` as a dedicated overlay layer. Create an empty container with your border style and place it after the background image in the stack.
+
+```rust
+let border_frame = container(Space::new())
+    .width(Fill).height(Fill)
+    .style(move |_| my_border_style);
+
+stack![bg_image, border_frame, content]
+```
+
+### Cargo Features for Images
+
+Ensure your `Cargo.toml` includes the necessary decoders for your assets:
+
+```toml
+[dependencies]
+image = { version = "0.25", features = ["jpeg", "png", "webp"] }
+```
+
+---

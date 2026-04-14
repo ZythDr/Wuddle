@@ -38,6 +38,9 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 <details>
 <summary><strong>v3.0.x Changelog</strong></summary>
 
+### v3.0.4
+- Restored the Turtle WoW artwork background on the Home tab for when the "I like turtles" preset is enabled.
+
 ### v3.0
 
 Wuddle v3 is a complete frontend rewrite from Tauri/WebView to [Iced 0.14](https://iced.rs), rendering natively via wgpu (Vulkan/Metal/DX12). No WebView, no browser engine overhead.

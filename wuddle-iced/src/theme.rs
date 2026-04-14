@@ -447,6 +447,21 @@ pub fn card_style(colors: &ThemeColors) -> container::Style {
     }
 }
 
+/// Card style for sections with background artwork — no background color, only border
+pub fn card_artwork_style(colors: &ThemeColors) -> container::Style {
+    container::Style {
+        background: None,
+        border: Border {
+            color: colors.border,
+            width: 1.0,
+            radius: Radius::new(0.0),
+        },
+        shadow: Shadow::default(),
+        text_color: None,
+        snap: true,
+    }
+}
+
 /// Table head uses a slightly more visible background
 pub fn table_card_style(colors: &ThemeColors) -> container::Style {
     container::Style {
