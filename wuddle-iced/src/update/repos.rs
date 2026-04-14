@@ -102,13 +102,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         }
                     }
 
-                    // Update infrequent check timestamp: if any infrequent repos
-                    // were actually checked this round, record the time.
+                    // Update infrequent check timestamp: if a token is present,
+                    // we always check everything, so update the timestamp.
+                    // If no token, only update if the window actually expired.
                     let now = now_unix();
-                    let skip_now = infrequent_skip_ids(&app.repos, &plans, app.last_infrequent_check_unix);
-                    // If skip set is empty, it means we just checked everything
-                    // (either the 4h window expired or this is a full check).
-                    if skip_now.is_empty() || app.last_infrequent_check_unix == 0 {
+                    let was_full_check = wuddle_engine::github_token().is_some() ||
+                        (now - app.last_infrequent_check_unix) >= INFREQUENT_CHECK_INTERVAL_SECS;
+
+                    if was_full_check || app.last_infrequent_check_unix == 0 {
                         app.last_infrequent_check_unix = now;
                     }
 
@@ -840,7 +841,7 @@ pub fn refresh_repos_task_inner(app: &App, fix_casing: bool) -> Task<Message> {
     Task::perform(service::list_repos(db, wow, fix_casing), Message::ReposLoaded)
 }
 
-pub fn check_updates_task(app: &App) -> Task<Message> {
+pub fn check_updates_task(app: &mut App) -> Task<Message> {
     let db = app.db_path.clone();
     let wow = if app.wow_dir.is_empty() {
         None
@@ -848,8 +849,14 @@ pub fn check_updates_task(app: &App) -> Task<Message> {
         Some(app.wow_dir.clone())
     };
     let skip = if wuddle_engine::github_token().is_none() {
-        infrequent_skip_ids(&app.repos, &app.plans, app.last_infrequent_check_unix)
+        let s = infrequent_skip_ids(&app.repos, &app.plans, app.last_infrequent_check_unix);
+        if !s.is_empty() {
+            // Only log skipping in background or if manually triggered without token
+            app.log(LogLevel::Info, &format!("Checking active mods and addons ({} infrequent repos skipped to save API quota)...", s.len()));
+        }
+        s
     } else {
+        app.log(LogLevel::Info, "Checking all repositories (authenticated)...");
         HashSet::new()
     };
 

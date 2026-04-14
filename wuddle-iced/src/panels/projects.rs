@@ -782,7 +782,8 @@ fn name_cell_with_expand<'a>(
     };
 
     // Infrequent badge: shown next to title for repos checked less often
-    let title_row: Element<Message> = if is_infrequent {
+    // Only shown for anonymous users since authenticated users have no throttle.
+    let title_row: Element<Message> = if is_infrequent && wuddle_engine::github_token().is_none() {
         let c_inf = c;
         let badge = container(text("\u{23F3}").size(10).color(c_inf.muted))
             .padding([0, 4]);

@@ -301,25 +301,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::AutoCheckTick => {
             if app.opt_auto_check && !app.checking_updates {
                 app.checking_updates = true;
-                let skip = if wuddle_engine::github_token().is_some() {
-                    std::collections::HashSet::new()
-                } else {
-                    crate::update::repos::infrequent_skip_ids(&app.repos, &app.plans, app.last_infrequent_check_unix)
-                };
-                let skipped = skip.len();
-                if skipped > 0 {
-                    app.log(LogLevel::Info, &format!(
-                        "Auto-checking for updates ({} infrequent repos skipped)...", skipped
-                    ));
-                } else {
-                    app.log(LogLevel::Info, "Auto-checking for updates...");
-                }
-                let db = app.db_path.clone();
-                let wow = if app.wow_dir.is_empty() { None } else { Some(app.wow_dir.clone()) };
-                return Some(Task::perform(
-                    crate::service::check_updates_skip(db, wow, wuddle_engine::CheckMode::Force, skip),
-                    Message::CheckUpdatesResult,
-                ));
+                return Some(crate::update::repos::check_updates_task(app));
             }
             Some(Task::none())
         }

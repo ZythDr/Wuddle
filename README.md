@@ -29,14 +29,18 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New In v3.0.5
-- **Anti-Virus safety warnings** — Restored and generalized the warning dialog for mods known to trigger security heuristics (SuperWoW, VanillaFixes, UnitXP_SP3). 
-- **Optimized Dialog Layout** — Increased warning dialog width to 650px for better readability and refined installation logic to prevent uninformed mod additions.
-
+### What's New In v3.0.6
+- **Token-Aware Update Checking** — Authenticated users now always perform full repository checks, while anonymous users benefit from optimized selective checks to stay within API limits.
+- **Visual De-cluttering** — Removed "Infrequent Mod" indicators for authenticated users.
+- **Reliability Fixes** — Corrected check timestamp logic to ensure fresh update results across both manual and auto-check modes.
 
 
 <details>
 <summary><strong>v3.x Changelog</strong></summary>
+
+### v3.0.5
+- **Anti-Virus safety warnings** — Restored and generalized the warning dialog for mods known to trigger security heuristics (SuperWoW, VanillaFixes, UnitXP_SP3). 
+- **Optimized Dialog Layout** — Increased warning dialog width to 650px for better readability and refined installation logic to prevent uninformed mod additions.
 
 ### v3.0.4
 

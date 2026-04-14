@@ -2,6 +2,17 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.0.6
+
+### Update Reliability & Quota Management
+- **Token-Aware Update Checking** — Authenticated users with a GitHub token now always perform a full repository check, bypassing all throttles and skips. 
+- **Selective Manual Checks** — For anonymous users, the "Check for updates" button now strictly skips infrequently updated mods (> 3 days stable) to preserve the 60 req/hr API quota.
+- **Improved Adaptive Skipping** — All background and manual checks for unauthenticated users now focus on addons and recently updated mods first.
+- **Check Persistence Fix** — Resolved a bug where the 4-hour "infrequent check" window could fail to reset, leading to either redundant checks or permanently stale results.
+
+### UI/UX
+- **Visual De-cluttering** — Hidden the "Infrequently Updated" hourglass icon and tooltip for authenticated users, reflecting that the 4-hour cooldown no longer applies to them.
+
 ## v3.0.5
 
 ### Security & Safety
