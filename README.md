@@ -28,18 +28,21 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **GitHub auth token (optional):** helps avoid anonymous API limits
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New In v3.0.2
+### What's New In v3.0.4
+- **Turtle WoW background artwork** — Restored the Turtle WoW artwork background on the Home tab for when the "I like turtles" preset is enabled.
+- **API Usage background sync** — Integrated a 60-second background subscription to monitor GitHub API rate limits, keeping rate-limit tooltips accurate without consuming user quota.  
+
+
+<details>
+<summary><strong>v3.0.x Changelog</strong></summary>
+
+
+### v3.0.2
 
 - **Live DLL Documentation** — Wuddle now pulls "live" documentation for individual WeirdUtils modules directly from the project's README on Codeberg. Usage instructions and commands will now always be up-to-date.
 - **Improved Codebase Architecture** — Complete refactor into a professional, modular structure for better maintenance and transparency.
 - **Fixed Scroll Stability** — Resolved a persistent issue where clicking inline code blocks in descriptions would trigger unwanted list scrolling.
 - **Decoupled System Feedback** — Radio connection states and other background tasks are now decoupled from the main UI thread for a smoother experience.
-
-<details>
-<summary><strong>v3.0.x Changelog</strong></summary>
-
-### v3.0.4
-- Restored the Turtle WoW artwork background on the Home tab for when the "I like turtles" preset is enabled.
 
 ### v3.0
 
