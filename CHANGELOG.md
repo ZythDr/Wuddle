@@ -2,6 +2,20 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.0.7
+
+### API Transparency & Log Filtering
+- **Dedicated API Log Category** — Introduced a new `[API]` log level with a dedicated filter button in the Log Panel.
+- **Cyan Highlighting** — API-related events are now distinctly colored in Cyan for better scannability.
+- **Detailed Quota Tracking** — Update summaries now show precisely how many GitHub API points were spent vs. cached, alongside your remaining hourly budget and reset timer.
+- **Transparency** — Self-update and version checks are now explicitly logged under the `[API]` category to clarify background budget consumption.
+
+### Update Reliability & UI Polish
+- **Immediate UI Refresh** — Successfully updated repositories are now instantly cleared from the Home tab and update indicators without requiring a re-scan.
+- **Restored Verbose Logging** — Returned to detailed per-repository logging (e.g., `Updating Owner/Repo...`) for both single and bulk updates.
+- **User Experience** — Hidden "Infrequently Updated" (4h interval) warnings for authenticated users with a GitHub token.
+- **Cleaner Errors** — Integrated `simplify_git_error` into all update flows for more human-readable logs when something goes wrong.
+
 ## v3.0.6
 
 ### Update Reliability & Quota Management

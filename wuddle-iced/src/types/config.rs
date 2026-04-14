@@ -27,12 +27,14 @@ pub enum LogFilter {
     #[default]
     All,
     Info,
+    Api,
     Errors,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
     Info,
+    Api,
     Error,
 }
 
@@ -55,4 +57,13 @@ pub enum InstanceField {
     WineArgs(String),
     CustomCommand(String),
     CustomArgs(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CheckStats {
+    pub updates_found: usize,
+    pub api_hits: usize,
+    pub api_cached: usize,
+    pub git_syncs: usize,
+    pub other_hits: usize,
 }

@@ -13,25 +13,33 @@ use crate::{App, LogFilter, LogLevel, Message};
 
 pub struct LogHighlighter {
     error_color: iced::Color,
+    api_color: iced::Color,
     current_line: usize,
 }
 
 impl iced::advanced::text::Highlighter for LogHighlighter {
-    type Settings = iced::Color;
+    type Settings = (iced::Color, iced::Color); // (error, api)
     type Highlight = Option<iced::Color>;
     type Iterator<'a> = std::iter::Once<(std::ops::Range<usize>, Option<iced::Color>)>;
 
-    fn new(settings: &iced::Color) -> Self {
-        Self { error_color: *settings, current_line: 0 }
+    fn new(settings: &Self::Settings) -> Self {
+        Self { error_color: settings.0, api_color: settings.1, current_line: 0 }
     }
-    fn update(&mut self, new_settings: &iced::Color) {
-        self.error_color = *new_settings;
+    fn update(&mut self, new_settings: &Self::Settings) {
+        self.error_color = new_settings.0;
+        self.api_color = new_settings.1;
     }
     fn change_line(&mut self, line: usize) {
         self.current_line = line;
     }
     fn highlight_line(&mut self, line: &str) -> Self::Iterator<'_> {
-        let color = if line.contains("[ERROR]") { Some(self.error_color) } else { None };
+        let color = if line.contains("[ERROR]") {
+            Some(self.error_color)
+        } else if line.contains("[API]") {
+            Some(self.api_color)
+        } else {
+            None
+        };
         std::iter::once((0..line.len(), color))
     }
     fn current_line(&self) -> usize {
@@ -115,6 +123,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let toolbar = row![
         filter_btn("All", LogFilter::All, app.log_filter, &c),
         filter_btn("Info", LogFilter::Info, app.log_filter, &c),
+        filter_btn("API", LogFilter::Api, app.log_filter, &c),
         filter_btn("Errors", LogFilter::Errors, app.log_filter, &c),
         Space::new().width(Length::Fill),
         checkbox(app.log_wrap)
@@ -189,7 +198,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         .height(Length::Fill)
         .padding(12)
         .wrapping(if app.log_wrap { Wrapping::Word } else { Wrapping::None })
-        .highlight_with::<LogHighlighter>(c.bad, log_to_format)
+        .highlight_with::<LogHighlighter>((c.bad, iced::Color::from_rgb8(0, 191, 255)), log_to_format)
         .style(move |theme, status| theme::log_editor_style(&c)(theme, status));
 
     let mut col = column![header, toolbar];
@@ -209,6 +218,7 @@ pub fn build_log_text(app: &App) -> String {
         .map(|line| {
             let prefix = match line.level {
                 LogLevel::Info => "[INFO]",
+                LogLevel::Api => "[API]",
                 LogLevel::Error => "[ERROR]",
             };
             format!("[{}] {} {}", line.timestamp, prefix, line.text)

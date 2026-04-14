@@ -6,7 +6,7 @@ use crate::settings::UpdateChannel;
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
         Message::CheckSelfUpdate => {
-            app.log(LogLevel::Info, "Checking for Wuddle updates...");
+            app.log(LogLevel::Api, "Checking for Wuddle updates...");
             return Some(Task::perform(
                 service::check_self_update_full(app.update_channel == UpdateChannel::Beta),
                 Message::CheckSelfUpdateResult
@@ -20,7 +20,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.self_update_assets_pending = status.assets_pending;
                     app.latest_version = status.latest_version;
                     app.update_message = Some(status.message.clone());
-                    app.log(LogLevel::Info, &format!("Version check: {}", status.message));
+                    app.log(LogLevel::Api, &format!("Version check: {}", status.message));
                     if status.update_available {
                         let ver = app.latest_version.as_deref().unwrap_or("new version");
                         app.show_toast_with_action(

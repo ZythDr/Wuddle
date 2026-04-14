@@ -78,6 +78,7 @@ pub enum Message {
     // Operations (Phase 3)
     CheckUpdates,
     CheckUpdatesResult(Result<Vec<PlanRow>, String>),
+    UpdateCheckRateLimitResult(CheckStats, Option<service::GitHubRateInfo>),
     GithubRateInfoResult(Option<service::GitHubRateInfo>),
     AddRepoSubmit,
     AddRepoResult(Result<i64, String>),

@@ -1,5 +1,5 @@
 use iced::Task;
-use crate::{App, Message, LogLevel, Dialog, ToastKind};
+use crate::{App, Message, LogLevel, Dialog, ToastKind, CheckStats};
 use crate::settings::UpdateChannel;
 use crate::service;
 use crate::components::presets::{WEIRD_UTILS_DESCRIPTIONS, WEIRD_UTILS_DLLS, is_av_false_positive};
@@ -15,6 +15,8 @@ pub fn now_unix() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
+
+
 
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
@@ -44,7 +46,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     if app.opt_auto_check && !app.repos.is_empty() && !app.checking_updates && !app.autocheck_done {
                         app.autocheck_done = true;
                         app.checking_updates = true;
-                        app.log(LogLevel::Info, "Auto-checking for updates on launch...");
+                        app.log(LogLevel::Api, "Auto-checking for updates on launch...");
                         tasks.push(check_updates_task(app));
                     }
                     // Always fire self-update check on launch
@@ -94,6 +96,49 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.checking_updates = false;
             match result {
                 Ok(mut plans) => {
+                    let update_count = plans.iter().filter(|p| p.has_update && !app.ignored_update_ids.contains(&p.repo_id)).count();
+                    
+                    let mut stats = CheckStats {
+                        updates_found: update_count,
+                        ..Default::default()
+                    };
+
+                    // Compute stats ONLY for the repos that were just checked (returned in plans)
+                    for p in &plans {
+                        if p.mode == "addon_git" {
+                            stats.git_syncs += 1;
+                        } else if p.host.contains("github.com") {
+                            if p.not_modified {
+                                stats.api_cached += 1;
+                            } else {
+                                stats.api_hits += 1;
+                            }
+                        } else {
+                            stats.other_hits += 1;
+                        }
+                    }
+
+                    for p in &plans {
+                        if let Some(err) = &p.error {
+                            // Suppress -16 (GIT_EAUTH): deleted/private repos the user
+                            // has acknowledged; they generate noise on every check.
+                            if !is_silenced_git_error(err) {
+                                app.log(LogLevel::Error, &format!("{}/{} - {}", p.owner, p.name, simplify_git_error(err)));
+                            }
+                        }
+                    }
+
+                    if is_explicit_check {
+                        if update_count > 0 {
+                            app.show_toast(
+                                format!("{} update{} available.", update_count, if update_count == 1 { "" } else { "s" }),
+                                ToastKind::Info,
+                            );
+                        } else {
+                            app.show_toast("No updates available.", ToastKind::Info);
+                        }
+                    }
+
                     // Merge in cached plans for repos that were skipped (infrequent).
                     let returned_ids: HashSet<i64> = plans.iter().map(|p| p.repo_id).collect();
                     for old_plan in &app.plans {
@@ -113,27 +158,6 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         app.last_infrequent_check_unix = now;
                     }
 
-                    let update_count = plans.iter().filter(|p| p.has_update && !app.ignored_update_ids.contains(&p.repo_id)).count();
-                    for p in &plans {
-                        if let Some(err) = &p.error {
-                            // Suppress -16 (GIT_EAUTH): deleted/private repos the user
-                            // has acknowledged; they generate noise on every check.
-                            if !is_silenced_git_error(err) {
-                                app.log(LogLevel::Error, &format!("{}/{} - {}", p.owner, p.name, simplify_git_error(err)));
-                            }
-                        }
-                    }
-                    app.log(LogLevel::Info, &format!("Update check complete. {} updates available.", update_count));
-                    if is_explicit_check {
-                        if update_count > 0 {
-                            app.show_toast(
-                                format!("{} update{} available.", update_count, if update_count == 1 { "" } else { "s" }),
-                                ToastKind::Info,
-                            );
-                        } else {
-                            app.show_toast("No updates available.", ToastKind::Info);
-                        }
-                    }
                     app.plans = plans;
                     recompute_infrequent_ids(app);
                     app.last_checked = Some(crate::chrono_now_fmt(app.opt_clock12));
@@ -141,6 +165,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         app.active_profile_id.clone(),
                         (app.plans.clone(), app.last_checked.clone()),
                     );
+
                     if is_explicit_check && app.opt_desktop_notify && update_count > 0 {
                         let _ = notify_rust::Notification::new()
                             .appname("Wuddle")
@@ -149,6 +174,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             .icon(crate::notification_icon_path())
                             .show();
                     }
+
                     // Auto-fetch versions for all mod repos that haven't been loaded yet
                     let mut version_tasks: Vec<Task<Message>> = Vec::new();
                     for repo in &app.repos {
@@ -166,11 +192,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             ));
                         }
                     }
-                    // Fetch GitHub rate limit info for the API status tooltip
+                    
+                    // Final summary rate fetch
                     version_tasks.push(Task::perform(
                         service::fetch_github_rate_limit(),
-                        Message::GithubRateInfoResult,
+                        move |info| Message::UpdateCheckRateLimitResult(stats.clone(), info)
                     ));
+
                     if !version_tasks.is_empty() {
                         return Some(Task::batch(version_tasks));
                     }
@@ -383,6 +411,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         }
                     }
                 }
+                if let Some(repo) = app.repos.iter().find(|r| r.id == id) {
+                    app.log(LogLevel::Info, &format!("Updating {}/{}...", repo.owner, repo.name));
+                }
                 app.updating_repo_ids.insert(id);
                 let db = app.db_path.clone();
                 let wow = app.wow_dir.clone();
@@ -401,8 +432,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     let name = format!("{}/{}", plan.owner, plan.name);
                     app.log(LogLevel::Info, &format!("Updated {}.", name));
                     app.show_toast(format!("Updated {}.", name), ToastKind::Info);
+                    // Remove from plans so it disappears from 'Updates' list in UI immediately
+                    app.plans.retain(|p| p.repo_id != plan.repo_id);
                 }
-                Ok(None) => app.log(LogLevel::Info, "Repo already up to date."),
+                Ok(None) => app.log(LogLevel::Info, "Already up to date."),
                 Err(e) => {
                     app.log(LogLevel::Error, &format!("Update failed: {}", e));
                     app.show_toast(format!("Update failed: {}", e), ToastKind::Error);
@@ -456,11 +489,18 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 let wow = app.wow_dir.clone();
                 let opts = app.install_options();
                 let mut targets = Vec::new();
+                let mut names = Vec::new();
                 for plan in &app.plans {
                     if plan.has_update && !app.ignored_update_ids.contains(&plan.repo_id) {
                         targets.push(plan.repo_id);
-                        app.updating_repo_ids.insert(plan.repo_id);
+                        names.push(format!("{}/{}", plan.owner, plan.name));
                     }
+                }
+                for name in names {
+                    app.log(LogLevel::Info, &format!("Updating {}...", name));
+                }
+                for id in &targets {
+                    app.updating_repo_ids.insert(*id);
                 }
                 if targets.is_empty() {
                     app.log(LogLevel::Info, "Nothing to update.");
@@ -481,16 +521,20 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     let mut errors = 0;
                     for r in results {
                         app.updating_repo_ids.remove(&r.repo_id);
-                        if r.error.is_none() {
-                            applied += 1;
-                        } else {
+                        let name = format!("{}/{}", r.owner, r.name);
+                        if let Some(e) = r.error {
                             errors += 1;
+                            app.log(LogLevel::Error, &format!("{} update failed: {}", name, simplify_git_error(&e)));
+                        } else {
+                            applied += 1;
+                            app.log(LogLevel::Info, &format!("Updated {}.", name));
+                            // Remove from plans so it disappears from UI immediately
+                            app.plans.retain(|p| p.repo_id != r.repo_id);
                         }
                     }
                     if errors > 0 {
-                        app.log(LogLevel::Error, &format!("Updated {} repos, {} failed.", applied, errors));
                         app.show_toast(format!("Update all partial: {} OK, {} failed.", applied, errors), ToastKind::Warn);
-                    } else {
+                    } else if applied > 0 {
                         app.log(LogLevel::Info, &format!("Done. Updated {} repo(s).", applied));
                         app.show_toast(format!("Updated {} repo(s).", applied), ToastKind::Info);
                     }
@@ -573,6 +617,39 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
+        Message::UpdateCheckRateLimitResult(stats, info) => {
+            app.github_rate_info = info;
+
+            let updates = if stats.updates_found == 1 { "update" } else { "updates" };
+            let mut parts = vec![
+                format!("{} {}", stats.updates_found, updates)
+            ];
+
+            if stats.api_hits > 0 {
+                parts.push(format!("spent {} API point{}", stats.api_hits, if stats.api_hits == 1 { "" } else { "s" }));
+            }
+            if stats.api_cached > 0 {
+                parts.push(format!("{} cached (free)", stats.api_cached));
+            }
+            if stats.git_syncs > 0 {
+                parts.push(format!("{} synced (git)", stats.git_syncs));
+            }
+            if stats.other_hits > 0 {
+                parts.push(format!("{} other check{}", stats.other_hits, if stats.other_hits == 1 { "" } else { "s" }));
+            }
+
+            let summary = parts.join(", ");
+            let rate_suffix = if let Some(r) = &app.github_rate_info {
+                let mins = (r.reset_epoch - now_unix()) / 60;
+                format!(". ({}/{} remaining, resets in {} min)", r.remaining, r.limit, mins)
+            } else {
+                "".to_string()
+            };
+
+            app.log(LogLevel::Api, &format!("Check complete: {}{}", summary, rate_suffix));
+            None
+        }
+
         Message::GithubRateInfoResult(info) => {
             app.github_rate_info = info;
             Some(Task::none())
@@ -852,11 +929,11 @@ pub fn check_updates_task(app: &mut App) -> Task<Message> {
         let s = infrequent_skip_ids(&app.repos, &app.plans, app.last_infrequent_check_unix);
         if !s.is_empty() {
             // Only log skipping in background or if manually triggered without token
-            app.log(LogLevel::Info, &format!("Checking active mods and addons ({} infrequent repos skipped to save API quota)...", s.len()));
+            app.log(LogLevel::Api, &format!("Checking active mods and addons ({} infrequent repos skipped to save API quota)...", s.len()));
         }
         s
     } else {
-        app.log(LogLevel::Info, "Checking all repositories (authenticated)...");
+        app.log(LogLevel::Api, "Checking all repositories (authenticated)...");
         HashSet::new()
     };
 

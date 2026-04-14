@@ -382,6 +382,7 @@ impl App {
             .filter(|line| match self.log_filter {
                 LogFilter::All => true,
                 LogFilter::Info => matches!(line.level, LogLevel::Info),
+                LogFilter::Api => matches!(line.level, LogLevel::Api),
                 LogFilter::Errors => {
                     if !matches!(line.level, LogLevel::Error) {
                         return false;
@@ -394,6 +395,7 @@ impl App {
             .map(|line| {
                 let prefix = match line.level {
                     LogLevel::Info => "[INFO]",
+                    LogLevel::Api => "[API]",
                     LogLevel::Error => "[ERROR]",
                 };
                 format!("[{}] {} {}", line.timestamp, prefix, line.text)
