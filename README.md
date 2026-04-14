@@ -19,14 +19,14 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 
 ### Core Features
 
-- **Multi-forge support:** GitHub, Codeberg, Gitea, GitLab
+- **Addon management:** install, update, reinstall/repair, remove
 - **DLL mod management:** install, update, reinstall/repair, remove
-- **Addon git-sync mode:** track addon repos with clone/pull and branch selection
-- **Quick Add catalog:** common Vanilla client mods with curated metadata
-- **Companion addon links/info:** surfaced directly in quick-add entries
-- **`dlls.txt` management:** enable/disable + sync behavior for DLL mods
+- **Multi-forge support:** GitHub, Codeberg, Gitea, GitLab
+- **Quick Add catalog:** common Vanilla client mods with descriptions
+- **Companion addon links/info:** shown directly in quick-add entries
+- **`dlls.txt` management:** enable/disable mods in Wuddle without having to uninstall them
 - **Multi-instance profiles:** each profile has its own tracked mods/addons + launch config
-- **GitHub auth token (optional):** helps avoid anonymous API limits
+- **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
 ### What's New In v3.0.4
@@ -35,7 +35,7 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 
 
 <details>
-<summary><strong>v3.0.x Changelog</strong></summary>
+<summary><strong>v3.x Changelog</strong></summary>
 
 
 ### v3.0.2
