@@ -15,6 +15,8 @@ pub struct InstallEntry {
     pub kind: String,
     /// SHA-256 hex digest recorded at install time (None for pre-migration rows).
     pub sha256: Option<String>,
+    /// Release version (tag_name) recorded at install time.
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,7 +48,7 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        const SCHEMA_VERSION: i32 = 7;
+        const SCHEMA_VERSION: i32 = 8;
 
         let current: i32 = self
             .conn
@@ -159,6 +161,16 @@ impl Db {
             self.conn.execute_batch("PRAGMA user_version = 7")?;
         }
 
+        // v7 → v8: add version column to installs for per-file version tracking (WeirdUtils).
+        if current < 8 {
+            let cols = self.existing_install_columns()?;
+            if !cols.contains("version") {
+                self.conn
+                    .execute_batch("ALTER TABLE installs ADD COLUMN version TEXT")?;
+            }
+            self.conn.execute_batch("PRAGMA user_version = 8")?;
+        }
+
         Ok(())
     }
 
@@ -259,6 +271,14 @@ impl Db {
 
     fn existing_repo_columns(&self) -> Result<HashSet<String>> {
         let mut stmt = self.conn.prepare("PRAGMA table_info(repos)")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(names.into_iter().collect())
+    }
+
+    fn existing_install_columns(&self) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(installs)")?;
         let names = stmt
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -565,13 +585,19 @@ impl Db {
         Ok(())
     }
 
-    pub fn add_install(&self, repo_id: i64, path: &str, kind: &str) -> Result<()> {
+    pub fn add_install(
+        &self,
+        repo_id: i64,
+        path: &str,
+        kind: &str,
+        version: Option<&str>,
+    ) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT OR REPLACE INTO installs(repo_id, path, kind)
-            VALUES (?1, ?2, ?3)
+            INSERT OR REPLACE INTO installs(repo_id, path, kind, version)
+            VALUES (?1, ?2, ?3, ?4)
             "#,
-            params![repo_id, path, kind],
+            params![repo_id, path, kind, version],
         )?;
         Ok(())
     }
@@ -579,7 +605,7 @@ impl Db {
     pub fn list_installs(&self, repo_id: i64) -> Result<Vec<InstallEntry>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT path, kind, sha256
+            SELECT path, kind, sha256, version
             FROM installs
             WHERE repo_id=?1
             ORDER BY kind, path
@@ -591,6 +617,7 @@ impl Db {
                 path: row.get(0)?,
                 kind: row.get(1)?,
                 sha256: row.get(2)?,
+                version: row.get(3)?,
             })
         })?;
 
@@ -607,13 +634,14 @@ impl Db {
         path: &str,
         kind: &str,
         sha256: Option<&str>,
+        version: Option<&str>,
     ) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT OR REPLACE INTO installs(repo_id, path, kind, sha256)
-            VALUES (?1, ?2, ?3, ?4)
+            INSERT OR REPLACE INTO installs(repo_id, path, kind, sha256, version)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             "#,
-            params![repo_id, path, kind, sha256],
+            params![repo_id, path, kind, sha256, version],
         )?;
         Ok(())
     }
@@ -633,6 +661,7 @@ impl Db {
         )?;
         Ok(())
     }
+
 
     /// Update an install entry's path in-place (used for staging-area migration).
     pub fn update_install_path(&self, repo_id: i64, old_path: &str, new_path: &str) -> Result<()> {

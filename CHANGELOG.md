@@ -2,6 +2,20 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.1.0
+
+### New Features
+- **Browse Option** — Added a "Browse..." option to the triple-dot menu for tracked addons and mods, allowing users to quickly open the relevant folder or file on their system.
+
+### Improvements
+- **Case-Insensitive Path Tracking** — Re-implemented addon path discovery and pruning to be case-insensitive. This prevents "ghost" entries and redundant re-imports on Linux when addon folder casing changes.
+- **Improved Invalid URL Logging** — Update check failures now include the specific Addon ID in the logs (e.g., `Fetch versions failed for id=404: invalid URL`), making it easier to identify problematic repositories.
+- **Strict Manual Addon Validation** — The manual scan now strictly requires a `.toc` file to be present in a directory before considering it a valid addon, preventing `.git`, `.repo`, and other non-addon folders from being imported.
+
+### Bug Fixes
+- **Ghost Addon Entries** — Resolved an issue where renaming an addon folder on disk would cause Wuddle to lose track of the path and display a generic "addon" placeholder in the removal dialog.
+- **Path Resolution Fallback** — Implemented a robust fallback mechanism for resolving addon paths that ensures the "Browse..." and "Remove" features work even if the database entry becomes slightly out of sync with the disk.
+
 ## v3.0.7
 
 ### API Transparency & Log Filtering

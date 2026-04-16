@@ -25,9 +25,9 @@ pub struct RepoRow {
     pub enabled: bool,
     pub last_version: Option<String>,
     pub git_branch: Option<String>,
-    /// DLL files managed by this repo: (filename, is_enabled_in_dlls_txt).
+    /// DLL files managed by this repo: (filename, is_enabled_in_dlls_txt, installed_version).
     /// Empty for non-DLL repos. More than one entry means this is a multi-DLL mod.
-    pub installed_dlls: Vec<(String, bool)>,
+    pub installed_dlls: Vec<(String, bool, Option<String>)>,
     pub merge_installs: bool,
     pub pinned_version: Option<String>,
     pub published_at_unix: Option<i64>,
@@ -109,7 +109,7 @@ impl From<UpdatePlan> for PlanRow {
 // ---------------------------------------------------------------------------
 
 pub fn is_mod(repo: &RepoRow) -> bool {
-    !matches!(repo.mode.as_str(), "addon" | "addon_git")
+    !matches!(repo.mode.as_str(), "addon" | "addon_git" | "manual")
 }
 
 fn open_engine(db_path: Option<&Path>) -> Result<Engine, String> {
@@ -279,7 +279,7 @@ pub async fn list_repos(
             // Prune repos whose files no longer exist on disk
             let _ = eng.prune_missing_repos(wow_path);
             // Auto-import newly discovered addon git repos
-            let _ = eng.import_existing_addon_git_repos(wow_path);
+            let _ = eng.import_existing_addons(wow_path);
             // Remove duplicate tracking entries
             let _ = eng.dedup_addon_repos_by_folder(wow_path);
         }
@@ -318,7 +318,7 @@ pub async fn list_repos(
                     let fname = std::path::Path::new(&e.path)
                         .file_name()?.to_str()?.to_string();
                     let is_enabled = enabled_dlls.contains(&fname.to_lowercase());
-                    Some((fname, is_enabled))
+                    Some((fname, is_enabled, e.version))
                 })
                 .collect();
             rows.push(row);
@@ -727,6 +727,53 @@ pub async fn list_repo_versions(
                 name: r.name,
             })
             .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn open_repo_folder(
+    db_path: Option<PathBuf>,
+    repo_id: i64,
+    wow_dir: PathBuf,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        let repo = eng
+            .db()
+            .get_repo(repo_id)
+            .map_err(|e| e.to_string())?;
+
+        let installs = eng.db().list_installs(repo_id).map_err(|e| e.to_string())?;
+
+        // 1. Try first valid install path
+        if let Some(first) = installs.first() {
+            let full_path = wow_dir.join(&first.path);
+            if full_path.exists() {
+                let _ = open::that(full_path);
+                return Ok(());
+            }
+        }
+
+        // 2. Fallback for Manual/AddonGit: construct path from repo name in AddOns
+        if matches!(repo.mode, InstallMode::Manual | InstallMode::AddonGit) {
+            let addons_dir = wow_dir.join("Interface").join("AddOns");
+            let repo_path = addons_dir.join(&repo.name);
+            if repo_path.exists() {
+                let _ = open::that(repo_path);
+                return Ok(());
+            }
+        }
+
+        // 3. Last resort: open AddOns folder
+        let addons_dir = wow_dir.join("Interface").join("AddOns");
+        if addons_dir.exists() {
+            let _ = open::that(addons_dir);
+        } else if wow_dir.exists() {
+            let _ = open::that(wow_dir);
+        }
+
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?

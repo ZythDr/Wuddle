@@ -351,8 +351,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
                 rows.push(mod_row(app, repo, colors));
                 // Inject child DLL rows when expanded
                 if repo.installed_dlls.len() > 1 && app.expanded_repo_ids.contains(&repo.id) {
-                    for (dll_name, dll_enabled) in &repo.installed_dlls {
-                        rows.push(dll_child_row(repo.id, &repo.url, dll_name, *dll_enabled, colors));
+                    for (dll_name, dll_enabled, dll_version) in &repo.installed_dlls {
+                        rows.push(dll_child_row(repo.id, &repo.url, dll_name, *dll_enabled, dll_version.as_deref(), colors));
                     }
                 }
             } else {
@@ -489,6 +489,7 @@ fn dll_child_row<'a>(
     repo_url: &str,
     dll_name: &'a str,
     dll_enabled: bool,
+    dll_version: Option<&'a str>,
     colors: &ThemeColors,
 ) -> Element<'a, Message> {
     let c = *colors;
@@ -501,8 +502,22 @@ fn dll_child_row<'a>(
         COL_ENABLED,
     );
 
+    // Version to show in the "Installed" column
+    let installed_cell = if let Some(ver) = dll_version {
+        col_cell(
+            tip(
+                text(ver).size(12).color(c.muted),
+                &format!("This DLL was last updated in {}", ver),
+                tooltip::Position::Top,
+                colors,
+            ),
+            COL_INSTALLED,
+        )
+    } else {
+        col_cell(text("\u{2014}").size(12).color(c.muted), COL_INSTALLED)
+    };
+
     // Placeholder columns to keep alignment
-    let empty_installed = col_cell(Space::new().width(Length::Fill), COL_INSTALLED);
     let empty_version   = col_cell(Space::new().width(Length::Fill), COL_VERSION);
     let empty_status    = col_cell(Space::new().width(Length::Fill), COL_STATUS);
     let empty_actions   = col_cell(Space::new().width(Length::Fill), COL_ACTIONS);
@@ -549,7 +564,7 @@ fn dll_child_row<'a>(
 
     let row_content = row![
         name_cell,
-        empty_installed,
+        installed_cell,
         empty_version,
         enable_cell,
         empty_status,

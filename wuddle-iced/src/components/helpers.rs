@@ -138,6 +138,7 @@ pub fn inline_context_menu<'a>(
         items.push(ctx_menu_item("\u{2193} Update", Message::UpdateRepo(rid), &c));
     }
     items.push(ctx_menu_item("Reinstall / Repair", Message::ReinstallRepo(rid), &c));
+    items.push(ctx_menu_item("Browse\u{2026}", Message::BrowseRepo(rid), &c));
     if crate::panels::projects::is_dxvk_repo(&repo.name) {
         items.push(ctx_menu_item("\u{2699} Configure DXVK\u{2026}", Message::OpenDxvkConfig, &c));
     }

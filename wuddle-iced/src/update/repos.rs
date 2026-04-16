@@ -353,7 +353,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::FetchVersionsResult((id, Err(e))) => {
-            app.log(LogLevel::Error, &format!("Fetch versions failed for id={}: {}", id, e));
+            let name = app
+                .repos
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| r.name.as_str())
+                .unwrap_or("?");
+            app.log(
+                LogLevel::Error,
+                &format!("Fetch versions failed for '{}': {}", name, e),
+            );
             Some(Task::none())
         }
         Message::SetPinnedVersion(id, version) => {
@@ -384,6 +393,20 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             } else {
                 return Some(Task::done(Message::UpdateRepo(repo_id)));
             }
+        }
+        Message::BrowseRepo(id) => {
+            app.open_menu = None;
+            let db = app.db_path.clone();
+            let wow = app.wow_dir.clone();
+            if wow.is_empty() {
+                app.log(LogLevel::Error, "Set a WoW directory in Options first.");
+            } else {
+                return Some(Task::perform(
+                    service::open_repo_folder(db, id, wow.into()),
+                    |_| Message::CloseMenu,
+                ));
+            }
+            Some(Task::none())
         }
         Message::UpdateRepo(id) => {
             app.open_menu = None;
@@ -991,6 +1014,8 @@ pub fn infrequent_skip_ids(repos: &[service::RepoRow], plans: &[service::PlanRow
         .map(|r| r.id)
         .collect()
 }
+
+
 
 pub fn is_silenced_git_error(raw: &str) -> bool {
     raw.contains("(-16)")

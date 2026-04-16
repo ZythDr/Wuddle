@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use git2::{Repository, Tree, TreeWalkMode, TreeWalkResult};
 use std::{
     collections::HashMap,
     fs, io,
@@ -448,36 +449,33 @@ fn detect_dlls(root: &Path) -> Vec<PathBuf> {
 fn detect_addons(root: &Path) -> Vec<(PathBuf, String)> {
     let mut candidates: Vec<(PathBuf, String)> = Vec::new();
 
-    let ia = root.join("Interface").join("AddOns");
-    if ia.exists() {
-        if let Ok(rd) = fs::read_dir(&ia) {
-            for entry in rd.flatten() {
-                let dir = entry.path();
-                if dir.is_dir() {
-                    if let Some(folder_name) = addon_folder_name_from_toc(&dir, &ia) {
-                        candidates.push((dir, folder_name));
-                    }
-                }
-            }
-        }
-        if !candidates.is_empty() {
-            return candidates;
-        }
+    // 1. Check if the root itself is an addon (contains a .toc matching the dir name or common name)
+    if let Some(folder_name) = addon_folder_name_from_toc(root, root) {
+        candidates.push((root.to_path_buf(), folder_name));
+        return candidates;
     }
 
-    walk_dir(root, &mut |p| {
-        if p.is_file() {
-            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                if ext.eq_ignore_ascii_case("toc") {
-                    if let Some(parent) = p.parent() {
-                        if let Some(folder_name) = addon_folder_name_from_toc(parent, root) {
-                            candidates.push((parent.to_path_buf(), folder_name));
-                        }
-                    }
+    // 2. Check immediate subdirectories of the root (depth 1) only.
+    // GAM mirrors this: if root isn't an addon, look 1 level deep for subfolder addons.
+    if let Ok(rd) = fs::read_dir(root) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                // Ignore hidden folders like .git
+                if p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.starts_with('.'))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+
+                if let Some(folder_name) = addon_folder_name_from_toc(&p, root) {
+                    candidates.push((p, folder_name));
                 }
             }
         }
-    });
+    }
 
     candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     candidates.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
@@ -485,7 +483,137 @@ fn detect_addons(root: &Path) -> Vec<(PathBuf, String)> {
 }
 
 pub fn detect_addons_in_tree(root: &Path) -> Vec<(PathBuf, String)> {
+    if let Ok(list) = detect_addons_in_git_tree(root) {
+        if !list.is_empty() {
+            return list;
+        }
+    }
     detect_addons(root)
+}
+
+pub fn detect_single_addon_folder(dir: &Path) -> Option<String> {
+    addon_folder_name_from_toc(dir, dir)
+}
+
+pub fn detect_addons_in_git_tree(root: &Path) -> Result<Vec<(PathBuf, String)>> {
+    let repo = Repository::open(root).context("open git repo for tree scan")?;
+    let head = repo.head()?.peel_to_tree()?;
+    let mut candidates = Vec::new();
+
+    // 1. Check root
+    if let Some(name) = addon_folder_name_from_git_tree(&repo, &head, "", true) {
+        candidates.push((root.to_path_buf(), name));
+        return Ok(candidates);
+    }
+
+    // 2. Scan depth 1 subfolders
+    head.walk(TreeWalkMode::PreOrder, |root_str, entry| {
+        // root_str is the path relative to tree root (ending in / unless empty)
+        let depth = if root_str.is_empty() { 0 } else { root_str.split('/').count() - 1 };
+
+        if depth == 0 {
+            if entry.kind() == Some(git2::ObjectType::Tree) {
+                let name = entry.name().unwrap_or("");
+                if name.starts_with('.') {
+                    return TreeWalkResult::Skip;
+                }
+                if let Ok(tree) = entry.to_object(&repo).and_then(|obj| obj.peel_to_tree()) {
+                    if let Some(addon_name) = addon_folder_name_from_git_tree(&repo, &tree, name, false) {
+                        candidates.push((root.join(name), addon_name));
+                        // Stop walking THIS branch.
+                        return TreeWalkResult::Skip;
+                    }
+                }
+            }
+        } else if depth >= 1 {
+            // Already inside a subfolder that wasn't an addon at depth 1.
+            // GAM stops here (size > 1).
+            return TreeWalkResult::Skip;
+        }
+
+        TreeWalkResult::Ok
+    })?;
+
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    Ok(candidates)
+}
+
+fn addon_folder_name_from_git_tree(
+    _repo: &Repository,
+    tree: &Tree,
+    dir_name: &str,
+    is_root: bool,
+) -> Option<String> {
+    let mut stems = Vec::new();
+    for entry in tree.iter() {
+        if entry.kind() == Some(git2::ObjectType::Blob) {
+            let name = entry.name().unwrap_or("");
+            if name.to_ascii_lowercase().ends_with(".toc") {
+                let stem = Path::new(name).file_stem().and_then(|s| s.to_str());
+                if let Some(s) = stem {
+                    stems.push(s.to_string());
+                }
+            }
+        }
+    }
+
+    if stems.is_empty() {
+        return None;
+    }
+
+    resolve_addon_name_from_stems(stems, dir_name, is_root)
+}
+
+fn resolve_addon_name_from_stems(
+    stems: Vec<String>,
+    dir_name: &str,
+    is_root: bool,
+) -> Option<String> {
+    let normalized: Vec<String> = stems.iter().map(|s| normalize_toc_stem(s)).collect();
+
+    // GAM strict rule: for subfolders, matches folder name (or normalized folder name).
+    if !is_root && !dir_name.is_empty() {
+        // Prefer the exact TOC stem if it matches the folder name case-insensitively.
+        // This ensures "autolfm" folder becomes "AutoLFM" if AutoLFM.toc is inside.
+        if let Some(matching_stem) = stems.iter().find(|name| name.eq_ignore_ascii_case(dir_name)) {
+            return Some(matching_stem.clone());
+        }
+        // Also check normalized stems (e.g. Atlas-classic matches Atlas)
+        if let Some(idx) = normalized.iter().position(|name| name.eq_ignore_ascii_case(dir_name)) {
+            return Some(stems[idx].clone());
+        }
+    }
+
+    let first_norm = normalized[0].to_ascii_lowercase();
+    let all_same_norm = normalized
+        .iter()
+        .all(|name| name.to_ascii_lowercase() == first_norm);
+
+    if all_same_norm {
+        return normalized.into_iter().next();
+    }
+
+    if is_root {
+        return None;
+    }
+
+    // Fallback for subfolders if no direct match but multiple TOCs agree on a name.
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for name in normalized {
+        *counts.entry(name.to_ascii_lowercase()).or_insert(0) += 1;
+    }
+    let mut best: Option<(String, usize)> = None;
+    for (key, count) in counts {
+        match &best {
+            None => best = Some((key, count)),
+            Some((prev, prev_count)) => {
+                if count > *prev_count || (count == *prev_count && key < *prev) {
+                    best = Some((key, count));
+                }
+            }
+        }
+    }
+    best.map(|(name, _)| name)
 }
 
 fn addon_folder_name_from_toc(dir: &Path, scan_root: &Path) -> Option<String> {
@@ -513,59 +641,12 @@ fn addon_folder_name_from_toc(dir: &Path, scan_root: &Path) -> Option<String> {
             }
         }
     }
+
     if stems.is_empty() {
         return None;
     }
 
-    let normalized: Vec<String> = stems.iter().map(|s| normalize_toc_stem(s)).collect();
-
-    // Credit: inspired by GitAddonsManager's subfolder scan behavior.
-    // For non-root addon directories, if any TOC matches this folder directly
-    // (or after suffix normalization), keep the folder name as-is.
-    if !is_root && !dir_name.is_empty() {
-        if stems.iter().any(|name| name.eq_ignore_ascii_case(dir_name))
-            || normalized
-                .iter()
-                .any(|name| name.eq_ignore_ascii_case(dir_name))
-        {
-            return Some(dir_name.to_string());
-        }
-    }
-
-    let first_norm = normalized[0].to_ascii_lowercase();
-    let all_same_norm = normalized
-        .iter()
-        .all(|name| name.to_ascii_lowercase() == first_norm);
-
-    // If all TOCs normalize to the same base, use that base (GAM-style).
-    if all_same_norm {
-        return normalized.into_iter().next();
-    }
-
-    // Root disagreement means this is likely a repo root with multiple modules;
-    // skip root here and let nested addon folders be detected.
-    if is_root {
-        return None;
-    }
-
-    // Non-root fallback: choose the most common normalized name.
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for name in normalized {
-        *counts.entry(name.to_ascii_lowercase()).or_insert(0) += 1;
-    }
-    let mut best: Option<(String, usize)> = None;
-    for (key, count) in counts {
-        match &best {
-            None => best = Some((key, count)),
-            Some((prev, prev_count)) => {
-                if count > *prev_count || (count == *prev_count && key < *prev) {
-                    best = Some((key, count));
-                }
-            }
-        }
-    }
-
-    best.map(|(name, _)| name)
+    resolve_addon_name_from_stems(stems, dir_name, is_root)
 }
 
 fn normalize_toc_stem(stem: &str) -> String {
@@ -601,6 +682,16 @@ fn normalize_toc_stem(stem: &str) -> String {
         "_classicera",
         "-retail",
         "_retail",
+        "-beta",
+        "_beta",
+        "-ptr",
+        "_ptr",
+        "-test",
+        "_test",
+        "-development",
+        "_development",
+        "-dev",
+        "_dev",
         "-cata",
         "_cata",
         "-sod",
@@ -658,20 +749,56 @@ fn walk_dir(root: &Path, cb: &mut dyn FnMut(&Path)) {
 /// `src` for a sub-addon folder inside a multi-addon git repository.
 ///
 /// This matches GAM's `unpackSubfolders()` behaviour: a multi-addon repo lives
-/// at `Interface/AddOns/{repo_name}/` and each sub-addon appears as a sibling
-/// symlink `Interface/AddOns/{SubAddon}` → `{repo_name}/{SubAddon}/`.
+/// at `Interface/AddOns/{repo_name}.repo/` and each sub-addon appears as a sibling
+/// symlink `Interface/AddOns/{SubAddon}` → `{repo_name}.repo/{SubAddon}/`.
 ///
-/// Falls back to copying the directory if symlink creation fails (e.g. Windows
-/// without Developer Mode or SeCreateSymbolicLinkPrivilege).
-pub fn link_addon_subfolder(src: &Path, dst: &Path) -> Result<InstallRecord> {
+/// It uses a "link then move" approach: it tries to create a relative symlink,
+/// and if that fails, it renames (moves) the folder out of the repository.
+pub fn link_addon_subfolder(repo_dir: &Path, sub_dir_name: &str, dst: &Path) -> Result<InstallRecord> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).with_context(|| format!("mkdir {:?}", parent))?;
     }
     remove_any_target(dst)?;
 
-    if symlink_path(src, dst).is_err() {
-        // Symlink failed — fall back to a full copy so the addon still works.
-        copy_dir_recursive(src, dst)?;
+    let src = repo_dir.join(sub_dir_name);
+    let repo_dir_name = repo_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let rel_src = format!("./{}/{}", repo_dir_name, sub_dir_name);
+
+    let mut linked = false;
+
+    // Try relative symlink first (GAM-style).
+    #[cfg(unix)]
+    {
+        if std::os::unix::fs::symlink(&rel_src, dst).is_ok() {
+            linked = true;
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // Try junction first on Windows as it's the safest non-privileged link type.
+        if junction::create(&src, dst).is_ok() {
+            linked = true;
+        }
+    }
+
+    if !linked {
+        // Fallback to rename (move) exactly as GAM does.
+        // If the source folder DOES NOT exist, check if it was already moved to the destination.
+        if !src.exists() {
+            if dst.exists() && dst.is_dir() {
+                // Already moved in a previous session or by GAM.
+                return Ok(InstallRecord {
+                    path: dst.to_path_buf(),
+                    kind: "addon",
+                });
+            }
+            anyhow::bail!("Source subfolder {:?} does not exist in repo and is not at destination {:?}", src, dst);
+        }
+
+        fs::rename(&src, dst).with_context(|| {
+            format!("Failed both link and move for {:?} -> {:?}", src, dst)
+        })?;
     }
 
     Ok(InstallRecord {

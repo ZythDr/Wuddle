@@ -29,14 +29,18 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New In v3.0.7
-- **API Transparency & Log Filtering** — Introduced a new `[API]` log category with a dedicated filter button and Cyan highlighting for technical budget tracking.
-- **Immediate UI Refresh** — Successfully updated repositories are now instantly cleared from the Home tab's update list.
-- **Restored Detailed Logging** — Verbose per-repository update reporting has been re-implemented for both single and bulk updates.
-
+### What's New In v3.1
+- **Browse to Folder** — Quickly open the local folder for any tracked addon or mod directly from the UI.
+- **Linux Stabilization** — Addon path tracking is now case-insensitive, preventing re-import issues and "ghost" entries on Linux filesystems.
+- **Cleaner Scans** — Improved manual scanning logic now ignores metadata and non-addon folders (like `.git`) by strictly validating for `.toc` files.
 
 <details>
 <summary><strong>v3.x Changelog</strong></summary>
+
+### v3.0.7
+- **API Transparency & Log Filtering** — Introduced a new `[API]` log category with a dedicated filter button and Cyan highlighting for technical budget tracking.
+- **Immediate UI Refresh** — Successfully updated repositories are now instantly cleared from the Home tab's update list.
+- **Restored Detailed Logging** — Verbose per-repository update reporting has been re-implemented for both single and bulk updates.
 
 ### v3.0.6
 - **Token-Aware Update Checking** — Authenticated users now always perform full repository checks, while anonymous users benefit from optimized selective checks to stay within API limits.

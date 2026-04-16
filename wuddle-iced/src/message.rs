@@ -109,6 +109,7 @@ pub enum Message {
     // Shared actions
     OpenUrl(String),
     OpenDirectory(String),
+    BrowseRepo(i64),
     CopyToClipboard(String),
     LaunchGame,
     LaunchGameResult(Result<String, String>),

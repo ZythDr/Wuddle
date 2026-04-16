@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum InstallMode {
     /// Automatically infer what to install from the downloaded asset:
     /// - If it's a .dll => copy into WoW root
@@ -16,6 +16,7 @@ pub enum InstallMode {
     Dll,
     Mixed,
     Raw, // downloads asset to a chosen folder (no unzip)
+    Manual,
 }
 
 impl InstallMode {
@@ -27,6 +28,7 @@ impl InstallMode {
             InstallMode::Dll => "dll",
             InstallMode::Mixed => "mixed",
             InstallMode::Raw => "raw",
+            InstallMode::Manual => "manual",
         }
     }
 
@@ -38,6 +40,7 @@ impl InstallMode {
             "dll" => Some(InstallMode::Dll),
             "mixed" => Some(InstallMode::Mixed),
             "raw" => Some(InstallMode::Raw),
+            "manual" => Some(InstallMode::Manual),
             _ => None,
         }
     }
