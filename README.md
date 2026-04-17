@@ -33,7 +33,9 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **GAM Path Fidelity** — Achieved 1:1 behavioral parity with GitAddonsManager (GAM) for directory naming and placement, ensuring perfect interoperability on Linux.
 - **Self-Healing Casing** — Wuddle now automatically synchronizes database repository names with their actual filesystem casing, resolving legacy lowercase discrepancies.
 - **Hybrid Addon Discovery** — Enhanced scanner now supports hybrid repositories containing both root-level and subfolder-level addons.
-- **Non-Blocking Rescan** — Broken path repair now runs asynchronously during Rescan, keeping the UI responsive during intensive repair operations.
+- **Targeted Link Repair** — Launch and normal refresh now verify tracked addon links cheaply and only escalate to repo-local repair when a broken entry is found.
+- **Focused Update Checks** — Startup update checks no longer run full addon maintenance passes, avoiding false "busy forever" states.
+- **Visible Rescan Phases** — The Logs tab now shows repair, cleanup, prune, import, and dedup phases during Rescan.
 
 <details>
 <summary><strong>v3.x Changelog</strong></summary>
@@ -42,6 +44,9 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **Browse to Folder** — Quickly open the local folder for any tracked addon or mod directly from the UI.
 - **Linux Stabilization** — Addon path tracking is now case-insensitive, preventing re-import issues and "ghost" entries on Linux filesystems.
 - **Non-Blocking Rescan** — Broken path repair runs asynchronously during Rescan, preventing UI freezes during intensive repair operations.
+- **Targeted Link Repair** — Normal refresh and launch only verify tracked addon links and repair broken entries on demand instead of scanning broadly.
+- **Focused Startup Checks** — Automatic update checks now stay on the network/version path instead of running addon maintenance work first.
+- **Rescan Phase Visibility** — Rescan now logs repair, cleanup, prune, import, and dedup phases with timing details in the Logs tab.
 - **Cleaner Scans** — Improved manual scanning logic now ignores metadata and non-addon folders by strictly validating for `.toc` files.
 - **Case-Insensitive Database** — Implemented `COLLATE NOCASE` in SQLite for repository lookups to prevent duplicate entries from varying URL casings.
 

@@ -4,6 +4,7 @@ use iced::widget::{
 use iced::{Element, Font, Length, Subscription, Task, Theme};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::components::helpers::*;
 use crate::components::markdown::ImageViewer;
@@ -90,6 +91,11 @@ pub struct App {
     pub checking_updates: bool,
     pub updating_all: bool,
     pub updating_repo_ids: HashSet<i64>,
+    pub current_update_check_snapshot: Option<String>,
+    pub current_update_check_started_at: Option<Instant>,
+    pub last_update_check_warning_secs: Option<u64>,
+    pub busy_started_at: Option<Instant>,
+    pub busy_state_snapshot: Option<String>,
 
     // Tweak values
     pub tweak_values: TweakValues,
@@ -241,6 +247,11 @@ impl App {
             checking_updates: false,
             updating_all: false,
             updating_repo_ids: HashSet::new(),
+            current_update_check_snapshot: None,
+            current_update_check_started_at: None,
+            last_update_check_warning_secs: None,
+            busy_started_at: None,
+            busy_state_snapshot: None,
             tweak_values: TweakValues::default(),
             latest_version: None,
             update_message: None,
@@ -419,6 +430,92 @@ impl App {
             || self.add_repo_preview_loading
     }
 
+    pub fn busy_reasons(&self) -> Vec<String> {
+        let mut reasons = Vec::new();
+        if self.loading {
+            reasons.push("loading repositories".to_string());
+        }
+        if self.checking_updates {
+            reasons.push("checking updates".to_string());
+        }
+        if self.updating_all {
+            reasons.push("updating all repositories".to_string());
+        }
+        if !self.updating_repo_ids.is_empty() {
+            reasons.push(format!("updating {} repo(s)", self.updating_repo_ids.len()));
+        }
+        if self.add_repo_preview_loading {
+            reasons.push("loading add-repo preview".to_string());
+        }
+        reasons
+    }
+
+    pub fn busy_summary(&self) -> Option<String> {
+        let reasons = self.busy_reasons();
+        if reasons.is_empty() {
+            None
+        } else {
+            Some(reasons.join(" + "))
+        }
+    }
+
+    pub fn busy_tooltip(&self) -> String {
+        match self.busy_summary() {
+            Some(summary) => match self.busy_started_at {
+                Some(started_at) => {
+                    format!("Busy: {} ({}s)", summary, started_at.elapsed().as_secs())
+                }
+                None => format!("Busy: {}", summary),
+            },
+            None => "Idle".to_string(),
+        }
+    }
+
+    fn sync_busy_tracking(&mut self) {
+        let previous = self.busy_state_snapshot.clone();
+        let current = self.busy_summary();
+        match (previous, current) {
+            (None, Some(summary)) => {
+                self.busy_started_at = Some(Instant::now());
+                self.busy_state_snapshot = Some(summary.clone());
+                self.log(LogLevel::Info, &format!("Busy started: {}.", summary));
+            }
+            (Some(previous), Some(current_summary)) if previous != current_summary => {
+                let elapsed = self
+                    .busy_started_at
+                    .map(|started_at| started_at.elapsed().as_secs())
+                    .unwrap_or(0);
+                self.busy_started_at = Some(Instant::now());
+                self.busy_state_snapshot = Some(current_summary.clone());
+                self.log(
+                    LogLevel::Info,
+                    &format!(
+                        "Busy state changed after {}s: {} -> {}.",
+                        elapsed, previous, current_summary
+                    ),
+                );
+            }
+            (Some(previous), None) => {
+                let elapsed = self
+                    .busy_started_at
+                    .map(|started_at| started_at.elapsed().as_secs())
+                    .unwrap_or(0);
+                self.busy_started_at = None;
+                self.busy_state_snapshot = None;
+                self.log(
+                    LogLevel::Info,
+                    &format!("Busy cleared after {}s: {}.", elapsed, previous),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_update(&mut self, task: Task<Message>) -> Task<Message> {
+        self.sync_busy_tracking();
+        task
+    }
+
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subs = Vec::new();
 
@@ -443,6 +540,13 @@ impl App {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(80))
                     .map(|_| Message::SpinnerTick),
+            );
+        }
+
+        if self.checking_updates {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(400))
+                    .map(|_| Message::PollUpdateCheckProgress),
             );
         }
 
@@ -514,22 +618,22 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         if let Some(task) = crate::update::misc::update(self, message.clone()) {
-            return task;
+            return self.finish_update(task);
         }
         if let Some(task) = crate::update::radio::update(self, message.clone()) {
-            return task;
+            return self.finish_update(task);
         }
         if let Some(task) = crate::update::tweaks::update(self, message.clone()) {
-            return task;
+            return self.finish_update(task);
         }
         if let Some(task) = crate::update::about::update(self, message.clone()) {
-            return task;
+            return self.finish_update(task);
         }
         if let Some(task) = crate::update::settings::update(self, message.clone()) {
-            return task;
+            return self.finish_update(task);
         }
         if let Some(task) = crate::update::repos::update(self, message.clone()) {
-            return task;
+            return self.finish_update(task);
         }
 
         match message {
@@ -538,10 +642,10 @@ impl App {
                 self.log(LogLevel::Info, &format!("Switched to tab: {:?}.", tab));
                 // Fire self-update check whenever the About tab becomes active
                 if tab == Tab::About {
-                    return Task::perform(
+                    return self.finish_update(Task::perform(
                         service::check_self_update_full(self.update_channel == UpdateChannel::Beta),
                         Message::CheckSelfUpdateResult,
-                    );
+                    ));
                 }
             }
             Message::SetTheme(_) => {}
@@ -661,7 +765,7 @@ impl App {
                     Task::none()
                 };
                 self.dialog = Some(d);
-                return fetch_task;
+                return self.finish_update(fetch_task);
             }
             Message::RemoveRepoFilesLoaded(result) => {
                 if let Some(Dialog::RemoveRepo { ref mut files, .. }) = self.dialog {
@@ -728,7 +832,7 @@ impl App {
             Message::RemoveProfile(profile_id) => {
                 if profile_id == self.active_profile_id {
                     self.log(LogLevel::Error, "Cannot remove the active profile.");
-                    return Task::none();
+                    return self.finish_update(Task::none());
                 }
                 let db = settings::profile_db_path(&profile_id).ok();
                 self.profiles.retain(|p| p.id != profile_id);
@@ -736,7 +840,7 @@ impl App {
                 self.log(LogLevel::Info, &format!("Removed profile: {}", profile_id));
                 self.save_settings();
                 // Delete the profile's SQLite database in the background
-                return Task::perform(
+                return self.finish_update(Task::perform(
                     async move {
                         if let Some(path) = db {
                             // Remove main db + WAL/SHM sidecars
@@ -748,7 +852,7 @@ impl App {
                         Ok(profile_id)
                     },
                     Message::RemoveProfileResult,
-                );
+                ));
             }
             Message::RemoveProfileResult(result) => match result {
                 Ok(id) => self.log(
@@ -813,10 +917,10 @@ impl App {
                 if let Some(Dialog::DxvkConfig { ref config, .. }) = self.dialog {
                     let content = panels::dxvk_config::generate_conf(config);
                     let path = std::path::Path::new(&self.wow_dir).join("dxvk.conf");
-                    return Task::perform(
+                    return self.finish_update(Task::perform(
                         service::save_dxvk_conf(path, content),
                         Message::DxvkConfigSaved,
-                    );
+                    ));
                 }
             }
             Message::DxvkConfigSaved(result) => match result {
@@ -857,7 +961,7 @@ impl App {
             // --- Add-repo preview ---
             _ => {}
         }
-        Task::none()
+        self.finish_update(Task::none())
     }
 
     pub fn install_options(&self) -> wuddle_engine::InstallOptions {

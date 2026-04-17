@@ -4,11 +4,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use wuddle_engine::{CheckMode, Engine, InstallMode, InstallOptions, Repo, UpdatePlan};
 use reqwest::Client;
 use serde::Deserialize;
 use iced;
+use crate::types::LogLevel;
 
 // ---------------------------------------------------------------------------
 // Row types for the UI (Clone-friendly, owned data)
@@ -76,6 +78,47 @@ pub struct PlanRow {
     pub error: Option<String>,
     pub previous_dll_count: usize,
     pub new_dll_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepoLoadLog {
+    pub level: LogLevel,
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepoLoadResult {
+    pub rows: Vec<RepoRow>,
+    pub logs: Vec<RepoLoadLog>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CheckUpdatesStreamEvent {
+    Progress(wuddle_engine::UpdateCheckProgress),
+    Finished(Result<Vec<PlanRow>, String>),
+}
+
+static UPDATE_CHECK_PROGRESS: OnceLock<Mutex<Option<wuddle_engine::UpdateCheckProgress>>> = OnceLock::new();
+
+fn update_check_progress_slot() -> &'static Mutex<Option<wuddle_engine::UpdateCheckProgress>> {
+    UPDATE_CHECK_PROGRESS.get_or_init(|| Mutex::new(None))
+}
+
+fn set_update_check_progress(progress: Option<wuddle_engine::UpdateCheckProgress>) {
+    if let Ok(mut slot) = update_check_progress_slot().lock() {
+        *slot = progress;
+    }
+}
+
+pub fn latest_update_check_progress() -> Option<wuddle_engine::UpdateCheckProgress> {
+    update_check_progress_slot()
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+}
+
+pub fn clear_update_check_progress() {
+    set_update_check_progress(None);
 }
 
 impl From<UpdatePlan> for PlanRow {
@@ -257,39 +300,128 @@ pub async fn list_repos(
     db_path: Option<PathBuf>,
     wow_dir: Option<String>,
     fix_casing: bool,
-) -> Result<Vec<RepoRow>, String> {
+) -> Result<RepoLoadResult, String> {
     // No wow_dir means no WoW installation configured — return empty list
     let dir = match wow_dir.as_deref() {
         Some(d) if !d.trim().is_empty() => d,
-        _ => return Ok(Vec::new()),
+        _ => {
+            return Ok(RepoLoadResult {
+                rows: Vec::new(),
+                logs: Vec::new(),
+            })
+        }
     };
     let wow_path_buf = PathBuf::from(dir);
     let eng = open_engine(db_path.as_deref())?;
+    let mut logs = Vec::new();
 
-    // 1. Perform automated repairs (only if explicitly requested via 'Rescan')
-    // Authoritative repair handles casing, symlinks, and missing files/repos.
-    if fix_casing {
-        let _ = eng.repair_broken_installations(&wow_path_buf).await;
+    // Cheap tracked-link verification runs on normal refresh/load.
+    // Full repair/reconciliation stays behind explicit Rescan only.
+    if !fix_casing {
+        let eng_clone = eng.clone();
+        let verify_path = wow_path_buf.clone();
+        let repaired = tokio::task::spawn_blocking(move || {
+            eng_clone.verify_and_repair_tracked_addon_links(&verify_path)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        if repaired > 0 {
+            logs.push(RepoLoadLog {
+                level: LogLevel::Info,
+                text: format!(
+                    "Verified tracked addon links and repaired {} broken entry(s).",
+                    repaired
+                ),
+            });
+        }
     }
 
-    tokio::task::spawn_blocking(move || {
+    // Perform authoritative repairs only if explicitly requested via Rescan.
+    // This handles casing, symlinks, and missing files/repos.
+    if fix_casing {
+        logs.push(RepoLoadLog {
+            level: LogLevel::Info,
+            text: "Rescan: repairing broken installations...".to_string(),
+        });
+        let started = Instant::now();
+        match eng.repair_broken_installations(&wow_path_buf).await {
+            Ok(fixed) => logs.push(RepoLoadLog {
+                level: LogLevel::Info,
+                text: format!(
+                    "Rescan: repair phase finished in {}ms ({} change(s)).",
+                    started.elapsed().as_millis(),
+                    fixed
+                ),
+            }),
+            Err(err) => logs.push(RepoLoadLog {
+                level: LogLevel::Error,
+                text: format!(
+                    "Rescan: repair phase failed after {}ms: {}",
+                    started.elapsed().as_millis(),
+                    err
+                ),
+            }),
+        }
+    }
+
+    let mut background_logs = tokio::task::spawn_blocking(move || {
         let wow_path = wow_path_buf.as_path();
+        let mut logs = Vec::new();
+
+        let started = Instant::now();
+        let cleaned = eng.cleanup_casing_collisions(wow_path).unwrap_or(0);
+        logs.push(RepoLoadLog {
+            level: LogLevel::Info,
+            text: format!(
+                "Refresh: casing cleanup finished in {}ms ({} change(s)).",
+                started.elapsed().as_millis(),
+                cleaned
+            ),
+        });
 
         // Restore correct capitalization from disk (.toc files/folders for addons).
         // This is fast and runs on every refresh to satisfy the requirement that
         // the list matches disk casing.
-        let _ = eng.cleanup_casing_collisions(wow_path);
-
         // Heavy maintenance tasks: only run during a full rescan or the one-time v4 migration.
         // This keeps the standard launch and refresh cycles fast and prevents
         // deleted repos from being automatically re-imported.
         if fix_casing || eng.db().needs_casing_fix() {
+            let started = Instant::now();
             // Prune repos whose files no longer exist on disk
-            let _ = eng.prune_missing_repos(wow_path);
+            let pruned = eng.prune_missing_repos(wow_path).unwrap_or(0);
+            logs.push(RepoLoadLog {
+                level: LogLevel::Info,
+                text: format!(
+                    "Rescan: prune phase finished in {}ms ({} repo(s) removed).",
+                    started.elapsed().as_millis(),
+                    pruned
+                ),
+            });
+
+            let started = Instant::now();
             // Auto-import newly discovered addon git repos
-            let _ = eng.import_existing_addons(wow_path);
+            let imported = eng.import_existing_addons(wow_path).unwrap_or(0);
+            logs.push(RepoLoadLog {
+                level: LogLevel::Info,
+                text: format!(
+                    "Rescan: import phase finished in {}ms ({} repo(s) added).",
+                    started.elapsed().as_millis(),
+                    imported
+                ),
+            });
+
+            let started = Instant::now();
             // Remove duplicate tracking entries
-            let _ = eng.dedup_addon_repos_by_folder(wow_path);
+            let deduped = eng.dedup_addon_repos_by_folder(wow_path).unwrap_or(0);
+            logs.push(RepoLoadLog {
+                level: LogLevel::Info,
+                text: format!(
+                    "Rescan: dedup phase finished in {}ms ({} duplicate repo(s) removed).",
+                    started.elapsed().as_millis(),
+                    deduped
+                ),
+            });
         }
 
         // Fix repo owner/name casing from forge APIs (best-effort).
@@ -331,10 +463,16 @@ pub async fn list_repos(
                 .collect();
             rows.push(row);
         }
-        Ok(rows)
+        Ok::<RepoLoadResult, String>(RepoLoadResult { rows, logs })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+
+    logs.append(&mut background_logs.logs);
+    Ok(RepoLoadResult {
+        rows: background_logs.rows,
+        logs,
+    })
 }
 
 pub async fn check_updates(
@@ -351,14 +489,31 @@ pub async fn check_updates_skip(
     mode: CheckMode,
     skip_repo_ids: std::collections::HashSet<i64>,
 ) -> Result<Vec<PlanRow>, String> {
+    clear_update_check_progress();
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
-        let plans = tokio::runtime::Handle::current()
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress_forwarder = std::thread::spawn(move || {
+            while let Some(progress) = progress_rx.blocking_recv() {
+                set_update_check_progress(Some(progress));
+            }
+        });
+        let plans = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?
             .block_on(async {
-                eng.check_updates_with_wow_skip(wow_dir.as_deref().map(Path::new), mode, &skip_repo_ids)
+                eng.check_updates_with_wow_skip_progress(
+                    wow_dir.as_deref().map(Path::new),
+                    mode,
+                    &skip_repo_ids,
+                    progress_tx,
+                )
                     .await
             })
             .map_err(|e| e.to_string())?;
+        let _ = progress_forwarder.join();
+        clear_update_check_progress();
         Ok(plans.into_iter().map(PlanRow::from).collect())
     })
     .await
@@ -531,9 +686,11 @@ pub async fn update_all(
                 log.push(format!("{}/{}: checking release assets.", owner, name));
             }
 
-            let result = tokio::runtime::Handle::current().block_on(async {
-                eng.update_repo(id, Path::new(&wow), None, opts).await
-            });
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?
+                .block_on(async { eng.update_repo(id, Path::new(&wow), None, opts).await });
 
             match result {
                 Err(e) => {
@@ -588,18 +745,19 @@ pub async fn install_new_repo(
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let wow_path = Path::new(&wow_dir);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
 
-        let update_result = tokio::runtime::Handle::current()
+        let update_result = runtime
             .block_on(async { eng.update_repo(id, wow_path, None, opts.clone()).await })
             .map_err(|e| e.to_string())?;
 
         if let Some(plan) = update_result {
-            // update_repo returned a plan — installation happened
             Ok(format!("Installed {}/{}.", plan.owner, plan.name))
         } else {
-            // update_repo returned None (engine says up-to-date or nothing to fetch).
-            // Force a fresh install via reinstall_repo so the files actually land on disk.
-            let plan = tokio::runtime::Handle::current()
+            let plan = runtime
                 .block_on(async { eng.reinstall_repo(id, wow_path, None, opts).await })
                 .map_err(|e| e.to_string())?;
             Ok(format!("Installed {}/{}.", plan.owner, plan.name))
@@ -617,10 +775,11 @@ pub async fn update_repo(
 ) -> Result<Option<PlanRow>, String> {
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
-        let plan = tokio::runtime::Handle::current()
-            .block_on(async {
-                eng.update_repo(id, Path::new(&wow_dir), None, opts).await
-            })
+        let plan = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?
+            .block_on(async { eng.update_repo(id, Path::new(&wow_dir), None, opts).await })
             .map_err(|e| e.to_string())?;
         Ok(plan.map(PlanRow::from))
     })
@@ -636,11 +795,11 @@ pub async fn reinstall_repo(
 ) -> Result<PlanRow, String> {
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
-        let plan = tokio::runtime::Handle::current()
-            .block_on(async {
-                eng.reinstall_repo(id, Path::new(&wow_dir), None, opts)
-                    .await
-            })
+        let plan = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?
+            .block_on(async { eng.reinstall_repo(id, Path::new(&wow_dir), None, opts).await })
             .map_err(|e| e.to_string())?;
         Ok(PlanRow::from(plan))
     })

@@ -1,5 +1,5 @@
 use crate::radio;
-use crate::service::{self, PlanRow, RepoRow};
+use crate::service::{self, PlanRow, RepoLoadResult};
 use crate::settings::{self, UpdateChannel};
 use crate::theme::WuddleTheme;
 use crate::tweaks;
@@ -74,12 +74,13 @@ pub enum Message {
     ToggleAddNewMenu,
 
     // Engine data (Phase 2)
-    ReposLoaded(Result<Vec<RepoRow>, String>),
+    ReposLoaded(Result<RepoLoadResult, String>),
     PlansLoaded(Result<Vec<PlanRow>, String>),
     SettingsLoaded(settings::AppSettings),
 
     // Operations (Phase 3)
     CheckUpdates,
+    PollUpdateCheckProgress,
     CheckUpdatesResult(Result<Vec<PlanRow>, String>),
     UpdateCheckRateLimitResult(CheckStats, Option<service::GitHubRateInfo>),
     GithubRateInfoResult(Option<service::GitHubRateInfo>),

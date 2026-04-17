@@ -23,7 +23,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::ReposLoaded(result) => {
             app.loading = false;
             match result {
-                Ok(repos) => {
+                Ok(load_result) => {
+                    for entry in &load_result.logs {
+                        app.log(entry.level, &entry.text);
+                    }
+                    let repos = load_result.rows;
                     let count = repos.len();
                     let mod_count = repos.iter().filter(|r| service::is_mod(r)).count();
                     let addon_count = count - mod_count;
@@ -82,6 +86,63 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.checking_updates = true;
             Some(check_updates_task(app))
         }
+        Message::PollUpdateCheckProgress => {
+            let progress = service::latest_update_check_progress();
+            let snapshot = progress.as_ref().map(|p| {
+                format!("{:?}|{}/{}|{}", p.stage, p.owner, p.name, p.mode)
+            });
+
+            if snapshot != app.current_update_check_snapshot {
+                app.current_update_check_snapshot = snapshot;
+                if let Some(progress) = progress {
+                    match progress.stage {
+                        wuddle_engine::UpdateCheckProgressStage::Started => {
+                            app.current_update_check_started_at = Some(std::time::Instant::now());
+                            app.last_update_check_warning_secs = None;
+                            app.log(
+                                LogLevel::Api,
+                                &format!(
+                                    "Checking {}/{} ({})...",
+                                    progress.owner,
+                                    progress.name,
+                                    progress.mode
+                                ),
+                            );
+                        }
+                        wuddle_engine::UpdateCheckProgressStage::Finished => {
+                            app.current_update_check_started_at = None;
+                            app.last_update_check_warning_secs = None;
+                            app.log(
+                                LogLevel::Api,
+                                &format!("Finished checking {}/{}.", progress.owner, progress.name),
+                            );
+                        }
+                    }
+                }
+            } else if let Some(progress) = progress {
+                if progress.stage == wuddle_engine::UpdateCheckProgressStage::Started {
+                    if let Some(started_at) = app.current_update_check_started_at {
+                        let elapsed = started_at.elapsed().as_secs();
+                        let should_warn = elapsed >= 10
+                            && app.last_update_check_warning_secs.map_or(true, |last| elapsed >= last + 10);
+                        if should_warn {
+                            app.last_update_check_warning_secs = Some(elapsed);
+                            app.log(
+                                LogLevel::Error,
+                                &format!(
+                                    "Still checking {}/{} after {}s.",
+                                    progress.owner,
+                                    progress.name,
+                                    elapsed
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+
+            Some(Task::none())
+        }
         Message::GithubRateTick => {
             return Some(Task::perform(
                 service::fetch_github_rate_limit(),
@@ -94,6 +155,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             // if false, it was a silent post-update refresh — skip toasts/notifications.
             let is_explicit_check = app.checking_updates;
             app.checking_updates = false;
+            app.current_update_check_snapshot = None;
+            app.current_update_check_started_at = None;
+            app.last_update_check_warning_secs = None;
+            service::clear_update_check_progress();
             match result {
                 Ok(mut plans) => {
                     let update_count = plans.iter().filter(|p| p.has_update && !app.ignored_update_ids.contains(&p.repo_id)).count();

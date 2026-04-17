@@ -5,12 +5,16 @@
 - **GAM Path Fidelity** — Achieved 1:1 functional parity with GitAddonsManager (GAM). Wuddle now mimics GAM's cloning, directory naming, and subfolder handling logic exactly, ensuring seamless interoperability on Linux.
 - **Auto-Correcting Casing** — Implemented a self-healing mechanism that synchronizes database repository names with their actual filesystem casing on Linux, resolving legacy lowercase discrepancies.
 - **Hybrid Addon Discovery** — Enhanced the addon scanner to support repositories containing both a root-level addon and additional subfolder-level addons, matching GAM's detection behavior.
+- **Targeted Addon Link Verification** — Standard refresh and launch flows now perform a cheap verification pass for tracked addon links and only escalate to repo-local repair when a broken entry is actually found.
 - **Case-Insensitive Path Tracking** — Re-implemented addon path discovery and pruning to be case-insensitive. This prevents "ghost" entries and redundant re-imports on Linux when addon folder casing changes.
 - **Improved Invalid URL Logging** — Update check failures now include the specific Addon ID in the logs (e.g., `Fetch versions failed for id=404: invalid URL`), making it easier to identify problematic repositories.
+- **Rescan Phase Logging** — Rescan now logs repair, casing cleanup, prune, import, and dedup phases with timings and counts in the Logs tab.
 - **Strict Manual Addon Validation** — The manual scan now strictly requires a `.toc` file to be present in a directory before considering it a valid addon, preventing `.git`, `.repo`, and other non-addon folders from being imported.
 
 ### Bug Fixes
 - **Async Repair Flow** — Made the broken path repair and casing correction mechanisms asynchronous, preventing UI freezes during intensive rescan operations.
 - **Case-Sensitive Collision Fix** — Fixed a bug where Wuddle would create duplicate lowercase `.repo` folders if a repository was managed by both Wuddle and GAM.
+- **Endless Startup Spinner** — Fixed a regression where launch auto-checks could appear stuck forever because addon maintenance work was incorrectly running inside the normal update-check path.
 - **Ghost Addon Entries** — Resolved an issue where renaming an addon folder on disk would cause Wuddle to lose track of the path and display a generic "addon" placeholder in the removal dialog.
 - **Path Resolution Fallback** — Implemented a robust fallback mechanism for resolving addon paths that ensures the "Browse..." and "Remove" features work even if the database entry becomes slightly out of sync with the disk.
+- **Timed Remote Checks** — Added explicit timeouts to git remote-head and release lookups so unresponsive hosts no longer block update checks indefinitely.

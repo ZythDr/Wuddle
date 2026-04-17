@@ -9,7 +9,7 @@ use std::{
     path::{Component, Path, PathBuf},
     pin::Pin,
     sync::{LazyLock, Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use url::Url;
 
@@ -76,6 +76,20 @@ pub enum CheckMode {
     Auto { cycle: u32 },
     /// Always check everything (startup, post-install, token save, etc.).
     Force,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateCheckProgressStage {
+    Started,
+    Finished,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateCheckProgress {
+    pub owner: String,
+    pub name: String,
+    pub mode: String,
+    pub stage: UpdateCheckProgressStage,
 }
 
 impl CheckMode {
@@ -187,6 +201,8 @@ static GITHUB_TOKEN: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static RE_GITHUB_RESET: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"reset (\d+)").unwrap());
 
+const REMOTE_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+
 static RE_VERSION_FROM_ASSET: LazyLock<regex::Regex> = LazyLock::new(|| {
     // Suffix character class deliberately excludes '.' to avoid consuming file
     // extensions (e.g. "2.1-1.tar.gz" should match "2.1-1", not "2.1-1.tar.gz").
@@ -223,10 +239,29 @@ pub fn github_token() -> Option<String> {
 }
 
 impl Engine {
+    fn send_update_progress(
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<UpdateCheckProgress>>,
+        repo: &Repo,
+        stage: UpdateCheckProgressStage,
+    ) {
+        if let Some(tx) = progress_tx {
+            let _ = tx.send(UpdateCheckProgress {
+                owner: repo.owner.clone(),
+                name: repo.name.clone(),
+                mode: repo.mode.as_str().to_string(),
+                stage,
+            });
+        }
+    }
+
     pub fn open(db_path: &Path) -> Result<Self> {
         Ok(Self {
             db: std::sync::Mutex::new(Db::open(db_path)?),
-            client: Client::builder().user_agent("wuddle-engine").build()?,
+            client: Client::builder()
+                .user_agent("wuddle-engine")
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(REMOTE_CHECK_TIMEOUT)
+                .build()?,
             db_path: db_path.to_path_buf(),
         })
     }
@@ -749,6 +784,155 @@ impl Engine {
         path.join(".git").exists()
     }
 
+    fn tracked_addon_entry_is_healthy(
+        worktree_dir: &Path,
+        full_link_path: &Path,
+        addon_name: &str,
+    ) -> bool {
+        if full_link_path == worktree_dir {
+            return install::detect_single_addon_folder(worktree_dir)
+                .map(|name| name.eq_ignore_ascii_case(addon_name))
+                .unwrap_or(false);
+        }
+
+        let meta = match fs::symlink_metadata(full_link_path) {
+            Ok(meta) => meta,
+            Err(_) => return false,
+        };
+
+        if !full_link_path.exists() {
+            return false;
+        }
+
+        if !meta.file_type().is_symlink() && !meta.is_dir() {
+            return false;
+        }
+
+        install::detect_single_addon_folder(full_link_path)
+            .map(|name| name.eq_ignore_ascii_case(addon_name))
+            .unwrap_or(false)
+    }
+
+    fn repair_tracked_addon_entry(
+        &self,
+        repo: &Repo,
+        wow_dir: &Path,
+        worktree_dir: &Path,
+        addon_name: &str,
+        full_link_path: &Path,
+        detected: &mut Option<Vec<(PathBuf, String)>>,
+    ) -> Result<bool> {
+        if !worktree_dir.is_dir() {
+            return Ok(false);
+        }
+
+        if detected.is_none() {
+            *detected = Some(install::detect_addons_in_tree(worktree_dir));
+        }
+
+        let Some((src, actual_toc_name)) = detected.as_ref().and_then(|det| {
+            det.iter()
+                .find(|(_, name)| name.eq_ignore_ascii_case(addon_name))
+        }) else {
+            return Ok(false);
+        };
+
+        println!(
+            "[Wuddle] Repairing tracked addon entry for {}: {} -> {:?}",
+            repo.name, addon_name, src
+        );
+
+        let _ = fs::remove_file(full_link_path);
+        let _ = fs::remove_dir_all(full_link_path);
+
+        if src == worktree_dir {
+            let _ = install::install_addon_folder(
+                src,
+                wow_dir,
+                actual_toc_name,
+                InstallOptions {
+                    use_symlinks: true,
+                    ..Default::default()
+                },
+                "Wuddle Repair",
+            );
+        } else {
+            let sub_name = src.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let _ = install::link_addon_subfolder(worktree_dir, sub_name, full_link_path);
+        }
+
+        Ok(Self::tracked_addon_entry_is_healthy(
+            worktree_dir,
+            full_link_path,
+            addon_name,
+        ))
+    }
+
+    /// Cheap verification pass for tracked git-addon installs.
+    ///
+    /// This validates only already-known addon entries and attempts targeted
+    /// repair for entries that are missing, broken, or no longer resolve to an
+    /// addon folder with the expected `.toc`. It intentionally avoids broad
+    /// addon discovery across the entire AddOns directory.
+    pub fn verify_and_repair_tracked_addon_links(&self, wow_dir: &Path) -> Result<usize> {
+        let repos = self.db().list_repos()?;
+        let mut repaired = 0usize;
+
+        for repo in repos {
+            if !repo.enabled || !matches!(repo.mode, InstallMode::AddonGit) {
+                continue;
+            }
+
+            let worktree_dir = self.addon_git_worktree_dir(repo.id, wow_dir, &repo);
+            if !worktree_dir.is_dir() {
+                continue;
+            }
+
+            let installs = self.db().list_installs(repo.id)?;
+            let mut detected: Option<Vec<(PathBuf, String)>> = None;
+
+            for entry in installs {
+                if entry.kind != "addon" {
+                    continue;
+                }
+                let full_link_path = match Self::resolve_install_path(&entry.path, Some(wow_dir)) {
+                    Some(path) => path,
+                    None => continue,
+                };
+
+                let addon_name = full_link_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+
+                if Self::tracked_addon_entry_is_healthy(&worktree_dir, &full_link_path, addon_name)
+                {
+                    continue;
+                }
+
+                if self.repair_tracked_addon_entry(
+                    &repo,
+                    wow_dir,
+                    &worktree_dir,
+                    addon_name,
+                    &full_link_path,
+                    &mut detected,
+                )? {
+                    repaired += 1;
+                }
+            }
+        }
+
+        if repaired > 0 {
+            println!(
+                "[Wuddle] Verified tracked addon links and repaired {} broken entry(s).",
+                repaired
+            );
+        }
+
+        Ok(repaired)
+    }
+
     pub fn import_existing_addons(&self, wow_dir: &Path) -> Result<usize> {
         let addons_root = wow_dir.join("Interface").join("AddOns");
         if !addons_root.is_dir() {
@@ -1086,104 +1270,7 @@ impl Engine {
     /// Targeted repair for Git-based addons. Verifies all tracked symlinks and
     /// recreates them if they are broken (e.g. due to casing-induced target renames).
     pub fn repair_git_addon_symlinks(&self, wow_dir: &Path) -> Result<usize> {
-        let repos = self.db().list_repos()?;
-        let mut repaired = 0;
-
-        for r in repos {
-            if !r.enabled || !matches!(r.mode, InstallMode::AddonGit) {
-                continue;
-            }
-
-            // 1. Find the actual worktree directory (handles casing)
-            let worktree_dir = self.addon_git_worktree_dir(r.id, wow_dir, &r);
-            if !worktree_dir.is_dir() {
-                continue;
-            }
-
-            // 2. List tracked installs for this repo
-            let installs = self.db().list_installs(r.id)?;
-            let mut detected: Option<Vec<(PathBuf, String)>> = None;
-
-            for entry in installs {
-                if entry.kind != "addon" {
-                    continue;
-                }
-                let full_link_path = match Self::resolve_install_path(&entry.path, Some(wow_dir)) {
-                    Some(p) => p,
-                    None => continue,
-                };
-
-                // If it's the worktree itself (single folder), no symlink to repair
-                if full_link_path == worktree_dir {
-                    continue;
-                }
-
-                // Check if the symlink is broken OR completely missing
-                let is_broken = match fs::symlink_metadata(&full_link_path) {
-                    Ok(m) => {
-                        (m.file_type().is_symlink() && !full_link_path.exists())
-                            || !full_link_path.exists()
-                    }
-                    Err(_) => true, // Missing entirely
-                };
-
-                if is_broken {
-                    // Try to repair! We need to find where this addon is in the repo.
-                    let addon_name = full_link_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
-
-                    if detected.is_none() {
-                        detected = Some(install::detect_addons_in_tree(&worktree_dir));
-                    }
-
-                    if let Some(ref det) = detected {
-                        // Use case-insensitive matching to find the correct folder
-                        if let Some((src, actual_toc_name)) = det
-                            .iter()
-                            .find(|(_, name)| name.eq_ignore_ascii_case(addon_name))
-                        {
-                            println!(
-                                "[Wuddle] Repairing broken symlink: {} -> {:?}",
-                                addon_name, src
-                            );
-                            // Found it! Re-install symlink.
-                            let _ = fs::remove_file(&full_link_path);
-                            let _ = fs::remove_dir_all(&full_link_path);
-
-                            if src == &worktree_dir {
-                                // Root is the addon
-                                let _ = install::install_addon_folder(
-                                    &src,
-                                    wow_dir,
-                                    actual_toc_name,
-                                    InstallOptions {
-                                        use_symlinks: true,
-                                        ..Default::default()
-                                    },
-                                    "Wuddle Repair",
-                                );
-                            } else {
-                                // Subfolder is the addon
-                                let sub_name =
-                                    src.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                                let _ = install::link_addon_subfolder(
-                                    &worktree_dir,
-                                    sub_name,
-                                    &full_link_path,
-                                );
-                            }
-                            repaired += 1;
-                        }
-                    }
-                }
-            }
-        }
-        if repaired > 0 {
-            println!("[Wuddle] Repaired {} broken symlinks.", repaired);
-        }
-        Ok(repaired)
+        self.verify_and_repair_tracked_addon_links(wow_dir)
     }
 
     /// Unified repair entry point. Performs casing cleanup and then triggers
@@ -1252,7 +1339,7 @@ impl Engine {
             println!("[Wuddle] Detected missing files for {} repo(s), performing authoritative repair...", needing_repair.len());
             // Use batched check (parallel with limited burst) to build repair plans efficiently.
             let plans = self
-                .check_updates_batched(&needing_repair, Some(wow_dir), CheckMode::Force)
+                .check_updates_batched(&needing_repair, Some(wow_dir), CheckMode::Force, None)
                 .await?;
             for plan in plans {
                 if plan.repair_needed {
@@ -1504,29 +1591,46 @@ impl Engine {
 
         let url = r.url.clone();
         let preferred_for_task = preferred_branch.clone();
-        let remote = tokio::task::spawn_blocking(move || {
-            git_sync::remote_head_for_branch(&url, Some(preferred_for_task.as_str()))
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("Git sync worker failed: {}", e));
+        let remote = tokio::time::timeout(
+            REMOTE_CHECK_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                git_sync::remote_head_for_branch(&url, Some(preferred_for_task.as_str()))
+            }),
+        )
+        .await;
         let remote = match remote {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
+            Ok(join_result) => match join_result {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    let mut p = Self::blank_plan(r);
+                    p.current = local
+                        .as_ref()
+                        .map(|h| h.short_oid.clone())
+                        .or_else(|| Self::normalized_current_version(r));
+                    p.error = Some(format!("Git sync check failed: {}", e));
+                    return Ok(p);
+                }
+                Err(e) => {
+                    let mut p = Self::blank_plan(r);
+                    p.current = local
+                        .as_ref()
+                        .map(|h| h.short_oid.clone())
+                        .or_else(|| Self::normalized_current_version(r));
+                    p.error = Some(format!("Git sync worker failed: {}", e));
+                    return Ok(p);
+                }
+            },
+            Err(_) => {
                 let mut p = Self::blank_plan(r);
                 p.current = local
                     .as_ref()
                     .map(|h| h.short_oid.clone())
                     .or_else(|| Self::normalized_current_version(r));
-                p.error = Some(format!("Git sync check failed: {}", e));
-                return Ok(p);
-            }
-            Err(e) => {
-                let mut p = Self::blank_plan(r);
-                p.current = local
-                    .as_ref()
-                    .map(|h| h.short_oid.clone())
-                    .or_else(|| Self::normalized_current_version(r));
-                p.error = Some(e.to_string());
+                p.error = Some(format!(
+                    "Git sync check timed out after {}s for {}.",
+                    REMOTE_CHECK_TIMEOUT.as_secs(),
+                    r.url
+                ));
                 return Ok(p);
             }
         };
@@ -1629,9 +1733,14 @@ impl Engine {
 
         let rel = loop {
             let (new_etag, rel_opt, not_modified) =
-                match forge::latest_release(&self.client, &det, etag).await {
-                    Ok(v) => v,
-                    Err(e) => {
+                match tokio::time::timeout(
+                    REMOTE_CHECK_TIMEOUT,
+                    forge::latest_release(&self.client, &det, etag),
+                )
+                .await
+                {
+                    Ok(Ok(v)) => v,
+                    Ok(Err(e)) => {
                         let msg = e.to_string();
                         if det.kind == ForgeKind::GitHub {
                             if let Some(reset_epoch) = Self::parse_github_reset_epoch(&msg) {
@@ -1641,6 +1750,15 @@ impl Engine {
                         }
                         let mut p = Self::blank_plan(r);
                         p.error = Some(msg);
+                        return Ok(p);
+                    }
+                    Err(_) => {
+                        let mut p = Self::blank_plan(r);
+                        p.error = Some(format!(
+                            "Release check timed out after {}s for {}.",
+                            REMOTE_CHECK_TIMEOUT.as_secs(),
+                            r.url
+                        ));
                         return Ok(p);
                     }
                 };
@@ -1854,20 +1972,26 @@ impl Engine {
         repos: &'a [Repo],
         wow_dir: Option<&'a Path>,
         check_mode: CheckMode,
+        progress_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<UpdateCheckProgress>>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<UpdatePlan>>> + 'a>> {
         Box::pin(async move {
             match repos {
                 [] => Ok(Vec::new()),
-                [repo] => Ok(vec![self
-                    .build_update_plan_for_repo(repo, true, wow_dir, check_mode)
-                    .await
-                    .with_context(|| format!("checking updates for '{}'", repo.name))?]),
+                [repo] => {
+                    Self::send_update_progress(progress_tx, repo, UpdateCheckProgressStage::Started);
+                    let plan = self
+                        .build_update_plan_for_repo(repo, true, wow_dir, check_mode)
+                        .await
+                        .with_context(|| format!("checking updates for '{}'", repo.name))?;
+                    Self::send_update_progress(progress_tx, repo, UpdateCheckProgressStage::Finished);
+                    Ok(vec![plan])
+                }
                 _ => {
                     let mid = repos.len() / 2;
                     let (left, right) = repos.split_at(mid);
                     let (lres, rres) = tokio::join!(
-                        self.check_updates_parallel(left, wow_dir, check_mode),
-                        self.check_updates_parallel(right, wow_dir, check_mode)
+                        self.check_updates_parallel(left, wow_dir, check_mode, progress_tx),
+                        self.check_updates_parallel(right, wow_dir, check_mode, progress_tx)
                     );
                     let mut plans = lres?;
                     plans.extend(rres?);
@@ -1882,6 +2006,7 @@ impl Engine {
         repos: &[Repo],
         wow_dir: Option<&Path>,
         check_mode: CheckMode,
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<UpdateCheckProgress>>,
     ) -> Result<Vec<UpdatePlan>> {
         let mut plans = Vec::with_capacity(repos.len());
 
@@ -1889,21 +2014,30 @@ impl Engine {
         for chunk in repos.chunks(4) {
             match chunk {
                 [r1] => {
+                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Started);
                     plans.push(
                         self.build_update_plan_for_repo(r1, true, wow_dir, check_mode)
                             .await
                             .with_context(|| format!("checking updates for '{}'", r1.name))?,
                     );
+                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Finished);
                 }
                 [r1, r2] => {
+                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Started);
+                    Self::send_update_progress(progress_tx, r2, UpdateCheckProgressStage::Started);
                     let (p1, p2) = tokio::join!(
                         self.build_update_plan_for_repo(r1, true, wow_dir, check_mode),
                         self.build_update_plan_for_repo(r2, true, wow_dir, check_mode)
                     );
                     plans.push(p1.with_context(|| format!("checking updates for '{}'", r1.name))?);
                     plans.push(p2.with_context(|| format!("checking updates for '{}'", r2.name))?);
+                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Finished);
+                    Self::send_update_progress(progress_tx, r2, UpdateCheckProgressStage::Finished);
                 }
                 [r1, r2, r3] => {
+                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Started);
+                    Self::send_update_progress(progress_tx, r2, UpdateCheckProgressStage::Started);
+                    Self::send_update_progress(progress_tx, r3, UpdateCheckProgressStage::Started);
                     let (p1, p2, p3) = tokio::join!(
                         self.build_update_plan_for_repo(r1, true, wow_dir, check_mode),
                         self.build_update_plan_for_repo(r2, true, wow_dir, check_mode),
@@ -1912,8 +2046,15 @@ impl Engine {
                     plans.push(p1.with_context(|| format!("checking updates for '{}'", r1.name))?);
                     plans.push(p2.with_context(|| format!("checking updates for '{}'", r2.name))?);
                     plans.push(p3.with_context(|| format!("checking updates for '{}'", r3.name))?);
+                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Finished);
+                    Self::send_update_progress(progress_tx, r2, UpdateCheckProgressStage::Finished);
+                    Self::send_update_progress(progress_tx, r3, UpdateCheckProgressStage::Finished);
                 }
                 [r1, r2, r3, r4] => {
+                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Started);
+                    Self::send_update_progress(progress_tx, r2, UpdateCheckProgressStage::Started);
+                    Self::send_update_progress(progress_tx, r3, UpdateCheckProgressStage::Started);
+                    Self::send_update_progress(progress_tx, r4, UpdateCheckProgressStage::Started);
                     let (p1, p2, p3, p4) = tokio::join!(
                         self.build_update_plan_for_repo(r1, true, wow_dir, check_mode),
                         self.build_update_plan_for_repo(r2, true, wow_dir, check_mode),
@@ -1924,6 +2065,10 @@ impl Engine {
                     plans.push(p2.with_context(|| format!("checking updates for '{}'", r2.name))?);
                     plans.push(p3.with_context(|| format!("checking updates for '{}'", r3.name))?);
                     plans.push(p4.with_context(|| format!("checking updates for '{}'", r4.name))?);
+                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Finished);
+                    Self::send_update_progress(progress_tx, r2, UpdateCheckProgressStage::Finished);
+                    Self::send_update_progress(progress_tx, r3, UpdateCheckProgressStage::Finished);
+                    Self::send_update_progress(progress_tx, r4, UpdateCheckProgressStage::Finished);
                 }
                 _ => unreachable!("chunk size is bounded to 4"),
             }
@@ -1941,50 +2086,42 @@ impl Engine {
             .await
     }
 
+    pub async fn check_updates_with_wow_skip_progress(
+        &self,
+        wow_dir: Option<&Path>,
+        check_mode: CheckMode,
+        skip_repo_ids: &HashSet<i64>,
+        progress_tx: tokio::sync::mpsc::UnboundedSender<UpdateCheckProgress>,
+    ) -> Result<Vec<UpdatePlan>> {
+        self.check_updates_with_wow_skip_inner(
+            wow_dir,
+            check_mode,
+            skip_repo_ids,
+            Some(&progress_tx),
+        )
+        .await
+    }
+
     pub async fn check_updates_with_wow_skip(
         &self,
         wow_dir: Option<&Path>,
         check_mode: CheckMode,
         skip_repo_ids: &HashSet<i64>,
     ) -> Result<Vec<UpdatePlan>> {
-        if let Some(wow_dir) = wow_dir {
-            // 1. Self-correction: Update repo name casing in DB from actual disk casing.
-            // We do this BEFORE cleanup so that cleanup knows what the "target" casing is.
-            if let Ok(repos) = self.db().list_repos() {
-                for r in repos {
-                    if matches!(r.mode, InstallMode::AddonGit) {
-                        let worktree = self.addon_git_worktree_dir(r.id, wow_dir, &r);
-                        if let Some(actual_name) = worktree.file_name().and_then(|n| n.to_str()) {
-                            let base_name = if actual_name.to_lowercase().ends_with(".repo") {
-                                &actual_name[..actual_name.len() - 5]
-                            } else {
-                                actual_name
-                            };
+        self.check_updates_with_wow_skip_inner(wow_dir, check_mode, skip_repo_ids, None)
+            .await
+    }
 
-                            if base_name != r.name && base_name.eq_ignore_ascii_case(&r.name) {
-                                let _ = self.db().update_repo_casing(r.id, &r.owner, base_name);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 2. Tidy up filesystem casing collisions (e.g. bugsack.repo vs BugSack.repo)
-            let _ = self.cleanup_casing_collisions(wow_dir);
-
-            // 3. Scan for untracked addons and dedup
-            let _ = self.import_existing_addons(wow_dir);
-            let _ = self.dedup_addon_repos_by_folder(wow_dir);
-
-            // 4. Proactive Migration from legacy hidden staging
-            if let Ok(repos) = self.db().list_repos() {
-                for r in repos {
-                    if matches!(r.mode, InstallMode::AddonGit) {
-                        let _ = self.migrate_staging_clone_if_needed(wow_dir, &r);
-                    }
-                }
-            }
-        }
+    async fn check_updates_with_wow_skip_inner(
+        &self,
+        wow_dir: Option<&Path>,
+        check_mode: CheckMode,
+        skip_repo_ids: &HashSet<i64>,
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<UpdateCheckProgress>>,
+    ) -> Result<Vec<UpdatePlan>> {
+        // Update checks must stay focused on network/version work only.
+        // Filesystem maintenance belongs to repo refresh/rescan flows; doing it here
+        // can stall startup auto-check before any per-repo progress is visible.
 
         let repos = self.db().list_repos()?;
         let mut git_repos = Vec::new();
@@ -2001,8 +2138,8 @@ impl Engine {
         }
 
         let (git_plans, release_plans) = tokio::join!(
-            self.check_updates_parallel(&git_repos, wow_dir, check_mode),
-            self.check_updates_batched(&release_repos, wow_dir, check_mode)
+            self.check_updates_parallel(&git_repos, wow_dir, check_mode, progress_tx),
+            self.check_updates_batched(&release_repos, wow_dir, check_mode, progress_tx)
         );
 
         let mut plans = Vec::with_capacity(git_repos.len() + release_repos.len());

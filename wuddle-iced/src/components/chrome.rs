@@ -4,10 +4,11 @@
 //! Functions take `&App` rather than `self` so they can live outside
 //! the main `impl App` block.
 
-use iced::widget::{button, canvas, container, row, rule, Space};
+use iced::widget::{button, canvas, container, mouse_area, row, rule, Space};
 use iced::{Element, Length};
 
 use crate::{App, Message, Tab, LIFECRAFT};
+use crate::components::helpers::tip;
 use crate::theme::{self, ThemeColors};
 use crate::components::helpers::SpinnerCanvas;
 
@@ -43,10 +44,20 @@ pub fn view_topbar<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Messag
     let spinner_el: Element<Message> = if app.is_busy() {
         let tick = app.spinner_tick;
         let primary = colors.primary;
-        canvas(SpinnerCanvas { tick, color: primary })
-            .width(26)
-            .height(26)
-            .into()
+        tip(
+            mouse_area(
+                container(
+                    canvas(SpinnerCanvas { tick, color: primary })
+                        .width(26)
+                        .height(26)
+                )
+                .width(26)
+                .height(26)
+            ),
+            &app.busy_tooltip(),
+            iced::widget::tooltip::Position::Bottom,
+            colors,
+        )
     } else {
         Space::new().width(26).height(26).into()
     };
