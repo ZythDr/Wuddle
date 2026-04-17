@@ -489,13 +489,30 @@ impl Engine {
             let target = components[i].as_os_str().to_string_lossy();
             let mut found = false;
             if let Ok(entries) = fs::read_dir(&current) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    if name.to_string_lossy().eq_ignore_ascii_case(&target) {
-                        current.push(name);
-                        found = true;
-                        break;
-                    }
+                let mut matches: Vec<_> = entries
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(&target))
+                    .map(|e| e.file_name())
+                    .collect();
+
+                if !matches.is_empty() {
+                    // Casing Preference: Always prefer exact match (if any), then
+                    // prefer the one with uppercase letters (GAM style).
+                    matches.sort_by(|a, b| {
+                        let na = a.to_string_lossy();
+                        let nb = b.to_string_lossy();
+                        let ua = na.chars().any(|c| c.is_uppercase());
+                        let ub = nb.chars().any(|c| c.is_uppercase());
+                        if ua && !ub {
+                            std::cmp::Ordering::Less
+                        } else if !ua && ub {
+                            std::cmp::Ordering::Greater
+                        } else {
+                            na.cmp(&nb)
+                        }
+                    });
+                    current.push(&matches[0]);
+                    found = true;
                 }
             }
             if !found {
@@ -977,46 +994,75 @@ impl Engine {
         Ok(removed)
     }
 
-    /// Update repository naming capitalization by checking .toc files or folder
-    /// names on disk. If a repo's name is all-lowercase (legacy from v4
-    /// migration) but is found on disk with better casing, update the DB.
-    pub fn fix_repo_casing_from_disk(&self, wow_dir: &Path) -> Result<usize> {
+    /// Tidies up filesystem casing discrepancies on case-sensitive filesystems.
+    /// If multiple folders exist that match case-insensitively (e.g., 'bugsack.repo'
+    /// and 'BugSack.repo'), this will delete the legacy all-lowercase one if it
+    /// collision matches a tracked repo. If only one folder exists but its casing
+    /// is incorrect compared to the DB, it renames it.
+    pub fn cleanup_casing_collisions(&self, wow_dir: &Path) -> Result<usize> {
+        let base = wow_dir.join("Interface").join("AddOns");
+        if !base.is_dir() {
+            return Ok(0);
+        }
+
         let repos = self.db.list_repos()?;
-        let mut updated = 0;
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        if let Ok(entries) = fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                groups.entry(name.to_lowercase()).or_default().push(path);
+            }
+        }
 
-        let has_upper = |s: &str| s.chars().any(|c| c.is_uppercase());
-        let is_lower = |s: &str| s == s.to_lowercase() && s.chars().any(|c| c.is_alphabetic());
-
-        for repo in repos {
-            // Only attempt fix if name looks lowercased.
-            if !is_lower(&repo.name) {
+        let mut cleaned = 0;
+        for r in repos {
+            if !matches!(r.mode, InstallMode::AddonGit) {
                 continue;
             }
 
-            let installs = self.db.list_installs(repo.id)?;
-            for entry in installs {
-                if entry.kind != "addon" {
-                    continue;
-                }
-                let full = match Self::resolve_install_path(&entry.path, Some(wow_dir)) {
-                    Some(p) => p,
-                    None => continue,
-                };
-                if !full.is_dir() {
-                    continue;
-                }
+            // Check both base name and .repo suffix
+            let names_to_check = vec![r.name.clone(), format!("{}.repo", r.name)];
 
-                // Check folder name for Repo Name fix
-                if let Some(folder_name) = full.file_name().and_then(|s| s.to_str()) {
-                    if folder_name.eq_ignore_ascii_case(&repo.name) && has_upper(folder_name) {
-                        let _ = self.db.update_repo_casing(repo.id, &repo.owner, folder_name);
-                        updated += 1;
-                        break;
+            for target_name in names_to_check {
+                let lc_target = target_name.to_lowercase();
+                let Some(paths) = groups.get(&lc_target) else {
+                    continue;
+                };
+
+                if paths.len() > 1 {
+                    // Collision! (e.g. ["bugsack.repo", "BugSack.repo"])
+                    for p in paths {
+                        let actual_name = p.file_name().unwrap().to_string_lossy();
+                        if actual_name != target_name {
+                            // This is a "wrong" casing and we have a collision. Delete it.
+                            // (Safely: only if it looks like a repo folder).
+                            if actual_name.to_lowercase().ends_with(".repo")
+                                || actual_name.to_lowercase().ends_with(".git")
+                                || Self::has_local_git_marker(p)
+                            {
+                                let _ = fs::remove_dir_all(p);
+                                cleaned += 1;
+                            }
+                        }
+                    }
+                } else if paths.len() == 1 {
+                    // No collision, but check if casing is wrong.
+                    let p = &paths[0];
+                    let actual_name = p.file_name().unwrap().to_string_lossy();
+                    if actual_name != target_name {
+                        // Only one exists but it has wrong casing. Rename it to match the DB/Forge casing.
+                        let target_path = base.join(&target_name);
+                        let _ = fs::rename(p, target_path);
+                        cleaned += 1;
                     }
                 }
             }
         }
-        Ok(updated)
+        Ok(cleaned)
     }
 
     /// Remove repos from the database whose installed files no longer exist
@@ -1675,16 +1721,11 @@ impl Engine {
 
     pub async fn check_updates_with_wow_skip(&self, wow_dir: Option<&Path>, check_mode: CheckMode, skip_repo_ids: &HashSet<i64>) -> Result<Vec<UpdatePlan>> {
         if let Some(wow_dir) = wow_dir {
-            let _ = self.import_existing_addons(wow_dir);
-            let _ = self.dedup_addon_repos_by_folder(wow_dir);
-            
+            // 1. Self-correction: Update repo name casing in DB from actual disk casing.
+            // We do this BEFORE cleanup so that cleanup knows what the "target" casing is.
             if let Ok(repos) = self.db.list_repos() {
                 for r in repos {
                     if matches!(r.mode, InstallMode::AddonGit) {
-                        // 1. Proactive Migration from legacy hidden staging
-                        let _ = self.migrate_staging_clone_if_needed(wow_dir, &r);
-                        
-                        // 2. Self-correction: Update repo name casing in DB from actual disk casing.
                         let worktree = self.addon_git_worktree_dir(r.id, wow_dir, &r);
                         if let Some(actual_name) = worktree.file_name().and_then(|n| n.to_str()) {
                             let base_name = if actual_name.to_lowercase().ends_with(".repo") {
@@ -1697,6 +1738,22 @@ impl Engine {
                                 let _ = self.db.update_repo_casing(r.id, &r.owner, base_name);
                             }
                         }
+                    }
+                }
+            }
+
+            // 2. Tidy up filesystem casing collisions (e.g. bugsack.repo vs BugSack.repo)
+            let _ = self.cleanup_casing_collisions(wow_dir);
+
+            // 3. Scan for untracked addons and dedup
+            let _ = self.import_existing_addons(wow_dir);
+            let _ = self.dedup_addon_repos_by_folder(wow_dir);
+
+            // 4. Proactive Migration from legacy hidden staging
+            if let Ok(repos) = self.db.list_repos() {
+                for r in repos {
+                    if matches!(r.mode, InstallMode::AddonGit) {
+                        let _ = self.migrate_staging_clone_if_needed(wow_dir, &r);
                     }
                 }
             }
