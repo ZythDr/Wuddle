@@ -1678,14 +1678,24 @@ impl Engine {
             let _ = self.import_existing_addons(wow_dir);
             let _ = self.dedup_addon_repos_by_folder(wow_dir);
             
-            // Proactive Migration: Scan the legacy hidden staging area on disk and 
-            // move anything found to the standard direct location.
-            let legacy_root = wow_dir.join("Interface").join("AddOns").join(".wuddle").join("addon_git");
-            if legacy_root.is_dir() {
-                if let Ok(repos) = self.db.list_repos() {
-                    for r in repos {
-                        if matches!(r.mode, InstallMode::AddonGit) {
-                            let _ = self.migrate_staging_clone_if_needed(wow_dir, &r);
+            if let Ok(repos) = self.db.list_repos() {
+                for r in repos {
+                    if matches!(r.mode, InstallMode::AddonGit) {
+                        // 1. Proactive Migration from legacy hidden staging
+                        let _ = self.migrate_staging_clone_if_needed(wow_dir, &r);
+                        
+                        // 2. Self-correction: Update repo name casing in DB from actual disk casing.
+                        let worktree = self.addon_git_worktree_dir(r.id, wow_dir, &r);
+                        if let Some(actual_name) = worktree.file_name().and_then(|n| n.to_str()) {
+                            let base_name = if actual_name.to_lowercase().ends_with(".repo") {
+                                &actual_name[..actual_name.len() - 5]
+                            } else {
+                                actual_name
+                            };
+
+                            if base_name != r.name && base_name.eq_ignore_ascii_case(&r.name) {
+                                let _ = self.db.update_repo_casing(r.id, &r.owner, base_name);
+                            }
                         }
                     }
                 }
