@@ -143,8 +143,15 @@ fn should_skip_adaptive(
 }
 
 pub struct Engine {
-    db: Db,
+    db: std::sync::Mutex<Db>,
     client: Client,
+    db_path: PathBuf,
+}
+
+impl Clone for Engine {
+    fn clone(&self) -> Self {
+        Self::open(&self.db_path).expect("Failed to clone Engine (re-open DB)")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -218,8 +225,9 @@ pub fn github_token() -> Option<String> {
 impl Engine {
     pub fn open(db_path: &Path) -> Result<Self> {
         Ok(Self {
-            db: Db::open(db_path)?,
+            db: std::sync::Mutex::new(Db::open(db_path)?),
             client: Client::builder().user_agent("wuddle-engine").build()?,
+            db_path: db_path.to_path_buf(),
         })
     }
 
@@ -228,8 +236,8 @@ impl Engine {
         Self::open(&db_path)
     }
 
-    pub fn db(&self) -> &Db {
-        &self.db
+    pub fn db(&self) -> std::sync::MutexGuard<'_, Db> {
+        self.db.lock().expect("DB mutex poisoned")
     }
 
     pub fn add_repo(
@@ -239,8 +247,11 @@ impl Engine {
         asset_regex: Option<String>,
     ) -> Result<i64> {
         let det = detect_repo(url)?;
-        if let Ok(Some(existing)) = self.db.find_repo_by_identity(&det.host, &det.owner, &det.name) {
-             return Ok(existing.id);
+        if let Ok(Some(existing)) = self
+            .db()
+            .find_repo_by_identity(&det.host, &det.owner, &det.name)
+        {
+            return Ok(existing.id);
         }
         let is_addon_git = matches!(&mode, InstallMode::AddonGit);
 
@@ -270,7 +281,7 @@ impl Engine {
             pinned_version: None,
         };
 
-        self.db.add_repo(&repo)
+        self.db().add_repo(&repo)
     }
 
     pub async fn probe_addon_repo_conflicts(
@@ -309,7 +320,7 @@ impl Engine {
         for addon_name in &addon_names {
             let target_path = wow_dir.join("Interface").join("AddOns").join(addon_name);
             let manifest_path = Self::to_manifest_path(&target_path, wow_dir);
-            let owners = self.db.find_addon_install_owners(&manifest_path, None)?;
+            let owners = self.db().find_addon_install_owners(&manifest_path, None)?;
             let has_local_conflict = Self::path_has_conflicting_content(&target_path);
             if owners.is_empty() && !has_local_conflict {
                 continue;
@@ -491,7 +502,11 @@ impl Engine {
             if let Ok(entries) = fs::read_dir(&current) {
                 let mut matches: Vec<_> = entries
                     .flatten()
-                    .filter(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(&target))
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case(&target)
+                    })
                     .map(|e| e.file_name())
                     .collect();
 
@@ -540,7 +555,7 @@ impl Engine {
             None => return Ok(false),
         };
 
-        let entries = self.db.list_installs(repo_id)?;
+        let entries = self.db().list_installs(repo_id)?;
         if entries.is_empty() {
             return Ok(false);
         }
@@ -574,7 +589,7 @@ impl Engine {
             Some(p) => p,
             None => return false,
         };
-        let entries = match self.db.list_installs(repo_id) {
+        let entries = match self.db().list_installs(repo_id) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -603,7 +618,7 @@ impl Engine {
 
     fn addon_git_worktree_dir(&self, repo_id: i64, wow_dir: &Path, repo: &Repo) -> PathBuf {
         // 1. Check DB install entries for an existing valid git repo on disk.
-        if let Ok(entries) = self.db.list_installs(repo_id) {
+        if let Ok(entries) = self.db().list_installs(repo_id) {
             for entry in entries {
                 let Some(full) = Self::resolve_install_path(&entry.path, Some(wow_dir)) else {
                     continue;
@@ -619,7 +634,7 @@ impl Engine {
         // 2. Fallback: Check standard locations (Interface/AddOns/{name} and {name}.repo)
         let name = repo.name.clone();
         let base = wow_dir.join("Interface").join("AddOns");
-        
+
         let primary_name = name.clone();
         let primary = base.join(&primary_name);
         if let Some(actual) = Self::find_actual_case(&primary) {
@@ -637,7 +652,6 @@ impl Engine {
 
         primary
     }
-
 
     fn repo_key(host: &str, owner: &str, name: &str) -> String {
         format!(
@@ -741,7 +755,7 @@ impl Engine {
             return Ok(0);
         }
 
-        let existing = self.db.list_repos()?;
+        let existing = self.db().list_repos()?;
         // Map lowercase repo key -> Repo ID and Repo Name for existence check
         let mut known_repos: HashMap<String, (i64, String)> = existing
             .into_iter()
@@ -752,7 +766,9 @@ impl Engine {
             .collect();
 
         // Track addon folder paths already claimed by any repo, case-insensitively.
-        let mut claimed_paths = self.db.all_addon_install_paths()?
+        let mut claimed_paths = self
+            .db()
+            .all_addon_install_paths()?
             .into_iter()
             .map(|s| s.to_lowercase())
             .collect::<HashSet<_>>();
@@ -791,11 +807,13 @@ impl Engine {
                     if let Some(remote_raw) = Self::local_repo_remote_url(&repo) {
                         if let Some(remote_url) = Self::normalize_git_remote_url(&remote_raw) {
                             if let Ok(det) = detect_repo(&remote_url) {
-                                let key = Self::repo_key(&det.host, &det.owner, &det.name).to_lowercase();
+                                let key =
+                                    Self::repo_key(&det.host, &det.owner, &det.name).to_lowercase();
                                 if !known_repos.contains_key(&key) {
                                     let detected_addons = install::detect_addons_in_tree(&root);
                                     if !detected_addons.is_empty() {
-                                        let branch = Self::local_repo_branch(&repo).unwrap_or_else(|| "master".to_string());
+                                        let branch = Self::local_repo_branch(&repo)
+                                            .unwrap_or_else(|| "master".to_string());
                                         let short_oid = Self::local_repo_short_oid(&repo);
                                         let full_oid = Self::local_repo_oid(&repo);
 
@@ -821,14 +839,15 @@ impl Engine {
                                             pinned_version: None,
                                         };
 
-                                        if let Ok(id) = self.db.add_repo(&tracked) {
+                                        if let Ok(id) = self.db().add_repo(&tracked) {
                                             tracked.id = id;
                                             known_repos.insert(key, (id, tracked.name));
                                             imported += 1;
                                             for (_src, name) in detected_addons {
                                                 let p = addons_root.join(&name);
                                                 let m = Self::to_manifest_path(&p, wow_dir);
-                                                let _ = self.db.add_install(id, &m, "addon", None);
+                                                let _ =
+                                                    self.db().add_install(id, &m, "addon", None);
                                                 claimed_paths.insert(m.to_lowercase());
                                             }
                                         }
@@ -853,7 +872,7 @@ impl Engine {
                 if let Some((id, existing_name)) = known_repos.get(&key) {
                     if existing_name != &folder_name {
                         // Casing changed! Update repo name in DB to match disk.
-                        let _ = self.db.update_repo_casing(*id, "", &folder_name);
+                        let _ = self.db().update_repo_casing(*id, "", &folder_name);
                     }
                     continue;
                 }
@@ -880,12 +899,12 @@ impl Engine {
                     pinned_version: None,
                 };
 
-                if let Ok(id) = self.db.add_repo(&tracked) {
+                if let Ok(id) = self.db().add_repo(&tracked) {
                     imported += 1;
                     for (_src, name) in detected_addons {
                         let p = addons_root.join(&name);
                         let m = Self::to_manifest_path(&p, wow_dir);
-                        let _ = self.db.add_install(id, &m, "addon", None);
+                        let _ = self.db().add_install(id, &m, "addon", None);
                         claimed_paths.insert(m.to_lowercase());
                     }
                 }
@@ -895,12 +914,11 @@ impl Engine {
         Ok(imported)
     }
 
-
     /// Remove duplicate addon_git repos that share the same on-disk addon
     /// folders. Keeps the repo whose git remote matches what's actually
     /// cloned on disk; removes the other(s).
     pub fn dedup_addon_repos_by_folder(&self, wow_dir: &Path) -> Result<usize> {
-        let repos = self.db.list_repos()?;
+        let repos = self.db().list_repos()?;
         let addon_repos: Vec<&Repo> = repos
             .iter()
             .filter(|r| matches!(r.mode, InstallMode::AddonGit))
@@ -912,7 +930,7 @@ impl Engine {
         // Map each addon install path → list of repo ids that claim it.
         let mut path_to_repos: HashMap<String, Vec<i64>> = HashMap::new();
         for r in &addon_repos {
-            let installs = self.db.list_installs(r.id)?;
+            let installs = self.db().list_installs(r.id)?;
             for entry in installs {
                 if entry.kind != "addon" {
                     continue;
@@ -988,7 +1006,7 @@ impl Engine {
         let mut removed = 0usize;
         for repo_id in to_remove {
             // Only remove tracking, don't delete files (the real repo still owns them).
-            self.db.remove_repo(repo_id)?;
+            self.db().remove_repo(repo_id)?;
             removed += 1;
         }
         Ok(removed)
@@ -1005,7 +1023,7 @@ impl Engine {
             return Ok(0);
         }
 
-        let repos = self.db.list_repos()?;
+        let repos = self.db().list_repos()?;
         let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
         if let Ok(entries) = fs::read_dir(&base) {
             for entry in entries.flatten() {
@@ -1062,92 +1080,195 @@ impl Engine {
                 }
             }
         }
-        let mut repaired = 0;
-        if let Ok(entries) = fs::read_dir(&base) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let meta = match fs::symlink_metadata(&path) {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                if !meta.file_type().is_symlink() {
-                    continue;
-                }
-
-                // If symlink is broken, try to find the target with actual casing.
-                if !path.exists() {
-                    if let Ok(target) = fs::read_link(&path) {
-                        let parent = path.parent().unwrap();
-                        let target_path = parent.join(&target);
-                        if let Some(actual) = Self::find_actual_case(&target_path) {
-                            if actual != target_path {
-                                let _ = fs::remove_file(&path);
-                                let new_target = if target.is_absolute() {
-                                    actual
-                                } else {
-                                    actual
-                                        .strip_prefix(parent)
-                                        .map(|p| p.to_path_buf())
-                                        .unwrap_or(actual)
-                                };
-
-                                #[cfg(unix)]
-                                let _ = std::os::unix::fs::symlink(&new_target, &path);
-
-                                #[cfg(windows)]
-                                {
-                                    if actual.is_dir() {
-                                        let _ = std::os::windows::fs::symlink_dir(&new_target, &path);
-                                    } else {
-                                        let _ = std::os::windows::fs::symlink_file(&new_target, &path);
-                                    }
-                                }
-                                repaired += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(cleaned + repaired)
+        Ok(cleaned)
     }
 
-    /// Scans all tracked repos and fixes their install entries if they point to
-    /// paths that no longer exist but CAN be found with different casing.
-    /// This resolves "Repair Needed" states caused by Wuddle renaming legacy
-    /// all-lowercase folders to match proper GAM casing.
-    pub fn repair_broken_installations(&self, wow_dir: &Path) -> Result<usize> {
-        let repos = self.db.list_repos()?;
+    /// Targeted repair for Git-based addons. Verifies all tracked symlinks and
+    /// recreates them if they are broken (e.g. due to casing-induced target renames).
+    pub fn repair_git_addon_symlinks(&self, wow_dir: &Path) -> Result<usize> {
+        let repos = self.db().list_repos()?;
         let mut repaired = 0;
-        for r in &repos {
-            if !r.enabled {
+
+        for r in repos {
+            if !r.enabled || !matches!(r.mode, InstallMode::AddonGit) {
                 continue;
             }
-            let installs = self.db.list_installs(r.id)?;
-            let mut changed = false;
+
+            // 1. Find the actual worktree directory (handles casing)
+            let worktree_dir = self.addon_git_worktree_dir(r.id, wow_dir, &r);
+            if !worktree_dir.is_dir() {
+                continue;
+            }
+
+            // 2. List tracked installs for this repo
+            let installs = self.db().list_installs(r.id)?;
+            let mut detected: Option<Vec<(PathBuf, String)>> = None;
+
             for entry in installs {
-                let full = match Self::resolve_install_path(&entry.path, Some(wow_dir)) {
+                if entry.kind != "addon" {
+                    continue;
+                }
+                let full_link_path = match Self::resolve_install_path(&entry.path, Some(wow_dir)) {
                     Some(p) => p,
                     None => continue,
                 };
 
-                if !full.exists() {
-                    // Try to find it with actual casing
-                    if let Some(actual) = Self::find_actual_case(&full) {
-                        let new_rel = Self::to_manifest_path(&actual, wow_dir);
-                        if new_rel != entry.path {
-                            let _ = self.db.update_install_path(r.id, &entry.path, &new_rel);
-                            changed = true;
+                // If it's the worktree itself (single folder), no symlink to repair
+                if full_link_path == worktree_dir {
+                    continue;
+                }
+
+                // Check if the symlink is broken OR completely missing
+                let is_broken = match fs::symlink_metadata(&full_link_path) {
+                    Ok(m) => {
+                        (m.file_type().is_symlink() && !full_link_path.exists())
+                            || !full_link_path.exists()
+                    }
+                    Err(_) => true, // Missing entirely
+                };
+
+                if is_broken {
+                    // Try to repair! We need to find where this addon is in the repo.
+                    let addon_name = full_link_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+
+                    if detected.is_none() {
+                        detected = Some(install::detect_addons_in_tree(&worktree_dir));
+                    }
+
+                    if let Some(ref det) = detected {
+                        // Use case-insensitive matching to find the correct folder
+                        if let Some((src, actual_toc_name)) = det
+                            .iter()
+                            .find(|(_, name)| name.eq_ignore_ascii_case(addon_name))
+                        {
+                            println!(
+                                "[Wuddle] Repairing broken symlink: {} -> {:?}",
+                                addon_name, src
+                            );
+                            // Found it! Re-install symlink.
+                            let _ = fs::remove_file(&full_link_path);
+                            let _ = fs::remove_dir_all(&full_link_path);
+
+                            if src == &worktree_dir {
+                                // Root is the addon
+                                let _ = install::install_addon_folder(
+                                    &src,
+                                    wow_dir,
+                                    actual_toc_name,
+                                    InstallOptions {
+                                        use_symlinks: true,
+                                        ..Default::default()
+                                    },
+                                    "Wuddle Repair",
+                                );
+                            } else {
+                                // Subfolder is the addon
+                                let sub_name =
+                                    src.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                                let _ = install::link_addon_subfolder(
+                                    &worktree_dir,
+                                    sub_name,
+                                    &full_link_path,
+                                );
+                            }
+                            repaired += 1;
                         }
                     }
                 }
             }
-            if changed {
-                repaired += 1;
-            }
+        }
+        if repaired > 0 {
+            println!("[Wuddle] Repaired {} broken symlinks.", repaired);
         }
         Ok(repaired)
+    }
+
+    /// Unified repair entry point. Performs casing cleanup and then triggers
+    /// the deep repair flow for any broken installations.
+    pub async fn repair_broken_installations(&self, wow_dir: &Path) -> Result<usize> {
+        let mut fixed = 0;
+
+        // 1 & 2. Cheap local repairs: casing sync and symlink restoration.
+        // These are offloaded to spawn_blocking because they perform heavy synchronous I/O.
+        let eng_clone = self.clone();
+        let wow_dir_buf = wow_dir.to_path_buf();
+        let cheap_fixed = tokio::task::spawn_blocking(move || {
+            let mut f = 0;
+
+            // Sync DB casing
+            let installs = eng_clone.db().list_all_installs_full()?;
+            for (repo_id, entry) in installs {
+                let full = match Self::resolve_install_path(&entry.path, Some(&wow_dir_buf)) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if let Some(actual) = Self::find_actual_case(&full) {
+                    let new_rel = actual
+                        .strip_prefix(&wow_dir_buf)
+                        .unwrap_or(&actual)
+                        .to_path_buf();
+                    let new_rel_str = new_rel.to_str().unwrap_or("");
+                    if new_rel_str != entry.path {
+                        println!(
+                            "[Wuddle] Syncing DB path casing: {:?} -> {:?}",
+                            entry.path, new_rel_str
+                        );
+                        let _ =
+                            eng_clone
+                                .db()
+                                .update_install_path(repo_id, &entry.path, new_rel_str);
+                        f += 1;
+                    }
+                }
+            }
+
+            // Repair Git symlinks (local folders)
+            f += eng_clone.repair_git_addon_symlinks(&wow_dir_buf)?;
+
+            Ok::<usize, anyhow::Error>(f)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Repair worker failed: {}", e))??;
+
+        fixed += cheap_fixed;
+
+        // 3. Selective Authority repair: ONLY if files are missing from disk.
+        // We identify needing_repair repos first using a cheap local check.
+        let repos = self.db().list_repos()?;
+        let mut needing_repair = Vec::new();
+        for r in repos {
+            if !r.enabled {
+                continue;
+            }
+            if self.has_missing_targets(r.id, Some(wow_dir))? {
+                needing_repair.push(r);
+            }
+        }
+
+        if !needing_repair.is_empty() {
+            println!("[Wuddle] Detected missing files for {} repo(s), performing authoritative repair...", needing_repair.len());
+            // Use batched check (parallel with limited burst) to build repair plans efficiently.
+            let plans = self
+                .check_updates_batched(&needing_repair, Some(wow_dir), CheckMode::Force)
+                .await?;
+            for plan in plans {
+                if plan.repair_needed {
+                    println!(
+                        "[Wuddle] Auto-repairing repo (authoritative): {}",
+                        plan.name
+                    );
+                    let mut opts = InstallOptions::default();
+                    opts.use_symlinks = true;
+                    let _ = self.apply_one(&plan, wow_dir, None, opts).await;
+                    fixed += 1;
+                }
+            }
+        }
+
+        Ok(fixed)
     }
 
     /// Remove repos from the database whose installed files no longer exist
@@ -1158,11 +1279,11 @@ impl Engine {
     /// an existing path, OR when it has no install entries at all and is not
     /// a manually-added (non-addon_git) repo that was never installed.
     pub fn prune_missing_repos(&self, wow_dir: &Path) -> Result<usize> {
-        let repos = self.db.list_repos()?;
+        let repos = self.db().list_repos()?;
         let mut pruned = 0usize;
 
         for repo in &repos {
-            let entries = match self.db.list_installs(repo.id) {
+            let entries = match self.db().list_installs(repo.id) {
                 Ok(e) => e,
                 Err(_) => continue,
             };
@@ -1176,14 +1297,20 @@ impl Engine {
                     // Check if the git worktree still exists
                     let worktree = self.addon_git_worktree_dir(repo.id, wow_dir, repo);
                     if !worktree.is_dir() {
-                        eprintln!("[prune] removing addon_git '{}' (no worktree at {:?})", repo.name, worktree);
-                        self.db.remove_repo(repo.id)?;
+                        eprintln!(
+                            "[prune] removing addon_git '{}' (no worktree at {:?})",
+                            repo.name, worktree
+                        );
+                        self.db().remove_repo(repo.id)?;
                         pruned += 1;
                     }
                 } else if matches!(repo.mode, InstallMode::Manual) {
                     // Manual repos with no installs are likely orphans or metadata
-                    eprintln!("[prune] removing manual repo '{}' — no valid addon folders found inside", repo.name);
-                    self.db.remove_repo(repo.id)?;
+                    eprintln!(
+                        "[prune] removing manual repo '{}' — no valid addon folders found inside",
+                        repo.name
+                    );
+                    self.db().remove_repo(repo.id)?;
                     pruned += 1;
                 }
                 continue;
@@ -1201,8 +1328,13 @@ impl Engine {
                         if let Ok(rel) = actual.strip_prefix(wow_dir) {
                             let new_path = Self::normalize_rel_path(rel);
                             if new_path != entry.path {
-                                eprintln!("[prune] '{}' casing changed: '{}' -> '{}'", repo.name, entry.path, new_path);
-                                let _ = self.db.update_install_path(repo.id, &entry.path, &new_path);
+                                eprintln!(
+                                    "[prune] '{}' casing changed: '{}' -> '{}'",
+                                    repo.name, entry.path, new_path
+                                );
+                                let _ =
+                                    self.db()
+                                        .update_install_path(repo.id, &entry.path, &new_path);
                             }
                             exists = true;
                         }
@@ -1212,18 +1344,25 @@ impl Engine {
                 if exists {
                     any_present = true;
                 } else {
-                    eprintln!("[prune] '{}' install entry '{}' -> {:?} exists=false", repo.name, entry.path, resolved);
+                    eprintln!(
+                        "[prune] '{}' install entry '{}' -> {:?} exists=false",
+                        repo.name, entry.path, resolved
+                    );
                 }
             }
 
-            let is_metadata = repo.name.to_lowercase().ends_with(".repo") || repo.name.to_lowercase().ends_with(".git");
+            let is_metadata = repo.name.to_lowercase().ends_with(".repo")
+                || repo.name.to_lowercase().ends_with(".git");
             let mut force_prune = matches!(repo.mode, InstallMode::Manual) && is_metadata;
 
             // Strict TOC check for Manual repos: MUST have a .toc at the root.
             if !force_prune && matches!(repo.mode, InstallMode::Manual) {
                 let repo_root = wow_dir.join("Interface").join("AddOns").join(&repo.name);
                 if install::detect_single_addon_folder(&repo_root).is_none() {
-                    eprintln!("[prune] removing manual repo '{}' — no .toc file found at root", repo.name);
+                    eprintln!(
+                        "[prune] removing manual repo '{}' — no .toc file found at root",
+                        repo.name
+                    );
                     force_prune = true;
                 }
             }
@@ -1232,9 +1371,13 @@ impl Engine {
                 if force_prune {
                     eprintln!("[prune] removing manual metadata repo '{}'", repo.name);
                 } else {
-                    eprintln!("[prune] removing '{}' ({}) — no install entries found on disk", repo.name, repo.mode.as_str());
+                    eprintln!(
+                        "[prune] removing '{}' ({}) — no install entries found on disk",
+                        repo.name,
+                        repo.mode.as_str()
+                    );
                 }
-                self.db.remove_repo(repo.id)?;
+                self.db().remove_repo(repo.id)?;
                 pruned += 1;
             }
         }
@@ -1440,7 +1583,12 @@ impl Engine {
         }
 
         // Adaptive update frequency: skip repos with old releases to conserve API quota.
-        if should_skip_adaptive(check_mode, r.published_at_unix, Self::now_unix(), Self::has_github_token()) {
+        if should_skip_adaptive(
+            check_mode,
+            r.published_at_unix,
+            Self::now_unix(),
+            Self::has_github_token(),
+        ) {
             let mut p = Self::blank_plan(r);
             p.not_modified = true;
             return Ok(p);
@@ -1463,12 +1611,12 @@ impl Engine {
 
         if det.kind == ForgeKind::GitHub {
             if Self::has_github_token() {
-                let _ = self.db.clear_rate_limit(&r.host);
-            } else if let Some(reset_epoch) = self.db.get_rate_limit(&r.host)? {
+                let _ = self.db().clear_rate_limit(&r.host);
+            } else if let Some(reset_epoch) = self.db().get_rate_limit(&r.host)? {
                 if now < reset_epoch {
                     return Ok(Self::rate_limited_plan(r, reset_epoch));
                 }
-                let _ = self.db.clear_rate_limit(&r.host);
+                let _ = self.db().clear_rate_limit(&r.host);
             }
         }
 
@@ -1487,7 +1635,7 @@ impl Engine {
                         let msg = e.to_string();
                         if det.kind == ForgeKind::GitHub {
                             if let Some(reset_epoch) = Self::parse_github_reset_epoch(&msg) {
-                                let _ = self.db.set_rate_limit(&r.host, reset_epoch);
+                                let _ = self.db().set_rate_limit(&r.host, reset_epoch);
                                 return Ok(Self::rate_limited_plan(r, reset_epoch));
                             }
                         }
@@ -1498,10 +1646,10 @@ impl Engine {
                 };
 
             if let Some(ref et) = new_etag {
-                let _ = self.db.update_etag(r.id, Some(et.as_str()));
+                let _ = self.db().update_etag(r.id, Some(et.as_str()));
             }
             if det.kind == ForgeKind::GitHub {
-                let _ = self.db.clear_rate_limit(&r.host);
+                let _ = self.db().clear_rate_limit(&r.host);
             }
 
             if not_modified {
@@ -1544,7 +1692,7 @@ impl Engine {
             match rel_opt {
                 Some(x) => {
                     if let Some(pub_at) = x.published_at {
-                        let _ = self.db.set_published_at(r.id, Some(pub_at));
+                        let _ = self.db().set_published_at(r.id, Some(pub_at));
                     }
                     break x;
                 }
@@ -1588,9 +1736,10 @@ impl Engine {
         // Collect ALL .dll assets for repos that publish individual DLL files (e.g. WeirdUtils).
         // Applies to Dll mode always, and to Auto/Mixed when no zip asset is present (a zip
         // would bundle all the DLLs itself, so we only need the zip in that case).
-        let has_zip_asset = target_rel.assets.iter().any(|a| {
-            a.name.to_lowercase().ends_with(".zip") && Self::is_asset_allowed(a, &mode)
-        });
+        let has_zip_asset = target_rel
+            .assets
+            .iter()
+            .any(|a| a.name.to_lowercase().ends_with(".zip") && Self::is_asset_allowed(a, &mode));
         let collect_all_dlls = matches!(mode, InstallMode::Dll)
             || (!has_zip_asset && matches!(mode, InstallMode::Auto | InstallMode::Mixed));
         let all_dll_assets: Vec<ReleaseAsset> = if collect_all_dlls {
@@ -1598,8 +1747,7 @@ impl Engine {
                 .assets
                 .iter()
                 .filter(|a| {
-                    a.name.to_lowercase().ends_with(".dll")
-                        && Self::is_asset_allowed(a, &mode)
+                    a.name.to_lowercase().ends_with(".dll") && Self::is_asset_allowed(a, &mode)
                 })
                 .cloned()
                 .collect()
@@ -1642,11 +1790,13 @@ impl Engine {
         // next check re-fetches the release instead of getting a 304 (which would
         // incorrectly report "up to date" while the update remains uninstalled).
         if needs_download {
-            let _ = self.db.update_etag(r.id, None);
+            let _ = self.db().update_etag(r.id, None);
         }
 
         // DLL count detection — count currently installed DLLs vs new release DLLs.
-        let previous_dll_count = self.db.list_installs(r.id)
+        let previous_dll_count = self
+            .db()
+            .list_installs(r.id)
             .map(|entries| entries.iter().filter(|e| e.kind == "dll").count())
             .unwrap_or(0);
         // New count = primary asset (if DLL) + extra DLL assets.
@@ -1750,12 +1900,8 @@ impl Engine {
                         self.build_update_plan_for_repo(r1, true, wow_dir, check_mode),
                         self.build_update_plan_for_repo(r2, true, wow_dir, check_mode)
                     );
-                    plans.push(
-                        p1.with_context(|| format!("checking updates for '{}'", r1.name))?,
-                    );
-                    plans.push(
-                        p2.with_context(|| format!("checking updates for '{}'", r2.name))?,
-                    );
+                    plans.push(p1.with_context(|| format!("checking updates for '{}'", r1.name))?);
+                    plans.push(p2.with_context(|| format!("checking updates for '{}'", r2.name))?);
                 }
                 [r1, r2, r3] => {
                     let (p1, p2, p3) = tokio::join!(
@@ -1763,15 +1909,9 @@ impl Engine {
                         self.build_update_plan_for_repo(r2, true, wow_dir, check_mode),
                         self.build_update_plan_for_repo(r3, true, wow_dir, check_mode)
                     );
-                    plans.push(
-                        p1.with_context(|| format!("checking updates for '{}'", r1.name))?,
-                    );
-                    plans.push(
-                        p2.with_context(|| format!("checking updates for '{}'", r2.name))?,
-                    );
-                    plans.push(
-                        p3.with_context(|| format!("checking updates for '{}'", r3.name))?,
-                    );
+                    plans.push(p1.with_context(|| format!("checking updates for '{}'", r1.name))?);
+                    plans.push(p2.with_context(|| format!("checking updates for '{}'", r2.name))?);
+                    plans.push(p3.with_context(|| format!("checking updates for '{}'", r3.name))?);
                 }
                 [r1, r2, r3, r4] => {
                     let (p1, p2, p3, p4) = tokio::join!(
@@ -1780,18 +1920,10 @@ impl Engine {
                         self.build_update_plan_for_repo(r3, true, wow_dir, check_mode),
                         self.build_update_plan_for_repo(r4, true, wow_dir, check_mode)
                     );
-                    plans.push(
-                        p1.with_context(|| format!("checking updates for '{}'", r1.name))?,
-                    );
-                    plans.push(
-                        p2.with_context(|| format!("checking updates for '{}'", r2.name))?,
-                    );
-                    plans.push(
-                        p3.with_context(|| format!("checking updates for '{}'", r3.name))?,
-                    );
-                    plans.push(
-                        p4.with_context(|| format!("checking updates for '{}'", r4.name))?,
-                    );
+                    plans.push(p1.with_context(|| format!("checking updates for '{}'", r1.name))?);
+                    plans.push(p2.with_context(|| format!("checking updates for '{}'", r2.name))?);
+                    plans.push(p3.with_context(|| format!("checking updates for '{}'", r3.name))?);
+                    plans.push(p4.with_context(|| format!("checking updates for '{}'", r4.name))?);
                 }
                 _ => unreachable!("chunk size is bounded to 4"),
             }
@@ -1800,15 +1932,25 @@ impl Engine {
         Ok(plans)
     }
 
-    pub async fn check_updates_with_wow(&self, wow_dir: Option<&Path>, check_mode: CheckMode) -> Result<Vec<UpdatePlan>> {
-        self.check_updates_with_wow_skip(wow_dir, check_mode, &HashSet::new()).await
+    pub async fn check_updates_with_wow(
+        &self,
+        wow_dir: Option<&Path>,
+        check_mode: CheckMode,
+    ) -> Result<Vec<UpdatePlan>> {
+        self.check_updates_with_wow_skip(wow_dir, check_mode, &HashSet::new())
+            .await
     }
 
-    pub async fn check_updates_with_wow_skip(&self, wow_dir: Option<&Path>, check_mode: CheckMode, skip_repo_ids: &HashSet<i64>) -> Result<Vec<UpdatePlan>> {
+    pub async fn check_updates_with_wow_skip(
+        &self,
+        wow_dir: Option<&Path>,
+        check_mode: CheckMode,
+        skip_repo_ids: &HashSet<i64>,
+    ) -> Result<Vec<UpdatePlan>> {
         if let Some(wow_dir) = wow_dir {
             // 1. Self-correction: Update repo name casing in DB from actual disk casing.
             // We do this BEFORE cleanup so that cleanup knows what the "target" casing is.
-            if let Ok(repos) = self.db.list_repos() {
+            if let Ok(repos) = self.db().list_repos() {
                 for r in repos {
                     if matches!(r.mode, InstallMode::AddonGit) {
                         let worktree = self.addon_git_worktree_dir(r.id, wow_dir, &r);
@@ -1820,7 +1962,7 @@ impl Engine {
                             };
 
                             if base_name != r.name && base_name.eq_ignore_ascii_case(&r.name) {
-                                let _ = self.db.update_repo_casing(r.id, &r.owner, base_name);
+                                let _ = self.db().update_repo_casing(r.id, &r.owner, base_name);
                             }
                         }
                     }
@@ -1835,7 +1977,7 @@ impl Engine {
             let _ = self.dedup_addon_repos_by_folder(wow_dir);
 
             // 4. Proactive Migration from legacy hidden staging
-            if let Ok(repos) = self.db.list_repos() {
+            if let Ok(repos) = self.db().list_repos() {
                 for r in repos {
                     if matches!(r.mode, InstallMode::AddonGit) {
                         let _ = self.migrate_staging_clone_if_needed(wow_dir, &r);
@@ -1844,7 +1986,7 @@ impl Engine {
             }
         }
 
-        let repos = self.db.list_repos()?;
+        let repos = self.db().list_repos()?;
         let mut git_repos = Vec::new();
         let mut release_repos = Vec::new();
         for repo in repos {
@@ -1866,7 +2008,6 @@ impl Engine {
         let mut plans = Vec::with_capacity(git_repos.len() + release_repos.len());
         plans.extend(git_plans?);
         plans.extend(release_plans?);
-
 
         Ok(plans)
     }
@@ -2171,10 +2312,11 @@ impl Engine {
         records: &[install::InstallRecord],
         version: Option<&str>,
     ) -> Result<()> {
-        self.db.clear_installs(repo_id)?;
+        self.db().clear_installs(repo_id)?;
         for rec in records {
             let manifest_path = Self::to_manifest_path(&rec.path, wow_dir);
-            self.db.add_install(repo_id, &manifest_path, rec.kind, version)?;
+            self.db()
+                .add_install(repo_id, &manifest_path, rec.kind, version)?;
         }
         Ok(())
     }
@@ -2190,7 +2332,8 @@ impl Engine {
     ) -> Result<()> {
         for rec in records {
             let manifest_path = Self::to_manifest_path(&rec.path, wow_dir);
-            self.db.add_install(repo_id, &manifest_path, rec.kind, version)?;
+            self.db()
+                .add_install(repo_id, &manifest_path, rec.kind, version)?;
         }
         Ok(())
     }
@@ -2213,7 +2356,9 @@ impl Engine {
             let manifest_path = Self::to_manifest_path(&rec.path, wow_dir);
             match util::sha256_file_hex(&rec.path) {
                 Ok(digest) => {
-                    let _ = self.db.set_install_sha256(repo_id, &manifest_path, Some(&digest));
+                    let _ = self
+                        .db()
+                        .set_install_sha256(repo_id, &manifest_path, Some(&digest));
                 }
                 Err(_) => {}
             }
@@ -2232,7 +2377,7 @@ impl Engine {
             .map(|rec| rec.path.clone())
             .collect();
 
-        for entry in self.db.list_installs(repo_id)? {
+        for entry in self.db().list_installs(repo_id)? {
             if entry.kind != "addon" {
                 continue;
             }
@@ -2284,7 +2429,7 @@ impl Engine {
         addon_folder_names: &[String],
     ) -> Result<Vec<AddonInstallConflict>> {
         let tracked_paths: HashSet<PathBuf> = self
-            .db
+            .db()
             .list_installs(repo_id)?
             .into_iter()
             .filter(|entry| entry.kind == "addon")
@@ -2296,7 +2441,7 @@ impl Engine {
             let dst = wow_dir.join("Interface").join("AddOns").join(addon_name);
             let manifest_path = Self::to_manifest_path(&dst, wow_dir);
             let owners = self
-                .db
+                .db()
                 .find_addon_install_owners(&manifest_path, Some(repo_id))?;
 
             if tracked_paths.contains(&dst) {
@@ -2365,17 +2510,17 @@ impl Engine {
 
         for (repo_id, manifest_paths) in by_repo {
             for path in manifest_paths {
-                self.db.remove_install(repo_id, &path)?;
+                self.db().remove_install(repo_id, &path)?;
             }
 
-            let remaining_installs = self.db.list_installs(repo_id)?;
+            let remaining_installs = self.db().list_installs(repo_id)?;
             let has_addon_installs = remaining_installs.iter().any(|entry| entry.kind == "addon");
             if !has_addon_installs {
                 // If this was an addon_git repo and no addon installs remain after conflict
                 // replacement, remove it from tracking entirely so duplicate forks cannot
                 // coexist in the tracked addons list.
                 let should_remove_repo = self
-                    .db
+                    .db()
                     .get_repo(repo_id)
                     .ok()
                     .map(|r| matches!(r.mode, InstallMode::AddonGit))
@@ -2383,7 +2528,7 @@ impl Engine {
                 if should_remove_repo {
                     let _ = self.remove_repo(repo_id, Some(wow_dir), true)?;
                 } else {
-                    self.db
+                    self.db()
                         .set_installed_asset_state(repo_id, None, None, None, None, None)?;
                 }
             }
@@ -2517,7 +2662,7 @@ impl Engine {
         wow_dir: Option<&Path>,
     ) -> Result<usize> {
         let mut dll_names = Vec::<String>::new();
-        for entry in self.db.list_installs(repo_id)? {
+        for entry in self.db().list_installs(repo_id)? {
             if entry.kind != "dll" {
                 continue;
             }
@@ -2531,25 +2676,20 @@ impl Engine {
             touched = Self::set_dlls_txt_entries_commented(base, &dll_names, !enabled)?;
         }
 
-        self.db.set_repo_enabled(repo_id, enabled)?;
+        self.db().set_repo_enabled(repo_id, enabled)?;
         Ok(touched)
     }
 
     /// Toggle a single DLL's enabled state in dlls.txt without touching the whole repo.
     /// Returns `true` if dlls.txt was modified.
-    pub fn set_dll_enabled(
-        &self,
-        dll_name: &str,
-        enabled: bool,
-        wow_dir: &Path,
-    ) -> Result<bool> {
+    pub fn set_dll_enabled(&self, dll_name: &str, enabled: bool, wow_dir: &Path) -> Result<bool> {
         let names = vec![dll_name.to_string()];
         let touched = Self::set_dlls_txt_entries_commented(wow_dir, &names, !enabled)?;
         Ok(touched > 0)
     }
 
     pub fn set_repo_git_branch(&self, repo_id: i64, git_branch: Option<String>) -> Result<()> {
-        let repo = self.db.get_repo(repo_id)?;
+        let repo = self.db().get_repo(repo_id)?;
         if !matches!(repo.mode, InstallMode::AddonGit) {
             anyhow::bail!("Branch selection is only supported for addon_git repos.");
         }
@@ -2557,25 +2697,21 @@ impl Engine {
             .map(|b| b.trim().to_string())
             .filter(|b| !b.is_empty())
             .unwrap_or_else(|| "master".to_string());
-        self.db
+        self.db()
             .set_repo_git_branch(repo_id, Some(normalized.as_str()))?;
         Ok(())
     }
 
     pub fn set_repo_merge_installs(&self, repo_id: i64, merge: bool) -> Result<()> {
-        self.db.set_merge_installs(repo_id, merge)?;
+        self.db().set_merge_installs(repo_id, merge)?;
         Ok(())
     }
 
-    pub fn set_repo_pinned_version(
-        &self,
-        repo_id: i64,
-        version: Option<String>,
-    ) -> Result<()> {
+    pub fn set_repo_pinned_version(&self, repo_id: i64, version: Option<String>) -> Result<()> {
         let normalized = version
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
-        self.db
+        self.db()
             .set_pinned_version(repo_id, normalized.as_deref())?;
         Ok(())
     }
@@ -2587,7 +2723,7 @@ impl Engine {
     }
 
     pub fn list_repo_branches(&self, repo_id: i64) -> Result<Vec<String>> {
-        let repo = self.db.get_repo(repo_id)?;
+        let repo = self.db().get_repo(repo_id)?;
         if !matches!(repo.mode, InstallMode::AddonGit) {
             return Ok(Vec::new());
         }
@@ -2610,9 +2746,9 @@ impl Engine {
         let mut removed_dlls = Vec::<String>::new();
 
         if remove_local_files {
-            let repo = self.db.get_repo(repo_id)?;
+            let repo = self.db().get_repo(repo_id)?;
             // 1. Remove tracked install folders/files
-            for entry in self.db.list_installs(repo_id)? {
+            for entry in self.db().list_installs(repo_id)? {
                 if let Some(full) = Self::resolve_install_path(&entry.path, wow_dir) {
                     let _ = Self::remove_any_target(&full);
                     removed_paths += 1;
@@ -2631,7 +2767,8 @@ impl Engine {
                 if repo.mode == InstallMode::AddonGit {
                     let addons_base = base.join("Interface").join("AddOns");
                     let to_remove_ideal = addons_base.join(format!("{}.repo", repo.name));
-                    let to_remove = Self::find_actual_case(&to_remove_ideal).unwrap_or(to_remove_ideal);
+                    let to_remove =
+                        Self::find_actual_case(&to_remove_ideal).unwrap_or(to_remove_ideal);
 
                     if to_remove.is_dir() {
                         let _ = fs::remove_dir_all(&to_remove);
@@ -2640,7 +2777,7 @@ impl Engine {
             }
         }
 
-        self.db.remove_repo(repo_id)?;
+        self.db().remove_repo(repo_id)?;
         Ok(removed_paths)
     }
 
@@ -2650,7 +2787,7 @@ impl Engine {
         raw_dest: Option<&Path>,
         opts: InstallOptions,
     ) -> Result<Vec<UpdatePlan>> {
-        let repos = self.db.list_repos()?;
+        let repos = self.db().list_repos()?;
         let mut plans = Vec::new();
 
         for r in repos {
@@ -2680,7 +2817,7 @@ impl Engine {
         raw_dest: Option<&Path>,
         opts: InstallOptions,
     ) -> Result<Option<UpdatePlan>> {
-        let repo = self.db.get_repo(repo_id)?;
+        let repo = self.db().get_repo(repo_id)?;
         let mut plan = self
             .build_update_plan_for_repo(&repo, true, Some(wow_dir), CheckMode::Force)
             .await?;
@@ -2705,9 +2842,8 @@ impl Engine {
     /// Safe to call repeatedly — does nothing when the legacy path doesn't exist
     /// or the target already exists.
     fn migrate_staging_clone_if_needed(&self, wow_dir: &Path, repo: &Repo) -> Result<()> {
-        let legacy = git_sync::addon_repo_legacy_staging_dir(
-            wow_dir, &repo.host, &repo.owner, &repo.name,
-        );
+        let legacy =
+            git_sync::addon_repo_legacy_staging_dir(wow_dir, &repo.host, &repo.owner, &repo.name);
         if !legacy.is_dir() || !Self::has_local_git_marker(&legacy) {
             return Ok(());
         }
@@ -2726,15 +2862,14 @@ impl Engine {
         if let Some(parent) = direct.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::rename(&legacy, &direct).with_context(|| {
-            format!("migrate addon clone {:?} -> {:?}", legacy, direct)
-        })?;
+        fs::rename(&legacy, &direct)
+            .with_context(|| format!("migrate addon clone {:?} -> {:?}", legacy, direct))?;
 
         // Cleanup: If the legacy .wuddle/addon_git folder is now empty, remove it
         // to avoid triggering errors in the Turtle WoW launcher.
         if let Some(legacy_parent) = legacy.parent() {
             // .../addon_git
-            let _ = fs::remove_dir(legacy_parent); 
+            let _ = fs::remove_dir(legacy_parent);
             if let Some(wuddle_dir) = legacy_parent.parent() {
                 // .../AddOns/.wuddle
                 let _ = fs::remove_dir(wuddle_dir);
@@ -2744,13 +2879,17 @@ impl Engine {
         // Update any DB install entries that pointed at the old path.
         let legacy_manifest = Self::to_manifest_path(&legacy, wow_dir);
         let direct_manifest = Self::to_manifest_path(&direct, wow_dir);
-        if let Ok(entries) = self.db.list_installs(repo.id) {
+        if let Ok(entries) = self.db().list_installs(repo.id) {
             for entry in entries {
                 if entry.path == legacy_manifest {
-                    let _ = self.db.update_install_path(repo.id, &entry.path, &direct_manifest);
+                    let _ = self
+                        .db()
+                        .update_install_path(repo.id, &entry.path, &direct_manifest);
                 } else if entry.path.starts_with(&legacy_manifest) {
                     let new_path = direct_manifest.clone() + &entry.path[legacy_manifest.len()..];
-                    let _ = self.db.update_install_path(repo.id, &entry.path, &new_path);
+                    let _ = self
+                        .db()
+                        .update_install_path(repo.id, &entry.path, &new_path);
                 }
             }
         }
@@ -2765,7 +2904,7 @@ impl Engine {
         opts: InstallOptions,
     ) -> Result<()> {
         if matches!(plan.mode, InstallMode::AddonGit) {
-            let repo = self.db.get_repo(plan.repo_id)?;
+            let repo = self.db().get_repo(plan.repo_id)?;
 
             // Migrate legacy staging clones to the direct AddOns location on first encounter.
             self.migrate_staging_clone_if_needed(wow_dir, &repo)?;
@@ -2781,7 +2920,9 @@ impl Engine {
                 };
 
                 if base_name != repo.name && base_name.eq_ignore_ascii_case(&repo.name) {
-                    let _ = self.db.update_repo_casing(repo.id, &repo.owner, base_name);
+                    let _ = self
+                        .db()
+                        .update_repo_casing(repo.id, &repo.owner, base_name);
                 }
             }
             let preferred_branch = repo
@@ -2797,24 +2938,29 @@ impl Engine {
             // detect_addons_in_tree returns (src_path, toc_name) pairs.
             let mut detected = install::detect_addons_in_tree(&worktree_dir);
 
-            // [Legacy Reconciliation] If strict detection found nothing, but we have 
-            // previous installs in the DB, try to "rescue" them by looking for their 
-            // .toc files directly. This ensures existing non-compliant addons are 
+            // [Legacy Reconciliation] If strict detection found nothing, but we have
+            // previous installs in the DB, try to "rescue" them by looking for their
+            // .toc files directly. This ensures existing non-compliant addons are
             // not deleted but instead migrated.
             if detected.is_empty() {
-                if let Ok(prev_installs) = self.db.list_installs(plan.repo_id) {
+                if let Ok(prev_installs) = self.db().list_installs(plan.repo_id) {
                     for prev in prev_installs {
                         if prev.kind == "addon" {
-                            if let Some(full) = Self::resolve_install_path(&prev.path, Some(wow_dir)) {
+                            if let Some(full) =
+                                Self::resolve_install_path(&prev.path, Some(wow_dir))
+                            {
                                 // If the folder still exists, check it for TOCs
                                 if full.is_dir() {
                                     // Try to find what it maps to in the repo
                                     // (For modular addons, we assume its name might match a folder in the repo)
-                                    let rel_name = full.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                                    let rel_name =
+                                        full.file_name().and_then(|n| n.to_str()).unwrap_or("");
                                     let src_in_repo = worktree_dir.join(rel_name);
                                     if src_in_repo.exists() {
-                                        if let Some(folder_name) = install::detect_single_addon_folder(&src_in_repo) {
-                                             detected.push((src_in_repo, folder_name));
+                                        if let Some(folder_name) =
+                                            install::detect_single_addon_folder(&src_in_repo)
+                                        {
+                                            detected.push((src_in_repo, folder_name));
                                         }
                                     }
                                 }
@@ -2862,11 +3008,18 @@ impl Engine {
                             // Update DB install paths that pointed at the old location.
                             let old_manifest = Self::to_manifest_path(&worktree_dir, wow_dir);
                             let new_manifest = Self::to_manifest_path(&new_dir, wow_dir);
-                            if let Ok(entries) = self.db.list_installs(repo.id) {
+                            if let Ok(entries) = self.db().list_installs(repo.id) {
                                 for entry in entries {
-                                    if entry.path == old_manifest || entry.path.starts_with(&(old_manifest.clone() + "/")) {
-                                        let updated = new_manifest.clone() + &entry.path[old_manifest.len()..];
-                                        let _ = self.db.update_install_path(repo.id, &entry.path, &updated);
+                                    if entry.path == old_manifest
+                                        || entry.path.starts_with(&(old_manifest.clone() + "/"))
+                                    {
+                                        let updated = new_manifest.clone()
+                                            + &entry.path[old_manifest.len()..];
+                                        let _ = self.db().update_install_path(
+                                            repo.id,
+                                            &entry.path,
+                                            &updated,
+                                        );
                                     }
                                 }
                             }
@@ -2888,7 +3041,7 @@ impl Engine {
 
             // Remove previously created sub-addon symlinks/copies for this repo
             // (but never the worktree dir itself or anything inside it).
-            for entry in self.db.list_installs(plan.repo_id)? {
+            for entry in self.db().list_installs(plan.repo_id)? {
                 if entry.kind != "addon" {
                     continue;
                 }
@@ -2911,7 +3064,10 @@ impl Engine {
                 let repo_dir = worktree_dir.with_file_name(format!("{}.repo", repo.name));
                 if !repo_dir.exists() {
                     fs::rename(&worktree_dir, &repo_dir).with_context(|| {
-                        format!("rename repo dir to .repo suffix {:?} -> {:?}", worktree_dir, repo_dir)
+                        format!(
+                            "rename repo dir to .repo suffix {:?} -> {:?}",
+                            worktree_dir, repo_dir
+                        )
                     })?;
                     // Update src paths in chosen that pointed at the old worktree dir.
                     for (src, _) in &mut chosen {
@@ -2933,7 +3089,8 @@ impl Engine {
                 .map(|(_, name)| name.clone())
                 .collect();
             if !sub_addon_names.is_empty() {
-                let conflicts = self.addon_install_conflicts(plan.repo_id, wow_dir, &sub_addon_names)?;
+                let conflicts =
+                    self.addon_install_conflicts(plan.repo_id, wow_dir, &sub_addon_names)?;
                 if !conflicts.is_empty() {
                     if !opts.replace_addon_conflicts {
                         anyhow::bail!(Self::format_addon_conflict_message(&conflicts));
@@ -2974,7 +3131,7 @@ impl Engine {
             // addon folders themselves. The .git dir inside the addon folder is the
             // ground truth; import_existing_addon_git_repos() will re-discover it.
             self.persist_installs(plan.repo_id, wow_dir, &records, Some(&synced.short_oid))?;
-            self.db.set_installed_asset_state(
+            self.db().set_installed_asset_state(
                 plan.repo_id,
                 Some(&synced.short_oid),
                 Some(&synced.oid),
@@ -3069,7 +3226,8 @@ impl Engine {
                 (None, _) => true,
             };
             if needs_dl {
-                self.download_url_to(&extra.download_url, &extra_path).await?;
+                self.download_url_to(&extra.download_url, &extra_path)
+                    .await?;
             }
             if extra_path.exists() {
                 records.push(install::install_dll(
@@ -3101,7 +3259,9 @@ impl Engine {
         }
 
         // Check if this repo uses merge-mode (keep existing files on update).
-        let merge_mode = self.db.get_repo(plan.repo_id)
+        let merge_mode = self
+            .db()
+            .get_repo(plan.repo_id)
             .map(|r| r.merge_installs)
             .unwrap_or(false);
 
@@ -3115,7 +3275,7 @@ impl Engine {
             self.persist_installs(plan.repo_id, wow_dir, &records, Some(&plan.latest))?;
         }
         self.hash_and_store_installs(plan.repo_id, wow_dir, &records);
-        self.db.set_installed_asset_state(
+        self.db().set_installed_asset_state(
             plan.repo_id,
             Some(&plan.latest),
             Some(&plan.asset_id),
@@ -3132,7 +3292,7 @@ impl Engine {
     /// Remove old cached release versions for a repo, keeping the `keep_versions`
     /// most recent plus the currently-installed version. Non-fatal on any error.
     fn prune_release_cache(&self, plan: &UpdatePlan, keep_versions: usize, wow_dir: Option<&Path>) {
-        let repo = match self.db.get_repo(plan.repo_id) {
+        let repo = match self.db().get_repo(plan.repo_id) {
             Ok(r) => r,
             Err(_) => return,
         };
@@ -3201,7 +3361,7 @@ impl Engine {
         raw_dest: Option<&Path>,
         opts: InstallOptions,
     ) -> Result<UpdatePlan> {
-        let r = self.db.get_repo(repo_id)?;
+        let r = self.db().get_repo(repo_id)?;
 
         if matches!(r.mode, InstallMode::AddonGit) {
             let mut plan = self.build_git_addon_plan_for_repo(&r, Some(wow_dir))?;
@@ -3222,7 +3382,7 @@ impl Engine {
             forge::latest_release(&self.client, &det, None).await?;
 
         if let Some(ref et) = etag {
-            let _ = self.db.update_etag(r.id, Some(et.as_str()));
+            let _ = self.db().update_etag(r.id, Some(et.as_str()));
         }
 
         let rel = rel_opt.ok_or_else(|| anyhow::anyhow!("No releases found for {}", r.url))?;

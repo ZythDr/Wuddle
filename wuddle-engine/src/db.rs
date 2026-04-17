@@ -673,6 +673,33 @@ impl Db {
         Ok(out)
     }
 
+    pub fn list_all_installs_full(&self) -> Result<Vec<(i64, InstallEntry)>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT repo_id, path, kind, sha256, version
+            FROM installs
+            "#,
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                InstallEntry {
+                    path: row.get(1)?,
+                    kind: row.get(2)?,
+                    sha256: row.get(3)?,
+                    version: row.get(4)?,
+                },
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     pub fn add_install_with_hash(
         &self,
         repo_id: i64,

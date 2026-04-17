@@ -15,7 +15,10 @@ pub enum Message {
     SetFilter(Filter),
     SetProjectSearch(String),
     ToggleSort(SortKey),
-    InstallRepoOverride { url: String, mode: String },
+    InstallRepoOverride {
+        url: String,
+        mode: String,
+    },
     OpenModFileInfo(String),
     FetchDllDescriptionResult(Result<(String, String), String>),
 
@@ -158,7 +161,10 @@ pub enum Message {
 
     // DLL count change warning
     /// User chose merge (keep existing DLLs) or clean (replace all) from the warning dialog.
-    DllCountWarningChoice { repo_id: i64, merge: bool },
+    DllCountWarningChoice {
+        repo_id: i64,
+        merge: bool,
+    },
 
     // About
     CheckSelfUpdate,

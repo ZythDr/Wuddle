@@ -258,20 +258,27 @@ pub async fn list_repos(
     wow_dir: Option<String>,
     fix_casing: bool,
 ) -> Result<Vec<RepoRow>, String> {
+    // No wow_dir means no WoW installation configured — return empty list
+    let dir = match wow_dir.as_deref() {
+        Some(d) if !d.trim().is_empty() => d,
+        _ => return Ok(Vec::new()),
+    };
+    let wow_path_buf = PathBuf::from(dir);
+    let eng = open_engine(db_path.as_deref())?;
+
+    // 1. Perform automated repairs (only if explicitly requested via 'Rescan')
+    // Authoritative repair handles casing, symlinks, and missing files/repos.
+    if fix_casing {
+        let _ = eng.repair_broken_installations(&wow_path_buf).await;
+    }
+
     tokio::task::spawn_blocking(move || {
-        // No wow_dir means no WoW installation configured — return empty list
-        let dir = match wow_dir.as_deref() {
-            Some(d) if !d.trim().is_empty() => d,
-            _ => return Ok(Vec::new()),
-        };
-        let eng = open_engine(db_path.as_deref())?;
-        let wow_path = Path::new(dir);
+        let wow_path = wow_path_buf.as_path();
 
         // Restore correct capitalization from disk (.toc files/folders for addons).
         // This is fast and runs on every refresh to satisfy the requirement that
         // the list matches disk casing.
         let _ = eng.cleanup_casing_collisions(wow_path);
-        let _ = eng.repair_broken_installations(wow_path);
 
         // Heavy maintenance tasks: only run during a full rescan or the one-time v4 migration.
         // This keeps the standard launch and refresh cycles fast and prevents

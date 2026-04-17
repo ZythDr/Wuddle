@@ -16,6 +16,7 @@ All notable changes to Wuddle are documented in this file.
 - **Strict Manual Addon Validation** — The manual scan now strictly requires a `.toc` file to be present in a directory before considering it a valid addon, preventing `.git`, `.repo`, and other non-addon folders from being imported.
 
 ### Bug Fixes
+- **Async Repair Flow** — Made the broken path repair and casing correction mechanisms asynchronous, preventing UI freezes during intensive rescan operations.
 - **Case-Sensitive Collision Fix** — Fixed a bug where Wuddle would create duplicate lowercase `.repo` folders if a repository was managed by both Wuddle and GAM.
 - **Ghost Addon Entries** — Resolved an issue where renaming an addon folder on disk would cause Wuddle to lose track of the path and display a generic "addon" placeholder in the removal dialog.
 - **Path Resolution Fallback** — Implemented a robust fallback mechanism for resolving addon paths that ensures the "Browse..." and "Remove" features work even if the database entry becomes slightly out of sync with the disk.
