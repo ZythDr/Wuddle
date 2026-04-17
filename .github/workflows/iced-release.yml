@@ -42,11 +42,16 @@ jobs:
     needs: guard
     if: needs.guard.outputs.should_build == 'true'
     name: Linux (portable tar.gz)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -74,6 +79,9 @@ jobs:
 
       - name: Build Wuddle (Iced)
         run: cargo build --release --manifest-path wuddle-iced/Cargo.toml
+
+      - name: Show sccache stats
+        run: ${SCCACHE_PATH} --show-stats || true
 
       - name: Build AppImage
         env:
@@ -161,10 +169,15 @@ jobs:
     if: needs.guard.outputs.should_build == 'true'
     name: Windows (portable zip)
     runs-on: windows-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -177,6 +190,11 @@ jobs:
         run: |
           cargo build --release --manifest-path wuddle-iced/Cargo.toml
           cargo build --release --manifest-path wuddle-launcher/Cargo.toml
+
+      - name: Show sccache stats
+        shell: pwsh
+        run: |
+          & $env:SCCACHE_PATH --show-stats
 
       - name: Package portable zip
         shell: pwsh
