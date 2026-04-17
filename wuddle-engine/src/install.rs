@@ -503,7 +503,6 @@ pub fn detect_addons_in_git_tree(root: &Path) -> Result<Vec<(PathBuf, String)>> 
     // 1. Check root
     if let Some(name) = addon_folder_name_from_git_tree(&repo, &head, "", true) {
         candidates.push((root.to_path_buf(), name));
-        return Ok(candidates);
     }
 
     // 2. Scan depth 1 subfolders

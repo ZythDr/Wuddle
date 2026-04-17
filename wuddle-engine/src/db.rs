@@ -449,6 +449,51 @@ impl Db {
         Ok(out)
     }
 
+    pub fn find_repo_by_identity(&self, host: &str, owner: &str, name: &str) -> Result<Option<Repo>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+              id, url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
+              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
+              published_at_unix, merge_installs, pinned_version
+            FROM repos
+            WHERE host=?1 COLLATE NOCASE AND owner=?2 COLLATE NOCASE AND name=?3 COLLATE NOCASE
+            LIMIT 1
+            "#,
+        )?;
+
+        let mut rows = stmt.query_map(params![host, owner, name], |row| {
+             let mode_str: String = row.get(6)?;
+             Ok(Repo {
+                 id: row.get(0)?,
+                 url: row.get(1)?,
+                 forge: row.get(2)?,
+                 host: row.get(3)?,
+                 owner: row.get(4)?,
+                 name: row.get(5)?,
+                 enabled: row.get::<_, i64>(7)? != 0,
+                 mode: InstallMode::from_str(&mode_str).unwrap_or(InstallMode::Auto),
+                 git_branch: row.get(8)?,
+                 asset_regex: row.get(9)?,
+                 last_version: row.get(10)?,
+                 etag: row.get(11)?,
+                 installed_asset_id: row.get(12)?,
+                 installed_asset_name: row.get(13)?,
+                 installed_asset_size: row.get(14)?,
+                 installed_asset_url: row.get(15)?,
+                 published_at_unix: row.get(16)?,
+                 merge_installs: row.get::<_, i64>(17).unwrap_or(0) != 0,
+                 pinned_version: row.get(18)?,
+             })
+        })?;
+
+        if let Some(row) = rows.next() {
+            Ok(Some(row?))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn get_repo(&self, id: i64) -> Result<Repo> {
         let mut stmt = self.conn.prepare(
             r#"

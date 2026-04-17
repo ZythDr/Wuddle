@@ -30,12 +30,18 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **Logs panel:** operational visibility and copyable logs
 
 ### What's New In v3.1
-- **Browse to Folder** — Quickly open the local folder for any tracked addon or mod directly from the UI.
-- **Linux Stabilization** — Addon path tracking is now case-insensitive, preventing re-import issues and "ghost" entries on Linux filesystems.
-- **Cleaner Scans** — Improved manual scanning logic now ignores metadata and non-addon folders (like `.git`) by strictly validating for `.toc` files.
+- **GAM Path Fidelity** — Achieved 1:1 behavioral parity with GitAddonsManager (GAM) for directory naming and placement, ensuring perfect interoperability on Linux.
+- **Self-Healing Casing** — Wuddle now automatically synchronizes database repository names with their actual filesystem casing, resolving legacy lowercase discrepancies.
+- **Hybrid Addon Discovery** — Enhanced scanner now supports hybrid repositories containing both root-level and subfolder-level addons.
 
 <details>
 <summary><strong>v3.x Changelog</strong></summary>
+
+### v3.1.0
+- **Browse to Folder** — Quickly open the local folder for any tracked addon or mod directly from the UI.
+- **Linux Stabilization** — Addon path tracking is now case-insensitive, preventing re-import issues and "ghost" entries on Linux filesystems.
+- **Cleaner Scans** — Improved manual scanning logic now ignores metadata and non-addon folders by strictly validating for `.toc` files.
+- **Case-Insensitive Database** — Implemented `COLLATE NOCASE` in SQLite for repository lookups to prevent duplicate entries from varying URL casings.
 
 ### v3.0.7
 - **API Transparency & Log Filtering** — Introduced a new `[API]` log category with a dedicated filter button and Cyan highlighting for technical budget tracking.

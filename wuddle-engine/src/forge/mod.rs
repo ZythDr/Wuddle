@@ -185,11 +185,7 @@ pub fn detect_repo(input: &str) -> Result<DetectedRepo> {
             if name.to_ascii_lowercase().ends_with(".git") {
                 name.truncate(name.len() - 4);
             }
-            let project_path = format!(
-                "{}/{}",
-                owner.to_ascii_lowercase(),
-                name.to_ascii_lowercase()
-            );
+            let project_path = format!("{}/{}", owner, name);
             let canonical_url = format!("{scheme}://{host}/{project_path}");
             Ok(DetectedRepo {
                 kind,
@@ -227,12 +223,7 @@ pub fn detect_repo(input: &str) -> Result<DetectedRepo> {
                 .cloned()
                 .unwrap_or_else(|| "project".into());
             let owner = project_segs[..project_segs.len().saturating_sub(1)].join("/");
-            // lowercase for canonical URL / project path dedup
-            let project_path = project_segs
-                .iter()
-                .map(|s| s.to_ascii_lowercase())
-                .collect::<Vec<_>>()
-                .join("/");
+            let project_path = project_segs.join("/");
             let canonical_url = format!("{scheme}://{host}/{project_path}");
             Ok(DetectedRepo {
                 kind,

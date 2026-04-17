@@ -239,6 +239,9 @@ impl Engine {
         asset_regex: Option<String>,
     ) -> Result<i64> {
         let det = detect_repo(url)?;
+        if let Ok(Some(existing)) = self.db.find_repo_by_identity(&det.host, &det.owner, &det.name) {
+             return Ok(existing.id);
+        }
         let is_addon_git = matches!(&mode, InstallMode::AddonGit);
 
         let repo = Repo {
@@ -597,23 +600,27 @@ impl Engine {
         }
 
         // 2. Fallback: Check standard locations (Interface/AddOns/{name} and {name}.repo)
-        let name = Self::url_to_repo_name(&repo.url).unwrap_or_else(|| repo.name.clone());
+        let name = repo.name.clone();
         let base = wow_dir.join("Interface").join("AddOns");
-        let primary = base.join(&name);
-        if primary.is_dir() && Self::has_local_git_marker(&primary) {
-            return primary;
+        
+        let primary_name = name.clone();
+        let primary = base.join(&primary_name);
+        if let Some(actual) = Self::find_actual_case(&primary) {
+            if actual.is_dir() && Self::has_local_git_marker(&actual) {
+                return actual;
+            }
         }
+
         let suffixed = base.join(format!("{}.repo", name));
-        if suffixed.is_dir() && Self::has_local_git_marker(&suffixed) {
-            return suffixed;
+        if let Some(actual) = Self::find_actual_case(&suffixed) {
+            if actual.is_dir() && Self::has_local_git_marker(&actual) {
+                return actual;
+            }
         }
 
         primary
     }
 
-    fn url_to_repo_name(url: &str) -> Option<String> {
-        detect_repo(url).ok().map(|d| d.name)
-    }
 
     fn repo_key(host: &str, owner: &str, name: &str) -> String {
         format!(
@@ -758,12 +765,6 @@ impl Engine {
             // Skip if this specific folder is already a tracked install target
             let manifest = Self::to_manifest_path(&root, wow_dir).to_lowercase();
             if claimed_paths.contains(&manifest) {
-                continue;
-            }
-
-            // Skip metadata folders (Git Addon Manager or similar)
-            let lower_name = folder_name.to_lowercase();
-            if lower_name.ends_with(".repo") || lower_name.ends_with(".git") {
                 continue;
             }
 
@@ -2476,14 +2477,12 @@ impl Engine {
 
                 // 2. Remove the repository folder itself (e.g. AddonName.repo or AddonName)
                 if repo.mode == InstallMode::AddonGit {
-                    let repo_dir_base = base.join("Interface").join("AddOns").join(&repo.name);
-                    let mut repo_dir = Self::find_actual_case(&repo_dir_base).unwrap_or(repo_dir_base);
-                    if !repo_dir.exists() {
-                        let dot_repo = base.join("Interface").join("AddOns").join(format!("{}.repo", repo.name));
-                        repo_dir = Self::find_actual_case(&dot_repo).unwrap_or(dot_repo);
-                    }
-                    if repo_dir.is_dir() {
-                        let _ = fs::remove_dir_all(repo_dir);
+                    let addons_base = base.join("Interface").join("AddOns");
+                    let to_remove_ideal = addons_base.join(format!("{}.repo", repo.name));
+                    let to_remove = Self::find_actual_case(&to_remove_ideal).unwrap_or(to_remove_ideal);
+
+                    if to_remove.is_dir() {
+                        let _ = fs::remove_dir_all(&to_remove);
                     }
                 }
             }
@@ -2620,6 +2619,19 @@ impl Engine {
             self.migrate_staging_clone_if_needed(wow_dir, &repo)?;
 
             let worktree_dir = self.addon_git_worktree_dir(plan.repo_id, wow_dir, &repo);
+
+            // Self-correction: Update repo name casing in DB from actual filesystem casing.
+            if let Some(actual_name) = worktree_dir.file_name().and_then(|n| n.to_str()) {
+                let base_name = if actual_name.to_lowercase().ends_with(".repo") {
+                    &actual_name[..actual_name.len() - 5]
+                } else {
+                    actual_name
+                };
+
+                if base_name != repo.name && base_name.eq_ignore_ascii_case(&repo.name) {
+                    let _ = self.db.update_repo_casing(repo.id, &repo.owner, base_name);
+                }
+            }
             let preferred_branch = repo
                 .git_branch
                 .as_deref()
@@ -2739,16 +2751,12 @@ impl Engine {
             // GAM subfolder collision: if a subfolder has the same name as the repo
             // directory, rename the repo dir to "{name}.repo" first — exactly as
             // GAM's Addon::unpackSubfolders() does — so the symlink can be created.
-            let repo_dir_name = worktree_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
+            let repo_dir_name = repo.name.clone();
             let has_collision = chosen.iter().any(|(src, name)| {
                 src != &worktree_dir && name.eq_ignore_ascii_case(&repo_dir_name)
             });
             let worktree_dir = if has_collision {
-                let repo_dir = worktree_dir.with_file_name(format!("{}.repo", repo_dir_name));
+                let repo_dir = worktree_dir.with_file_name(format!("{}.repo", repo.name));
                 if !repo_dir.exists() {
                     fs::rename(&worktree_dir, &repo_dir).with_context(|| {
                         format!("rename repo dir to .repo suffix {:?} -> {:?}", worktree_dir, repo_dir)

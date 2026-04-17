@@ -8,11 +8,15 @@ All notable changes to Wuddle are documented in this file.
 - **Browse Option** — Added a "Browse..." option to the triple-dot menu for tracked addons and mods, allowing users to quickly open the relevant folder or file on their system.
 
 ### Improvements
+- **GAM Path Fidelity** — Achieved 1:1 functional parity with GitAddonsManager (GAM). Wuddle now mimics GAM's cloning, directory naming, and subfolder handling logic exactly, ensuring seamless interoperability on Linux.
+- **Auto-Correcting Casing** — Implemented a self-healing mechanism that synchronizes database repository names with their actual filesystem casing on Linux, resolving legacy lowercase discrepancies.
+- **Hybrid Addon Discovery** — Enhanced the addon scanner to support repositories containing both a root-level addon and additional subfolder-level addons, matching GAM's detection behavior.
 - **Case-Insensitive Path Tracking** — Re-implemented addon path discovery and pruning to be case-insensitive. This prevents "ghost" entries and redundant re-imports on Linux when addon folder casing changes.
 - **Improved Invalid URL Logging** — Update check failures now include the specific Addon ID in the logs (e.g., `Fetch versions failed for id=404: invalid URL`), making it easier to identify problematic repositories.
 - **Strict Manual Addon Validation** — The manual scan now strictly requires a `.toc` file to be present in a directory before considering it a valid addon, preventing `.git`, `.repo`, and other non-addon folders from being imported.
 
 ### Bug Fixes
+- **Case-Sensitive Collision Fix** — Fixed a bug where Wuddle would create duplicate lowercase `.repo` folders if a repository was managed by both Wuddle and GAM.
 - **Ghost Addon Entries** — Resolved an issue where renaming an addon folder on disk would cause Wuddle to lose track of the path and display a generic "addon" placeholder in the removal dialog.
 - **Path Resolution Fallback** — Implemented a robust fallback mechanism for resolving addon paths that ensures the "Browse..." and "Remove" features work even if the database entry becomes slightly out of sync with the disk.
 
