@@ -270,7 +270,8 @@ pub async fn list_repos(
         // Restore correct capitalization from disk (.toc files/folders for addons).
         // This is fast and runs on every refresh to satisfy the requirement that
         // the list matches disk casing.
-        let _ = eng.fix_repo_casing_from_disk(wow_path);
+        let _ = eng.cleanup_casing_collisions(wow_path);
+        let _ = eng.repair_broken_installations(wow_path);
 
         // Heavy maintenance tasks: only run during a full rescan or the one-time v4 migration.
         // This keeps the standard launch and refresh cycles fast and prevents

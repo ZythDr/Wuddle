@@ -1062,7 +1062,92 @@ impl Engine {
                 }
             }
         }
-        Ok(cleaned)
+        let mut repaired = 0;
+        if let Ok(entries) = fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let meta = match fs::symlink_metadata(&path) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if !meta.file_type().is_symlink() {
+                    continue;
+                }
+
+                // If symlink is broken, try to find the target with actual casing.
+                if !path.exists() {
+                    if let Ok(target) = fs::read_link(&path) {
+                        let parent = path.parent().unwrap();
+                        let target_path = parent.join(&target);
+                        if let Some(actual) = Self::find_actual_case(&target_path) {
+                            if actual != target_path {
+                                let _ = fs::remove_file(&path);
+                                let new_target = if target.is_absolute() {
+                                    actual
+                                } else {
+                                    actual
+                                        .strip_prefix(parent)
+                                        .map(|p| p.to_path_buf())
+                                        .unwrap_or(actual)
+                                };
+
+                                #[cfg(unix)]
+                                let _ = std::os::unix::fs::symlink(&new_target, &path);
+
+                                #[cfg(windows)]
+                                {
+                                    if actual.is_dir() {
+                                        let _ = std::os::windows::fs::symlink_dir(&new_target, &path);
+                                    } else {
+                                        let _ = std::os::windows::fs::symlink_file(&new_target, &path);
+                                    }
+                                }
+                                repaired += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(cleaned + repaired)
+    }
+
+    /// Scans all tracked repos and fixes their install entries if they point to
+    /// paths that no longer exist but CAN be found with different casing.
+    /// This resolves "Repair Needed" states caused by Wuddle renaming legacy
+    /// all-lowercase folders to match proper GAM casing.
+    pub fn repair_broken_installations(&self, wow_dir: &Path) -> Result<usize> {
+        let repos = self.db.list_repos()?;
+        let mut repaired = 0;
+        for r in &repos {
+            if !r.enabled {
+                continue;
+            }
+            let installs = self.db.list_installs(r.id)?;
+            let mut changed = false;
+            for entry in installs {
+                let full = match Self::resolve_install_path(&entry.path, Some(wow_dir)) {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                if !full.exists() {
+                    // Try to find it with actual casing
+                    if let Some(actual) = Self::find_actual_case(&full) {
+                        let new_rel = Self::to_manifest_path(&actual, wow_dir);
+                        if new_rel != entry.path {
+                            let _ = self.db.update_install_path(r.id, &entry.path, &new_rel);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed {
+                repaired += 1;
+            }
+        }
+        Ok(repaired)
     }
 
     /// Remove repos from the database whose installed files no longer exist
