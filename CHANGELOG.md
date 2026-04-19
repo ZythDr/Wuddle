@@ -2,6 +2,25 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.2.0
+
+### New Features
+- **Collection Addon Management** — Treat addon-git repositories as real collections, choose which addon folders to keep directly in the Add Repo preview, and manage installed collections later without re-adding the repo.
+- **Nested Addon Discovery** — Wuddle now detects addon folders with `.toc` files up to 5 levels deep in addon-git repositories.
+
+### Improvements
+- **Executable-Aware Tweaks** — Profiles can target a specific game executable for Auto launch and Tweaks instead of assuming a single default client file.
+- **Targeted Tweaks Feedback** — Tweaks now reports which executable is being inspected and clearly explains when the selected client is not compatible with legacy 1.12.1 patching.
+
+### Bug Fixes
+- **Collection Matching Fixes** — Fixed collection management for repositories whose folder names differ from the installed addon name, including common GitHub suffixes like `-master` and `-main`.
+- **Nested Install Linking** — Fixed nested addon installs and repair flows so the correct repo-relative folder is linked or moved.
+
+### Removed
+- **Legacy Radio UI** — Removed the in-app radio player and its related settings UI.
+- **Turtle-Specific Home Links** — Removed the Turtle-only links section from the Home tab.
+- **`I like turtles` Profile Flag** — Removed the old profile toggle that controlled Turtle-themed home content.
+
 ## v3.1.0
 
 ### New Features

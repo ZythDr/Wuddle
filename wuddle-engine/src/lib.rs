@@ -168,6 +168,35 @@ impl Clone for Engine {
     }
 }
 
+fn normalize_selected_addons(addons: &[String]) -> Option<String> {
+    let mut normalized = addons
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string())
+        .collect::<Vec<_>>();
+
+    if normalized.is_empty() {
+        return None;
+    }
+
+    normalized.sort_by_key(|name| name.to_ascii_lowercase());
+    normalized.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    serde_json::to_string(&normalized).ok()
+}
+
+fn selected_addons_from_json(raw: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Vec::new();
+    };
+
+    let mut parsed = serde_json::from_str::<Vec<String>>(raw).unwrap_or_default();
+    parsed.retain(|name| !name.trim().is_empty());
+    parsed.sort_by_key(|name| name.to_ascii_lowercase());
+    parsed.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    parsed
+}
+
 #[derive(Debug, Clone)]
 pub struct AddonProbeOwner {
     pub repo_id: i64,
@@ -183,8 +212,15 @@ pub struct AddonProbeConflict {
 }
 
 #[derive(Debug, Clone)]
+pub struct AddonProbeEntry {
+    pub addon_name: String,
+    pub source_path: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct AddonProbeResult {
     pub addon_names: Vec<String>,
+    pub addon_entries: Vec<AddonProbeEntry>,
     pub conflicts: Vec<AddonProbeConflict>,
     pub resolved_branch: String,
 }
@@ -280,6 +316,7 @@ impl Engine {
         url: &str,
         mode: InstallMode,
         asset_regex: Option<String>,
+        selected_addons: Option<Vec<String>>,
     ) -> Result<i64> {
         let det = detect_repo(url)?;
         if let Ok(Some(existing)) = self
@@ -314,9 +351,21 @@ impl Engine {
             published_at_unix: None,
             merge_installs: false,
             pinned_version: None,
+            selected_addons_json: normalize_selected_addons(selected_addons.as_deref().unwrap_or(&[])),
         };
 
         self.db().add_repo(&repo)
+    }
+
+    pub fn set_repo_selected_addons(
+        &self,
+        repo_id: i64,
+        selected_addons: Option<Vec<String>>,
+    ) -> Result<()> {
+        let normalized = normalize_selected_addons(selected_addons.as_deref().unwrap_or(&[]));
+        self.db()
+            .set_repo_selected_addons(repo_id, normalized.as_deref())?;
+        Ok(())
     }
 
     pub async fn probe_addon_repo_conflicts(
@@ -338,10 +387,21 @@ impl Engine {
         detected.sort_by_key(|(src, name)| (src.components().count(), name.clone()));
 
         let mut addon_names = Vec::<String>::new();
+        let mut addon_entries = Vec::<AddonProbeEntry>::new();
         let mut seen_names = HashSet::<String>::new();
-        for (_, addon_name) in detected {
+        for (src, addon_name) in detected {
             let key = addon_name.to_lowercase();
             if seen_names.insert(key) {
+                let source_path = src
+                    .strip_prefix(probe_dir.path())
+                    .ok()
+                    .and_then(|rel| rel.to_str())
+                    .map(|rel| rel.trim_start_matches(std::path::MAIN_SEPARATOR).replace('\\', "/"))
+                    .unwrap_or_else(|| addon_name.clone());
+                addon_entries.push(AddonProbeEntry {
+                    addon_name: addon_name.clone(),
+                    source_path,
+                });
                 addon_names.push(addon_name);
             }
         }
@@ -377,6 +437,7 @@ impl Engine {
 
         Ok(AddonProbeResult {
             addon_names,
+            addon_entries,
             conflicts,
             resolved_branch: synced.branch,
         })
@@ -857,8 +918,11 @@ impl Engine {
                 "Wuddle Repair",
             );
         } else {
-            let sub_name = src.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let _ = install::link_addon_subfolder(worktree_dir, sub_name, full_link_path);
+            if let Ok(rel_src) = src.strip_prefix(worktree_dir) {
+                if let Some(rel_src) = rel_src.to_str() {
+                    let _ = install::link_addon_subfolder(worktree_dir, rel_src, full_link_path);
+                }
+            }
         }
 
         Ok(Self::tracked_addon_entry_is_healthy(
@@ -1021,6 +1085,7 @@ impl Engine {
                                             published_at_unix: None,
                                             merge_installs: false,
                                             pinned_version: None,
+                                            selected_addons_json: None,
                                         };
 
                                         if let Ok(id) = self.db().add_repo(&tracked) {
@@ -1081,6 +1146,7 @@ impl Engine {
                     published_at_unix: None,
                     merge_installs: false,
                     pinned_version: None,
+                    selected_addons_json: None,
                 };
 
                 if let Ok(id) = self.db().add_repo(&tracked) {
@@ -3118,6 +3184,26 @@ impl Engine {
                 }
             }
 
+            let selected_addons = selected_addons_from_json(repo.selected_addons_json.as_deref());
+            if !selected_addons.is_empty() {
+                let selected_set: HashSet<String> = selected_addons
+                    .iter()
+                    .map(|name| name.to_ascii_lowercase())
+                    .collect();
+                chosen.retain(|(src, addon_name)| {
+                    let folder_name = src
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.to_ascii_lowercase());
+
+                    selected_set.contains(&addon_name.to_ascii_lowercase())
+                        || folder_name
+                            .as_ref()
+                            .map(|name| selected_set.contains(name))
+                            .unwrap_or(false)
+                });
+            }
+
             if chosen.is_empty() {
                 anyhow::bail!(
                     "No addon .toc files found in synced repo. Expected at least one addon folder."
@@ -3255,11 +3341,12 @@ impl Engine {
                     });
                 } else {
                     // Multi-addon repo subfolder: unpack it using GAM's link-or-move strategy.
-                    let sub_name = src_dir
-                        .file_name()
-                        .and_then(|n| n.to_str())
+                    let rel_src = src_dir
+                        .strip_prefix(&worktree_dir)
+                        .ok()
+                        .and_then(|path| path.to_str())
                         .unwrap_or(&addon_folder_name);
-                    let rec = install::link_addon_subfolder(&worktree_dir, sub_name, &dst_dir)?;
+                    let rec = install::link_addon_subfolder(&worktree_dir, rel_src, &dst_dir)?;
                     records.push(rec);
                 }
             }

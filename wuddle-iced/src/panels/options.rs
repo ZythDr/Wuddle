@@ -1,7 +1,7 @@
 use iced::widget::{button, checkbox, column, container, row, scrollable, stack, text, text_input, tooltip, Space};
 use iced::{Element, Length};
 
-use crate::settings::UiScaleMode;
+use crate::settings::{self, UiScaleMode};
 use crate::theme::{self, ThemeColors, WuddleTheme};
 use crate::{App, Dialog, Message};
 
@@ -28,7 +28,6 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                         name: String::new(),
                         wow_dir: String::new(),
                         launch_method: String::from("auto"),
-                        like_turtles: true,
                         clear_wdb: false,
                         lutris_target: String::new(),
                         wine_command: String::from("wine"),
@@ -51,7 +50,12 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
 
     let profile_cards: Vec<Element<Message>> = app.profiles.iter().map(|p| {
         let c2 = c;
-        let dir_display = if p.wow_dir.is_empty() { "No directory set" } else { &p.wow_dir };
+        let display_path = settings::wow_path_display(&p.wow_dir, p.auto_launch_exe.as_deref());
+        let dir_display = if display_path.is_empty() {
+            "No directory set".to_string()
+        } else {
+            display_path
+        };
         let is_active = p.id == app.active_profile_id;
         let active_label = if is_active { " (active)" } else { "" };
 
@@ -67,9 +71,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             is_new: false,
             profile_id: p.id.clone(),
             name: p.name.clone(),
-            wow_dir: p.wow_dir.clone(),
+            wow_dir: settings::wow_path_display(&p.wow_dir, p.auto_launch_exe.as_deref()),
             launch_method: p.launch_method.clone(),
-            like_turtles: p.like_turtles,
             clear_wdb: p.clear_wdb,
             lutris_target: p.lutris_target.clone(),
             wine_command: p.wine_command.clone(),

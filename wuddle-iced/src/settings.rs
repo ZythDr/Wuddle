@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 pub static AUTO_UI_SCALE: OnceLock<f32> = OnceLock::new();
@@ -83,8 +83,8 @@ pub struct ProfileConfig {
     pub id: String,
     pub name: String,
     pub wow_dir: String,
+    pub auto_launch_exe: Option<String>,
     pub launch_method: String,
-    pub like_turtles: bool,
     pub clear_wdb: bool,
     pub lutris_target: String,
     pub wine_command: String,
@@ -101,8 +101,8 @@ impl Default for ProfileConfig {
             id: String::from("default"),
             name: String::from("Default"),
             wow_dir: String::new(),
+            auto_launch_exe: None,
             launch_method: String::from("auto"),
-            like_turtles: true,
             clear_wdb: false,
             lutris_target: String::new(),
             wine_command: String::from("wine"),
@@ -125,11 +125,6 @@ pub struct AppSettings {
     pub opt_desktop_notify: bool,
     pub opt_symlinks: bool,
     pub opt_xattr: bool,
-    pub radio_auto_connect: bool,
-    pub radio_volume: f32,
-    pub radio_auto_play: bool,
-    pub radio_buffer_size: usize,
-    pub radio_persist_volume: bool,
     pub opt_clock12: bool,
     pub opt_friz_font: bool,
     pub log_wrap: bool,
@@ -151,11 +146,6 @@ impl Default for AppSettings {
             opt_desktop_notify: false,
             opt_symlinks: false,
             opt_xattr: true,
-            radio_auto_connect: false,
-            radio_volume: 0.25,
-            radio_auto_play: false,
-            radio_buffer_size: 4096,
-            radio_persist_volume: true,
             opt_clock12: false,
             opt_friz_font: false,
             log_wrap: false,
@@ -166,6 +156,52 @@ impl Default for AppSettings {
             update_channel: UpdateChannel::Beta,
             ui_scale_mode: UiScaleMode::Auto,
         }
+    }
+}
+
+pub fn normalize_wow_path_input(raw: &str) -> (String, Option<String>) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return (String::new(), None);
+    }
+
+    let cleaned = trimmed.trim_end_matches(['/', '\\']).to_string();
+    if cleaned.to_ascii_lowercase().ends_with(".exe") {
+        let exe_path = Path::new(&cleaned);
+        let parent = exe_path
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let exe_name = exe_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|name| name.to_string());
+
+        if !parent.is_empty() && exe_name.is_some() {
+            return (parent, exe_name);
+        }
+    }
+
+    (cleaned, None)
+}
+
+pub fn wow_path_display(wow_dir: &str, auto_launch_exe: Option<&str>) -> String {
+    if let Some(exe_name) = auto_launch_exe.filter(|name| !name.trim().is_empty()) {
+        return Path::new(wow_dir)
+            .join(exe_name)
+            .to_string_lossy()
+            .to_string();
+    }
+    wow_dir.to_string()
+}
+
+pub fn auto_launch_description(auto_launch_exe: Option<&str>) -> String {
+    match auto_launch_exe.filter(|name| !name.trim().is_empty()) {
+        Some(exe_name) => format!(
+            "Auto: launches {} if present, otherwise VanillaFixes.exe, then Wow.exe",
+            exe_name
+        ),
+        None => "Auto: launches VanillaFixes.exe if present, otherwise Wow.exe".to_string(),
     }
 }
 
@@ -385,9 +421,9 @@ fn discover_orphan_profiles(settings: &mut AppSettings, dir: &std::path::Path) {
             if let Some(tp) = tauri_profiles.iter().find(|p| p.id == profile.id) {
                 if !tp.wow_dir.is_empty() {
                     profile.wow_dir = tp.wow_dir.clone();
+                    profile.auto_launch_exe = tp.auto_launch_exe.clone();
                     profile.name = tp.name.clone();
                     profile.launch_method = tp.launch_method.clone();
-                    profile.like_turtles = tp.like_turtles;
                     profile.clear_wdb = tp.clear_wdb;
                     profile.lutris_target = tp.lutris_target.clone();
                     profile.wine_command = tp.wine_command.clone();
@@ -460,23 +496,14 @@ fn read_tauri_localstorage_profiles() -> Vec<ProfileConfig> {
         .filter_map(|p| {
             let id = p.get("id")?.as_str()?.to_string();
             let launch = p.get("launch").cloned().unwrap_or(serde_json::json!({}));
-            // Tauri stores wowDir which may point to an exe — extract directory
             let raw_wow_dir = p.get("wowDir").and_then(|v| v.as_str()).unwrap_or("");
-            let wow_dir = if raw_wow_dir.to_lowercase().ends_with(".exe") {
-                std::path::Path::new(raw_wow_dir)
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            } else {
-                // Strip trailing slash
-                raw_wow_dir.trim_end_matches('/').to_string()
-            };
+            let (wow_dir, auto_launch_exe) = normalize_wow_path_input(raw_wow_dir);
             Some(ProfileConfig {
                 id,
                 name: p.get("name").and_then(|v| v.as_str()).unwrap_or("WoW").to_string(),
                 wow_dir,
+                auto_launch_exe,
                 launch_method: launch.get("method").and_then(|v| v.as_str()).unwrap_or("auto").to_string(),
-                like_turtles: p.get("likesTurtles").and_then(|v| v.as_bool()).unwrap_or(false),
                 clear_wdb: launch.get("clearWdb").and_then(|v| v.as_bool()).unwrap_or(false),
                 lutris_target: launch.get("lutrisTarget").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 wine_command: launch.get("wineCommand").and_then(|v| v.as_str()).unwrap_or("wine").to_string(),

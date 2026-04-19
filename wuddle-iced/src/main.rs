@@ -4,7 +4,6 @@ mod anchored_overlay;
 mod monitor;
 pub mod panels;
 pub mod service;
-pub mod radio;
 pub(crate) mod settings;
 #[allow(dead_code)]
 pub(crate) mod theme;

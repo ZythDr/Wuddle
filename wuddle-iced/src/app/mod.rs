@@ -16,7 +16,7 @@ use crate::settings::{self, UpdateChannel};
 use crate::theme::{self, ThemeColors, WuddleTheme, FRIZ, LIFECRAFT, NOTO};
 use crate::types::*;
 use crate::{chrono_now, chrono_now_fmt, monitor};
-use crate::{panels, radio};
+use crate::panels;
 
 pub struct App {
     pub active_tab: Tab,
@@ -35,17 +35,6 @@ pub struct App {
     pub opt_xattr: bool,
     pub opt_clock12: bool,
     pub opt_friz_font: bool,
-    // Radio
-    pub radio_playing: bool,
-    pub radio_volume: f32,
-    pub radio_pre_mute_volume: Option<f32>,
-    pub radio_connecting: bool,
-    pub radio_auto_connect: bool,
-    pub radio_auto_play: bool,
-    pub radio_buffer_size: usize,
-    pub radio_persist_volume: bool,
-    pub radio_error: Option<String>,
-    pub radio_handle: Option<radio::RadioHandle>,
 
     // GitHub auth
     pub github_token_input: String,
@@ -67,14 +56,14 @@ pub struct App {
     pub dialog: Option<Dialog>,
 
     // Context menu: which repo's menu is open
-    pub open_menu: Option<i64>,
+    pub open_menu: Option<String>,
     // "Add New" dropdown on the Home tab
     pub add_new_menu_open: bool,
 
     // Branch data (cached per repo_id)
     pub branches: HashMap<i64, Vec<String>>,
 
-    // Engine data (Phase 2)
+    // Engine data
     pub repos: Vec<RepoRow>,
     pub plans: Vec<PlanRow>,
     pub loading: bool,
@@ -87,7 +76,7 @@ pub struct App {
     // Plans cached per profile so switching profiles restores previous update state
     pub cached_plans: HashMap<String, (Vec<PlanRow>, Option<String>)>,
 
-    // Operation state (Phase 3)
+    // Operation state
     pub checking_updates: bool,
     pub updating_all: bool,
     pub updating_repo_ids: HashSet<i64>,
@@ -97,8 +86,11 @@ pub struct App {
     pub busy_started_at: Option<Instant>,
     pub busy_state_snapshot: Option<String>,
 
-    // Tweak values
+    // Tweak values and compatibility status
     pub tweak_values: TweakValues,
+    pub tweak_client_info: Option<service::ClientVersionInfo>,
+    pub tweak_client_error: Option<String>,
+    pub tweak_client_checking: bool,
 
     // About / self-update
     pub latest_version: Option<String>,
@@ -126,6 +118,12 @@ pub struct App {
     // Add-repo dialog preview
     pub add_repo_preview: Option<service::RepoPreviewInfo>,
     pub add_repo_preview_loading: bool,
+    pub add_repo_probe: Option<wuddle_engine::AddonProbeResult>,
+    pub add_repo_probe_loading: bool,
+    pub add_repo_collection_choice: Option<bool>,
+    pub add_repo_existing_addons: HashSet<String>,
+    pub add_repo_selected_addons: HashSet<String>,
+    pub add_repo_manage_repo_id: Option<i64>,
     pub add_repo_expanded_dirs: HashSet<String>,
     /// Lazily-loaded directory contents, keyed by dir path.
     pub add_repo_dir_contents: HashMap<String, Vec<service::RepoFileEntry>>,
@@ -188,16 +186,6 @@ impl App {
             opt_xattr: true,
             opt_clock12: false,
             opt_friz_font: false,
-            radio_playing: false,
-            radio_volume: 0.25,
-            radio_pre_mute_volume: None,
-            radio_connecting: false,
-            radio_auto_connect: false,
-            radio_auto_play: false,
-            radio_buffer_size: 4096,
-            radio_persist_volume: true,
-            radio_error: None,
-            radio_handle: None,
             github_token_input: String::new(),
             tweaks: TweakState::default(),
             log_lines: {
@@ -253,6 +241,9 @@ impl App {
             busy_started_at: None,
             busy_state_snapshot: None,
             tweak_values: TweakValues::default(),
+            tweak_client_info: None,
+            tweak_client_error: None,
+            tweak_client_checking: false,
             latest_version: None,
             update_message: None,
             self_update_supported: false,
@@ -268,6 +259,12 @@ impl App {
             spinner_tick: 0,
             add_repo_preview: None,
             add_repo_preview_loading: false,
+            add_repo_probe: None,
+            add_repo_probe_loading: false,
+            add_repo_collection_choice: None,
+            add_repo_existing_addons: HashSet::new(),
+            add_repo_selected_addons: HashSet::new(),
+            add_repo_manage_repo_id: None,
             add_repo_expanded_dirs: HashSet::new(),
             add_repo_dir_contents: HashMap::new(),
             add_repo_file_preview: None,
@@ -320,6 +317,22 @@ impl App {
         self.push_toast(message, kind, None);
     }
 
+    pub fn reset_add_repo_state(&mut self) {
+        self.add_repo_preview = None;
+        self.add_repo_preview_loading = false;
+        self.add_repo_probe = None;
+        self.add_repo_probe_loading = false;
+        self.add_repo_collection_choice = None;
+        self.add_repo_existing_addons.clear();
+        self.add_repo_selected_addons.clear();
+        self.add_repo_manage_repo_id = None;
+        self.add_repo_release_notes = None;
+        self.add_repo_show_releases = false;
+        self.add_repo_file_preview = None;
+        self.add_repo_expanded_dirs.clear();
+        self.add_repo_dir_contents.clear();
+    }
+
     pub fn show_toast_with_action(
         &mut self,
         message: impl Into<String>,
@@ -363,11 +376,6 @@ impl App {
             opt_desktop_notify: self.opt_desktop_notify,
             opt_symlinks: self.opt_symlinks,
             opt_xattr: self.opt_xattr,
-            radio_auto_connect: self.radio_auto_connect,
-            radio_volume: self.radio_volume,
-            radio_auto_play: self.radio_auto_play,
-            radio_buffer_size: self.radio_buffer_size,
-            radio_persist_volume: self.radio_persist_volume,
             opt_clock12: self.opt_clock12,
             opt_friz_font: self.opt_friz_font,
             log_wrap: self.log_wrap,
@@ -594,6 +602,49 @@ impl App {
         }
     }
 
+    pub fn active_profile(&self) -> Option<&settings::ProfileConfig> {
+        self.profiles.iter().find(|p| p.id == self.active_profile_id)
+    }
+
+    pub fn show_tweaks_tab(&self) -> bool {
+        self.tweak_client_info
+            .as_ref()
+            .map(|info| info.supports_legacy_1121_tweaks)
+            .unwrap_or(true)
+    }
+
+    pub fn tweaks_disabled_reason(&self) -> Option<String> {
+        if self.wow_dir.trim().is_empty() {
+            return Some("Set a WoW directory or executable in Options first.".to_string());
+        }
+
+        if self.tweak_client_checking {
+            return Some("Inspecting the selected client executable for Tweaks compatibility.".to_string());
+        }
+
+        if let Some(info) = &self.tweak_client_info {
+            if info.supports_legacy_1121_tweaks {
+                return None;
+            }
+
+            let version = info
+                .file_version
+                .as_deref()
+                .or(info.product_version.as_deref())
+                .unwrap_or("unknown version");
+            return Some(format!(
+                "Tweaks are only supported for legacy WoW 1.12.1 clients. Detected {} ({version}).",
+                info.executable_name
+            ));
+        }
+
+        if let Some(err) = &self.tweak_client_error {
+            return Some(format!("Unable to inspect the selected client executable: {}", err));
+        }
+
+        Some("Tweaks are only available for legacy WoW 1.12.1 clients.".to_string())
+    }
+
     pub fn mod_update_count(&self) -> usize {
         self.plans
             .iter()
@@ -620,9 +671,6 @@ impl App {
         if let Some(task) = crate::update::misc::update(self, message.clone()) {
             return self.finish_update(task);
         }
-        if let Some(task) = crate::update::radio::update(self, message.clone()) {
-            return self.finish_update(task);
-        }
         if let Some(task) = crate::update::tweaks::update(self, message.clone()) {
             return self.finish_update(task);
         }
@@ -638,6 +686,13 @@ impl App {
 
         match message {
             Message::SetTab(tab) => {
+                if tab == Tab::Tweaks {
+                    if let Some(reason) = self.tweaks_disabled_reason() {
+                        self.log(LogLevel::Info, &reason);
+                        self.show_toast(reason, ToastKind::Info);
+                        return Task::none();
+                    }
+                }
                 self.active_tab = tab;
                 self.log(LogLevel::Info, &format!("Switched to tab: {:?}.", tab));
                 // Fire self-update check whenever the About tab becomes active
@@ -675,8 +730,6 @@ impl App {
             | Message::ToggleFrizFont(_)
             | Message::SetUiScaleMode(_)
             | Message::SetGithubTokenInput(_) => {}
-
-            // Radio settings dialog
 
             // Tweaks
             Message::ToggleTweak(id, val) => self.tweaks.set(id, val),
@@ -747,16 +800,13 @@ impl App {
                         "add_repo_url",
                     ))];
                     if !matches!(self.dialog, Some(Dialog::AddRepo { .. })) {
-                        self.add_repo_preview = None;
-                        self.add_repo_preview_loading = false;
-                        self.add_repo_release_notes = None;
-                        self.add_repo_show_releases = false;
-                        self.add_repo_file_preview = None;
-                        self.add_repo_expanded_dirs.clear();
-                        self.add_repo_dir_contents.clear();
+                        self.reset_add_repo_state();
                         if let Dialog::AddRepo { url, .. } = &d {
                             if !url.trim().is_empty() {
                                 tasks.push(Task::done(Message::FetchRepoPreview(url.clone())));
+                                if !self.wow_dir.trim().is_empty() {
+                                    tasks.push(Task::done(Message::FetchCollectionProbe(url.clone())));
+                                }
                             }
                         }
                     }
@@ -774,18 +824,13 @@ impl App {
             }
             Message::CloseDialog => {
                 self.dialog = None;
-                self.add_repo_preview = None;
-                self.add_repo_preview_loading = false;
-                self.add_repo_release_notes = None;
-                self.add_repo_show_releases = false;
-                self.add_repo_file_preview = None;
-                self.add_repo_expanded_dirs.clear();
-                self.add_repo_dir_contents.clear();
+                self.reset_add_repo_state();
             }
+            Message::ConsumeDialogClick => {}
 
             // Context menu
             Message::ToggleMenu(id) => {
-                if self.open_menu == Some(id) {
+                if self.open_menu.as_ref() == Some(&id) {
                     self.open_menu = None;
                 } else {
                     self.open_menu = Some(id);
@@ -866,7 +911,7 @@ impl App {
             },
 
             // --- File dialog ---
-            Message::PickWowDirectory | Message::WowDirectoryPicked(_) => {}
+            Message::PickWowDirectory | Message::PickWowExecutable | Message::WowPathPicked(_) => {}
 
             // --- Tweak value setters ---
 
@@ -1041,7 +1086,9 @@ impl App {
                     Dialog::AddRepo { .. } => (1400u32, 16),
                     Dialog::InstanceSettings { .. } => (600u32, 24),
                     Dialog::Changelog { .. } => (720u32, 24),
-                    Dialog::AvWarning { .. } | Dialog::AddonConflict { .. } => (650u32, 24),
+                    Dialog::AvWarning { .. }
+                    | Dialog::AddonConflict { .. }
+                    | Dialog::RemoveCollectionAddon { .. } => (650u32, 24),
                     _ => (480u32, 24),
                 };
                 let c_dlg = c;
@@ -1070,9 +1117,6 @@ impl App {
                 }
             };
 
-            // Wrap dialog in mouse_area to block click-through to the scrim
-            let dialog_blocker = iced::widget::mouse_area(dialog_box).on_press(Message::CloseMenu);
-
             let scrim = iced::widget::mouse_area(
                 container(Space::new())
                     .width(Length::Fill)
@@ -1080,6 +1124,10 @@ impl App {
                     .style(|_theme| theme::scrim_style()),
             )
             .on_press(Message::CloseDialog);
+
+            let dialog_blocker = iced::widget::mouse_area(dialog_box)
+                .on_press(Message::ConsumeDialogClick)
+                .on_right_press(Message::ConsumeDialogClick);
 
             // 40px margin on all sides \u{2248} 90% of a typical window
             let centered_dialog = container(dialog_blocker)
@@ -1230,12 +1278,17 @@ impl App {
             } => {
                 let is_addons = *is_addons;
                 let advanced = *advanced;
-                let title = if is_addons {
+                let manage_mode = self.add_repo_manage_repo_id.is_some();
+                let title = if manage_mode {
+                    "Manage collection"
+                } else if is_addons {
                     "Add an addon repo"
                 } else {
                     "Add a mod repo"
                 };
-                let subtitle = if is_addons {
+                let subtitle = if manage_mode {
+                    "Choose which addon folders from this repository should stay installed."
+                } else if is_addons {
                     "Paste a Git repository URL below. Wuddle will automatically download and install the addon for you."
                 } else {
                     "Quick-add from the mods listed, or add your own Git repo URL below."
@@ -1300,6 +1353,120 @@ impl App {
                     .into()
                 };
 
+                let build_collection_section = || -> Element<Message> {
+                    if is_addons && mode == "addon_git" {
+                        if manage_mode {
+                            return Space::new().height(0).into();
+                        }
+
+                        if self.add_repo_probe_loading {
+                            return container(
+                                row![
+                                    text("Collection Addons").size(12).color(colors.text),
+                                    Space::new().width(Length::Fill),
+                                    text("Scanning folders...").size(11).color(colors.muted),
+                                ]
+                                .align_y(iced::Alignment::Center),
+                            )
+                            .padding([8, 10])
+                            .style(move |_t| theme::card_style(&c))
+                            .into();
+                        }
+
+                        if let Some(probe) = self.add_repo_probe.as_ref() {
+                            if probe.addon_names.len() > 1 {
+                                let hinted_addon = service::selected_addon_hint_from_url(&url);
+                                let requires_choice = !manage_mode
+                                    && probe.addon_names.len() > service::COLLECTION_PROMPT_THRESHOLD;
+                                let treat_as_collection = manage_mode
+                                    || hinted_addon.is_some()
+                                    || self.add_repo_collection_choice == Some(true)
+                                    || (!requires_choice && probe.addon_names.len() > 1);
+                                let selected_count = self.add_repo_selected_addons.len();
+                                let count_text = format!("{} selected", selected_count);
+                                let header_label = if requires_choice {
+                                    "Multiple addon folders detected"
+                                } else {
+                                    "Collection Addons"
+                                };
+                                let subtitle = if requires_choice {
+                                    format!(
+                                        "This repo has {} addon folders. Choose whether Wuddle should treat it as a collection or as one addon with bundled modules.",
+                                        probe.addon_names.len()
+                                    )
+                                } else {
+                                    "Pick the addon folders Wuddle should keep installed from this repository.".to_string()
+                                };
+                                let right_label = if treat_as_collection {
+                                    count_text
+                                } else {
+                                    format!("{} folders detected", probe.addon_names.len())
+                                };
+                                let mut items = vec![
+                                    row![
+                                        text(header_label).size(12).color(colors.text),
+                                        Space::new().width(Length::Fill),
+                                        text(right_label).size(11).color(colors.muted),
+                                    ]
+                                    .align_y(iced::Alignment::Center)
+                                    .into(),
+                                    text(subtitle.clone())
+                                        .size(11)
+                                        .color(colors.text_soft)
+                                        .into(),
+                                ];
+
+                                if requires_choice {
+                                    let is_collection_choice = self.add_repo_collection_choice == Some(true);
+                                    let is_modules_choice = self.add_repo_collection_choice == Some(false);
+                                    items.push(
+                                        row![
+                                            button(text("Collection").size(12))
+                                                .on_press(Message::SetAddRepoCollectionMode(true))
+                                                .padding([6, 12])
+                                                .style(move |_t, _s| {
+                                                    if is_collection_choice {
+                                                        theme::tab_button_active_style(&c)
+                                                    } else {
+                                                        theme::tab_button_style(&c)
+                                                    }
+                                                }),
+                                            button(text("Single addon with modules").size(12))
+                                                .on_press(Message::SetAddRepoCollectionMode(false))
+                                                .padding([6, 12])
+                                                .style(move |_t, _s| {
+                                                    if is_modules_choice {
+                                                        theme::tab_button_active_style(&c)
+                                                    } else {
+                                                        theme::tab_button_style(&c)
+                                                    }
+                                                }),
+                                        ]
+                                        .spacing(8)
+                                        .into(),
+                                    );
+                                }
+
+                                if !treat_as_collection {
+                                    items.push(
+                                        text("Wuddle will install and track this repository as one addon entry, without per-folder collection selection.")
+                                            .size(11)
+                                            .color(colors.muted)
+                                            .into(),
+                                    );
+                                    return container(column(items).spacing(8))
+                                        .padding([10, 12])
+                                        .style(move |_t| theme::card_style(&c))
+                                        .into();
+                                }
+                                return Space::new().height(0).into();
+                            }
+                        }
+                    }
+
+                    Space::new().height(0).into()
+                };
+
                 // --- Footer: mode section + optional forge/release-notes + Cancel + Add ---
                 let footer: Element<Message> = {
                     let mode_list: Vec<String> = if is_addons {
@@ -1315,7 +1482,9 @@ impl App {
                     let mode_cb = mode.clone();
                     let url_pl = url.clone();
 
-                    let advanced_section: Element<Message> = if advanced {
+                    let advanced_section: Element<Message> = if manage_mode {
+                        Space::new().width(0).into()
+                    } else if advanced {
                         let picked = Some(mode.clone());
                         row![
                             iced::widget::checkbox(advanced)
@@ -1443,14 +1612,27 @@ impl App {
                                     || format!("{}.git", r_url) == d_url)
                         });
 
-                        let add_label = if is_installed {
+                        let selected_count = self.add_repo_selected_addons.len();
+                        let add_label = if manage_mode {
+                            if selected_count == 0 {
+                                "Remove collection"
+                            } else {
+                                "Save changes"
+                            }
+                        } else if is_installed {
                             "Installed"
                         } else if is_addons {
                             "Add addon"
                         } else {
                             "Add mod"
                         };
-                        let add_tip_text = if is_installed {
+                        let add_tip_text = if manage_mode {
+                            if selected_count == 0 {
+                                "Remove this collection and all selected addons"
+                            } else {
+                                "Apply the new collection selection"
+                            }
+                        } else if is_installed {
                             "This repository is already managed by Wuddle"
                         } else if is_addons {
                             "Add this addon to Wuddle"
@@ -1460,7 +1642,9 @@ impl App {
 
                         let mut add_btn = button(text(add_label).size(13)).padding([6, 14]).style(
                             move |_t, _s| {
-                                if is_installed {
+                                if manage_mode {
+                                    theme::tab_button_active_style(&c)
+                                } else if is_installed {
                                     theme::tab_button_style(&c)
                                 } else {
                                     theme::tab_button_active_style(&c)
@@ -1468,7 +1652,9 @@ impl App {
                             },
                         );
 
-                        if !is_installed {
+                        if manage_mode {
+                            add_btn = add_btn.on_press(Message::SaveCollectionSelection);
+                        } else if !is_installed {
                             add_btn = add_btn.on_press(Message::AddRepoSubmit);
                         }
                         footer_row.push(tip(
@@ -1584,58 +1770,192 @@ impl App {
 
                         // Files section
                         if !preview.files.is_empty() {
+                            let hinted_addon = service::selected_addon_hint_from_url(&url);
+                            let collection_mode = manage_mode
+                                || hinted_addon.is_some()
+                                || self.add_repo_collection_choice == Some(true);
+                            let treat_preview_as_collection = self
+                                .add_repo_probe
+                                .as_ref()
+                                .map(|probe| {
+                                    collection_mode
+                                        || (probe.addon_names.len() > 1
+                                            && probe.addon_names.len() <= service::COLLECTION_PROMPT_THRESHOLD)
+                                })
+                                .unwrap_or(manage_mode && !self.add_repo_existing_addons.is_empty());
+                            let mut detected_collection_addons = self
+                                .add_repo_probe
+                                .as_ref()
+                                .filter(|probe| probe.addon_names.len() > 1 && treat_preview_as_collection)
+                                .map(|probe| {
+                                    probe
+                                        .addon_names
+                                        .iter()
+                                        .map(|name| name.to_ascii_lowercase())
+                                        .collect::<HashSet<_>>()
+                                })
+                                .unwrap_or_default();
+                            if manage_mode {
+                                detected_collection_addons.extend(
+                                    self.add_repo_existing_addons
+                                        .iter()
+                                        .map(|name| name.to_ascii_lowercase()),
+                                );
+                                detected_collection_addons.extend(
+                                    self.add_repo_selected_addons
+                                        .iter()
+                                        .map(|name| name.to_ascii_lowercase()),
+                                );
+                            }
+                            let selected_collection_addons = self
+                                .add_repo_selected_addons
+                                .iter()
+                                .map(|name| name.to_ascii_lowercase())
+                                .collect::<HashSet<_>>();
+                            let selected_collection_keys = self
+                                .add_repo_selected_addons
+                                .iter()
+                                .map(|name| service::normalize_collection_entry_key(name))
+                                .collect::<HashSet<_>>();
                             sidebar_col.push(
                                 rule::horizontal(1)
                                     .style(move |_t| theme::update_line_style(&c_divider))
                                     .into(),
                             );
-                            sidebar_col.push(text("Files").size(12).color(colors.muted).into());
+                            let files_label: Element<Message> = if detected_collection_addons.is_empty() {
+                                text("Files").size(12).color(colors.muted).into()
+                            } else {
+                                row![
+                                    text("Files").size(12).color(colors.muted),
+                                    Space::new().width(Length::Fill),
+                                    text("Use the checkbox to keep or remove collection folders")
+                                        .size(11)
+                                        .color(colors.link),
+                                ]
+                                .align_y(iced::Alignment::Center)
+                                .into()
+                            };
+                            sidebar_col.push(files_label);
 
                             let mut sorted_files = preview.files.clone();
-                            sorted_files
-                                .sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+                            sorted_files.sort_by(|a, b| {
+                                let a_key = a.name.to_ascii_lowercase();
+                                let b_key = b.name.to_ascii_lowercase();
+                                let a_toggle = detected_collection_addons.contains(&a_key)
+                                    || (collection_mode && a.is_dir);
+                                let b_toggle = detected_collection_addons.contains(&b_key)
+                                    || (collection_mode && b.is_dir);
+
+                                b_toggle.cmp(&a_toggle)
+                                    .then(b.is_dir.cmp(&a.is_dir))
+                                    .then(a.name.cmp(&b.name))
+                            });
 
                             let mut file_rows: Vec<Element<Message>> = Vec::new();
-                            for f in sorted_files.iter().take(60) {
+                            for f in sorted_files.iter() {
                                 let c_tree = c;
                                 let path = f.path.clone();
                                 if f.is_dir {
                                     let expanded = self.add_repo_expanded_dirs.contains(&f.path);
                                     let folder_icon =
                                         if expanded { "\u{1f4c2}" } else { "\u{1f4c1}" }; // \u{1f4c2} / \u{1f4c1}
-                                    file_rows.push(
-                                        button(
-                                            text(format!("{} {}", folder_icon, f.name))
-                                                .size(12)
-                                                .color(colors.text),
-                                        )
-                                        .on_press(Message::ToggleAddRepoDir(path.clone()))
-                                        .padding([2, 4])
-                                        .style(move |_t, status| match status {
-                                            button::Status::Hovered => button::Style {
-                                                background: Some(iced::Background::Color(
-                                                    iced::Color::from_rgba(1.0, 1.0, 1.0, 0.07),
-                                                )),
-                                                text_color: c_tree.text,
-                                                border: iced::Border::default(),
-                                                shadow: iced::Shadow::default(),
-                                                snap: true,
-                                            },
-                                            _ => button::Style {
-                                                background: None,
-                                                text_color: c_tree.text,
-                                                border: iced::Border::default(),
-                                                shadow: iced::Shadow::default(),
-                                                snap: true,
-                                            },
+                                    let folder_path_key = f.path.to_ascii_lowercase();
+                                    let folder_path_prefix = format!("{}/", folder_path_key);
+                                    let top_level_matches = self
+                                        .add_repo_probe
+                                        .as_ref()
+                                        .map(|probe| {
+                                            probe
+                                                .addon_entries
+                                                .iter()
+                                                .filter(|entry| {
+                                                    let source_path = entry.source_path.to_ascii_lowercase();
+                                                    source_path == folder_path_key
+                                                        || source_path.starts_with(&folder_path_prefix)
+                                                })
+                                                .map(|entry| entry.addon_name.clone())
+                                                .collect::<Vec<_>>()
                                         })
-                                        .into(),
-                                    );
+                                        .unwrap_or_default();
+                                    let show_toggle = !top_level_matches.is_empty();
+                                    let all_selected = show_toggle
+                                        && top_level_matches.iter().all(|name| {
+                                            selected_collection_addons.contains(&name.to_ascii_lowercase())
+                                                || selected_collection_keys.contains(
+                                                    &service::normalize_collection_entry_key(name),
+                                                )
+                                        });
+                                    let folder_toggle: Element<Message> = if show_toggle {
+                                        iced::widget::checkbox(all_selected)
+                                            .on_toggle({
+                                                let folder_path = f.path.clone();
+                                                move |_| Message::ToggleCollectionFolder(folder_path.clone())
+                                            })
+                                            .into()
+                                    } else {
+                                        Space::new().width(24).into()
+                                    };
+                                    let folder_label_button = button(
+                                        text(format!("{} {}", folder_icon, f.name))
+                                            .size(12)
+                                            .color(colors.text),
+                                    )
+                                    .on_press(Message::ToggleAddRepoDir(path.clone()))
+                                    .padding([2, 4])
+                                    .width(Length::Fill)
+                                    .style(move |_t, status| match status {
+                                        button::Status::Hovered => button::Style {
+                                            background: Some(iced::Background::Color(
+                                                iced::Color::from_rgba(1.0, 1.0, 1.0, 0.07),
+                                            )),
+                                            text_color: c_tree.text,
+                                            border: iced::Border::default(),
+                                            shadow: iced::Shadow::default(),
+                                            snap: true,
+                                        },
+                                        _ => button::Style {
+                                            background: None,
+                                            text_color: c_tree.text,
+                                            border: iced::Border::default(),
+                                            shadow: iced::Shadow::default(),
+                                            snap: true,
+                                        },
+                                    });
+                                    let folder_button: Element<Message> = folder_label_button.into();
+                                    let folder_action_slot: Element<Message> = if show_toggle {
+                                        container(folder_toggle)
+                                            .align_x(iced::Alignment::Start)
+                                            .width(Length::Fixed(18.0))
+                                            .into()
+                                    } else {
+                                        Space::new().width(18).into()
+                                    };
+                                    let folder_row: Element<Message> = row![
+                                        folder_action_slot,
+                                        folder_button,
+                                    ]
+                                    .spacing(3)
+                                    .align_y(iced::Alignment::Center)
+                                    .into();
+                                    file_rows.push(folder_row);
                                     if expanded {
                                         if let Some(children) =
                                             self.add_repo_dir_contents.get(&f.path)
                                         {
-                                            for child in children.iter().take(40) {
+                                            let mut sorted_children = children.clone();
+                                            sorted_children.sort_by(|a, b| {
+                                                let a_key = a.name.to_ascii_lowercase();
+                                                let b_key = b.name.to_ascii_lowercase();
+                                                let a_toggle = detected_collection_addons.contains(&a_key)
+                                                    || (collection_mode && a.is_dir);
+                                                let b_toggle = detected_collection_addons.contains(&b_key)
+                                                    || (collection_mode && b.is_dir);
+
+                                                b_toggle.cmp(&a_toggle)
+                                                    .then(b.is_dir.cmp(&a.is_dir))
+                                                    .then(a.name.cmp(&b.name))
+                                            });
+                                            for child in sorted_children.iter() {
                                                 let c_ch = c;
                                                 let child_path = child.path.clone();
                                                 let child_icon = if child.is_dir {
@@ -1653,40 +1973,90 @@ impl App {
                                                 } else {
                                                     colors.text_soft
                                                 };
-                                                file_rows.push(
-                                                    button(row![
-                                                        Space::new().width(14),
-                                                        text(format!(
-                                                            "{} {}",
-                                                            child_icon, child.name
-                                                        ))
-                                                        .size(11)
-                                                        .color(child_color),
-                                                    ])
-                                                    .on_press(child_msg)
-                                                    .padding([1, 4])
-                                                    .style(move |_t, status| match status {
-                                                        button::Status::Hovered => button::Style {
-                                                            background: Some(
-                                                                iced::Background::Color(
-                                                                    iced::Color::from_rgba(
-                                                                        1.0, 1.0, 1.0, 0.07,
-                                                                    ),
+                                                let child_path_key = child.path.to_ascii_lowercase();
+                                                let child_path_prefix = format!("{}/", child_path_key);
+                                                let child_matches = self
+                                                    .add_repo_probe
+                                                    .as_ref()
+                                                    .map(|probe| {
+                                                        probe
+                                                            .addon_entries
+                                                            .iter()
+                                                            .filter(|entry| {
+                                                                let source_path = entry.source_path.to_ascii_lowercase();
+                                                                source_path == child_path_key
+                                                                    || source_path.starts_with(&child_path_prefix)
+                                                            })
+                                                            .map(|entry| entry.addon_name.clone())
+                                                            .collect::<Vec<_>>()
+                                                    })
+                                                    .unwrap_or_default();
+                                                let show_toggle = child.is_dir && !child_matches.is_empty();
+                                                let checked = show_toggle
+                                                    && child_matches.iter().all(|name| {
+                                                        selected_collection_addons.contains(&name.to_ascii_lowercase())
+                                                            || selected_collection_keys.contains(
+                                                                &service::normalize_collection_entry_key(name),
+                                                            )
+                                                    });
+                                                let child_toggle: Element<Message> = if show_toggle {
+                                                    iced::widget::checkbox(checked)
+                                                        .on_toggle({
+                                                            let folder_path = child.path.clone();
+                                                            move |_| Message::ToggleCollectionFolder(folder_path.clone())
+                                                        })
+                                                        .into()
+                                                } else {
+                                                    Space::new().width(24).into()
+                                                };
+                                                let child_label_button = button(text(format!(
+                                                    "{} {}",
+                                                    child_icon, child.name
+                                                ))
+                                                .size(11)
+                                                .color(child_color))
+                                                .on_press(child_msg)
+                                                .padding([1, 4])
+                                                .width(Length::Fill)
+                                                .style(move |_t, status| match status {
+                                                    button::Status::Hovered => button::Style {
+                                                        background: Some(
+                                                            iced::Background::Color(
+                                                                iced::Color::from_rgba(
+                                                                    1.0, 1.0, 1.0, 0.07,
                                                                 ),
                                                             ),
-                                                            text_color: c_ch.text,
-                                                            border: iced::Border::default(),
-                                                            shadow: iced::Shadow::default(),
-                                                            snap: true,
-                                                        },
-                                                        _ => button::Style {
-                                                            background: None,
-                                                            text_color: c_ch.text_soft,
-                                                            border: iced::Border::default(),
-                                                            shadow: iced::Shadow::default(),
-                                                            snap: true,
-                                                        },
-                                                    })
+                                                        ),
+                                                        text_color: c_ch.text,
+                                                        border: iced::Border::default(),
+                                                        shadow: iced::Shadow::default(),
+                                                        snap: true,
+                                                    },
+                                                    _ => button::Style {
+                                                        background: None,
+                                                        text_color: c_ch.text_soft,
+                                                        border: iced::Border::default(),
+                                                        shadow: iced::Shadow::default(),
+                                                        snap: true,
+                                                    },
+                                                });
+                                                let child_button: Element<Message> = child_label_button.into();
+                                                let child_action_slot: Element<Message> = if show_toggle {
+                                                    container(child_toggle)
+                                                        .align_x(iced::Alignment::Start)
+                                                        .width(Length::Fixed(18.0))
+                                                        .into()
+                                                } else {
+                                                    Space::new().width(18).into()
+                                                };
+                                                file_rows.push(
+                                                    row![
+                                                        Space::new().width(10),
+                                                        child_action_slot,
+                                                        child_button,
+                                                    ]
+                                                    .spacing(3)
+                                                    .align_y(iced::Alignment::Center)
                                                     .into(),
                                                 );
                                             }
@@ -1778,9 +2148,9 @@ impl App {
                             .width(Length::Fill)
                             .height(Length::Fill),
                     )
-                    .width(250)
+                    .width(280)
                     .height(Length::Fill)
-                    .padding([16, 14])
+                    .padding([16, 10])
                     .style(move |_theme| theme::dialog_style(&c_sp));
 
                     // --- MAIN FORM CARD ---
@@ -2086,6 +2456,7 @@ impl App {
                             rule::horizontal(1).style(move |_t| theme::update_line_style(&c_form)),
                             text(url_label).size(12).color(colors.text),
                             url_row,
+                            build_collection_section(),
                             Space::new().height(4),
                             content_label,
                             // Scrollable content fills remaining space
@@ -2167,6 +2538,7 @@ impl App {
                         rule::horizontal(1).style(move |_t| theme::update_line_style(&c)),
                         text(url_label).size(12).color(colors.text),
                         url_row,
+                        build_collection_section(),
                         body_section,
                         rule::horizontal(1).style(move |_t| theme::update_line_style(&c)),
                         footer,
@@ -2357,6 +2729,101 @@ impl App {
                 .spacing(12)
                 .into()
             }
+            Dialog::RemoveCollectionAddon {
+                repo_id,
+                repo_name,
+                addon_name,
+                files,
+            } => {
+                let rid = *repo_id;
+
+                let file_rows: Vec<Element<Message>> = files
+                    .iter()
+                    .map(|(path, kind)| {
+                        let icon = match kind.as_str() {
+                            "dll" => "\u{2699}",
+                            "addon" => "\u{1f4c1}",
+                            _ => "\u{1f4c4}",
+                        };
+                        container(text(format!("{} {}", icon, path)).size(12).color(colors.warn))
+                            .padding([2, 6])
+                            .into()
+                    })
+                    .collect();
+
+                let file_section: Element<Message> = container(
+                    scrollable(column(file_rows).spacing(0).width(Length::Fill))
+                        .height(iced::Length::Fixed(120.0))
+                        .direction(theme::vscroll_overlay())
+                        .style(move |t, s| theme::scrollable_style(&c)(t, s)),
+                )
+                .width(Length::Fill)
+                .padding([6, 0])
+                .style(move |_t| container::Style {
+                    background: Some(iced::Background::Color(iced::Color { a: 0.5, ..c.card })),
+                    border: iced::Border {
+                        color: iced::Color { a: 0.15, ..c.border },
+                        width: 1.0,
+                        radius: 6.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .into();
+
+                column![
+                    row![
+                        text("Remove Collection Addon").size(18).color(colors.title),
+                        Space::new().width(Length::Fill),
+                        close_button(&c),
+                    ]
+                    .align_y(iced::Alignment::Center),
+                    text(format!(
+                        "Remove '{}' from the collection '{}' ?",
+                        addon_name, repo_name
+                    ))
+                    .size(13)
+                    .color(colors.text),
+                    text("Wuddle will remove this addon from the collection selection and delete its installed folder from your WoW directory.")
+                        .size(12)
+                        .color(colors.text_soft),
+                    file_section,
+                    text("The source collection stays installed until all selected addons are removed.")
+                        .size(12)
+                        .color(colors.muted),
+                    row![
+                        Space::new().width(Length::Fill),
+                        button(text("Cancel").size(13))
+                            .on_press(Message::CloseDialog)
+                            .padding([6, 12])
+                            .style(move |_theme, status| match status {
+                                button::Status::Hovered => theme::tab_button_hovered_style(&c),
+                                _ => theme::tab_button_style(&c),
+                            }),
+                        {
+                            let c2 = c;
+                            tip(
+                                button(text("Remove").size(13).color(c.bad))
+                                    .on_press(Message::RemoveCollectionAddonConfirm {
+                                        repo_id: rid,
+                                        addon_name: addon_name.clone(),
+                                    })
+                                    .padding([6, 12])
+                                    .style(move |_theme, _status| {
+                                        let mut s = theme::tab_button_style(&c2);
+                                        s.border.color = c2.bad;
+                                        s
+                                    }),
+                                "Remove this addon from the collection",
+                                iced::widget::tooltip::Position::Top,
+                                colors,
+                            )
+                        },
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(12)
+                .into()
+            }
             Dialog::DllCountWarning {
                 repo_id,
                 repo_name,
@@ -2462,7 +2929,6 @@ impl App {
                 name,
                 wow_dir,
                 launch_method,
-                like_turtles,
                 clear_wdb,
                 lutris_target,
                 wine_command,
@@ -2507,6 +2973,8 @@ impl App {
                     }
                 })
                 .collect();
+
+                let (_, auto_launch_exe) = settings::normalize_wow_path_input(wow_dir);
 
                 // Conditional launch method fields
                 let launch_fields: Element<Message> = match launch_method.as_str() {
@@ -2556,13 +3024,10 @@ impl App {
                     ]
                     .spacing(4)
                     .into(),
-                    _ => {
-                        // "auto"
-                        text("Auto: launches VanillaFixes.exe if present, otherwise Wow.exe")
-                            .size(12)
-                            .color(colors.muted)
-                            .into()
-                    }
+                    _ => text(settings::auto_launch_description(auto_launch_exe.as_deref()))
+                        .size(12)
+                        .color(colors.muted)
+                        .into(),
                 };
 
                 column![
@@ -2579,19 +3044,16 @@ impl App {
                     iced::widget::text_input("My WoW Install", name)
                         .on_input(|s| Message::UpdateInstanceField(InstanceField::Name(s)))
                         .padding([8, 12]),
-                    iced::widget::checkbox(*like_turtles)
-                        .label("I like turtles!")
-                        .on_toggle(|b| Message::UpdateInstanceField(InstanceField::LikeTurtles(b))),
-                    text("WoW directory").size(13).color(colors.text),
+                    text("WoW directory or executable").size(13).color(colors.text),
                     row![
-                        iced::widget::text_input("/path/to/WoW", wow_dir)
+                        iced::widget::text_input("/path/to/WoW or /path/to/Game.exe", wow_dir)
                             .on_input(|s| Message::UpdateInstanceField(InstanceField::WowDir(s)))
                             .width(Length::Fill)
                             .padding([8, 12]),
                         {
                             let c2 = c;
                             tip(
-                                button(text("Browse").size(12))
+                                button(text("Folder").size(12))
                                     .on_press(Message::PickWowDirectory)
                                     .padding([8, 12])
                                     .style(move |_t, s| match s {
@@ -2605,8 +3067,28 @@ impl App {
                                 colors,
                             )
                         },
+                        {
+                            let c2 = c;
+                            tip(
+                                button(text("Exe").size(12))
+                                    .on_press(Message::PickWowExecutable)
+                                    .padding([8, 12])
+                                    .style(move |_t, s| match s {
+                                        button::Status::Hovered => {
+                                            theme::tab_button_hovered_style(&c2)
+                                        }
+                                        _ => theme::tab_button_style(&c2),
+                                    }),
+                                "Pick a specific game executable for Auto launch",
+                                iced::widget::tooltip::Position::Top,
+                                colors,
+                            )
+                        },
                     ]
                     .spacing(6),
+                    text("Tip: choose a folder for default Auto behavior, or choose a renamed game executable to make Auto prefer that file.")
+                        .size(11)
+                        .color(colors.muted),
                     iced::widget::checkbox(*clear_wdb)
                         .label("Auto-clear WDB cache on launch")
                         .on_toggle(|b| Message::UpdateInstanceField(InstanceField::ClearWdb(b))),
@@ -2698,20 +3180,6 @@ impl App {
                 &self.dxvk_preview_content,
                 colors,
             ),
-            Dialog::RadioSettings {
-                auto_connect,
-                auto_play,
-                buffer_size,
-                custom_buffer,
-                persist_volume,
-            } => panels::radio::view(
-                auto_connect,
-                auto_play,
-                buffer_size,
-                *custom_buffer,
-                persist_volume,
-                colors,
-            ),
             Dialog::AvWarning { url, mode } => av_false_positive_warning(url, mode, colors),
             Dialog::AddonConflict {
                 url,
@@ -2730,13 +3198,15 @@ impl App {
             .color(colors.title)
             .line_height(1.0);
 
-        let view_tabs = row![
+        let mut view_tabs = row![
             self.view_tab_button(Tab::Home, colors),
             self.view_tab_button(Tab::Mods, colors),
             self.view_tab_button(Tab::Addons, colors),
-            self.view_tab_button(Tab::Tweaks, colors),
         ]
         .spacing(8);
+        if self.show_tweaks_tab() {
+            view_tabs = view_tabs.push(self.view_tab_button(Tab::Tweaks, colors));
+        }
 
         let action_tabs = row![
             self.view_tab_button(Tab::Options, colors),
@@ -3003,7 +3473,7 @@ impl App {
                 }
                 _ => (
                     "Launch Mode: Auto".to_string(),
-                    "Launches VanillaFixes.exe if present, otherwise Wow.exe".to_string(),
+                    settings::auto_launch_description(active.auto_launch_exe.as_deref()),
                 ),
             };
             let tooltip_content =

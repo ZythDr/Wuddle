@@ -278,8 +278,58 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::AddRepoSubmit => {
             if let Some(Dialog::AddRepo { ref url, ref mode, .. }) = app.dialog {
+                if app.add_repo_manage_repo_id.is_some() {
+                    return Some(Task::done(Message::SaveCollectionSelection));
+                }
+
                 let url = url.clone();
                 let mode = mode.clone();
+                let selected_addons = if mode == "addon_git" {
+                    let hinted = service::selected_addon_hint_from_url(&url);
+                    let requires_choice = app
+                        .add_repo_probe
+                        .as_ref()
+                        .map(|probe| probe.addon_names.len() > service::COLLECTION_PROMPT_THRESHOLD)
+                        .unwrap_or(false);
+                    let treat_as_collection = app.add_repo_manage_repo_id.is_some()
+                        || hinted.is_some()
+                        || app.add_repo_collection_choice == Some(true)
+                        || (app.add_repo_probe
+                            .as_ref()
+                            .map(|probe| probe.addon_names.len() > 1 && !requires_choice)
+                            .unwrap_or(false));
+
+                    if requires_choice && app.add_repo_collection_choice.is_none() {
+                        app.log(LogLevel::Error, "Choose whether this repo is a collection or a multi-module addon.");
+                        app.show_toast(
+                            "Choose whether this repo is a collection or a multi-module addon.",
+                            ToastKind::Warn,
+                        );
+                        return Some(Task::none());
+                    }
+
+                    app.add_repo_probe
+                        .as_ref()
+                        .filter(|probe| probe.addon_names.len() > 1 && treat_as_collection)
+                        .map(|_| {
+                            let mut selected = app
+                                .add_repo_selected_addons
+                                .iter()
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            selected.sort_by_key(|name| name.to_ascii_lowercase());
+                            selected
+                        })
+                        .or_else(|| hinted.map(|name| vec![name]))
+                } else {
+                    None
+                };
+
+                if matches!(selected_addons.as_ref(), Some(selected) if selected.is_empty()) {
+                    app.log(LogLevel::Error, "Select at least one addon from the collection.");
+                    app.show_toast("Select at least one addon from the collection.", ToastKind::Warn);
+                    return Some(Task::none());
+                }
 
                 // Check if this mod requires an AV warning
                 if is_av_false_positive(&url) {
@@ -291,7 +341,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 app.dialog = None;
                 app.log(LogLevel::Info, &format!("Adding repo: {}", url));
                 return Some(Task::perform(
-                    service::add_repo(db, url, mode),
+                    service::add_repo(db, url, mode, selected_addons),
                     Message::AddRepoResult,
                 ));
             }
@@ -334,17 +384,468 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::InstallRepoOverride { url, mode } => {
             let db = app.db_path.clone();
             app.dialog = None;
-            app.add_repo_preview = None;
-            app.add_repo_preview_loading = false;
-            app.add_repo_release_notes = None;
-            app.add_repo_show_releases = false;
-            app.add_repo_file_preview = None;
-            app.add_repo_expanded_dirs.clear();
-            app.add_repo_dir_contents.clear();
+            app.reset_add_repo_state();
             app.log(LogLevel::Info, &format!("Adding repo (override): {}", url));
             Some(Task::perform(
-                service::add_repo(db, url, mode),
+                service::add_repo(db, url, mode, None),
                 Message::AddRepoResult,
+            ))
+        }
+        Message::OpenCollectionManager(repo_id) => {
+            let Some(repo) = app.repos.iter().find(|repo| repo.id == repo_id).cloned() else {
+                return Some(Task::none());
+            };
+
+            app.open_menu = None;
+            app.add_new_menu_open = false;
+            app.reset_add_repo_state();
+            app.add_repo_manage_repo_id = Some(repo_id);
+            app.add_repo_collection_choice = Some(true);
+            let initial_selection = if repo.selected_addons.is_empty() {
+                repo.installed_addons.clone()
+            } else {
+                repo.selected_addons.clone()
+            };
+            app.add_repo_existing_addons = initial_selection.iter().cloned().collect();
+            app.add_repo_selected_addons = initial_selection.into_iter().collect();
+            app.dialog = Some(Dialog::AddRepo {
+                url: repo.url.clone(),
+                mode: repo.mode.clone(),
+                is_addons: true,
+                advanced: false,
+            });
+
+            let mut tasks = vec![iced::widget::operation::focus(iced::widget::Id::new(
+                "add_repo_url",
+            ))];
+            tasks.push(Task::done(Message::FetchRepoPreview(repo.url.clone())));
+            if !app.wow_dir.trim().is_empty() {
+                tasks.push(Task::done(Message::FetchCollectionProbe(repo.url)));
+            }
+            Some(Task::batch(tasks))
+        }
+        Message::FetchCollectionProbe(url) => {
+            if app.wow_dir.trim().is_empty() {
+                app.add_repo_probe = None;
+                app.add_repo_probe_loading = false;
+                return Some(Task::none());
+            }
+            app.add_repo_probe_loading = true;
+            let db = app.db_path.clone();
+            let wow = app.wow_dir.clone();
+            Some(Task::perform(
+                service::probe_conflicts(db, url, wow),
+                Message::FetchCollectionProbeResult,
+            ))
+        }
+        Message::FetchCollectionProbeResult(result) => {
+            app.add_repo_probe_loading = false;
+            match result {
+                Ok(probe) => {
+                    let hinted_addon = if let Some(Dialog::AddRepo { url, .. }) = app.dialog.as_ref() {
+                        service::selected_addon_hint_from_url(url)
+                    } else {
+                        None
+                    };
+                    let requires_choice = probe.addon_names.len() > service::COLLECTION_PROMPT_THRESHOLD;
+                    let detected_names = probe
+                        .addon_names
+                        .iter()
+                        .map(|name| name.to_ascii_lowercase())
+                        .collect::<HashSet<_>>();
+                    if hinted_addon.is_some() {
+                        app.add_repo_collection_choice = Some(true);
+                    } else if app.add_repo_manage_repo_id.is_some() {
+                        app.add_repo_collection_choice = Some(true);
+                    } else if requires_choice {
+                        app.add_repo_collection_choice = None;
+                    } else if probe.addon_names.len() > 1 && app.add_repo_collection_choice.is_none() {
+                        app.add_repo_collection_choice = Some(true);
+                    }
+                    app.add_repo_selected_addons
+                        .retain(|name| detected_names.contains(&name.to_ascii_lowercase()));
+                    if app.add_repo_selected_addons.is_empty() && app.add_repo_collection_choice == Some(true) {
+                        if let Some(hint) = hinted_addon {
+                            let hint_key = hint.to_ascii_lowercase();
+                            if detected_names.contains(&hint_key) {
+                                app.add_repo_selected_addons = probe
+                                    .addon_names
+                                    .iter()
+                                    .filter(|name| name.eq_ignore_ascii_case(&hint))
+                                    .cloned()
+                                    .collect();
+                            }
+                        }
+                    }
+                    if app.add_repo_selected_addons.is_empty()
+                        && probe.addon_names.len() > 1
+                        && app.add_repo_collection_choice == Some(true)
+                    {
+                        app.add_repo_selected_addons = probe.addon_names.iter().cloned().collect();
+                    }
+                    app.add_repo_probe = Some(probe);
+                }
+                Err(e) => {
+                    app.add_repo_probe = None;
+                    app.log(LogLevel::Error, &format!("Addon probe failed: {}", e));
+                }
+            }
+            Some(Task::none())
+        }
+        Message::SetAddRepoCollectionMode(is_collection) => {
+            app.add_repo_collection_choice = Some(is_collection);
+            if is_collection {
+                if let Some(probe) = app.add_repo_probe.as_ref() {
+                    if app.add_repo_selected_addons.is_empty() {
+                        app.add_repo_selected_addons = probe.addon_names.iter().cloned().collect();
+                    }
+                }
+            } else {
+                app.add_repo_selected_addons.clear();
+            }
+            Some(Task::none())
+        }
+        Message::ToggleCollectionFolder(folder_name) => {
+            let folder_display_name = folder_name
+                .rsplit('/')
+                .next()
+                .unwrap_or(folder_name.as_str())
+                .to_string();
+            let folder_path_key = folder_name.trim_matches('/').to_ascii_lowercase();
+            let folder_path_prefix = format!("{}/", folder_path_key);
+            let folder_key = service::normalize_collection_entry_key(&folder_display_name);
+            let mut matching_addons = app
+                .add_repo_probe
+                .as_ref()
+                .map(|probe| {
+                    probe
+                        .addon_entries
+                        .iter()
+                        .filter(|entry| {
+                            let source_path = entry.source_path.to_ascii_lowercase();
+                            source_path == folder_path_key
+                                || source_path.starts_with(&folder_path_prefix)
+                                || service::normalize_collection_entry_key(&entry.addon_name)
+                                    == folder_key
+                        })
+                        .map(|entry| entry.addon_name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            if matching_addons.is_empty() {
+                if let Some(probe) = app.add_repo_probe.as_ref() {
+                    matching_addons.extend(
+                        probe
+                            .addon_names
+                            .iter()
+                            .filter(|addon_name| {
+                                service::normalize_collection_entry_key(addon_name) == folder_key
+                            })
+                            .cloned(),
+                    );
+                }
+            }
+
+            if matching_addons.is_empty() {
+                matching_addons.extend(
+                    app.add_repo_selected_addons
+                        .iter()
+                        .filter(|addon_name| {
+                            service::normalize_collection_entry_key(addon_name) == folder_key
+                        })
+                        .cloned(),
+                );
+            }
+
+            if matching_addons.is_empty() {
+                matching_addons.extend(
+                    app.add_repo_existing_addons
+                        .iter()
+                        .filter(|addon_name| {
+                            service::normalize_collection_entry_key(addon_name) == folder_key
+                        })
+                        .cloned(),
+                );
+            }
+
+            if matching_addons.is_empty() {
+                matching_addons.push(folder_name.clone());
+            }
+
+            matching_addons.sort_by_key(|name| name.to_ascii_lowercase());
+            matching_addons.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+
+            let all_selected = matching_addons
+                .iter()
+                .all(|name| {
+                    app.add_repo_selected_addons
+                        .iter()
+                        .any(|selected| {
+                            selected.eq_ignore_ascii_case(name)
+                                || service::normalize_collection_entry_key(selected)
+                                    == service::normalize_collection_entry_key(name)
+                        })
+                });
+
+            if all_selected {
+                app.add_repo_selected_addons.retain(|selected| {
+                    !matching_addons
+                        .iter()
+                        .any(|addon_name| {
+                            addon_name.eq_ignore_ascii_case(selected)
+                                || service::normalize_collection_entry_key(addon_name)
+                                    == service::normalize_collection_entry_key(selected)
+                        })
+                });
+            } else {
+                for addon_name in matching_addons {
+                    if !app
+                        .add_repo_selected_addons
+                        .iter()
+                        .any(|selected| {
+                            selected.eq_ignore_ascii_case(&addon_name)
+                                || service::normalize_collection_entry_key(selected)
+                                    == service::normalize_collection_entry_key(&addon_name)
+                        })
+                    {
+                        app.add_repo_selected_addons.insert(addon_name);
+                    }
+                }
+            }
+
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "Collection folder '{}' toggled. {} addon(s) now selected.",
+                    folder_display_name,
+                    app.add_repo_selected_addons.len()
+                ),
+            );
+            app.show_toast(
+                format!(
+                    "{} {}",
+                    if all_selected { "Marked for removal:" } else { "Marked to keep/install:" },
+                    folder_display_name
+                ),
+                ToastKind::Info,
+            );
+            Some(Task::none())
+        }
+        Message::ToggleCollectionAddon(addon_name) => {
+            let addon_key = service::normalize_collection_entry_key(&addon_name);
+            let mut matching_addons = app
+                .add_repo_probe
+                .as_ref()
+                .map(|probe| {
+                    probe
+                        .addon_entries
+                        .iter()
+                        .filter(|entry| {
+                            let source_top = entry
+                                .source_path
+                                .split('/')
+                                .next()
+                                .unwrap_or(entry.addon_name.as_str());
+                            service::normalize_collection_entry_key(source_top) == addon_key
+                                || service::normalize_collection_entry_key(&entry.addon_name)
+                                    == addon_key
+                        })
+                        .map(|entry| entry.addon_name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            if matching_addons.is_empty() {
+                matching_addons.extend(
+                    app.add_repo_selected_addons
+                        .iter()
+                        .chain(app.add_repo_existing_addons.iter())
+                        .filter(|selected| {
+                            service::normalize_collection_entry_key(selected) == addon_key
+                        })
+                        .cloned(),
+                );
+            }
+
+            if matching_addons.is_empty() {
+                matching_addons.push(addon_name.clone());
+            }
+
+            matching_addons.sort_by_key(|name| name.to_ascii_lowercase());
+            matching_addons.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+
+            let already_selected = matching_addons.iter().all(|name| {
+                app.add_repo_selected_addons.iter().any(|selected| {
+                    selected.eq_ignore_ascii_case(name)
+                        || service::normalize_collection_entry_key(selected)
+                            == service::normalize_collection_entry_key(name)
+                })
+            });
+
+            if already_selected {
+                app.add_repo_selected_addons.retain(|selected| {
+                    !matching_addons.iter().any(|name| {
+                        selected.eq_ignore_ascii_case(name)
+                            || service::normalize_collection_entry_key(selected)
+                                == service::normalize_collection_entry_key(name)
+                    })
+                });
+            } else {
+                for resolved_name in matching_addons {
+                    if !app.add_repo_selected_addons.iter().any(|selected| {
+                        selected.eq_ignore_ascii_case(&resolved_name)
+                            || service::normalize_collection_entry_key(selected)
+                                == service::normalize_collection_entry_key(&resolved_name)
+                    }) {
+                        app.add_repo_selected_addons.insert(resolved_name);
+                    }
+                }
+            }
+
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "Collection addon '{}' toggled. {} addon(s) now selected.",
+                    addon_name,
+                    app.add_repo_selected_addons.len()
+                ),
+            );
+            app.show_toast(
+                format!(
+                    "{} {}",
+                    if already_selected { "Marked for removal:" } else { "Marked to keep/install:" },
+                    addon_name
+                ),
+                ToastKind::Info,
+            );
+            Some(Task::none())
+        }
+        Message::SaveCollectionSelection => {
+            let Some(repo_id) = app.add_repo_manage_repo_id else {
+                return Some(Task::none());
+            };
+            if app.wow_dir.trim().is_empty() {
+                app.log(LogLevel::Error, "Set a WoW directory in Options first.");
+                return Some(Task::none());
+            }
+
+            let mut selected = app
+                .add_repo_selected_addons
+                .iter()
+                .flat_map(|selected_name| {
+                    let selected_key = service::normalize_collection_entry_key(selected_name);
+                    let mut resolved = app
+                        .add_repo_probe
+                        .as_ref()
+                        .map(|probe| {
+                            probe
+                                .addon_entries
+                                .iter()
+                                .filter(|entry| {
+                                    let source_top = entry
+                                        .source_path
+                                        .split('/')
+                                        .next()
+                                        .unwrap_or(entry.addon_name.as_str());
+                                    service::normalize_collection_entry_key(source_top) == selected_key
+                                        || service::normalize_collection_entry_key(&entry.addon_name)
+                                            == selected_key
+                                })
+                                .map(|entry| entry.addon_name.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+
+                    if resolved.is_empty() {
+                        resolved.push(selected_name.clone());
+                    }
+
+                    resolved
+                })
+                .collect::<Vec<_>>();
+            selected.sort_by_key(|name| name.to_ascii_lowercase());
+            selected.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+
+            let db = app.db_path.clone();
+            let wow = app.wow_dir.clone();
+            let opts = app.install_options();
+            app.dialog = None;
+            app.log(LogLevel::Info, &format!("Saving collection selection for repo id={}...", repo_id));
+            Some(Task::perform(
+                service::update_collection_selection(db, repo_id, wow, selected, opts),
+                Message::SaveCollectionSelectionResult,
+            ))
+        }
+        Message::SaveCollectionSelectionResult(result) => {
+            match result {
+                Ok(msg) => {
+                    app.log(LogLevel::Info, &msg);
+                    app.show_toast(msg, ToastKind::Info);
+                }
+                Err(e) => {
+                    app.log(LogLevel::Error, &format!("Collection update failed: {}", e));
+                    app.show_toast(format!("Collection update failed: {}", e), ToastKind::Error);
+                }
+            }
+            app.reset_add_repo_state();
+            Some(refresh_repos_task(app))
+        }
+        Message::BrowseAddonInstall { repo_id, addon_name } => {
+            app.open_menu = None;
+            let db = app.db_path.clone();
+            let wow = app.wow_dir.clone();
+            if wow.is_empty() {
+                app.log(LogLevel::Error, "Set a WoW directory in Options first.");
+            } else {
+                return Some(Task::perform(
+                    service::open_addon_folder(db, repo_id, wow.into(), addon_name),
+                    |_| Message::CloseMenu,
+                ));
+            }
+            Some(Task::none())
+        }
+        Message::RemoveCollectionAddonPrompt { repo_id, addon_name } => {
+            let repo_name = app
+                .repos
+                .iter()
+                .find(|repo| repo.id == repo_id)
+                .map(|repo| format!("{}/{}", repo.owner, repo.name))
+                .unwrap_or_else(|| format!("repo#{}", repo_id));
+            app.open_menu = None;
+            app.dialog = Some(Dialog::RemoveCollectionAddon {
+                repo_id,
+                repo_name,
+                addon_name: addon_name.clone(),
+                files: vec![(format!("Interface/AddOns/{}", addon_name), "addon".to_string())],
+            });
+            Some(Task::none())
+        }
+        Message::RemoveCollectionAddonConfirm { repo_id, addon_name } => {
+            let Some(repo) = app.repos.iter().find(|repo| repo.id == repo_id).cloned() else {
+                return Some(Task::none());
+            };
+
+            if app.wow_dir.trim().is_empty() {
+                app.log(LogLevel::Error, "Set a WoW directory in Options first.");
+                return Some(Task::none());
+            }
+
+            let mut selected = if repo.selected_addons.is_empty() {
+                repo.installed_addons.clone()
+            } else {
+                repo.selected_addons.clone()
+            };
+            selected.retain(|name| !name.eq_ignore_ascii_case(&addon_name));
+
+            let db = app.db_path.clone();
+            let wow = app.wow_dir.clone();
+            let opts = app.install_options();
+            app.dialog = None;
+            app.log(LogLevel::Info, &format!("Removing '{}' from collection repo id={}...", addon_name, repo_id));
+            Some(Task::perform(
+                service::update_collection_selection(db, repo_id, wow, selected, opts),
+                Message::SaveCollectionSelectionResult,
             ))
         }
         Message::RemoveRepoConfirm(id, remove_files) => {
@@ -906,17 +1407,32 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.add_repo_dir_contents.clear();
             app.log(LogLevel::Info, &format!("Adding repo: {}", url));
             return Some(Task::perform(
-                service::add_repo(db, url, mode),
+                service::add_repo(db, url, mode, None),
                 Message::AddRepoResult,
             ));
         }
         Message::SetAddRepoUrl(url) => {
-            if let Some(Dialog::AddRepo { url: ref mut old_url, .. }) = app.dialog {
+            let is_addons = if let Some(Dialog::AddRepo { url: ref mut old_url, is_addons, .. }) = app.dialog {
                 *old_url = url.clone();
+                is_addons
+            } else {
+                false
+            };
+            app.add_repo_probe = None;
+            app.add_repo_probe_loading = false;
+            if app.add_repo_manage_repo_id.is_none() {
+                app.add_repo_collection_choice = None;
+            }
+            if app.add_repo_manage_repo_id.is_none() {
+                app.add_repo_selected_addons.clear();
             }
             // Also trigger preview fetch automatically as the user types
             if !url.is_empty() && (url.contains('/') || url.contains(':')) {
-                return Some(Task::done(Message::FetchRepoPreview(url)));
+                let mut tasks = vec![Task::done(Message::FetchRepoPreview(url.clone()))];
+                if is_addons && !app.wow_dir.trim().is_empty() {
+                    tasks.push(Task::done(Message::FetchCollectionProbe(url)));
+                }
+                return Some(Task::batch(tasks));
             }
             Some(Task::none())
         }

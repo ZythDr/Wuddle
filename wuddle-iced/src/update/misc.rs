@@ -42,6 +42,7 @@ pub fn launch_game(app: &mut App) -> Task<Message> {
             .unwrap_or_default();
         let cfg = service::LaunchConfig {
             method: active.launch_method,
+            auto_launch_exe: active.auto_launch_exe,
             lutris_target: active.lutris_target,
             wine_command: active.wine_command,
             wine_args: active.wine_args,

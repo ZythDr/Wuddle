@@ -6,11 +6,14 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use pelite::{FileMap, PeFile};
 use wuddle_engine::{CheckMode, Engine, InstallMode, InstallOptions, Repo, UpdatePlan};
 use reqwest::Client;
 use serde::Deserialize;
 use iced;
 use crate::types::LogLevel;
+
+pub const COLLECTION_PROMPT_THRESHOLD: usize = 5;
 
 // ---------------------------------------------------------------------------
 // Row types for the UI (Clone-friendly, owned data)
@@ -30,9 +33,24 @@ pub struct RepoRow {
     /// DLL files managed by this repo: (filename, is_enabled_in_dlls_txt, installed_version).
     /// Empty for non-DLL repos. More than one entry means this is a multi-DLL mod.
     pub installed_dlls: Vec<(String, bool, Option<String>)>,
+    pub installed_addons: Vec<String>,
+    pub selected_addons: Vec<String>,
+    pub is_collection: bool,
     pub merge_installs: bool,
     pub pinned_version: Option<String>,
     pub published_at_unix: Option<i64>,
+}
+
+fn parse_selected_addons(raw: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Vec::new();
+    };
+
+    let mut parsed = serde_json::from_str::<Vec<String>>(raw).unwrap_or_default();
+    parsed.retain(|name| !name.trim().is_empty());
+    parsed.sort_by_key(|name| name.to_ascii_lowercase());
+    parsed.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    parsed
 }
 
 impl From<Repo> for RepoRow {
@@ -54,6 +72,13 @@ impl From<Repo> for RepoRow {
             last_version: r.last_version,
             git_branch: r.git_branch,
             installed_dlls: Vec::new(),
+            installed_addons: Vec::new(),
+            selected_addons: parse_selected_addons(r.selected_addons_json.as_deref()),
+            is_collection: r
+                .selected_addons_json
+                .as_deref()
+                .map(str::trim)
+                .map_or(false, |raw| !raw.is_empty()),
             merge_installs: r.merge_installs,
             pinned_version: r.pinned_version,
             published_at_unix: r.published_at_unix,
@@ -92,6 +117,16 @@ pub struct RepoLoadResult {
     pub logs: Vec<RepoLoadLog>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ClientVersionInfo {
+    pub executable_path: String,
+    pub executable_name: String,
+    pub file_description: Option<String>,
+    pub file_version: Option<String>,
+    pub product_version: Option<String>,
+    pub supports_legacy_1121_tweaks: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum CheckUpdatesStreamEvent {
     Progress(wuddle_engine::UpdateCheckProgress),
@@ -119,6 +154,130 @@ pub fn latest_update_check_progress() -> Option<wuddle_engine::UpdateCheckProgre
 
 pub fn clear_update_check_progress() {
     set_update_check_progress(None);
+}
+
+fn first_existing_game_executable(dir: &Path) -> Option<PathBuf> {
+    ["WoW.exe", "wow.exe", "Wow.exe", "WOW.EXE"]
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn resolve_tweak_target_executable(
+    wow_dir: &Path,
+    auto_launch_exe: Option<&str>,
+) -> Result<PathBuf, String> {
+    if let Some(exe_name) = auto_launch_exe.map(str::trim).filter(|name| !name.is_empty()) {
+        let explicit = wow_dir.join(exe_name);
+        if explicit.is_file() {
+            return Ok(explicit);
+        }
+        return Err(format!("{} not found in the specified directory.", exe_name));
+    }
+
+    first_existing_game_executable(wow_dir)
+        .ok_or_else(|| "WoW.exe not found in the specified directory.".to_string())
+}
+
+fn parse_version_tuple(raw: &str) -> Option<(u16, u16, u16, u16)> {
+    let parts: Vec<u16> = raw
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u16>().ok())
+        .collect();
+
+    if parts.len() < 3 {
+        return None;
+    }
+
+    Some((
+        parts[0],
+        parts[1],
+        parts[2],
+        *parts.get(3).unwrap_or(&0),
+    ))
+}
+
+pub async fn detect_tweak_client(
+    wow_dir: String,
+    auto_launch_exe: Option<String>,
+) -> Result<ClientVersionInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        let wow_path = Path::new(&wow_dir);
+        let exe_path = resolve_tweak_target_executable(wow_path, auto_launch_exe.as_deref())?;
+        let file_map = FileMap::open(&exe_path)
+            .map_err(|e| format!("Failed to open {}: {e}", exe_path.display()))?;
+        let pe = PeFile::from_bytes(&file_map)
+            .map_err(|e| format!("Failed to parse {} as a Windows executable: {e}", exe_path.display()))?;
+
+        let mut file_description = None;
+        let mut file_version = None;
+        let mut product_version = None;
+        let mut version_tuple = None;
+
+        if let Ok(resources) = pe.resources() {
+            if let Ok(version_info) = resources.version_info() {
+                if let Some(fixed) = version_info.fixed() {
+                    version_tuple = Some((
+                        fixed.dwFileVersion.Major,
+                        fixed.dwFileVersion.Minor,
+                        fixed.dwFileVersion.Patch,
+                        fixed.dwFileVersion.Build,
+                    ));
+                    file_version = Some(format!(
+                        "{}.{}.{}.{}",
+                        fixed.dwFileVersion.Major,
+                        fixed.dwFileVersion.Minor,
+                        fixed.dwFileVersion.Patch,
+                        fixed.dwFileVersion.Build,
+                    ));
+                    product_version = Some(format!(
+                        "{}.{}.{}.{}",
+                        fixed.dwProductVersion.Major,
+                        fixed.dwProductVersion.Minor,
+                        fixed.dwProductVersion.Patch,
+                        fixed.dwProductVersion.Build,
+                    ));
+                }
+
+                let file_info = version_info.file_info();
+                if let Some(strings) = file_info.strings.values().next() {
+                    file_description = strings.get("FileDescription").cloned();
+                    if file_version.is_none() {
+                        file_version = strings.get("FileVersion").cloned();
+                    }
+                    if product_version.is_none() {
+                        product_version = strings.get("ProductVersion").cloned();
+                    }
+                }
+            }
+        }
+
+        if version_tuple.is_none() {
+            version_tuple = file_version
+                .as_deref()
+                .and_then(parse_version_tuple)
+                .or_else(|| product_version.as_deref().and_then(parse_version_tuple));
+        }
+
+        let supports_legacy_1121_tweaks = version_tuple
+            .map(|(major, minor, patch, _)| (major, minor, patch) == (1, 12, 1))
+            .unwrap_or(false);
+
+        Ok(ClientVersionInfo {
+            executable_path: exe_path.to_string_lossy().to_string(),
+            executable_name: exe_path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| "WoW.exe".to_string()),
+            file_description,
+            file_version,
+            product_version,
+            supports_legacy_1121_tweaks,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 impl From<UpdatePlan> for PlanRow {
@@ -452,15 +611,35 @@ pub async fn list_repos(
             let mut row = RepoRow::from(repo);
             let installs = eng.db().list_installs(row.id).unwrap_or_default();
             row.installed_dlls = installs
-                .into_iter()
+                .iter()
                 .filter(|e| e.kind == "dll")
                 .filter_map(|e| {
                     let fname = std::path::Path::new(&e.path)
                         .file_name()?.to_str()?.to_string();
                     let is_enabled = enabled_dlls.contains(&fname.to_lowercase());
-                    Some((fname, is_enabled, e.version))
+                    Some((fname, is_enabled, e.version.clone()))
                 })
                 .collect();
+            row.installed_addons = installs
+                .into_iter()
+                .filter(|e| e.kind == "addon")
+                .filter_map(|e| {
+                    std::path::Path::new(&e.path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.to_string())
+                })
+                .collect();
+            row.installed_addons
+                .sort_by_key(|name| name.to_ascii_lowercase());
+            row.installed_addons
+                .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+            if row.mode == "addon_git" && row.installed_addons.len() > COLLECTION_PROMPT_THRESHOLD {
+                if row.selected_addons.is_empty() {
+                    row.selected_addons = row.installed_addons.clone();
+                }
+                row.is_collection = true;
+            }
             rows.push(row);
         }
         Ok::<RepoLoadResult, String>(RepoLoadResult { rows, logs })
@@ -528,12 +707,46 @@ pub async fn add_repo(
     db_path: Option<PathBuf>,
     url: String,
     mode: String,
+    selected_addons: Option<Vec<String>>,
 ) -> Result<i64, String> {
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let install_mode = InstallMode::from_str(&mode).unwrap_or(InstallMode::Auto);
-        eng.add_repo(&url, install_mode, None)
+        eng.add_repo(&url, install_mode, None, selected_addons)
             .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn update_collection_selection(
+    db_path: Option<PathBuf>,
+    repo_id: i64,
+    wow_dir: String,
+    selected_addons: Vec<String>,
+    opts: InstallOptions,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        let repo = eng.db().get_repo(repo_id).map_err(|e| e.to_string())?;
+
+        eng.set_repo_selected_addons(repo_id, Some(selected_addons.clone()))
+            .map_err(|e| e.to_string())?;
+
+        if selected_addons.is_empty() {
+            eng.remove_repo(repo_id, Some(Path::new(&wow_dir)), true)
+                .map_err(|e| e.to_string())?;
+            return Ok(format!("Removed collection {}/{}.", repo.owner, repo.name));
+        }
+
+        let plan = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?
+            .block_on(async { eng.reinstall_repo(repo_id, Path::new(&wow_dir), None, opts).await })
+            .map_err(|e| e.to_string())?;
+
+        Ok(format!("Updated collection selection for {}/{}.", plan.owner, plan.name))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -550,12 +763,13 @@ pub async fn probe_conflicts(
     // fresh, isolated current-thread runtime inside the blocking task.
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
+        let normalized_url = normalize_repo_input_url(&url);
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?
             .block_on(async {
-                eng.probe_addon_repo_conflicts(&url, Path::new(&wow_dir), None).await
+                eng.probe_addon_repo_conflicts(&normalized_url, Path::new(&wow_dir), None).await
             })
             .map_err(|e| e.to_string())
     })
@@ -946,6 +1160,42 @@ pub async fn open_repo_folder(
     .map_err(|e| e.to_string())?
 }
 
+pub async fn open_addon_folder(
+    db_path: Option<PathBuf>,
+    repo_id: i64,
+    wow_dir: PathBuf,
+    addon_name: String,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        let installs = eng.db().list_installs(repo_id).map_err(|e| e.to_string())?;
+
+        if let Some(entry) = installs.into_iter().find(|entry| {
+            entry.kind == "addon"
+                && std::path::Path::new(&entry.path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.eq_ignore_ascii_case(&addon_name))
+                    .unwrap_or(false)
+        }) {
+            let full_path = wow_dir.join(entry.path);
+            if full_path.exists() {
+                let _ = open::that(full_path);
+                return Ok(());
+            }
+        }
+
+        let fallback = wow_dir.join("Interface").join("AddOns").join(addon_name);
+        if fallback.exists() {
+            let _ = open::that(fallback);
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---------------------------------------------------------------------------
 // Game launch
 // ---------------------------------------------------------------------------
@@ -953,6 +1203,7 @@ pub async fn open_repo_folder(
 #[derive(Debug, Clone)]
 pub struct LaunchConfig {
     pub method: String,        // "auto", "lutris", "wine", "custom"
+    pub auto_launch_exe: Option<String>,
     pub lutris_target: String, // e.g. "lutris:rungameid/2"
     pub wine_command: String,  // e.g. "wine"
     pub wine_args: String,
@@ -968,14 +1219,29 @@ fn first_existing_file(dir: &Path, names: &[&str]) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-fn resolve_launch_target(wow_path: &Path) -> Result<PathBuf, String> {
+fn resolve_launch_target(wow_path: &Path, auto_launch_exe: Option<&str>) -> Result<PathBuf, String> {
+    let override_name = auto_launch_exe.map(str::trim).filter(|name| !name.is_empty());
+
+    if let Some(exe_name) = override_name {
+        if let Some(target) = first_existing_file(wow_path, &[exe_name]) {
+            return Ok(target);
+        }
+    }
+
     first_existing_file(wow_path, &["VanillaFixes.exe", "vanillafixes.exe"])
         .or_else(|| first_existing_file(wow_path, &["Wow.exe", "wow.exe", "WoW.exe"]))
         .ok_or_else(|| {
-            format!(
-                "No launcher found in {} (expected VanillaFixes.exe or Wow.exe).",
-                wow_path.display()
-            )
+            match override_name {
+                Some(exe_name) => format!(
+                    "No launcher found in {} (checked {}, VanillaFixes.exe, and Wow.exe).",
+                    wow_path.display(),
+                    exe_name
+                ),
+                None => format!(
+                    "No launcher found in {} (expected VanillaFixes.exe or Wow.exe).",
+                    wow_path.display()
+                ),
+            }
         })
 }
 
@@ -1043,7 +1309,7 @@ pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, S
             }
         }
 
-        let target = resolve_launch_target(&wow_path)?;
+        let target = resolve_launch_target(&wow_path, cfg.auto_launch_exe.as_deref())?;
         let target_str = target.to_string_lossy().to_string();
         let target_name = target.file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -1328,6 +1594,60 @@ pub fn parse_forge_url(url: &str) -> Option<ForgeInfo> {
         }
     }
     None
+}
+
+pub fn normalize_repo_input_url(url: &str) -> String {
+    parse_forge_url(url)
+        .map(|fi| format!("{}://{}/{}/{}", fi.scheme, fi.host, fi.owner, fi.repo))
+        .unwrap_or_else(|| url.trim().trim_end_matches('/').to_string())
+}
+
+pub fn selected_addon_hint_from_url(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .map(|s| ("https", s))
+        .or_else(|| trimmed.strip_prefix("http://").map(|s| ("http", s)))
+        .unwrap_or(("https", trimmed));
+    let (_scheme, rest) = without_scheme;
+
+    if let Some(r) = rest.strip_prefix("github.com/") {
+        let parts: Vec<&str> = r.split('/').filter(|part| !part.is_empty()).collect();
+        if parts.len() >= 5 && parts[2] == "tree" {
+            return parts.last().map(|name| name.to_string());
+        }
+    }
+
+    if let Some(r) = rest.strip_prefix("gitlab.com/") {
+        let parts: Vec<&str> = r.split('/').filter(|part| !part.is_empty()).collect();
+        if let Some(tree_index) = parts.iter().position(|part| *part == "tree") {
+            if parts.get(tree_index.wrapping_add(2)).is_some() {
+                return parts.last().map(|name| name.to_string());
+            }
+        }
+    }
+
+    let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
+    if let Some(src_index) = parts.iter().position(|part| *part == "src") {
+        if parts.get(src_index.wrapping_add(2)).is_some() {
+            return parts.last().map(|name| name.to_string());
+        }
+    }
+
+    None
+}
+
+pub fn normalize_collection_entry_key(name: &str) -> String {
+    let mut key = name.trim().to_ascii_lowercase();
+
+    for suffix in ["-master", "_master", "-main", "_main"] {
+        if let Some(stripped) = key.strip_suffix(suffix) {
+            key = stripped.to_string();
+            break;
+        }
+    }
+
+    key
 }
 
 // ---------------------------------------------------------------------------
@@ -1969,25 +2289,39 @@ fn extract_dll_info_from_readme(readme: &str, target_dll: &str) -> Option<String
 // Tweak wrappers (delegates to crate::tweaks which ports vanilla-tweaks)
 // ---------------------------------------------------------------------------
 
-pub async fn read_tweaks(wow_dir: String) -> Result<crate::tweaks::ReadTweakValues, String> {
+pub async fn read_tweaks(
+    wow_dir: String,
+    auto_launch_exe: Option<String>,
+) -> Result<crate::tweaks::ReadTweakValues, String> {
     tokio::task::spawn_blocking(move || {
-        crate::tweaks::read_tweaks(std::path::Path::new(&wow_dir))
+        crate::tweaks::read_tweaks(std::path::Path::new(&wow_dir), auto_launch_exe.as_deref())
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-pub async fn apply_tweaks(wow_dir: String, opts: crate::tweaks::TweakOptions) -> Result<String, String> {
+pub async fn apply_tweaks(
+    wow_dir: String,
+    auto_launch_exe: Option<String>,
+    opts: crate::tweaks::TweakOptions,
+) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
-        crate::tweaks::apply_tweaks(std::path::Path::new(&wow_dir), &opts)
+        crate::tweaks::apply_tweaks(
+            std::path::Path::new(&wow_dir),
+            auto_launch_exe.as_deref(),
+            &opts,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-pub async fn restore_tweaks(wow_dir: String) -> Result<String, String> {
+pub async fn restore_tweaks(
+    wow_dir: String,
+    auto_launch_exe: Option<String>,
+) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
-        crate::tweaks::restore_backup(std::path::Path::new(&wow_dir))
+        crate::tweaks::restore_backup(std::path::Path::new(&wow_dir), auto_launch_exe.as_deref())
     })
     .await
     .map_err(|e| e.to_string())?

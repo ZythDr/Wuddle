@@ -72,6 +72,7 @@ pub struct Repo {
     pub published_at_unix: Option<i64>, // latest release timestamp for adaptive frequency
     pub merge_installs: bool, // keep existing files when updating (don't delete unmatched)
     pub pinned_version: Option<String>, // lock to a specific release tag (None = latest)
+    pub selected_addons_json: Option<String>, // collection selection for addon_git repos
 }
 
 #[allow(dead_code)]

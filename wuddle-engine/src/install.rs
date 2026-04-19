@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use git2::{Repository, Tree, TreeWalkMode, TreeWalkResult};
+use git2::{Repository, Tree};
 use std::{
     collections::HashMap,
     fs, io,
@@ -446,6 +446,8 @@ fn detect_dlls(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+const MAX_ADDON_SCAN_DEPTH: usize = 5;
+
 fn detect_addons(root: &Path) -> Vec<(PathBuf, String)> {
     let mut candidates: Vec<(PathBuf, String)> = Vec::new();
 
@@ -455,31 +457,48 @@ fn detect_addons(root: &Path) -> Vec<(PathBuf, String)> {
         return candidates;
     }
 
-    // 2. Check immediate subdirectories of the root (depth 1) only.
-    // GAM mirrors this: if root isn't an addon, look 1 level deep for subfolder addons.
-    if let Ok(rd) = fs::read_dir(root) {
-        for entry in rd.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                // Ignore hidden folders like .git
-                if p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.starts_with('.'))
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-
-                if let Some(folder_name) = addon_folder_name_from_toc(&p, root) {
-                    candidates.push((p, folder_name));
-                }
-            }
-        }
-    }
+    scan_addon_dirs(root, root, 1, &mut candidates);
 
     candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     candidates.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
     candidates
+}
+
+fn scan_addon_dirs(
+    dir: &Path,
+    scan_root: &Path,
+    depth: usize,
+    candidates: &mut Vec<(PathBuf, String)>,
+) {
+    if depth > MAX_ADDON_SCAN_DEPTH {
+        return;
+    }
+
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|name| name.starts_with('.'))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        if let Some(folder_name) = addon_folder_name_from_toc(&path, scan_root) {
+            candidates.push((path, folder_name));
+            continue;
+        }
+
+        scan_addon_dirs(&path, scan_root, depth + 1, candidates);
+    }
 }
 
 pub fn detect_addons_in_tree(root: &Path) -> Vec<(PathBuf, String)> {
@@ -505,36 +524,50 @@ pub fn detect_addons_in_git_tree(root: &Path) -> Result<Vec<(PathBuf, String)>> 
         candidates.push((root.to_path_buf(), name));
     }
 
-    // 2. Scan depth 1 subfolders
-    head.walk(TreeWalkMode::PreOrder, |root_str, entry| {
-        // root_str is the path relative to tree root (ending in / unless empty)
-        let depth = if root_str.is_empty() { 0 } else { root_str.split('/').count() - 1 };
-
-        if depth == 0 {
-            if entry.kind() == Some(git2::ObjectType::Tree) {
-                let name = entry.name().unwrap_or("");
-                if name.starts_with('.') {
-                    return TreeWalkResult::Skip;
-                }
-                if let Ok(tree) = entry.to_object(&repo).and_then(|obj| obj.peel_to_tree()) {
-                    if let Some(addon_name) = addon_folder_name_from_git_tree(&repo, &tree, name, false) {
-                        candidates.push((root.join(name), addon_name));
-                        // Stop walking THIS branch.
-                        return TreeWalkResult::Skip;
-                    }
-                }
-            }
-        } else if depth >= 1 {
-            // Already inside a subfolder that wasn't an addon at depth 1.
-            // GAM stops here (size > 1).
-            return TreeWalkResult::Skip;
-        }
-
-        TreeWalkResult::Ok
-    })?;
+    scan_git_addon_dirs(&repo, root, &head, "", 1, &mut candidates)?;
 
     candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     Ok(candidates)
+}
+
+fn scan_git_addon_dirs(
+    repo: &Repository,
+    root: &Path,
+    tree: &Tree,
+    rel_path: &str,
+    depth: usize,
+    candidates: &mut Vec<(PathBuf, String)>,
+) -> Result<()> {
+    if depth > MAX_ADDON_SCAN_DEPTH {
+        return Ok(());
+    }
+
+    for entry in tree.iter() {
+        if entry.kind() != Some(git2::ObjectType::Tree) {
+            continue;
+        }
+
+        let name = entry.name().unwrap_or("");
+        if name.starts_with('.') {
+            continue;
+        }
+
+        let subtree = entry.to_object(repo)?.peel_to_tree()?;
+        let child_rel = if rel_path.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}/{}", rel_path, name)
+        };
+
+        if let Some(addon_name) = addon_folder_name_from_git_tree(repo, &subtree, name, false) {
+            candidates.push((root.join(&child_rel), addon_name));
+            continue;
+        }
+
+        scan_git_addon_dirs(repo, root, &subtree, &child_rel, depth + 1, candidates)?;
+    }
+
+    Ok(())
 }
 
 fn addon_folder_name_from_git_tree(
@@ -753,15 +786,16 @@ fn walk_dir(root: &Path, cb: &mut dyn FnMut(&Path)) {
 ///
 /// It uses a "link then move" approach: it tries to create a relative symlink,
 /// and if that fails, it renames (moves) the folder out of the repository.
-pub fn link_addon_subfolder(repo_dir: &Path, sub_dir_name: &str, dst: &Path) -> Result<InstallRecord> {
+pub fn link_addon_subfolder(repo_dir: &Path, sub_path: &str, dst: &Path) -> Result<InstallRecord> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).with_context(|| format!("mkdir {:?}", parent))?;
     }
     remove_any_target(dst)?;
 
-    let src = repo_dir.join(sub_dir_name);
+    let src = repo_dir.join(sub_path);
     let repo_dir_name = repo_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let rel_src = format!("./{}/{}", repo_dir_name, sub_dir_name);
+    let rel_sub_path = sub_path.replace('\\', "/");
+    let rel_src = format!("./{}/{}", repo_dir_name, rel_sub_path);
 
     let mut linked = false;
 

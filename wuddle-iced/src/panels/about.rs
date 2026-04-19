@@ -60,7 +60,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         let mut r = row![
             column![
                 text("About").size(18).color(colors.title),
-                text("Wuddle — Addon & mod manager for Turtle WoW.")
+                text("Wuddle — Custom launcher with mods and addons management for legacy WoW clients.")
                     .size(12)
                     .color(colors.muted),
             ]

@@ -1,4 +1,3 @@
-use crate::radio;
 use crate::service::{self, PlanRow, RepoLoadResult};
 use crate::settings::{self, UpdateChannel};
 use crate::theme::WuddleTheme;
@@ -31,22 +30,6 @@ pub enum Message {
     ToggleClock12(bool),
     ToggleFrizFont(bool),
     SetUiScaleMode(settings::UiScaleMode),
-    // Radio
-    ToggleRadio,
-    ReconnectRadio,
-    RadioStarted(Result<radio::RadioHandle, String>),
-    SetRadioVolume(f32),
-    ToggleRadioMute,
-    ToggleRadioAutoConnect(bool),
-    AutoConnectRadio,
-    OpenRadioSettings,
-    CloseRadioSettings,
-    SetRadioAutoConnect(bool),
-    SetRadioAutoPlay(bool),
-    SetRadioBufferSize(String),
-    SetRadioCustomBuffer(bool),
-    SetRadioPersistVolume(bool),
-    SaveRadioSettings,
     SetGithubTokenInput(String),
 
     // Tweaks
@@ -67,9 +50,10 @@ pub enum Message {
     // Dialogs
     OpenDialog(Dialog),
     CloseDialog,
+    ConsumeDialogClick,
 
     // Context menu
-    ToggleMenu(i64),
+    ToggleMenu(String),
     CloseMenu,
     ToggleAddNewMenu,
 
@@ -114,9 +98,22 @@ pub enum Message {
     OpenUrl(String),
     OpenDirectory(String),
     BrowseRepo(i64),
+    BrowseAddonInstall { repo_id: i64, addon_name: String },
     CopyToClipboard(String),
     LaunchGame,
     LaunchGameResult(Result<String, String>),
+
+    // Collection addon management
+    OpenCollectionManager(i64),
+    FetchCollectionProbe(String),
+    FetchCollectionProbeResult(Result<wuddle_engine::AddonProbeResult, String>),
+    SetAddRepoCollectionMode(bool),
+    ToggleCollectionFolder(String),
+    ToggleCollectionAddon(String),
+    SaveCollectionSelection,
+    SaveCollectionSelectionResult(Result<String, String>),
+    RemoveCollectionAddonPrompt { repo_id: i64, addon_name: String },
+    RemoveCollectionAddonConfirm { repo_id: i64, addon_name: String },
 
     // GitHub token
     SaveGithubToken,
@@ -133,7 +130,8 @@ pub enum Message {
 
     // File dialog
     PickWowDirectory,
-    WowDirectoryPicked(Option<PathBuf>),
+    PickWowExecutable,
+    WowPathPicked(Option<PathBuf>),
 
     // Tweaks
     SetTweakFov(f32),
@@ -142,6 +140,7 @@ pub enum Message {
     SetTweakNameplateDist(f32),
     SetTweakMaxCameraDist(String),
     SetTweakSoundChannels(String),
+    DetectTweakClientResult(Result<service::ClientVersionInfo, String>),
     ReadTweaks,
     ReadTweaksResult(Result<tweaks::ReadTweakValues, String>),
     ApplyTweaks,

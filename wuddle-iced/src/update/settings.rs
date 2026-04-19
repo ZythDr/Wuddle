@@ -1,8 +1,31 @@
 use iced::Task;
 use crate::{App, Message, Dialog, InstanceField, ToastKind};
+use crate::service;
 use crate::theme::WuddleTheme;
 use crate::types::LogLevel;
 use crate::settings::{self, ProfileConfig, resolve_ui_scale};
+
+fn schedule_tweak_client_detection(app: &mut App) -> Option<Task<Message>> {
+    if app.wow_dir.trim().is_empty() {
+        app.tweak_client_info = None;
+        app.tweak_client_error = None;
+        app.tweak_client_checking = false;
+        return None;
+    }
+
+    let auto_launch_exe = app
+        .active_profile()
+        .and_then(|profile| profile.auto_launch_exe.clone());
+
+    app.tweak_client_info = None;
+    app.tweak_client_error = None;
+    app.tweak_client_checking = true;
+
+    Some(Task::perform(
+        service::detect_tweak_client(app.wow_dir.clone(), auto_launch_exe),
+        Message::DetectTweakClientResult,
+    ))
+}
 
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
@@ -114,7 +137,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::UpdateInstanceField(field) => {
             if let Some(Dialog::InstanceSettings {
                 ref mut name, ref mut wow_dir, ref mut launch_method,
-                ref mut like_turtles, ref mut clear_wdb,
+                ref mut clear_wdb,
                 ref mut lutris_target, ref mut wine_command, ref mut wine_args,
                 ref mut custom_command, ref mut custom_args, ..
             }) = app.dialog {
@@ -122,7 +145,6 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     InstanceField::Name(v) => *name = v,
                     InstanceField::WowDir(v) => *wow_dir = v,
                     InstanceField::LaunchMethod(v) => *launch_method = v,
-                    InstanceField::LikeTurtles(v) => *like_turtles = v,
                     InstanceField::ClearWdb(v) => *clear_wdb = v,
                     InstanceField::LutrisTarget(v) => *lutris_target = v,
                     InstanceField::WineCommand(v) => *wine_command = v,
@@ -136,12 +158,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::SaveInstanceSettings => {
             if let Some(Dialog::InstanceSettings {
                 is_new, profile_id: dialog_profile_id, name, wow_dir, launch_method,
-                like_turtles, clear_wdb,
+                clear_wdb,
                 lutris_target, wine_command, wine_args,
                 custom_command, custom_args,
             }) = app.dialog.take() {
                 let profile_name = if name.trim().is_empty() { String::from("Default") } else { name.trim().to_string() };
-                let dir = wow_dir.trim().to_string();
+                let (dir, auto_launch_exe) = settings::normalize_wow_path_input(&wow_dir);
                 let profile_id = if is_new {
                     profile_name.to_lowercase().replace(' ', "-")
                 } else if !dialog_profile_id.is_empty() {
@@ -157,8 +179,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     id: profile_id.clone(),
                     name: profile_name.clone(),
                     wow_dir: dir.clone(),
+                    auto_launch_exe,
                     launch_method,
-                    like_turtles,
                     clear_wdb,
                     lutris_target,
                     wine_command,
@@ -180,6 +202,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 }
                 app.save_settings();
                 app.log(LogLevel::Info, &format!("Instance profile saved: {}", profile_name));
+
+                if app.active_profile_id == profile_id {
+                    if let Some(task) = schedule_tweak_client_detection(app) {
+                        return Some(task);
+                    }
+                }
             }
             Some(Task::none())
         }
@@ -199,7 +227,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.loading = true;
                     app.log(LogLevel::Info, &format!("Switched to profile: {} ({})", pname, pid));
                     app.save_settings();
-                    return Some(crate::update::repos::refresh_repos_task(app));
+                    let mut tasks = vec![crate::update::repos::refresh_repos_task(app)];
+                    if let Some(task) = schedule_tweak_client_detection(app) {
+                        tasks.push(task);
+                    }
+                    return Some(Task::batch(tasks));
                 }
             }
             Some(Task::none())
@@ -235,11 +267,6 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.opt_desktop_notify = s.opt_desktop_notify;
             app.opt_symlinks = s.opt_symlinks;
             app.opt_xattr = s.opt_xattr;
-            app.radio_auto_connect = s.radio_auto_connect;
-            app.radio_volume = s.radio_volume;
-            app.radio_auto_play = s.radio_auto_play;
-            app.radio_buffer_size = s.radio_buffer_size;
-            app.radio_persist_volume = s.radio_persist_volume;
             app.opt_clock12 = s.opt_clock12;
             app.opt_friz_font = s.opt_friz_font;
             app.log_wrap = s.log_wrap;
@@ -263,8 +290,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.db_path = settings::resolve_profile_db_path(&app.active_profile_id).ok();
             app.log(LogLevel::Info, "Settings loaded.");
             let mut tasks = vec![crate::update::repos::refresh_repos_task(app)];
-            if app.radio_auto_connect {
-                tasks.push(Task::done(Message::AutoConnectRadio));
+            if let Some(task) = schedule_tweak_client_detection(app) {
+                tasks.push(task);
             }
             Some(Task::batch(tasks))
         }
@@ -281,19 +308,42 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         .await
                         .map(|h| h.path().to_path_buf())
                 },
-                Message::WowDirectoryPicked,
+                Message::WowPathPicked,
             ))
         }
-        Message::WowDirectoryPicked(opt) => {
+        Message::PickWowExecutable => {
+            Some(Task::perform(
+                async {
+                    rfd::AsyncFileDialog::new()
+                        .add_filter("Windows executable", &["exe"])
+                        .set_title("Select Game Executable")
+                        .pick_file()
+                        .await
+                        .map(|h| h.path().to_path_buf())
+                },
+                Message::WowPathPicked,
+            ))
+        }
+        Message::WowPathPicked(opt) => {
             if let Some(path) = opt {
-                let dir = path.to_string_lossy().to_string();
-                app.log(LogLevel::Info, &format!("WoW directory set: {}", dir));
+                let selected = path.to_string_lossy().to_string();
+                let (dir, auto_launch_exe) = settings::normalize_wow_path_input(&selected);
+                let display = settings::wow_path_display(&dir, auto_launch_exe.as_deref());
+                app.log(LogLevel::Info, &format!("WoW path set: {}", display));
                 if let Some(Dialog::InstanceSettings { ref mut wow_dir, .. }) = app.dialog {
-                    *wow_dir = dir;
+                    *wow_dir = display;
                 } else {
-                    app.wow_dir = dir;
+                    app.wow_dir = dir.clone();
+                    if let Some(profile) = app.profiles.iter_mut().find(|p| p.id == app.active_profile_id) {
+                        profile.wow_dir = dir;
+                        profile.auto_launch_exe = auto_launch_exe;
+                    }
                     app.save_settings();
-                    return Some(crate::update::repos::refresh_repos_task(app));
+                    let mut tasks = vec![crate::update::repos::refresh_repos_task(app)];
+                    if let Some(task) = schedule_tweak_client_detection(app) {
+                        tasks.push(task);
+                    }
+                    return Some(Task::batch(tasks));
                 }
             }
             Some(Task::none())

@@ -98,9 +98,14 @@ impl Default for DxvkConfig {
 pub enum Dialog {
     AddRepo { url: String, mode: String, is_addons: bool, advanced: bool },
     RemoveRepo { id: i64, name: String, remove_files: bool, files: Vec<(String, String)> },
+    RemoveCollectionAddon {
+        repo_id: i64,
+        repo_name: String,
+        addon_name: String,
+        files: Vec<(String, String)>,
+    },
     Changelog { title: String, items: Vec<iced::widget::markdown::Item>, loading: bool },
     DxvkConfig { config: DxvkConfig, show_preview: bool },
-    RadioSettings { auto_connect: bool, auto_play: bool, buffer_size: String, custom_buffer: bool, persist_volume: bool },
     DllCountWarning {
         repo_id: i64,
         repo_name: String,
@@ -113,7 +118,6 @@ pub enum Dialog {
         name: String,
         wow_dir: String,
         launch_method: String,  // "auto", "lutris", "wine", "custom"
-        like_turtles: bool,
         clear_wdb: bool,
         lutris_target: String,
         wine_command: String,

@@ -50,7 +50,6 @@ pub enum InstanceField {
     Name(String),
     WowDir(String),
     LaunchMethod(String),
-    LikeTurtles(bool),
     ClearWdb(bool),
     LutrisTarget(String),
     WineCommand(String),

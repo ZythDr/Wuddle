@@ -48,7 +48,7 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        const SCHEMA_VERSION: i32 = 8;
+        const SCHEMA_VERSION: i32 = 9;
 
         let current: i32 = self
             .conn
@@ -79,7 +79,8 @@ impl Db {
                   installed_asset_id   TEXT,
                   installed_asset_name TEXT,
                   installed_asset_size INTEGER,
-                  installed_asset_url  TEXT
+                                    installed_asset_url  TEXT,
+                                    selected_addons_json TEXT
                 );
 
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_repos_unique
@@ -169,6 +170,16 @@ impl Db {
                     .execute_batch("ALTER TABLE installs ADD COLUMN version TEXT")?;
             }
             self.conn.execute_batch("PRAGMA user_version = 8")?;
+        }
+
+        // v8 -> v9: persist selected addon folders for collection-style addon_git repos.
+        if current < 9 {
+            let cols = self.existing_repo_columns()?;
+            if !cols.contains("selected_addons_json") {
+                self.conn
+                    .execute_batch("ALTER TABLE repos ADD COLUMN selected_addons_json TEXT")?;
+            }
+            self.conn.execute_batch("PRAGMA user_version = 9")?;
         }
 
         Ok(())
@@ -316,6 +327,10 @@ impl Db {
             "installed_asset_url",
             "ALTER TABLE repos ADD COLUMN installed_asset_url TEXT",
         )?;
+        ensure(
+            "selected_addons_json",
+            "ALTER TABLE repos ADD COLUMN selected_addons_json TEXT",
+        )?;
         Ok(())
     }
 
@@ -327,12 +342,12 @@ impl Db {
             INSERT INTO repos(
               url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
               installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
-              published_at_unix, merge_installs, pinned_version
+                            published_at_unix, merge_installs, pinned_version, selected_addons_json
             )
             VALUES (
               ?1,  ?2,   ?3,   ?4,    ?5,   ?6,   ?7,      ?8,         ?9,         ?10,         ?11,
               ?12,               ?13,                 ?14,                  ?15,
-              ?16, ?17, ?18
+                            ?16, ?17, ?18, ?19
             )
             "#,
             params![
@@ -354,6 +369,7 @@ impl Db {
                 repo.published_at_unix,
                 if repo.merge_installs { 1 } else { 0 },
                 repo.pinned_version,
+                repo.selected_addons_json,
             ],
         );
 
@@ -402,6 +418,10 @@ impl Db {
             );
         }
 
+        if repo.selected_addons_json.is_some() {
+            let _ = self.set_repo_selected_addons(existing_id, repo.selected_addons_json.as_deref());
+        }
+
         Ok(existing_id)
     }
 
@@ -411,7 +431,7 @@ impl Db {
             SELECT
               id, url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
               installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
-              published_at_unix, merge_installs, pinned_version
+                            published_at_unix, merge_installs, pinned_version, selected_addons_json
             FROM repos
             ORDER BY host, owner, name
             "#,
@@ -439,6 +459,7 @@ impl Db {
                 published_at_unix: row.get(16)?,
                 merge_installs: row.get::<_, i64>(17).unwrap_or(0) != 0,
                 pinned_version: row.get(18)?,
+                selected_addons_json: row.get(19)?,
             })
         })?;
 
@@ -455,7 +476,7 @@ impl Db {
             SELECT
               id, url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
               installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
-              published_at_unix, merge_installs, pinned_version
+                            published_at_unix, merge_installs, pinned_version, selected_addons_json
             FROM repos
             WHERE host=?1 COLLATE NOCASE AND owner=?2 COLLATE NOCASE AND name=?3 COLLATE NOCASE
             LIMIT 1
@@ -484,6 +505,7 @@ impl Db {
                  published_at_unix: row.get(16)?,
                  merge_installs: row.get::<_, i64>(17).unwrap_or(0) != 0,
                  pinned_version: row.get(18)?,
+                 selected_addons_json: row.get(19)?,
              })
         })?;
 
@@ -500,7 +522,7 @@ impl Db {
             SELECT
               id, url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
               installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
-              published_at_unix, merge_installs, pinned_version
+                            published_at_unix, merge_installs, pinned_version, selected_addons_json
             FROM repos
             WHERE id=?1
             "#,
@@ -528,6 +550,7 @@ impl Db {
                 published_at_unix: row.get(16)?,
                 merge_installs: row.get::<_, i64>(17).unwrap_or(0) != 0,
                 pinned_version: row.get(18)?,
+                selected_addons_json: row.get(19)?,
             })
         })?;
 
@@ -609,6 +632,14 @@ impl Db {
         self.conn.execute(
             r#"UPDATE repos SET pinned_version=?1 WHERE id=?2"#,
             params![version, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_repo_selected_addons(&self, id: i64, selected_addons_json: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            r#"UPDATE repos SET selected_addons_json=?1 WHERE id=?2"#,
+            params![selected_addons_json, id],
         )?;
         Ok(())
     }

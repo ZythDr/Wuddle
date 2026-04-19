@@ -1,9 +1,45 @@
 use iced::Task;
-use crate::{App, Message, LogLevel, ToastKind, TweakId, TweakValues};
+use crate::{App, Message, LogLevel, Tab, ToastKind, TweakId, TweakValues};
 use crate::service;
 
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
+        Message::DetectTweakClientResult(result) => {
+            app.tweak_client_checking = false;
+            match result {
+                Ok(info) => {
+                    let file_version = info
+                        .file_version
+                        .clone()
+                        .or(info.product_version.clone())
+                        .unwrap_or_else(|| "unknown version".to_string());
+                    let exe_name = info.executable_name.clone();
+                    let supported = info.supports_legacy_1121_tweaks;
+                    app.tweak_client_error = None;
+                    app.tweak_client_info = Some(info);
+                    app.log(
+                        LogLevel::Info,
+                        &format!("Tweaks target detected: {} ({})", exe_name, file_version),
+                    );
+                    if !supported && app.active_tab == Tab::Tweaks {
+                        app.active_tab = Tab::Home;
+                        app.show_toast(
+                            "Tweaks are disabled for this client. Only legacy 1.12.1 executables are supported.",
+                            ToastKind::Info,
+                        );
+                    }
+                }
+                Err(e) => {
+                    app.tweak_client_info = None;
+                    app.tweak_client_error = Some(e.clone());
+                    app.log(LogLevel::Error, &format!("Client detection failed: {}", e));
+                    if app.active_tab == Tab::Tweaks {
+                        app.active_tab = Tab::Home;
+                    }
+                }
+            }
+            return Some(Task::none());
+        }
         Message::ToggleTweak(id, b) => {
             match id {
                 TweakId::Fov => app.tweaks.fov = b,
@@ -48,12 +84,22 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             return Some(Task::none());
         }
         Message::ReadTweaks => {
-            if app.wow_dir.is_empty() {
-                app.log(LogLevel::Error, "Set a WoW directory in Options first.");
+            if let Some(reason) = app.tweaks_disabled_reason() {
+                app.log(LogLevel::Error, &reason);
             } else {
-                app.log(LogLevel::Info, "Reading current tweaks from WoW.exe...");
+                let auto_launch_exe = app.active_profile().and_then(|profile| profile.auto_launch_exe.clone());
+                let exe_name = app
+                    .tweak_client_info
+                    .as_ref()
+                    .map(|info| info.executable_name.clone())
+                    .or(auto_launch_exe.clone())
+                    .unwrap_or_else(|| "WoW.exe".to_string());
+                app.log(LogLevel::Info, &format!("Reading current tweaks from {}...", exe_name));
                 let wow = app.wow_dir.clone();
-                return Some(Task::perform(service::read_tweaks(wow), Message::ReadTweaksResult));
+                return Some(Task::perform(
+                    service::read_tweaks(wow, auto_launch_exe),
+                    Message::ReadTweaksResult,
+                ));
             }
             return Some(Task::none());
         }
@@ -84,10 +130,17 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             return Some(Task::none());
         }
         Message::ApplyTweaks => {
-            if app.wow_dir.is_empty() {
-                app.log(LogLevel::Error, "Set a WoW directory in Options first.");
+            if let Some(reason) = app.tweaks_disabled_reason() {
+                app.log(LogLevel::Error, &reason);
             } else {
-                app.log(LogLevel::Info, "Applying tweaks to WoW.exe...");
+                let auto_launch_exe = app.active_profile().and_then(|profile| profile.auto_launch_exe.clone());
+                let exe_name = app
+                    .tweak_client_info
+                    .as_ref()
+                    .map(|info| info.executable_name.clone())
+                    .or(auto_launch_exe.clone())
+                    .unwrap_or_else(|| "WoW.exe".to_string());
+                app.log(LogLevel::Info, &format!("Applying tweaks to {}...", exe_name));
                 let wow = app.wow_dir.clone();
                 let tv = &app.tweak_values;
                 let ts = &app.tweaks;
@@ -103,7 +156,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     large_address_aware:ts.large_address,
                     camera_skip_fix:    ts.camera_skip,
                 };
-                return Some(Task::perform(service::apply_tweaks(wow, opts), Message::ApplyTweaksResult));
+                return Some(Task::perform(
+                    service::apply_tweaks(wow, auto_launch_exe, opts),
+                    Message::ApplyTweaksResult,
+                ));
             }
             return Some(Task::none());
         }
@@ -121,12 +177,22 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             return Some(Task::none());
         }
         Message::RestoreTweaks => {
-            if app.wow_dir.is_empty() {
-                app.log(LogLevel::Error, "Set a WoW directory in Options first.");
+            if let Some(reason) = app.tweaks_disabled_reason() {
+                app.log(LogLevel::Error, &reason);
             } else {
-                app.log(LogLevel::Info, "Restoring WoW.exe from backup...");
+                let auto_launch_exe = app.active_profile().and_then(|profile| profile.auto_launch_exe.clone());
+                let exe_name = app
+                    .tweak_client_info
+                    .as_ref()
+                    .map(|info| info.executable_name.clone())
+                    .or(auto_launch_exe.clone())
+                    .unwrap_or_else(|| "WoW.exe".to_string());
+                app.log(LogLevel::Info, &format!("Restoring {} from backup...", exe_name));
                 let wow = app.wow_dir.clone();
-                return Some(Task::perform(service::restore_tweaks(wow), Message::RestoreTweaksResult));
+                return Some(Task::perform(
+                    service::restore_tweaks(wow, auto_launch_exe),
+                    Message::RestoreTweaksResult,
+                ));
             }
             return Some(Task::none());
         }
@@ -134,7 +200,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             match result {
                 Ok(msg) => {
                     app.log(LogLevel::Info, &msg);
-                    app.show_toast("WoW.exe restored from backup.", ToastKind::Info);
+                    app.show_toast(msg, ToastKind::Info);
                 }
                 Err(e) => {
                     app.log(LogLevel::Error, &format!("Restore tweaks failed: {}", e));

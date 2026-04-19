@@ -7,7 +7,7 @@
 use iced::widget::{button, canvas, container, mouse_area, row, rule, Space};
 use iced::{Element, Length};
 
-use crate::{App, Message, Tab, LIFECRAFT};
+use crate::{settings, App, Message, Tab, LIFECRAFT};
 use crate::components::helpers::tip;
 use crate::theme::{self, ThemeColors};
 use crate::components::helpers::SpinnerCanvas;
@@ -25,13 +25,15 @@ pub fn view_topbar<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Messag
         .color(colors.title)
         .line_height(1.0);
 
-    let view_tabs = row![
+    let mut view_tabs = row![
         view_tab_button(app, Tab::Home, colors),
         view_tab_button(app, Tab::Mods, colors),
         view_tab_button(app, Tab::Addons, colors),
-        view_tab_button(app, Tab::Tweaks, colors),
     ]
     .spacing(8);
+    if app.show_tweaks_tab() {
+        view_tabs = view_tabs.push(view_tab_button(app, Tab::Tweaks, colors));
+    }
 
     let action_tabs = row![
         view_tab_button(app, Tab::Options, colors),
@@ -145,12 +147,24 @@ pub fn view_topbar<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Messag
 pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: &ThemeColors) -> Element<'a, Message> {
     let is_active = app.active_tab == tab;
     let c = *colors;
+    let disabled_reason = if tab == Tab::Tweaks {
+        app.tweaks_disabled_reason()
+    } else {
+        None
+    };
+    let is_disabled = disabled_reason.is_some();
 
     let is_icon = matches!(tab, Tab::Options | Tab::Logs);
     let is_unicode_icon = tab == Tab::About;
 
     let content: Element<Message> = if is_icon {
-        let icon_color = if is_active { c.primary_text } else { c.text };
+        let icon_color = if is_disabled {
+            c.muted
+        } else if is_active {
+            c.primary_text
+        } else {
+            c.text
+        };
         container(
             iced::widget::svg(tab_icon_svg(tab))
                 .width(17)
@@ -161,7 +175,13 @@ pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: &ThemeColors) -> Elem
         .center_x(Length::Fill)
         .into()
     } else if is_unicode_icon {
-        let icon_color = if is_active { c.primary_text } else { c.text };
+        let icon_color = if is_disabled {
+            c.muted
+        } else if is_active {
+            c.primary_text
+        } else {
+            c.text
+        };
         container(
             iced::widget::text(tab.icon_label()).size(17).color(icon_color).line_height(1.0),
         )
@@ -169,29 +189,45 @@ pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: &ThemeColors) -> Elem
         .into()
     } else {
         let lbl = app.tab_label(tab);
-        container(iced::widget::text(lbl).size(14))
+        let text_color = if is_disabled { c.muted } else { c.text };
+        container(iced::widget::text(lbl).size(14).color(text_color))
             .width(Length::Fill)
             .center_x(Length::Fill)
             .into()
     };
 
     let btn = button(content)
-        .on_press(Message::SetTab(tab))
         .padding([7, 0])
-        .width(if is_icon || is_unicode_icon { Length::Fixed(32.0) } else { Length::Fixed(114.0) });
+        .width(if is_icon || is_unicode_icon { Length::Fixed(32.0) } else { Length::Fixed(114.0) })
+        .on_press(Message::SetTab(tab));
 
     let styled_btn: Element<Message> = if is_active {
         btn.style(move |_theme, _status| theme::tab_button_active_style(&c)).into()
     } else {
         btn.style(move |_theme, status| match status {
-            button::Status::Hovered => theme::tab_button_hovered_style(&c),
-            button::Status::Pressed => theme::tab_button_active_style(&c),
-            _ => theme::tab_button_style(&c),
+            button::Status::Hovered if !is_disabled => theme::tab_button_hovered_style(&c),
+            button::Status::Pressed if !is_disabled => theme::tab_button_active_style(&c),
+            _ if !is_disabled => theme::tab_button_style(&c),
+            _ => {
+                let mut style = theme::tab_button_style(&c);
+                style.text_color = c.muted;
+                style
+            }
         })
         .into()
     };
 
-    if is_icon || tab == Tab::About {
+    if let Some(reason) = disabled_reason {
+        iced::widget::tooltip(
+            styled_btn,
+            container(iced::widget::text(reason).size(13).color(c.text))
+                .max_width(320)
+                .padding([3, 8])
+                .style(move |_theme| theme::tooltip_style(&c)),
+            iced::widget::tooltip::Position::Bottom,
+        )
+        .into()
+    } else if is_icon || tab == Tab::About {
         iced::widget::tooltip(
             styled_btn,
             container(iced::widget::text(tab.tooltip()).size(13).color(c.text))
@@ -261,7 +297,7 @@ pub fn view_footer<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Messag
             }
             _ => (
                 "Launch Mode: Auto".to_string(),
-                "Launches VanillaFixes.exe if present, otherwise Wow.exe".to_string(),
+                settings::auto_launch_description(active.auto_launch_exe.as_deref()),
             ),
         };
         let tooltip_content = container(

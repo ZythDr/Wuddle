@@ -9,40 +9,64 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     let tv = &app.tweak_values;
     let t = &app.tweaks;
     let has_wow_dir = !app.wow_dir.is_empty();
-    let has_backup = has_wow_dir && crate::tweaks::has_backup(std::path::Path::new(&app.wow_dir));
+    let selected_exe = app.active_profile().and_then(|profile| profile.auto_launch_exe.as_deref());
+    let has_backup = has_wow_dir
+        && crate::tweaks::has_backup(std::path::Path::new(&app.wow_dir), selected_exe);
+    let tweaks_disabled_reason = app.tweaks_disabled_reason();
+    let tweaks_enabled = tweaks_disabled_reason.is_none();
+    let tweak_target_name = app
+        .tweak_client_info
+        .as_ref()
+        .map(|info| info.executable_name.clone())
+        .or_else(|| selected_exe.map(|name| name.to_string()))
+        .unwrap_or_else(|| "WoW.exe".to_string());
+    let tweak_target_version = app
+        .tweak_client_info
+        .as_ref()
+        .and_then(|info| info.file_version.as_deref().or(info.product_version.as_deref()))
+        .unwrap_or("unknown version");
 
     let header = row![
         column![
             text("Tweaks").size(18).color(colors.title),
-            text("Patch WoW.exe with quality-of-life improvements.")
+            text("Patch legacy 1.12.1 client executables with quality-of-life improvements.")
                 .size(12)
                 .color(colors.muted),
         ]
         .spacing(2),
         Space::new().width(Length::Fill),
-        tip(btn("Read Current", Message::ReadTweaks, &c), "Read current tweak values from WoW.exe", tooltip::Position::Bottom, colors),
+        tip(btn_action("Read Current", tweaks_enabled.then_some(Message::ReadTweaks), &c), &format!("Read current tweak values from {}", tweak_target_name), tooltip::Position::Bottom, colors),
         tip(btn("Reset to Default", Message::ResetTweaksToDefault, &c), "Reset all sliders to default values", tooltip::Position::Bottom, colors),
-        tip(btn("Restore", Message::RestoreTweaks, &c), "Restore WoW.exe from backup", tooltip::Position::Bottom, colors),
-        tip(btn_primary("Apply", Message::ApplyTweaks, &c), "Patch WoW.exe with selected tweaks (creates backup first)", tooltip::Position::Bottom, colors),
+        tip(btn_action("Restore", tweaks_enabled.then_some(Message::RestoreTweaks), &c), &format!("Restore {} from backup", tweak_target_name), tooltip::Position::Bottom, colors),
+        tip(btn_primary_action("Apply", tweaks_enabled.then_some(Message::ApplyTweaks), &c), &format!("Patch {} with selected tweaks (creates backup first)", tweak_target_name), tooltip::Position::Bottom, colors),
     ]
     .spacing(6)
     .align_y(iced::Alignment::Center);
 
-    let hint: Element<Message> = if !has_wow_dir {
-        text("Select a WoW directory in Options to enable tweaks.")
+    let hint: Element<Message> = if let Some(reason) = tweaks_disabled_reason {
+        text(reason)
             .size(13)
             .color(colors.warn)
             .into()
     } else {
+        let support_label = format!(
+            "Tweaks target: {}  ·  Detected version: {}  ·  Compatible with vanilla-tweaks",
+            tweak_target_name,
+            tweak_target_version
+        );
         let backup_label = if has_backup {
-            format!("WoW directory: {}  ·  Backup: WoW.exe.bak ✓", app.wow_dir)
+            format!("WoW directory: {}  ·  Backup: {}.bak ✓", app.wow_dir, tweak_target_name)
         } else {
             format!("WoW directory: {}  ·  No backup yet — Apply to create one", app.wow_dir)
         };
-        text(backup_label)
-            .size(13)
-            .color(if has_backup { colors.good } else { colors.muted })
-            .into()
+        column![
+            text(support_label).size(13).color(colors.good),
+            text(backup_label)
+                .size(13)
+                .color(if has_backup { colors.good } else { colors.muted }),
+        ]
+        .spacing(2)
+        .into()
     };
 
     // Rendering section
@@ -327,22 +351,46 @@ fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: toolti
 }
 
 fn btn<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
+    btn_action(label, Some(msg), colors)
+}
+
+fn btn_action<'a>(label: &str, msg: Option<Message>, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
-    button(text(String::from(label)).size(13))
-        .on_press(msg)
+    let mut button = button(text(String::from(label)).size(13));
+    if let Some(ref message) = msg {
+        button = button.on_press(message.clone());
+    }
+    button
         .padding([6, 12])
         .style(move |_theme, status| match status {
-            button::Status::Hovered => theme::tab_button_hovered_style(&c),
-            _ => theme::tab_button_style(&c),
+            button::Status::Hovered if msg.is_some() => theme::tab_button_hovered_style(&c),
+            button::Status::Pressed if msg.is_some() => theme::tab_button_active_style(&c),
+            _ if msg.is_some() => theme::tab_button_style(&c),
+            _ => {
+                let mut style = theme::tab_button_style(&c);
+                style.text_color = c.muted;
+                style
+            }
         })
         .into()
 }
 
-fn btn_primary<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
+fn btn_primary_action<'a>(label: &str, msg: Option<Message>, colors: &ThemeColors) -> Element<'a, Message> {
     let c = *colors;
-    button(text(String::from(label)).size(13))
-        .on_press(msg)
+    let mut button = button(text(String::from(label)).size(13));
+    if let Some(ref message) = msg {
+        button = button.on_press(message.clone());
+    }
+    button
         .padding([6, 12])
-        .style(move |_theme, _status| theme::tab_button_active_style(&c))
+        .style(move |_theme, _status| {
+            if msg.is_some() {
+                theme::tab_button_active_style(&c)
+            } else {
+                let mut style = theme::tab_button_style(&c);
+                style.text_color = c.muted;
+                style
+            }
+        })
         .into()
 }

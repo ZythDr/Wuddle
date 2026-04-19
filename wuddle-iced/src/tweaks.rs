@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,13 +78,41 @@ fn write_f32(buf: &mut [u8], offset: usize, val: f32) -> Result<(), String> {
     Ok(())
 }
 
-pub fn apply_tweaks(wow_dir: &Path, opts: &TweakOptions) -> Result<String, String> {
-    let exe_path = wow_dir.join("WoW.exe");
-    if !exe_path.exists() {
-        return Err("WoW.exe not found in the specified directory.".into());
+fn first_existing_game_executable(dir: &Path) -> Option<PathBuf> {
+    ["WoW.exe", "wow.exe", "Wow.exe", "WOW.EXE"]
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn resolve_target_executable(wow_dir: &Path, selected_exe: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(exe_name) = selected_exe.map(str::trim).filter(|name| !name.is_empty()) {
+        let explicit = wow_dir.join(exe_name);
+        if explicit.is_file() {
+            return Ok(explicit);
+        }
+        return Err(format!("{} not found in the specified directory.", exe_name));
     }
 
-    let backup_path = wow_dir.join("WoW.exe.bak");
+    first_existing_game_executable(wow_dir)
+        .ok_or_else(|| "WoW.exe not found in the specified directory.".to_string())
+}
+
+fn backup_path(exe_path: &Path) -> Result<PathBuf, String> {
+    let file_name = exe_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| "Invalid executable path.".to_string())?;
+    Ok(exe_path.with_file_name(format!("{}.bak", file_name)))
+}
+
+pub fn apply_tweaks(wow_dir: &Path, selected_exe: Option<&str>, opts: &TweakOptions) -> Result<String, String> {
+    let exe_path = resolve_target_executable(wow_dir, selected_exe)?;
+    let exe_name = exe_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "WoW.exe".to_string());
+    let backup_path = backup_path(&exe_path)?;
     if !backup_path.exists() {
         fs::copy(&exe_path, &backup_path)
             .map_err(|e| format!("Failed to create backup: {e}"))?;
@@ -92,7 +120,8 @@ pub fn apply_tweaks(wow_dir: &Path, opts: &TweakOptions) -> Result<String, Strin
 
     // Always start from the clean backup so unchecked tweaks revert to original values
     // and re-applying with different settings works without a manual restore first.
-    let mut buf = fs::read(&backup_path).map_err(|e| format!("Failed to read WoW.exe.bak: {e}"))?;
+    let mut buf = fs::read(&backup_path)
+        .map_err(|e| format!("Failed to read {}: {e}", backup_path.display()))?;
 
     let mut applied: Vec<&str> = Vec::new();
 
@@ -190,29 +219,43 @@ pub fn apply_tweaks(wow_dir: &Path, opts: &TweakOptions) -> Result<String, Strin
         applied.push("Camera skip fix");
     }
 
-    fs::write(&exe_path, &buf).map_err(|e| format!("Failed to write patched WoW.exe: {e}"))?;
+    fs::write(&exe_path, &buf)
+        .map_err(|e| format!("Failed to write patched {}: {e}", exe_name))?;
 
     if applied.is_empty() {
         Ok("No tweaks were selected.".into())
     } else {
-        Ok(format!("Applied {} tweak(s): {}", applied.len(), applied.join(", ")))
+        Ok(format!(
+            "Applied {} tweak(s) to {}: {}",
+            applied.len(),
+            exe_name,
+            applied.join(", ")
+        ))
     }
 }
 
-pub fn restore_backup(wow_dir: &Path) -> Result<String, String> {
-    let exe_path = wow_dir.join("WoW.exe");
-    let backup_path = wow_dir.join("WoW.exe.bak");
+pub fn restore_backup(wow_dir: &Path, selected_exe: Option<&str>) -> Result<String, String> {
+    let exe_path = resolve_target_executable(wow_dir, selected_exe)?;
+    let exe_name = exe_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "WoW.exe".to_string());
+    let backup_path = backup_path(&exe_path)?;
     if !backup_path.exists() {
-        return Err("No backup file (WoW.exe.bak) found.".into());
+        return Err(format!("No backup file ({}) found.", backup_path.display()));
     }
     fs::copy(&backup_path, &exe_path)
         .map_err(|e| format!("Failed to restore backup: {e}"))?;
-    Ok("Restored WoW.exe from backup.".into())
+    Ok(format!("Restored {} from backup.", exe_name))
 }
 
 #[allow(dead_code)]
-pub fn has_backup(wow_dir: &Path) -> bool {
-    wow_dir.join("WoW.exe.bak").exists()
+pub fn has_backup(wow_dir: &Path, selected_exe: Option<&str>) -> bool {
+    resolve_target_executable(wow_dir, selected_exe)
+        .ok()
+        .and_then(|exe_path| backup_path(&exe_path).ok())
+        .map(|path| path.exists())
+        .unwrap_or(false)
 }
 
 // ---- Read current values from WoW.exe ----
@@ -240,13 +283,11 @@ fn read_f32(buf: &[u8], offset: usize) -> Result<f32, String> {
     Ok(f32::from_le_bytes(buf[offset..end].try_into().unwrap()))
 }
 
-pub fn read_tweaks(wow_dir: &Path) -> Result<ReadTweakValues, String> {
-    let exe_path = wow_dir.join("WoW.exe");
-    if !exe_path.exists() {
-        return Err("WoW.exe not found in the specified directory.".into());
-    }
+pub fn read_tweaks(wow_dir: &Path, selected_exe: Option<&str>) -> Result<ReadTweakValues, String> {
+    let exe_path = resolve_target_executable(wow_dir, selected_exe)?;
 
-    let buf = fs::read(&exe_path).map_err(|e| format!("Failed to read WoW.exe: {e}"))?;
+    let buf = fs::read(&exe_path)
+        .map_err(|e| format!("Failed to read {}: {e}", exe_path.display()))?;
 
     let fov = read_f32(&buf, FOV_OFFSET)?;
     let farclip = read_f32(&buf, FARCLIP_OFFSET)?;

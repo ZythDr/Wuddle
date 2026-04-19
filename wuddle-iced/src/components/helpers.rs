@@ -122,6 +122,7 @@ pub fn ctx_menu_item<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Ele
 pub fn inline_context_menu<'a>(
     app: &crate::App,
     repo: &service::RepoRow,
+    collection_addon: Option<&str>,
     colors: &ThemeColors,
 ) -> Element<'a, Message> {
     let c = *colors;
@@ -138,7 +139,23 @@ pub fn inline_context_menu<'a>(
         items.push(ctx_menu_item("\u{2193} Update", Message::UpdateRepo(rid), &c));
     }
     items.push(ctx_menu_item("Reinstall / Repair", Message::ReinstallRepo(rid), &c));
-    items.push(ctx_menu_item("Browse\u{2026}", Message::BrowseRepo(rid), &c));
+    if let Some(addon_name) = collection_addon {
+        items.push(ctx_menu_item(
+            "Manage Collection\u{2026}",
+            Message::OpenCollectionManager(rid),
+            &c,
+        ));
+        items.push(ctx_menu_item(
+            "Browse\u{2026}",
+            Message::BrowseAddonInstall {
+                repo_id: rid,
+                addon_name: addon_name.to_string(),
+            },
+            &c,
+        ));
+    } else {
+        items.push(ctx_menu_item("Browse\u{2026}", Message::BrowseRepo(rid), &c));
+    }
     if crate::panels::projects::is_dxvk_repo(&repo.name) {
         items.push(ctx_menu_item("\u{2699} Configure DXVK\u{2026}", Message::OpenDxvkConfig, &c));
     }
@@ -155,14 +172,22 @@ pub fn inline_context_menu<'a>(
     }
 
     let c3 = c;
+    let remove_message = if let Some(addon_name) = collection_addon {
+        Message::RemoveCollectionAddonPrompt {
+            repo_id: rid,
+            addon_name: addon_name.to_string(),
+        }
+    } else {
+        Message::OpenDialog(Dialog::RemoveRepo {
+            id: rid,
+            name,
+            remove_files: false,
+            files: Vec::new(),
+        })
+    };
     items.push(
         button(text("Remove").size(12).color(c.bad))
-            .on_press(Message::OpenDialog(Dialog::RemoveRepo {
-                id: rid,
-                name,
-                remove_files: false,
-                files: Vec::new(),
-            }))
+            .on_press(remove_message)
             .padding([6, 12])
             .width(Length::Fill)
             .style(move |_theme, status| {
@@ -170,13 +195,13 @@ pub fn inline_context_menu<'a>(
                     button::Status::Hovered => theme::tab_button_hovered_style(&c3),
                     _ => button::Style {
                         background: None,
-                        text_color: c3.bad,
+                        text_color: c3.text,
                         border: iced::Border::default(),
                         shadow: iced::Shadow::default(),
                         snap: true,
                     },
                 };
-                s.border.color = c3.bad;
+                s.text_color = c3.bad;
                 s
             })
             .into(),

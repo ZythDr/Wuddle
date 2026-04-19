@@ -45,7 +45,6 @@ Cross-reference of every Tauri/Svelte feature vs. the Iced 0.14 implementation.
 | Feature | Tauri | Iced | Notes |
 |---------|-------|------|-------|
 | Quick-update summary (repos with updates) | ✅ | 🔶 | Iced shows repo table; Tauri has a compact summary widget on Home |
-| 12 Turtle WoW resource links | ✅ | ✅ | all URLs wired |
 | Update count displays | ✅ | ✅ | |
 
 ---

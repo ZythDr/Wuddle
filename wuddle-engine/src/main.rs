@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
             asset_regex,
         } => {
             let mode = InstallMode::from_str(&mode).ok_or_else(|| anyhow::anyhow!("bad mode"))?;
-            let id = engine.add_repo(&url, mode, asset_regex)?;
+                let id = engine.add_repo(&url, mode, asset_regex, None)?;
             println!("Added repo id={id}");
         }
         Cmd::List => {

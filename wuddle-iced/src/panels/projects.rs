@@ -27,6 +27,45 @@ fn is_weird_utils_item(repo_url: &str, dll_name: &str) -> bool {
     crate::components::presets::WEIRD_UTILS_DLLS.iter().any(|&d| d.eq_ignore_ascii_case(dll_name))
 }
 
+#[derive(Debug, Clone)]
+struct AddonDisplayRow<'a> {
+    repo: &'a RepoRow,
+    addon_name: String,
+    is_collection_member: bool,
+}
+
+fn addon_display_rows<'a>(app: &'a App) -> Vec<AddonDisplayRow<'a>> {
+    let mut rows = Vec::new();
+
+    for repo in app.repos.iter().filter(|repo| !is_mod(repo)) {
+        if repo.is_collection {
+            let mut addon_names = if repo.installed_addons.is_empty() {
+                repo.selected_addons.clone()
+            } else {
+                repo.installed_addons.clone()
+            };
+            addon_names.sort_by_key(|name| name.to_ascii_lowercase());
+            addon_names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+
+            for addon_name in addon_names {
+                rows.push(AddonDisplayRow {
+                    repo,
+                    addon_name,
+                    is_collection_member: true,
+                });
+            }
+        } else {
+            rows.push(AddonDisplayRow {
+                repo,
+                addon_name: repo.name.clone(),
+                is_collection_member: false,
+            });
+        }
+    }
+
+    rows
+}
+
 /// 1px vertical divider as a colored container with fixed height.
 /// Using a container instead of rule::vertical because rule::vertical expands
 /// to fill all available height in scrollable layouts, breaking row sizing.
@@ -73,43 +112,96 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
     let c = *colors;
     let is_mods_tab = label == "Mods";
 
-    // Filter repos for this tab
-    let filtered_repos: Vec<&RepoRow> = app
-        .repos
-        .iter()
-        .filter(|r| if is_mods_tab { is_mod(r) } else { !is_mod(r) })
-        .filter(|r| match app.filter {
-            Filter::All => true,
-            Filter::Updates => app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
-                && !app.ignored_update_ids.contains(&r.id),
-            Filter::Errors => app.plans.iter().any(|p| p.repo_id == r.id && p.error.is_some())
-                && r.enabled
-                && !app.ignored_update_ids.contains(&r.id),
-            Filter::Ignored => !r.enabled || app.ignored_update_ids.contains(&r.id),
-        })
-        .filter(|r| {
-            app.project_search.is_empty()
-                || r.name.to_lowercase().contains(&app.project_search.to_lowercase())
-                || r.owner.to_lowercase().contains(&app.project_search.to_lowercase())
-        })
-        .collect();
+    let addon_rows = if is_mods_tab {
+        Vec::new()
+    } else {
+        addon_display_rows(app)
+    };
 
-    let total = app.repos.iter().filter(|r| if is_mods_tab { is_mod(r) } else { !is_mod(r) }).count();
-    let update_count = app.repos.iter().filter(|r| {
-        (if is_mods_tab { is_mod(r) } else { !is_mod(r) })
-            && app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
-            && !app.ignored_update_ids.contains(&r.id)
-    }).count();
-    let error_count = app.repos.iter().filter(|r| {
-        (if is_mods_tab { is_mod(r) } else { !is_mod(r) })
-            && app.plans.iter().any(|p| p.repo_id == r.id && p.error.is_some())
-            && r.enabled
-            && !app.ignored_update_ids.contains(&r.id)
-    }).count();
-    let ignored_count = app.repos.iter().filter(|r| {
-        (if is_mods_tab { is_mod(r) } else { !is_mod(r) })
-            && (!r.enabled || app.ignored_update_ids.contains(&r.id))
-    }).count();
+    // Filter repos for this tab
+    let filtered_repos: Vec<&RepoRow> = if is_mods_tab {
+        app.repos
+            .iter()
+            .filter(|r| is_mod(r))
+            .filter(|r| match app.filter {
+                Filter::All => true,
+                Filter::Updates => app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
+                    && !app.ignored_update_ids.contains(&r.id),
+                Filter::Errors => app.plans.iter().any(|p| p.repo_id == r.id && p.error.is_some())
+                    && r.enabled
+                    && !app.ignored_update_ids.contains(&r.id),
+                Filter::Ignored => !r.enabled || app.ignored_update_ids.contains(&r.id),
+            })
+            .filter(|r| {
+                app.project_search.is_empty()
+                    || r.name.to_lowercase().contains(&app.project_search.to_lowercase())
+                    || r.owner.to_lowercase().contains(&app.project_search.to_lowercase())
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let filtered_addon_rows: Vec<AddonDisplayRow> = if is_mods_tab {
+        Vec::new()
+    } else {
+        addon_rows
+            .iter()
+            .cloned()
+            .filter(|row| match app.filter {
+                Filter::All => true,
+                Filter::Updates => app.plans.iter().any(|p| p.repo_id == row.repo.id && p.has_update)
+                    && !app.ignored_update_ids.contains(&row.repo.id),
+                Filter::Errors => app.plans.iter().any(|p| p.repo_id == row.repo.id && p.error.is_some())
+                    && row.repo.enabled
+                    && !app.ignored_update_ids.contains(&row.repo.id),
+                Filter::Ignored => !row.repo.enabled || app.ignored_update_ids.contains(&row.repo.id),
+            })
+            .filter(|row| {
+                app.project_search.is_empty()
+                    || row.addon_name.to_lowercase().contains(&app.project_search.to_lowercase())
+                    || row.repo.name.to_lowercase().contains(&app.project_search.to_lowercase())
+                    || row.repo.owner.to_lowercase().contains(&app.project_search.to_lowercase())
+            })
+            .collect()
+    };
+
+    let total = if is_mods_tab {
+        app.repos.iter().filter(|r| is_mod(r)).count()
+    } else {
+        addon_rows.len()
+    };
+    let update_count = if is_mods_tab {
+        app.repos.iter().filter(|r| {
+            is_mod(r)
+                && app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
+                && !app.ignored_update_ids.contains(&r.id)
+        }).count()
+    } else {
+        addon_rows.iter().filter(|row| {
+            app.plans.iter().any(|p| p.repo_id == row.repo.id && p.has_update)
+                && !app.ignored_update_ids.contains(&row.repo.id)
+        }).count()
+    };
+    let error_count = if is_mods_tab {
+        app.repos.iter().filter(|r| {
+            is_mod(r)
+                && app.plans.iter().any(|p| p.repo_id == r.id && p.error.is_some())
+                && r.enabled
+                && !app.ignored_update_ids.contains(&r.id)
+        }).count()
+    } else {
+        addon_rows.iter().filter(|row| {
+            app.plans.iter().any(|p| p.repo_id == row.repo.id && p.error.is_some())
+                && row.repo.enabled
+                && !app.ignored_update_ids.contains(&row.repo.id)
+        }).count()
+    };
+    let ignored_count = if is_mods_tab {
+        app.repos.iter().filter(|r| is_mod(r) && (!r.enabled || app.ignored_update_ids.contains(&r.id))).count()
+    } else {
+        addon_rows.iter().filter(|row| !row.repo.enabled || app.ignored_update_ids.contains(&row.repo.id)).count()
+    };
 
     // Toolbar: filters on left, search + buttons on right, all on one row
     let filters_part = row![
@@ -321,7 +413,11 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
     }
 
     // Table body
-    let body: Element<Message> = if filtered_repos.is_empty() {
+    let body: Element<Message> = if if is_mods_tab {
+        filtered_repos.is_empty()
+    } else {
+        filtered_addon_rows.is_empty()
+    } {
         container(
             text(if app.loading {
                 format!("Loading {}...", label.to_lowercase())
@@ -346,8 +442,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         .into()
     } else {
         let mut rows: Vec<Element<Message>> = Vec::new();
-        for repo in filtered_repos.iter() {
-            if is_mods_tab {
+        if is_mods_tab {
+            for repo in filtered_repos.iter() {
                 rows.push(mod_row(app, repo, colors));
                 // Inject child DLL rows when expanded
                 if repo.installed_dlls.len() > 1 && app.expanded_repo_ids.contains(&repo.id) {
@@ -355,8 +451,16 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
                         rows.push(dll_child_row(repo.id, &repo.url, dll_name, *dll_enabled, dll_version.as_deref(), colors));
                     }
                 }
-            } else {
-                rows.push(addon_row(app, repo, colors));
+            }
+        } else {
+            for addon_row_data in filtered_addon_rows.iter() {
+                rows.push(addon_row(
+                    app,
+                    addon_row_data.repo,
+                    addon_row_data.addon_name.clone(),
+                    addon_row_data.is_collection_member,
+                    colors,
+                ));
             }
         }
         let scroll_id = if label == "Mods" {
@@ -460,8 +564,9 @@ fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: &ThemeColors) -> Element
     let is_expanded = app.expanded_repo_ids.contains(&repo.id);
     let is_infrequent = app.infrequent_repo_ids.contains(&repo.id);
     let name_col = name_cell_with_expand(repo, is_multi_dll, is_expanded, is_infrequent, colors);
-    let is_menu_open = app.open_menu == Some(repo.id);
-    let menu_content = crate::inline_context_menu(app, repo, &c);
+    let menu_key = format!("repo:{}", repo.id);
+    let is_menu_open = app.open_menu.as_deref() == Some(menu_key.as_str());
+    let menu_content = crate::inline_context_menu(app, repo, None, &c);
 
     // Version picker dropdown — build options list with "Latest" as first entry
     let version_picker = version_picker_cell(app, repo, colors);
@@ -472,7 +577,7 @@ fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: &ThemeColors) -> Element
         col_cell(version_picker, COL_VERSION),
         col_cell(checkbox(enabled).on_toggle(move |b| Message::ToggleRepoEnabled(rid, b)), COL_ENABLED),
         col_cell(status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, colors), COL_STATUS),
-        col_cell(action_buttons(repo, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
+        col_cell(action_buttons(repo, menu_key, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
     .padding([9, 12])
@@ -617,8 +722,102 @@ fn version_picker_cell<'a>(app: &'a App, repo: &'a RepoRow, _colors: &ThemeColor
     .into()
 }
 
+fn addon_name_cell<'a>(
+    repo: &'a RepoRow,
+    addon_name: String,
+    is_collection_member: bool,
+    is_infrequent: bool,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let c = *colors;
+    let url = repo.url.clone();
+    let subtitle = if repo.enabled {
+        format!("{} • {}", repo.owner, repo.forge)
+    } else {
+        format!("{} • {} • disabled", repo.owner, repo.forge)
+    };
+
+    let title_btn = button(
+        iced::widget::rich_text::<(), _, _, _>([
+            iced::widget::span(addon_name.clone())
+                .underline(true)
+                .color(c.link)
+                .font(name_font(colors))
+                .size(20.0_f32),
+        ]),
+    )
+    .on_press(Message::OpenUrl(url))
+    .padding(0)
+    .style(move |_theme, _status| button::Style {
+        background: None,
+        text_color: c.link,
+        border: iced::Border::default(),
+        shadow: iced::Shadow::default(),
+        snap: true,
+    });
+
+    let title_row: Element<Message> = if is_collection_member {
+        let c2 = c;
+        let badge = tip(
+            button(text("Collection").size(10).color(c2.link))
+                .on_press(Message::OpenCollectionManager(repo.id))
+                .padding([2, 6])
+                .style(move |_theme, _status| button::Style {
+                    background: Some(iced::Background::Color(iced::Color { a: 0.10, ..c2.link })),
+                    text_color: c2.link,
+                    border: iced::Border {
+                        color: iced::Color { a: 0.28, ..c2.link },
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                }),
+            &format!("Installed from collection: {}/{}", repo.owner, repo.name),
+            tooltip::Position::Top,
+            colors,
+        );
+        row![title_btn, Space::new().width(8), badge]
+            .align_y(iced::Alignment::Center)
+            .into()
+    } else {
+        title_btn.into()
+    };
+
+    let title_row: Element<Message> = if is_infrequent && wuddle_engine::github_token().is_none() {
+        let c_inf = c;
+        let badge = container(text("\u{23F3}").size(10).color(c_inf.muted))
+            .padding([0, 4]);
+        crate::tip(
+            row![title_row, Space::new().width(6), badge]
+                .align_y(iced::Alignment::Center),
+            "Infrequently updated — checked once every 4h to avoid API rate limits",
+            tooltip::Position::Top,
+            colors,
+        ).into()
+    } else {
+        title_row
+    };
+
+    container(
+        column![
+            title_row,
+            text(subtitle).size(12).color(colors.muted).font(colors.body_font),
+        ]
+        .spacing(2),
+    )
+    .width(Length::Fill)
+    .into()
+}
+
 /// Addons row: Name | Branch | Status | Actions
-fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a, Message> {
+fn addon_row<'a>(
+    app: &App,
+    repo: &'a RepoRow,
+    addon_name: String,
+    is_collection_member: bool,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
     let c = *colors;
     let plan = app.plans.iter().find(|p| p.repo_id == repo.id);
     let has_update = plan.map(|p| p.has_update).unwrap_or(false);
@@ -630,31 +829,48 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<
     let current_branch = repo.git_branch.clone().unwrap_or_else(|| "master".to_string());
     let update_ignored = app.ignored_update_ids.contains(&repo.id);
     let is_infrequent = app.infrequent_repo_ids.contains(&repo.id);
-    let name_col = name_cell(repo, is_infrequent, colors);
-    let is_menu_open = app.open_menu == Some(repo.id);
-    let menu_content = crate::inline_context_menu(app, repo, &c);
+    let name_col = addon_name_cell(repo, addon_name.clone(), is_collection_member, is_infrequent, colors);
+    let menu_key = if is_collection_member {
+        format!("addon:{}:{}", repo.id, addon_name.to_ascii_lowercase())
+    } else {
+        format!("repo:{}", repo.id)
+    };
+    let is_menu_open = app.open_menu.as_deref() == Some(menu_key.as_str());
+    let menu_content = crate::inline_context_menu(
+        app,
+        repo,
+        if is_collection_member { Some(addon_name.as_str()) } else { None },
+        &c,
+    );
 
     let rid = repo.id;
     let branch_options = app.branches.get(&repo.id).cloned().unwrap_or_default();
-    let branch_display: Element<Message> = container(
-        pick_list(
-            branch_options,
-            Some(current_branch),
-            move |branch: String| Message::SetRepoBranch(rid, branch),
+    let branch_display: Element<Message> = if is_collection_member {
+        container(text(current_branch).size(12).color(colors.text_soft))
+            .width(Length::Fill)
+            .padding(iced::Padding { top: 0.0, right: 5.0, bottom: 0.0, left: 5.0 })
+            .into()
+    } else {
+        container(
+            pick_list(
+                branch_options,
+                Some(current_branch),
+                move |branch: String| Message::SetRepoBranch(rid, branch),
+            )
+            .placeholder("master")
+            .text_size(12)
+            .width(Length::Fill),
         )
-        .placeholder("master")
-        .text_size(12)
-        .width(Length::Fill),
-    )
-    .width(Length::Fill)
-    .padding(iced::Padding { top: 0.0, right: 5.0, bottom: 0.0, left: 5.0 })
-    .into();
+        .width(Length::Fill)
+        .padding(iced::Padding { top: 0.0, right: 5.0, bottom: 0.0, left: 5.0 })
+        .into()
+    };
 
     let row_content = row![
         name_col,
         col_cell(branch_display, COL_BRANCH),
         col_cell(status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, colors), COL_STATUS),
-        col_cell(action_buttons(repo, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
+        col_cell(action_buttons(repo, menu_key, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
     .padding([9, 12])
@@ -663,11 +879,6 @@ fn addon_row<'a>(app: &App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<
     let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(&c));
 
     column![separator, row_content].into()
-}
-
-/// Name cell used by addon rows (no expand chevron).
-fn name_cell<'a>(repo: &'a RepoRow, is_infrequent: bool, colors: &ThemeColors) -> Element<'a, Message> {
-    name_cell_with_expand(repo, false, false, is_infrequent, colors)
 }
 
 /// Name cell with optional expand chevron and DLL count badge for multi-DLL mod rows.
@@ -923,6 +1134,7 @@ fn status_badge<'a>(
 /// Action column: Update button + triple-dot menu button (with anchored overlay).
 fn action_buttons<'a>(
     repo: &RepoRow,
+    menu_key: String,
     has_update: bool,
     is_menu_open: bool,
     menu_content: Element<'a, Message>,
@@ -959,7 +1171,7 @@ fn action_buttons<'a>(
     // to the button's actual screen position via Iced's overlay system.
     let c2 = c;
     let dots_btn = button(container(text("\u{22EE}").size(14)).center_x(Length::Fill)) // ⋮
-        .on_press(Message::ToggleMenu(rid))
+        .on_press(Message::ToggleMenu(menu_key))
         .padding([4, 0])
         .width(30)
         .style(move |_theme, status| match status {
