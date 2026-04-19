@@ -13,9 +13,10 @@ Wuddle is a desktop WoW launcher/manager primarily focusing Vanilla clients, wit
 [Screencast_20260414_150926.webm](https://github.com/user-attachments/assets/231d99f9-1809-49e8-b6ba-6117876c08bc)
 
 
-# Important Note (Anti-virus + SuperWoW)
-SuperWoW is known to trigger false-positives in many antivirus products.
-Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is installed through Wuddle, antivirus tools may attribute the detection to `Wuddle.exe` because Wuddle performs the download/install action.
+# Important Note (Anti-virus false positives)
+Various DLL mods such as SuperWoW, UnitXP_SP3 and Nampower for the vanilla 1.12 clients are known to trigger false-positives in many antivirus products.  
+Wuddle displays a warning before adding known false-positive triggering mods from it's Quick Add section. If any false-positive mod is installed through Wuddle, antivirus tools may attribute the detection to `Wuddle.exe` because Wuddle performs the download/install action.  
+If this happens, you need to add the game installation folder to your Anti-virus' exclusions/whitelist or else the files will keep being deleted.
 
 ### Core Features
 
