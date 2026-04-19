@@ -36,7 +36,7 @@ Wuddle shows a warning before adding SuperWoW from Quick Add. If SuperWoW is ins
 - **Nested Addon Discovery** — Wuddle now detects addon folders with `.toc` files up to 5 levels deep in addon-git repositories.
 
 #### Improvements
-- **Executable-Aware Tweaks** — Profiles can target a specific game executable for Auto launch and Tweaks instead of assuming a single default client file.
+- **Custom Executable Targeting** — Profiles can now target renamed or irregularly named game executables for Auto launch and Tweaks instead of only relying on `Wow.exe` or `VanillaFixes.exe`.
 - **Targeted Tweaks Feedback** — Tweaks now reports which executable is being inspected and clearly explains when the selected client is not compatible with legacy 1.12.1 patching.
 
 #### Bug Fixes
