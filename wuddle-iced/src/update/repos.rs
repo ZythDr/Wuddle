@@ -523,8 +523,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         .iter()
                         .filter(|entry| {
                             let source_path = entry.source_path.to_ascii_lowercase();
+                            let source_top = entry
+                                .source_path
+                                .split('/')
+                                .next()
+                                .unwrap_or(entry.addon_name.as_str());
                             source_path == folder_path_key
                                 || source_path.starts_with(&folder_path_prefix)
+                                || service::normalize_collection_entry_key(source_top)
+                                    == folder_key
                                 || service::normalize_collection_entry_key(&entry.addon_name)
                                     == folder_key
                         })
@@ -576,6 +583,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             matching_addons.sort_by_key(|name| name.to_ascii_lowercase());
             matching_addons.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
 
+            let resolved_addons = matching_addons.join(", ");
+
             let all_selected = matching_addons
                 .iter()
                 .all(|name| {
@@ -617,8 +626,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.log(
                 LogLevel::Info,
                 &format!(
-                    "Collection folder '{}' toggled. {} addon(s) now selected.",
+                    "Collection folder '{}' toggled via '{}'. Resolved addons: [{}]. {} addon(s) now selected.",
                     folder_display_name,
+                    folder_name,
+                    resolved_addons,
                     app.add_repo_selected_addons.len()
                 ),
             );

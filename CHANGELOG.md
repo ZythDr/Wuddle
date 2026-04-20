@@ -2,6 +2,14 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.2.1
+
+### Bug Fixes
+- **Collection Folder Checkboxes** — Fixed collection folder checkboxes not appearing until the background addon probe completed (which could take 10–30+ seconds). Checkboxes now appear immediately when opening Manage Collection.
+- **Collection Toggle Silently Dropped** — Fixed folder checkbox clicks being silently discarded in manage mode when the probe hadn't loaded yet. The selected state is now correctly updated on every click.
+- **Collection Matching Robustness** — Improved the folder-to-addon matching fallback chain so checkboxes correctly reflect keep/remove state even before the probe finishes.
+- **Dialog Overlay** — Fixed a gap where clicks on the dialog scrim could interact with content behind the dialog.
+
 ## v3.2.0
 
 ### New Features

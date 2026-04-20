@@ -1125,15 +1125,13 @@ impl App {
             )
             .on_press(Message::CloseDialog);
 
-            let dialog_blocker = iced::widget::mouse_area(dialog_box)
-                .on_press(Message::ConsumeDialogClick)
-                .on_right_press(Message::ConsumeDialogClick);
-
             // 40px margin on all sides \u{2248} 90% of a typical window
-            let centered_dialog = container(dialog_blocker)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
-                .padding(40);
+            let centered_dialog = iced::widget::opaque(
+                container(dialog_box)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .padding(40),
+            );
 
             // Use opaque() to make the entire overlay absorb ALL mouse events,
             // preventing any interaction with main_content while the dialog is open.
@@ -1817,13 +1815,100 @@ impl App {
                                 .iter()
                                 .map(|name| service::normalize_collection_entry_key(name))
                                 .collect::<HashSet<_>>();
+                            let resolve_collection_folder_matches = |folder_path: &str, folder_name: &str| {
+                                let folder_path_key = folder_path.trim_matches('/').to_ascii_lowercase();
+                                let folder_path_prefix = format!("{}/", folder_path_key);
+                                let folder_key = service::normalize_collection_entry_key(folder_name);
+                                let mut matches = self
+                                    .add_repo_probe
+                                    .as_ref()
+                                    .map(|probe| {
+                                        probe
+                                            .addon_entries
+                                            .iter()
+                                            .filter(|entry| {
+                                                let source_path = entry.source_path.to_ascii_lowercase();
+                                                let source_top = entry
+                                                    .source_path
+                                                    .split('/')
+                                                    .next()
+                                                    .unwrap_or(entry.addon_name.as_str());
+
+                                                source_path == folder_path_key
+                                                    || source_path.starts_with(&folder_path_prefix)
+                                                    || service::normalize_collection_entry_key(source_top)
+                                                        == folder_key
+                                                    || service::normalize_collection_entry_key(
+                                                        &entry.addon_name,
+                                                    ) == folder_key
+                                            })
+                                            .map(|entry| entry.addon_name.clone())
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+
+                                if matches.is_empty() {
+                                    if let Some(probe) = self.add_repo_probe.as_ref() {
+                                        matches.extend(
+                                            probe
+                                                .addon_names
+                                                .iter()
+                                                .filter(|name| {
+                                                    service::normalize_collection_entry_key(name)
+                                                        == folder_key
+                                                })
+                                                .cloned(),
+                                        );
+                                    }
+                                }
+
+                                if matches.is_empty() {
+                                    matches.extend(
+                                        self.add_repo_selected_addons
+                                            .iter()
+                                            .filter(|name| {
+                                                service::normalize_collection_entry_key(name)
+                                                    == folder_key
+                                            })
+                                            .cloned(),
+                                    );
+                                }
+
+                                if matches.is_empty() {
+                                    matches.extend(
+                                        self.add_repo_existing_addons
+                                            .iter()
+                                            .filter(|name| {
+                                                service::normalize_collection_entry_key(name)
+                                                    == folder_key
+                                            })
+                                            .cloned(),
+                                    );
+                                }
+
+                                matches.sort_by_key(|name| name.to_ascii_lowercase());
+                                matches.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+                                matches
+                            };
                             sidebar_col.push(
                                 rule::horizontal(1)
                                     .style(move |_t| theme::update_line_style(&c_divider))
                                     .into(),
                             );
                             let files_label: Element<Message> = if detected_collection_addons.is_empty() {
-                                text("Files").size(12).color(colors.muted).into()
+                                if manage_mode {
+                                    row![
+                                        text("Files").size(12).color(colors.muted),
+                                        Space::new().width(Length::Fill),
+                                        text("Use the checkbox to keep or remove collection folders")
+                                            .size(11)
+                                            .color(colors.link),
+                                    ]
+                                    .align_y(iced::Alignment::Center)
+                                    .into()
+                                } else {
+                                    text("Files").size(12).color(colors.muted).into()
+                                }
                             } else {
                                 row![
                                     text("Files").size(12).color(colors.muted),
@@ -1859,84 +1944,90 @@ impl App {
                                     let expanded = self.add_repo_expanded_dirs.contains(&f.path);
                                     let folder_icon =
                                         if expanded { "\u{1f4c2}" } else { "\u{1f4c1}" }; // \u{1f4c2} / \u{1f4c1}
-                                    let folder_path_key = f.path.to_ascii_lowercase();
-                                    let folder_path_prefix = format!("{}/", folder_path_key);
-                                    let top_level_matches = self
-                                        .add_repo_probe
-                                        .as_ref()
-                                        .map(|probe| {
-                                            probe
-                                                .addon_entries
-                                                .iter()
-                                                .filter(|entry| {
-                                                    let source_path = entry.source_path.to_ascii_lowercase();
-                                                    source_path == folder_path_key
-                                                        || source_path.starts_with(&folder_path_prefix)
-                                                })
-                                                .map(|entry| entry.addon_name.clone())
-                                                .collect::<Vec<_>>()
-                                        })
-                                        .unwrap_or_default();
-                                    let show_toggle = !top_level_matches.is_empty();
+                                    let top_level_matches =
+                                        resolve_collection_folder_matches(&f.path, &f.name);
+                                    let show_toggle = manage_mode || !top_level_matches.is_empty();
                                     let all_selected = show_toggle
+                                        && !top_level_matches.is_empty()
                                         && top_level_matches.iter().all(|name| {
                                             selected_collection_addons.contains(&name.to_ascii_lowercase())
                                                 || selected_collection_keys.contains(
                                                     &service::normalize_collection_entry_key(name),
                                                 )
                                         });
-                                    let folder_toggle: Element<Message> = if show_toggle {
-                                        iced::widget::checkbox(all_selected)
+                                    let folder_row: Element<Message> = if show_toggle {
+                                        let folder_toggle: Element<Message> = iced::widget::checkbox(all_selected)
                                             .on_toggle({
                                                 let folder_path = f.path.clone();
                                                 move |_| Message::ToggleCollectionFolder(folder_path.clone())
                                             })
-                                            .into()
-                                    } else {
-                                        Space::new().width(24).into()
-                                    };
-                                    let folder_label_button = button(
-                                        text(format!("{} {}", folder_icon, f.name))
-                                            .size(12)
-                                            .color(colors.text),
-                                    )
-                                    .on_press(Message::ToggleAddRepoDir(path.clone()))
-                                    .padding([2, 4])
-                                    .width(Length::Fill)
-                                    .style(move |_t, status| match status {
-                                        button::Status::Hovered => button::Style {
-                                            background: Some(iced::Background::Color(
-                                                iced::Color::from_rgba(1.0, 1.0, 1.0, 0.07),
-                                            )),
-                                            text_color: c_tree.text,
-                                            border: iced::Border::default(),
-                                            shadow: iced::Shadow::default(),
-                                            snap: true,
-                                        },
-                                        _ => button::Style {
-                                            background: None,
-                                            text_color: c_tree.text,
-                                            border: iced::Border::default(),
-                                            shadow: iced::Shadow::default(),
-                                            snap: true,
-                                        },
-                                    });
-                                    let folder_button: Element<Message> = folder_label_button.into();
-                                    let folder_action_slot: Element<Message> = if show_toggle {
-                                        container(folder_toggle)
+                                            .into();
+                                        let folder_action_slot: Element<Message> = container(folder_toggle)
                                             .align_x(iced::Alignment::Start)
-                                            .width(Length::Fixed(18.0))
+                                            .width(Length::Fixed(24.0))
+                                            .into();
+                                        let folder_label_button = button(
+                                            text(format!("{} {}", folder_icon, f.name))
+                                                .size(12)
+                                                .color(colors.text),
+                                        )
+                                        .on_press(Message::ToggleAddRepoDir(path.clone()))
+                                        .padding([2, 4])
+                                        .width(Length::Fill)
+                                        .style(move |_t, status| match status {
+                                            button::Status::Hovered => button::Style {
+                                                background: Some(iced::Background::Color(
+                                                    iced::Color::from_rgba(1.0, 1.0, 1.0, 0.07),
+                                                )),
+                                                text_color: c_tree.text,
+                                                border: iced::Border::default(),
+                                                shadow: iced::Shadow::default(),
+                                                snap: true,
+                                            },
+                                            _ => button::Style {
+                                                background: None,
+                                                text_color: c_tree.text,
+                                                border: iced::Border::default(),
+                                                shadow: iced::Shadow::default(),
+                                                snap: true,
+                                            },
+                                        });
+                                        row![folder_action_slot, folder_label_button]
+                                            .spacing(3)
+                                            .align_y(iced::Alignment::Center)
                                             .into()
                                     } else {
-                                        Space::new().width(18).into()
+                                        let folder_label_button = button(
+                                            text(format!("{} {}", folder_icon, f.name))
+                                                .size(12)
+                                                .color(colors.text),
+                                        )
+                                        .on_press(Message::ToggleAddRepoDir(path.clone()))
+                                        .padding([2, 4])
+                                        .width(Length::Fill)
+                                        .style(move |_t, status| match status {
+                                            button::Status::Hovered => button::Style {
+                                                background: Some(iced::Background::Color(
+                                                    iced::Color::from_rgba(1.0, 1.0, 1.0, 0.07),
+                                                )),
+                                                text_color: c_tree.text,
+                                                border: iced::Border::default(),
+                                                shadow: iced::Shadow::default(),
+                                                snap: true,
+                                            },
+                                            _ => button::Style {
+                                                background: None,
+                                                text_color: c_tree.text,
+                                                border: iced::Border::default(),
+                                                shadow: iced::Shadow::default(),
+                                                snap: true,
+                                            },
+                                        });
+                                        row![Space::new().width(24), folder_label_button]
+                                            .spacing(3)
+                                            .align_y(iced::Alignment::Center)
+                                            .into()
                                     };
-                                    let folder_row: Element<Message> = row![
-                                        folder_action_slot,
-                                        folder_button,
-                                    ]
-                                    .spacing(3)
-                                    .align_y(iced::Alignment::Center)
-                                    .into();
                                     file_rows.push(folder_row);
                                     if expanded {
                                         if let Some(children) =
@@ -1973,92 +2064,110 @@ impl App {
                                                 } else {
                                                     colors.text_soft
                                                 };
-                                                let child_path_key = child.path.to_ascii_lowercase();
-                                                let child_path_prefix = format!("{}/", child_path_key);
-                                                let child_matches = self
-                                                    .add_repo_probe
-                                                    .as_ref()
-                                                    .map(|probe| {
-                                                        probe
-                                                            .addon_entries
-                                                            .iter()
-                                                            .filter(|entry| {
-                                                                let source_path = entry.source_path.to_ascii_lowercase();
-                                                                source_path == child_path_key
-                                                                    || source_path.starts_with(&child_path_prefix)
-                                                            })
-                                                            .map(|entry| entry.addon_name.clone())
-                                                            .collect::<Vec<_>>()
-                                                    })
-                                                    .unwrap_or_default();
-                                                let show_toggle = child.is_dir && !child_matches.is_empty();
+                                                let child_matches =
+                                                    resolve_collection_folder_matches(&child.path, &child.name);
+                                                let show_toggle = child.is_dir
+                                                    && (manage_mode || !child_matches.is_empty());
                                                 let checked = show_toggle
+                                                    && !child_matches.is_empty()
                                                     && child_matches.iter().all(|name| {
                                                         selected_collection_addons.contains(&name.to_ascii_lowercase())
                                                             || selected_collection_keys.contains(
                                                                 &service::normalize_collection_entry_key(name),
                                                             )
                                                     });
-                                                let child_toggle: Element<Message> = if show_toggle {
-                                                    iced::widget::checkbox(checked)
+                                                let child_row: Element<Message> = if show_toggle {
+                                                    let child_toggle: Element<Message> = iced::widget::checkbox(checked)
                                                         .on_toggle({
                                                             let folder_path = child.path.clone();
                                                             move |_| Message::ToggleCollectionFolder(folder_path.clone())
                                                         })
-                                                        .into()
-                                                } else {
-                                                    Space::new().width(24).into()
-                                                };
-                                                let child_label_button = button(text(format!(
-                                                    "{} {}",
-                                                    child_icon, child.name
-                                                ))
-                                                .size(11)
-                                                .color(child_color))
-                                                .on_press(child_msg)
-                                                .padding([1, 4])
-                                                .width(Length::Fill)
-                                                .style(move |_t, status| match status {
-                                                    button::Status::Hovered => button::Style {
-                                                        background: Some(
-                                                            iced::Background::Color(
-                                                                iced::Color::from_rgba(
-                                                                    1.0, 1.0, 1.0, 0.07,
+                                                        .into();
+                                                    let child_action_slot: Element<Message> = container(child_toggle)
+                                                        .align_x(iced::Alignment::Start)
+                                                        .width(Length::Fixed(24.0))
+                                                        .into();
+                                                    let child_label_button = button(text(format!(
+                                                        "{} {}",
+                                                        child_icon, child.name
+                                                    ))
+                                                    .size(11)
+                                                    .color(child_color))
+                                                    .on_press(child_msg)
+                                                    .padding([1, 4])
+                                                    .width(Length::Fill)
+                                                    .style(move |_t, status| match status {
+                                                        button::Status::Hovered => button::Style {
+                                                            background: Some(
+                                                                iced::Background::Color(
+                                                                    iced::Color::from_rgba(
+                                                                        1.0, 1.0, 1.0, 0.07,
+                                                                    ),
                                                                 ),
                                                             ),
-                                                        ),
-                                                        text_color: c_ch.text,
-                                                        border: iced::Border::default(),
-                                                        shadow: iced::Shadow::default(),
-                                                        snap: true,
-                                                    },
-                                                    _ => button::Style {
-                                                        background: None,
-                                                        text_color: c_ch.text_soft,
-                                                        border: iced::Border::default(),
-                                                        shadow: iced::Shadow::default(),
-                                                        snap: true,
-                                                    },
-                                                });
-                                                let child_button: Element<Message> = child_label_button.into();
-                                                let child_action_slot: Element<Message> = if show_toggle {
-                                                    container(child_toggle)
-                                                        .align_x(iced::Alignment::Start)
-                                                        .width(Length::Fixed(18.0))
-                                                        .into()
-                                                } else {
-                                                    Space::new().width(18).into()
-                                                };
-                                                file_rows.push(
+                                                            text_color: c_ch.text,
+                                                            border: iced::Border::default(),
+                                                            shadow: iced::Shadow::default(),
+                                                            snap: true,
+                                                        },
+                                                        _ => button::Style {
+                                                            background: None,
+                                                            text_color: c_ch.text_soft,
+                                                            border: iced::Border::default(),
+                                                            shadow: iced::Shadow::default(),
+                                                            snap: true,
+                                                        },
+                                                    });
                                                     row![
                                                         Space::new().width(10),
                                                         child_action_slot,
-                                                        child_button,
+                                                        child_label_button,
                                                     ]
                                                     .spacing(3)
                                                     .align_y(iced::Alignment::Center)
-                                                    .into(),
-                                                );
+                                                    .into()
+                                                } else {
+                                                    let child_label_button = button(text(format!(
+                                                        "{} {}",
+                                                        child_icon, child.name
+                                                    ))
+                                                    .size(11)
+                                                    .color(child_color))
+                                                    .on_press(child_msg)
+                                                    .padding([1, 4])
+                                                    .width(Length::Fill)
+                                                    .style(move |_t, status| match status {
+                                                        button::Status::Hovered => button::Style {
+                                                            background: Some(
+                                                                iced::Background::Color(
+                                                                    iced::Color::from_rgba(
+                                                                        1.0, 1.0, 1.0, 0.07,
+                                                                    ),
+                                                                ),
+                                                            ),
+                                                            text_color: c_ch.text,
+                                                            border: iced::Border::default(),
+                                                            shadow: iced::Shadow::default(),
+                                                            snap: true,
+                                                        },
+                                                        _ => button::Style {
+                                                            background: None,
+                                                            text_color: c_ch.text_soft,
+                                                            border: iced::Border::default(),
+                                                            shadow: iced::Shadow::default(),
+                                                            snap: true,
+                                                        },
+                                                    });
+                                                    row![
+                                                        Space::new().width(10),
+                                                        Space::new().width(18),
+                                                        child_label_button,
+                                                    ]
+                                                    .spacing(4)
+                                                    .align_y(iced::Alignment::Center)
+                                                    .into()
+                                                };
+                                                file_rows.push(child_row);
                                             }
                                         } else {
                                             file_rows.push(
