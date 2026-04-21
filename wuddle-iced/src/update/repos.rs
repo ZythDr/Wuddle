@@ -286,27 +286,21 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 let mode = mode.clone();
                 let selected_addons = if mode == "addon_git" {
                     let hinted = service::selected_addon_hint_from_url(&url);
-                    let requires_choice = app
-                        .add_repo_probe
-                        .as_ref()
-                        .map(|probe| probe.addon_names.len() > service::COLLECTION_PROMPT_THRESHOLD)
-                        .unwrap_or(false);
                     let treat_as_collection = app.add_repo_manage_repo_id.is_some()
                         || hinted.is_some()
-                        || app.add_repo_collection_choice == Some(true)
-                        || (app.add_repo_probe
-                            .as_ref()
-                            .map(|probe| probe.addon_names.len() > 1 && !requires_choice)
-                            .unwrap_or(false));
+                        || app.add_repo_collection_choice == Some(true);
 
-                    if requires_choice && app.add_repo_collection_choice.is_none() {
-                        app.log(LogLevel::Error, "Choose whether this repo is a collection or a multi-module addon.");
+                    // If the probe is still scanning, block submit so the user sees the choice prompt.
+                    if app.add_repo_probe_loading {
                         app.show_toast(
-                            "Choose whether this repo is a collection or a multi-module addon.",
-                            ToastKind::Warn,
+                            "Scanning addon folders\u{2026} please wait a moment.",
+                            ToastKind::Info,
                         );
                         return Some(Task::none());
                     }
+
+                    // Default to Single modular addon when the user hasn't explicitly chosen.
+                    // (No blocking prompt — Collection must be opted into manually.)
 
                     app.add_repo_probe
                         .as_ref()
@@ -425,13 +419,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::batch(tasks))
         }
         Message::FetchCollectionProbe(url) => {
-            if app.wow_dir.trim().is_empty() {
-                app.add_repo_probe = None;
-                app.add_repo_probe_loading = false;
-                return Some(Task::none());
-            }
             app.add_repo_probe_loading = true;
             let db = app.db_path.clone();
+            // Pass wow_dir for conflict detection; an empty string means no conflicts will
+            // be found, which is fine — we primarily need addon folder structure detection.
             let wow = app.wow_dir.clone();
             Some(Task::perform(
                 service::probe_conflicts(db, url, wow),
@@ -447,23 +438,40 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     } else {
                         None
                     };
-                    let requires_choice = probe.addon_names.len() > service::COLLECTION_PROMPT_THRESHOLD;
                     let detected_names = probe
                         .addon_names
                         .iter()
                         .map(|name| name.to_ascii_lowercase())
                         .collect::<HashSet<_>>();
                     if hinted_addon.is_some() {
+                        // URL hints (e.g. ?addon=Foo) lock to collection mode.
                         app.add_repo_collection_choice = Some(true);
                     } else if app.add_repo_manage_repo_id.is_some() {
-                        app.add_repo_collection_choice = Some(true);
-                    } else if requires_choice {
-                        app.add_repo_collection_choice = None;
-                    } else if probe.addon_names.len() > 1 && app.add_repo_collection_choice.is_none() {
+                        // Manage mode is always collection.
                         app.add_repo_collection_choice = Some(true);
                     }
-                    app.add_repo_selected_addons
-                        .retain(|name| detected_names.contains(&name.to_ascii_lowercase()));
+                    // For the multi-folder case with no prior choice, leave as None —
+                    // the always-visible toggle in the form lets the user decide.
+                    // Resolve any path-based fallback names (e.g. "Collection/AddonA") that
+                    // were stored before the probe loaded. Keep names that match a probe
+                    // addon_name directly, or resolve them via source_path matching.
+                    let old_selected: Vec<String> = std::mem::take(&mut app.add_repo_selected_addons).into_iter().collect();
+                    for selected_name in old_selected {
+                        let name_lower = selected_name.to_ascii_lowercase();
+                        if detected_names.contains(&name_lower) {
+                            app.add_repo_selected_addons.insert(selected_name);
+                            continue;
+                        }
+                        // Path-based resolution: find probe entries whose source_path matches
+                        let path_prefix = format!("{}/", name_lower);
+                        for entry in &probe.addon_entries {
+                            let src = entry.source_path.to_ascii_lowercase();
+                            if src == name_lower || src.starts_with(&path_prefix) {
+                                app.add_repo_selected_addons.insert(entry.addon_name.clone());
+                            }
+                        }
+                        // Names with no resolution are dropped (not a known addon)
+                    }
                     if app.add_repo_selected_addons.is_empty() && app.add_repo_collection_choice == Some(true) {
                         if let Some(hint) = hinted_addon {
                             let hint_key = hint.to_ascii_lowercase();
@@ -487,7 +495,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 }
                 Err(e) => {
                     app.add_repo_probe = None;
-                    app.log(LogLevel::Error, &format!("Addon probe failed: {}", e));
+                    app.log(LogLevel::Error, &format!("Addon probe failed: {:#}", e));
                 }
             }
             Some(Task::none())
@@ -502,6 +510,17 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 }
             } else {
                 app.add_repo_selected_addons.clear();
+            }
+            // If we came from the CollectionChoice popup, restore the AddRepo dialog.
+            if matches!(app.dialog, Some(Dialog::CollectionChoice { .. })) {
+                if let Some(Dialog::CollectionChoice { url, .. }) = app.dialog.take() {
+                    app.dialog = Some(Dialog::AddRepo {
+                        url,
+                        mode: "addon_git".to_string(),
+                        is_addons: true,
+                        advanced: false,
+                    });
+                }
             }
             Some(Task::none())
         }
@@ -577,7 +596,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
 
             if matching_addons.is_empty() {
-                matching_addons.push(folder_name.clone());
+                // Use the display name (last path component) not the full path, so the view
+                // closure can immediately resolve it via normalize(name) == folder_key, and
+                // it survives the probe's retain check (probe.addon_names uses bare names).
+                matching_addons.push(folder_display_name.clone());
             }
 
             matching_addons.sort_by_key(|name| name.to_ascii_lowercase());
@@ -759,9 +781,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                                         .split('/')
                                         .next()
                                         .unwrap_or(entry.addon_name.as_str());
+                                    let source_path_lower = entry.source_path.to_ascii_lowercase();
                                     service::normalize_collection_entry_key(source_top) == selected_key
                                         || service::normalize_collection_entry_key(&entry.addon_name)
                                             == selected_key
+                                        || source_path_lower == selected_key
+                                        || source_path_lower.starts_with(&format!("{}/", selected_key))
                                 })
                                 .map(|entry| entry.addon_name.clone())
                                 .collect::<Vec<_>>()
@@ -1289,12 +1314,40 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Ok(info) => {
                     app.readme_editor_content = iced::widget::text_editor::Content::with_text(&info.readme_text);
                     app.readme_source_view = false;
-                    app.add_repo_preview = Some(info);
                     app.add_repo_release_notes = None;
                     app.add_repo_show_releases = false;
                     app.add_repo_file_preview = None;
                     app.add_repo_expanded_dirs.clear();
                     app.add_repo_dir_contents.clear();
+
+                    // In manage/collection mode, pre-fetch contents of all top-level dirs so
+                    // the "−" indeterminate indicator works before the user expands anything.
+                    let is_collection = app.add_repo_manage_repo_id.is_some()
+                        || app.add_repo_collection_choice == Some(true)
+                        || !app.add_repo_selected_addons.is_empty()
+                        || !app.add_repo_existing_addons.is_empty();
+                    let prefetch_tasks: Vec<iced::Task<Message>> = if is_collection {
+                        info.files
+                            .iter()
+                            .filter(|f| f.is_dir)
+                            .map(|f| {
+                                let forge_url = info.forge_url.clone();
+                                let path = f.path.clone();
+                                iced::Task::perform(
+                                    service::fetch_dir_contents(forge_url, path),
+                                    Message::FetchDirContentsResult,
+                                )
+                            })
+                            .collect()
+                    } else {
+                        vec![]
+                    };
+
+                    app.add_repo_preview = Some(info);
+                    if prefetch_tasks.is_empty() {
+                        return Some(Task::none());
+                    }
+                    return Some(Task::batch(prefetch_tasks));
                 }
                 Err(_) => app.add_repo_preview = None,
             }
@@ -1440,7 +1493,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             // Also trigger preview fetch automatically as the user types
             if !url.is_empty() && (url.contains('/') || url.contains(':')) {
                 let mut tasks = vec![Task::done(Message::FetchRepoPreview(url.clone()))];
-                if is_addons && !app.wow_dir.trim().is_empty() {
+                // Always probe for addon structure — wow_dir is not required for folder detection.
+                if is_addons {
                     tasks.push(Task::done(Message::FetchCollectionProbe(url)));
                 }
                 return Some(Task::batch(tasks));

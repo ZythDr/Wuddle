@@ -2,6 +2,18 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.2.2
+
+### New Features
+- **Inline Mode Selector** — The Add Repo dialog now features a compact "Single Addon / Collection" dropdown inline with the Repo URL field. Hovering the dropdown shows a tooltip explaining the difference between the two modes.
+
+### Improvements
+- **Grouped Collections** — Addons installed from a Collection now appear under a single expandable repository row with a badge showing how many addons belong to the collection (for example, "12 addons").
+- **Grouped Modular Single Addons** — Single addons that include multiple modules now appear as an expandable group similar to Collections, with a badge showing how many modules were installed (for example, "6 modules").
+
+### Bug Fixes
+- None.
+
 ## v3.2.1
 
 ### Bug Fixes

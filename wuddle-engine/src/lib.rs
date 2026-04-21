@@ -2966,15 +2966,25 @@ impl Engine {
             if let Some(base) = wow_dir {
                 let _ = Self::remove_dlls_txt_entries(base, &removed_dlls);
 
-                // 2. Remove the repository folder itself (e.g. AddonName.repo or AddonName)
+                // 2. Remove the repository folder itself (AddonName or AddonName.repo).
+                // Step 1 above already removes symlinks that point INTO the worktree, but
+                // the worktree directory itself is never listed as an install entry for
+                // multi-addon repos, so it must be removed explicitly here.
                 if repo.mode == InstallMode::AddonGit {
                     let addons_base = base.join("Interface").join("AddOns");
-                    let to_remove_ideal = addons_base.join(format!("{}.repo", repo.name));
-                    let to_remove =
-                        Self::find_actual_case(&to_remove_ideal).unwrap_or(to_remove_ideal);
-
-                    if to_remove.is_dir() {
-                        let _ = fs::remove_dir_all(&to_remove);
+                    // Standard location: Interface/AddOns/{name}
+                    let std_dir = addons_base.join(&repo.name);
+                    if let Some(actual) = Self::find_actual_case(&std_dir) {
+                        if actual.is_dir() {
+                            let _ = fs::remove_dir_all(&actual);
+                        }
+                    }
+                    // Collision-renamed location: Interface/AddOns/{name}.repo
+                    let repo_dir = addons_base.join(format!("{}.repo", repo.name));
+                    if let Some(actual) = Self::find_actual_case(&repo_dir) {
+                        if actual.is_dir() {
+                            let _ = fs::remove_dir_all(&actual);
+                        }
                     }
                 }
             }

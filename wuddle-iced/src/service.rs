@@ -13,7 +13,6 @@ use serde::Deserialize;
 use iced;
 use crate::types::LogLevel;
 
-pub const COLLECTION_PROMPT_THRESHOLD: usize = 5;
 
 // ---------------------------------------------------------------------------
 // Row types for the UI (Clone-friendly, owned data)
@@ -634,12 +633,6 @@ pub async fn list_repos(
                 .sort_by_key(|name| name.to_ascii_lowercase());
             row.installed_addons
                 .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-            if row.mode == "addon_git" && row.installed_addons.len() > COLLECTION_PROMPT_THRESHOLD {
-                if row.selected_addons.is_empty() {
-                    row.selected_addons = row.installed_addons.clone();
-                }
-                row.is_collection = true;
-            }
             rows.push(row);
         }
         Ok::<RepoLoadResult, String>(RepoLoadResult { rows, logs })
@@ -1127,7 +1120,23 @@ pub async fn open_repo_folder(
 
         let installs = eng.db().list_installs(repo_id).map_err(|e| e.to_string())?;
 
-        // 1. Try first valid install path
+        // 1. For addon_git repos, prefer the worktree root over individual addon symlinks.
+        if matches!(repo.mode, InstallMode::AddonGit) {
+            let addons_dir = wow_dir.join("Interface").join("AddOns");
+            // Try standard clone location first, then .repo suffix (GAM collision rename)
+            let candidates = [
+                addons_dir.join(&repo.name),
+                addons_dir.join(format!("{}.repo", repo.name)),
+            ];
+            for candidate in &candidates {
+                if candidate.is_dir() {
+                    let _ = open::that(candidate);
+                    return Ok(());
+                }
+            }
+        }
+
+        // 2. Try first valid install path (for release/manual mods)
         if let Some(first) = installs.first() {
             let full_path = wow_dir.join(&first.path);
             if full_path.exists() {
@@ -1136,8 +1145,8 @@ pub async fn open_repo_folder(
             }
         }
 
-        // 2. Fallback for Manual/AddonGit: construct path from repo name in AddOns
-        if matches!(repo.mode, InstallMode::Manual | InstallMode::AddonGit) {
+        // 3. Fallback for Manual: construct path from repo name in AddOns
+        if matches!(repo.mode, InstallMode::Manual) {
             let addons_dir = wow_dir.join("Interface").join("AddOns");
             let repo_path = addons_dir.join(&repo.name);
             if repo_path.exists() {

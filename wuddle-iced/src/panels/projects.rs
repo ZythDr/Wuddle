@@ -31,39 +31,23 @@ fn is_weird_utils_item(repo_url: &str, dll_name: &str) -> bool {
 struct AddonDisplayRow<'a> {
     repo: &'a RepoRow,
     addon_name: String,
-    is_collection_member: bool,
+    /// True for the parent (header) row of a collection repo.
+    is_collection_parent: bool,
+    /// True for repos that are not collections but have >1 installed module.
+    is_modular_parent: bool,
 }
 
 fn addon_display_rows<'a>(app: &'a App) -> Vec<AddonDisplayRow<'a>> {
-    let mut rows = Vec::new();
-
-    for repo in app.repos.iter().filter(|repo| !is_mod(repo)) {
-        if repo.is_collection {
-            let mut addon_names = if repo.installed_addons.is_empty() {
-                repo.selected_addons.clone()
-            } else {
-                repo.installed_addons.clone()
-            };
-            addon_names.sort_by_key(|name| name.to_ascii_lowercase());
-            addon_names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-
-            for addon_name in addon_names {
-                rows.push(AddonDisplayRow {
-                    repo,
-                    addon_name,
-                    is_collection_member: true,
-                });
-            }
-        } else {
-            rows.push(AddonDisplayRow {
-                repo,
-                addon_name: repo.name.clone(),
-                is_collection_member: false,
-            });
-        }
-    }
-
-    rows
+    app.repos
+        .iter()
+        .filter(|repo| !is_mod(repo))
+        .map(|repo| AddonDisplayRow {
+            repo,
+            addon_name: repo.name.clone(),
+            is_collection_parent: repo.is_collection,
+            is_modular_parent: !repo.is_collection && repo.installed_addons.len() > 1,
+        })
+        .collect()
 }
 
 /// 1px vertical divider as a colored container with fixed height.
@@ -158,10 +142,29 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
                 Filter::Ignored => !row.repo.enabled || app.ignored_update_ids.contains(&row.repo.id),
             })
             .filter(|row| {
-                app.project_search.is_empty()
-                    || row.addon_name.to_lowercase().contains(&app.project_search.to_lowercase())
-                    || row.repo.name.to_lowercase().contains(&app.project_search.to_lowercase())
-                    || row.repo.owner.to_lowercase().contains(&app.project_search.to_lowercase())
+                if app.project_search.is_empty() {
+                    return true;
+                }
+                let q = app.project_search.to_lowercase();
+                if row.addon_name.to_lowercase().contains(&q)
+                    || row.repo.name.to_lowercase().contains(&q)
+                    || row.repo.owner.to_lowercase().contains(&q)
+                {
+                    return true;
+                }
+                // For collection/modular parents, also search member addon/module names.
+                if row.is_collection_parent {
+                    let members = if row.repo.installed_addons.is_empty() {
+                        &row.repo.selected_addons
+                    } else {
+                        &row.repo.installed_addons
+                    };
+                    return members.iter().any(|m| m.to_lowercase().contains(&q));
+                }
+                if row.is_modular_parent {
+                    return row.repo.installed_addons.iter().any(|m| m.to_lowercase().contains(&q));
+                }
+                false
             })
             .collect()
     };
@@ -412,6 +415,23 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         });
     }
 
+    // Sort filtered addon rows (addons tab)
+    let mut filtered_addon_rows = filtered_addon_rows;
+    if app.sort_dir != SortDir::None {
+        let dir: i8 = if app.sort_dir == SortDir::Desc { -1 } else { 1 };
+        filtered_addon_rows.sort_by(|a, b| {
+            let cmp = match app.sort_key {
+                SortKey::Name => a.addon_name.to_lowercase().cmp(&b.addon_name.to_lowercase()),
+                SortKey::Status => {
+                    let sa = status_rank(app, a.repo);
+                    let sb = status_rank(app, b.repo);
+                    sa.cmp(&sb)
+                }
+            };
+            if dir < 0 { cmp.reverse() } else { cmp }
+        });
+    }
+
     // Table body
     let body: Element<Message> = if if is_mods_tab {
         filtered_repos.is_empty()
@@ -453,14 +473,49 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
                 }
             }
         } else {
+            let search_active = !app.project_search.is_empty();
+            let q = app.project_search.to_lowercase();
             for addon_row_data in filtered_addon_rows.iter() {
-                rows.push(addon_row(
-                    app,
-                    addon_row_data.repo,
-                    addon_row_data.addon_name.clone(),
-                    addon_row_data.is_collection_member,
-                    colors,
-                ));
+                if addon_row_data.is_collection_parent || addon_row_data.is_modular_parent {
+                    // Auto-expand when a search is active so members are visible.
+                    let is_expanded = search_active || app.expanded_repo_ids.contains(&addon_row_data.repo.id);
+                    let repo = addon_row_data.repo;
+                    let mut member_names = if addon_row_data.is_collection_parent {
+                        if repo.installed_addons.is_empty() {
+                            repo.selected_addons.clone()
+                        } else {
+                            repo.installed_addons.clone()
+                        }
+                    } else {
+                        repo.installed_addons.clone()
+                    };
+                    member_names.sort_by_key(|name| name.to_ascii_lowercase());
+                    member_names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+                    let member_count = member_names.len();
+                    let member_label = if addon_row_data.is_collection_parent { "addons" } else { "modules" };
+                    rows.push(addon_collection_parent_row(app, repo, is_expanded, member_count, member_label, colors));
+                    if is_expanded {
+                        let repo_itself_matched = !search_active
+                            || repo.name.to_lowercase().contains(&q)
+                            || repo.owner.to_lowercase().contains(&q);
+                        for addon_name in member_names {
+                            if search_active && !repo_itself_matched
+                                && !addon_name.to_lowercase().contains(&q)
+                            {
+                                continue;
+                            }
+                            rows.push(addon_row(app, repo, addon_name, true, colors));
+                        }
+                    }
+                } else {
+                    rows.push(addon_row(
+                        app,
+                        addon_row_data.repo,
+                        addon_row_data.addon_name.clone(),
+                        false,
+                        colors,
+                    ));
+                }
             }
         }
         let scroll_id = if label == "Mods" {
@@ -722,6 +777,177 @@ fn version_picker_cell<'a>(app: &'a App, repo: &'a RepoRow, _colors: &ThemeColor
     .into()
 }
 
+/// Name cell for a collection/modular parent row: repo title, expand chevron, member-count badge.
+fn addon_collection_name_cell<'a>(
+    repo: &'a RepoRow,
+    is_expanded: bool,
+    is_infrequent: bool,
+    member_count: usize,
+    member_label: &str,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let c = *colors;
+    let url = repo.url.clone();
+    let subtitle = if repo.enabled {
+        format!("{} \u{2022} {}", repo.owner, repo.forge)
+    } else {
+        format!("{} \u{2022} {} \u{2022} disabled", repo.owner, repo.forge)
+    };
+    let name_font = name_font(colors);
+
+    let title_btn = button(
+        iced::widget::rich_text::<(), _, _, _>([
+            iced::widget::span(repo.name.clone())
+                .underline(true)
+                .color(c.link)
+                .font(name_font)
+                .size(20.0_f32),
+        ]),
+    )
+    .on_press(Message::OpenUrl(url))
+    .padding(0)
+    .style(move |_theme, _status| button::Style {
+        background: None,
+        text_color: c.link,
+        border: iced::Border::default(),
+        shadow: iced::Shadow::default(),
+        snap: true,
+    });
+
+    let rid = repo.id;
+
+    let chevron_bytes: &[u8] = if is_expanded {
+        include_bytes!("../../assets/icons/chevron-down.svg")
+    } else {
+        include_bytes!("../../assets/icons/chevron-right.svg")
+    };
+    let chevron_handle = iced::widget::svg::Handle::from_memory(chevron_bytes);
+    let chevron_icon = iced::widget::svg(chevron_handle)
+        .width(14)
+        .height(14)
+        .style(move |_t, _s| iced::widget::svg::Style { color: Some(c.muted) });
+
+    let count_badge = container(text(format!("{} {}", member_count, member_label)).size(10).color(c.muted))
+        .padding([1, 5])
+        .style(move |_t| container::Style {
+            background: Some(iced::Background::Color(iced::Color { a: 0.12, ..c.muted })),
+            border: iced::Border {
+                color: iced::Color { a: 0.2, ..c.muted },
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        });
+
+    let title_row: Element<Message> = row![
+        title_btn,
+        Space::new().width(6),
+        chevron_icon,
+        Space::new().width(6),
+        count_badge,
+    ]
+    .align_y(iced::Alignment::Center)
+    .into();
+
+    let title_row: Element<Message> = if is_infrequent && wuddle_engine::github_token().is_none() {
+        let c_inf = c;
+        let infreq_badge = container(text("\u{23F3}").size(10).color(c_inf.muted)).padding([0, 4]);
+        crate::tip(
+            row![title_row, Space::new().width(6), infreq_badge].align_y(iced::Alignment::Center),
+            "Infrequently updated \u{2014} checked once every 4h to avoid API rate limits",
+            tooltip::Position::Top,
+            colors,
+        )
+        .into()
+    } else {
+        title_row
+    };
+
+    let content = container(
+        column![
+            title_row,
+            text(subtitle).size(12).color(colors.muted).font(colors.body_font),
+        ]
+        .spacing(2),
+    )
+    .width(Length::Fill);
+
+    // Transparent backdrop so clicking anywhere in the name cell toggles expand.
+    let backdrop = button(Space::new().width(Length::Fill).height(Length::Fill))
+        .on_press(Message::ToggleRepoExpanded(rid))
+        .padding(0)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_t, _s| button::Style {
+            background: None,
+            text_color: c.text,
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        });
+
+    stack![backdrop, content].width(Length::Fill).into()
+}
+
+/// A full summary row for a collection or modular-addon repo.
+fn addon_collection_parent_row<'a>(
+    app: &'a App,
+    repo: &'a RepoRow,
+    is_expanded: bool,
+    member_count: usize,
+    member_label: &'a str,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let c = *colors;
+    let plan = app.plans.iter().find(|p| p.repo_id == repo.id);
+    let has_update = plan.map(|p| p.has_update).unwrap_or(false);
+    let has_error = plan.and_then(|p| p.error.as_ref()).is_some();
+    let externally_modified = plan.map(|p| p.externally_modified).unwrap_or(false);
+    let latest_str = plan.map(|p| p.latest.clone()).unwrap_or_default();
+    let enabled = repo.enabled;
+    let update_ignored = app.ignored_update_ids.contains(&repo.id);
+    let is_infrequent = app.infrequent_repo_ids.contains(&repo.id);
+    let rid = repo.id;
+
+    let name_col = addon_collection_name_cell(repo, is_expanded, is_infrequent, member_count, member_label, colors);
+
+    let menu_key = format!("repo:{}", repo.id);
+    let is_menu_open = app.open_menu.as_deref() == Some(menu_key.as_str());
+    let menu_content = crate::inline_context_menu(app, repo, None, &c);
+
+    let current_branch = repo.git_branch.clone().unwrap_or_else(|| "master".to_string());
+    let branch_options = app.branches.get(&repo.id).cloned().unwrap_or_default();
+    let branch_display: Element<Message> = container(
+        pick_list(
+            branch_options,
+            Some(current_branch),
+            move |branch: String| Message::SetRepoBranch(rid, branch),
+        )
+        .placeholder("master")
+        .text_size(12)
+        .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .padding(iced::Padding { top: 0.0, right: 5.0, bottom: 0.0, left: 5.0 })
+    .into();
+
+    let row_content = row![
+        name_col,
+        col_cell(branch_display, COL_BRANCH),
+        col_cell(
+            status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, colors),
+            COL_STATUS,
+        ),
+        col_cell(action_buttons(repo, menu_key, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
+    ]
+    .spacing(0)
+    .padding([9, 12])
+    .align_y(iced::Alignment::Center);
+
+    let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(&c));
+    column![separator, row_content].into()
+}
+
 fn addon_name_cell<'a>(
     repo: &'a RepoRow,
     addon_name: String,
@@ -799,15 +1025,26 @@ fn addon_name_cell<'a>(
         title_row
     };
 
-    container(
+    let inner = container(
         column![
             title_row,
             text(subtitle).size(12).color(colors.muted).font(colors.body_font),
         ]
         .spacing(2),
     )
-    .width(Length::Fill)
-    .into()
+    .width(Length::Fill);
+
+    if is_collection_member {
+        // Indent child rows slightly to visually nest them under the parent.
+        row![
+            Space::new().width(20),
+            inner,
+        ]
+        .width(Length::Fill)
+        .into()
+    } else {
+        inner.into()
+    }
 }
 
 /// Addons row: Name | Branch | Status | Actions

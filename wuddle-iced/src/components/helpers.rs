@@ -154,6 +154,13 @@ pub fn inline_context_menu<'a>(
             &c,
         ));
     } else {
+        if repo.is_collection {
+            items.push(ctx_menu_item(
+                "Manage Collection\u{2026}",
+                Message::OpenCollectionManager(rid),
+                &c,
+            ));
+        }
         items.push(ctx_menu_item("Browse\u{2026}", Message::BrowseRepo(rid), &c));
     }
     if crate::panels::projects::is_dxvk_repo(&repo.name) {
