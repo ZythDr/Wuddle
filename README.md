@@ -30,7 +30,30 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.2.0
+### What's New in v3.2.2
+
+#### New Features
+- **Inline Mode Selector** — The Add Repo dialog now features a compact "Single Addon / Collection" dropdown inline with the Repo URL field. Hovering the dropdown shows a tooltip explaining the difference between the two modes.
+
+#### Improvements
+- **Grouped Collections** — Addons installed from a Collection now appear under a single expandable repository row with a badge showing how many addons belong to the collection (for example, "12 addons").
+- **Grouped Modular Single Addons** — Single addons that include multiple modules now appear as an expandable group similar to Collections, with a badge showing how many modules were installed (for example, "6 modules").
+
+#### Bug Fixes
+- None.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.2.1
+
+#### Bug Fixes
+- **Collection Folder Checkboxes** — Fixed collection folder checkboxes not appearing until the background addon probe completed (which could take 10–30+ seconds). Checkboxes now appear immediately when opening Manage Collection.
+- **Collection Toggle Silently Dropped** — Fixed folder checkbox clicks being silently discarded in manage mode when the probe hadn't loaded yet. The selected state is now correctly updated on every click.
+- **Collection Matching Robustness** — Improved the folder-to-addon matching fallback chain so checkboxes correctly reflect keep/remove state even before the probe finishes.
+- **Dialog Overlay** — Fixed a gap where clicks on the dialog scrim could interact with content behind the dialog.
+
+### v3.2.0
 
 #### New Features
 - **Collection Addon Management** — Treat addon-git repositories as real collections, choose which addon folders to keep directly in the Add Repo preview, and manage installed collections later without re-adding the repo.
@@ -48,9 +71,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **Legacy Radio UI** — Removed the in-app radio player and its related settings UI.
 - **Turtle-Specific Home Links** — Removed the Turtle-only links section from the Home tab.
 - **`I like turtles` Profile Flag** — Removed the old profile toggle that controlled Turtle-themed home content.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.1.0
 - **Browse to Folder** — Quickly open the local folder for any tracked addon or mod directly from the UI.
