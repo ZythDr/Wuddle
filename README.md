@@ -30,7 +30,17 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.2.2
+### What's New in v3.2.3
+
+#### Bug Fixes
+- **Windows Close Handling** — Fixed a Windows issue where closing Wuddle while it was still working could leave `Wuddle.exe` running in the background and keep files locked until the process was killed manually.
+- **Busy State Recovery** — Fixed stuck busy/spinner states caused by update flows not always clearing their in-progress state after failures or no-op results.
+- **Collection Selection on Windows** — Fixed addon-git collection installs incorrectly leaving every addon linked or copied on disk instead of honoring the selected addon folders.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.2.2
 
 #### New Features
 - **Inline Mode Selector** — The Add Repo dialog now features a compact "Single Addon / Collection" dropdown inline with the Repo URL field. Hovering the dropdown shows a tooltip explaining the difference between the two modes.
@@ -41,9 +51,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 
 #### Bug Fixes
 - None.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.2.1
 

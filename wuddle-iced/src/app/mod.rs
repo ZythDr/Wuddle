@@ -574,6 +574,15 @@ impl App {
             ));
         }
 
+        subs.push(iced::event::listen_with(
+            |event, _status, _window| match event {
+                iced::Event::Window(iced::window::Event::CloseRequested) => {
+                    Some(Message::RequestExit)
+                }
+                _ => None,
+            },
+        ));
+
         Subscription::batch(subs)
     }
 
@@ -825,6 +834,23 @@ impl App {
             Message::CloseDialog => {
                 self.dialog = None;
                 self.reset_add_repo_state();
+            }
+            Message::RequestExit => {
+                self.save_settings();
+
+                #[cfg(target_os = "windows")]
+                {
+                    let busy = self.busy_summary();
+                    std::thread::spawn(move || {
+                        if let Some(summary) = busy {
+                            eprintln!("[Wuddle] Forced shutdown on close request while busy: {}", summary);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                        std::process::exit(0);
+                    });
+                }
+
+                return self.finish_update(iced::window::latest().and_then(iced::window::close));
             }
             Message::ConsumeDialogClick => {}
 

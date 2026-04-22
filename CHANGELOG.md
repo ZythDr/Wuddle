@@ -2,6 +2,13 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.2.3
+
+### Bug Fixes
+- **Windows Close Handling** — Fixed a Windows issue where closing Wuddle while it was still working could leave `Wuddle.exe` running in the background and keep files locked until the process was killed manually.
+- **Busy State Recovery** — Fixed stuck busy/spinner states caused by update flows not always clearing their in-progress state after failures or no-op results.
+- **Collection Selection on Windows** — Fixed addon-git collection installs incorrectly leaving every addon linked or copied on disk instead of honoring the selected addon folders.
+
 ## v3.2.2
 
 ### New Features

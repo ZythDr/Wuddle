@@ -50,6 +50,7 @@ pub enum Message {
     // Dialogs
     OpenDialog(Dialog),
     CloseDialog,
+    RequestExit,
     ConsumeDialogClick,
 
     // Context menu

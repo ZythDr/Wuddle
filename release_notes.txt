@@ -1,11 +1,6 @@
-## Wuddle v3.2.2
-
-### New Features
-- **Inline Mode Selector** — The Add Repo dialog now features a compact "Single Addon / Collection" dropdown inline with the Repo URL field. Hovering the dropdown shows a tooltip explaining the difference between the two modes.
-
-### Improvements
-- **Grouped Collections** — Addons installed from a Collection now appear under a single expandable repository row with a badge showing how many addons belong to the collection (for example, "12 addons").
-- **Grouped Modular Single Addons** — Single addons that include multiple modules now appear as an expandable group similar to Collections, with a badge showing how many modules were installed (for example, "6 modules").
+## Wuddle v3.2.3
 
 ### Bug Fixes
-- None.
+- **Windows Close Handling** — Fixed a Windows issue where closing Wuddle while it was still working could leave `Wuddle.exe` running in the background and keep files locked until the process was killed manually.
+- **Busy State Recovery** — Fixed stuck busy/spinner states caused by update flows not always clearing their in-progress state after failures or no-op results.
+- **Collection Selection on Windows** — Fixed addon-git collection installs incorrectly leaving every addon linked or copied on disk instead of honoring the selected addon folders.

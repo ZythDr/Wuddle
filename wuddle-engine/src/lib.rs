@@ -3361,6 +3361,10 @@ impl Engine {
                 }
             }
 
+            // Remove previously-tracked addon targets that are no longer part of the
+            // current collection selection before rewriting the manifest.
+            self.cleanup_stale_addon_installs(plan.repo_id, wow_dir, &records)?;
+
             // No kind='raw' worktree entry — GAM doesn't track anything beyond the
             // addon folders themselves. The .git dir inside the addon folder is the
             // ground truth; import_existing_addon_git_repos() will re-discover it.

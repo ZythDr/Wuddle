@@ -1051,9 +1051,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::UpdateRepoResult(result) => {
+            app.updating_repo_ids.clear();
             match result {
                 Ok(Some(plan)) => {
-                    app.updating_repo_ids.remove(&plan.repo_id);
                     let name = format!("{}/{}", plan.owner, plan.name);
                     app.log(LogLevel::Info, &format!("Updated {}.", name));
                     app.show_toast(format!("Updated {}.", name), ToastKind::Info);
@@ -1140,12 +1140,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::UpdateAllResult(result) => {
+            app.updating_repo_ids.clear();
             match result {
                 Ok(results) => {
                     let mut applied = 0;
                     let mut errors = 0;
                     for r in results {
-                        app.updating_repo_ids.remove(&r.repo_id);
                         let name = format!("{}/{}", r.owner, r.name);
                         if let Some(e) = r.error {
                             errors += 1;
