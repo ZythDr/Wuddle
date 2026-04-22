@@ -11,6 +11,9 @@ use std::{
     sync::{LazyLock, Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use url::Url;
 
 mod db;
@@ -27,6 +30,14 @@ use crate::forge::detect_repo;
 use crate::forge::git_sync;
 use crate::forge::ForgeKind;
 // LatestRelease and ReleaseAsset re-exported via `pub use model::` above.
+
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+#[cfg(windows)]
+fn is_reparse_dir(meta: &fs::Metadata) -> bool {
+    meta.is_dir() && (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+}
 
 #[derive(Debug, Clone)]
 pub struct UpdatePlan {
@@ -2598,13 +2609,25 @@ impl Engine {
     fn remove_any_target(path: &Path) -> Result<bool> {
         let actual = Self::find_actual_case(path);
         let p = actual.as_deref().unwrap_or(path);
-        if p.is_file() || p.is_symlink() {
+        let meta = match fs::symlink_metadata(p) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err.into()),
+        };
+        let ft = meta.file_type();
+
+        if ft.is_file() || ft.is_symlink() {
             fs::remove_file(p)?;
             Ok(true)
-        } else if p.is_dir() {
+        } else if ft.is_dir() {
             #[cfg(windows)]
             {
-                if fs::remove_dir(p).is_ok() {
+                let remove_dir_result = fs::remove_dir(p);
+                if remove_dir_result.is_ok() {
+                    return Ok(true);
+                }
+                if is_reparse_dir(&meta) {
+                    remove_dir_result?;
                     return Ok(true);
                 }
             }

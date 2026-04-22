@@ -278,10 +278,26 @@ jobs:
               sys.stdout.write(f'See CHANGELOG.md for v{version} release notes.\n')
           PYEOF
 
+      - name: Derive release metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          BASE_VERSION="${VERSION%%-*}"
+          if [[ "${VERSION}" == *-rc.* || "${VERSION}" == *-beta* || "${VERSION}" == *-alpha* ]]; then
+            SUFFIX="${VERSION#*-}"
+            echo "is_prerelease=true" >> "${GITHUB_OUTPUT}"
+            echo "release_name=v${BASE_VERSION} pre-release ${SUFFIX}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "is_prerelease=false" >> "${GITHUB_OUTPUT}"
+            echo "release_name=v${VERSION}" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Publish pre-release
         uses: softprops/action-gh-release@v2
         with:
-          prerelease: ${{ contains(github.ref_name, '-rc.') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          name: ${{ steps.meta.outputs.release_name }}
+          prerelease: ${{ steps.meta.outputs.is_prerelease == 'true' }}
           generate_release_notes: false
           body_path: dist/RELEASE_BODY.md
           files: |

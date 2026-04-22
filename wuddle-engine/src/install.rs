@@ -7,6 +7,17 @@ use std::{
     process::Command,
 };
 
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+#[cfg(windows)]
+fn is_reparse_dir(meta: &fs::Metadata) -> bool {
+    meta.is_dir() && (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct InstallOptions {
     pub use_symlinks: bool,
@@ -203,7 +214,13 @@ fn remove_any_target(path: &Path) -> Result<()> {
         if ft.is_dir() {
             #[cfg(windows)]
             {
-                if fs::remove_dir(path).is_ok() {
+                let remove_dir_result = fs::remove_dir(path);
+                if remove_dir_result.is_ok() {
+                    return Ok(());
+                }
+                if is_reparse_dir(&meta) {
+                    remove_dir_result
+                        .with_context(|| format!("remove junction {:?}", path))?;
                     return Ok(());
                 }
             }
