@@ -127,6 +127,14 @@ pub enum Dialog {
     },
     AvWarning { url: String, mode: String },
     AddonConflict { url: String, mode: String, conflicts: Vec<wuddle_engine::AddonProbeConflict> },
+    CollectionAddonConflict {
+        repo_id: i64,
+        repo_name: String,
+        repo_url: String,
+        selected_addons: Vec<String>,
+        conflicts: Vec<wuddle_engine::AddonProbeConflict>,
+        existing_repos: Vec<crate::service::CollectionConflictOwnerGroup>,
+    },
     /// Shown when the probe finishes and detects >1 addon folder in a new-add flow.
     /// Asking the user whether to treat the repo as a collection or a single modular addon.
     CollectionChoice {

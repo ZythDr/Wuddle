@@ -112,7 +112,8 @@ pub enum Message {
     ToggleCollectionFolder(String),
     ToggleCollectionAddon(String),
     SaveCollectionSelection,
-    SaveCollectionSelectionResult(Result<String, String>),
+    SaveCollectionSelectionOverride { repo_id: i64, selected_addons: Vec<String> },
+    SaveCollectionSelectionResult(Result<String, service::CollectionSelectionError>),
     RemoveCollectionAddonPrompt { repo_id: i64, addon_name: String },
     RemoveCollectionAddonConfirm { repo_id: i64, addon_name: String },
 

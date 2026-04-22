@@ -9,7 +9,7 @@ use std::time::Instant;
 use crate::components::helpers::*;
 use crate::components::markdown::ImageViewer;
 use crate::components::presets::build_quick_add_presets;
-use crate::dialogs::simple_warnings::{addon_conflict, av_false_positive_warning};
+use crate::dialogs::simple_warnings::{addon_conflict, av_false_positive_warning, collection_addon_conflict};
 use crate::message::Message;
 use crate::service::{self, is_mod, PlanRow, RepoRow};
 use crate::settings::{self, UpdateChannel};
@@ -832,8 +832,17 @@ impl App {
                 }
             }
             Message::CloseDialog => {
-                self.dialog = None;
-                self.reset_add_repo_state();
+                if let Some(Dialog::CollectionAddonConflict { repo_url, .. }) = self.dialog.take() {
+                    self.dialog = Some(Dialog::AddRepo {
+                        url: repo_url,
+                        mode: "addon_git".to_string(),
+                        is_addons: true,
+                        advanced: false,
+                    });
+                } else {
+                    self.dialog = None;
+                    self.reset_add_repo_state();
+                }
             }
             Message::RequestExit => {
                 self.save_settings();
@@ -1116,6 +1125,7 @@ impl App {
                     | Dialog::AddonConflict { .. }
                     | Dialog::CollectionChoice { .. }
                     | Dialog::RemoveCollectionAddon { .. } => (650u32, 24),
+                    Dialog::CollectionAddonConflict { .. } => (920u32, 24),
                     _ => (480u32, 24),
                 };
                 let c_dlg = c;
@@ -1767,11 +1777,77 @@ impl App {
                                 .iter()
                                 .map(|name| name.to_ascii_lowercase())
                                 .collect::<HashSet<_>>();
+                            let selected_collection_paths = self
+                                .add_repo_selected_addons
+                                .iter()
+                                .map(|name| name.trim().trim_matches('/').to_ascii_lowercase())
+                                .collect::<HashSet<_>>();
                             let selected_collection_keys = self
                                 .add_repo_selected_addons
                                 .iter()
                                 .map(|name| service::normalize_collection_entry_key(name))
                                 .collect::<HashSet<_>>();
+                            let folder_all_selected = |folder_path: &str, matches: &[String]| {
+                                let folder_path_lower = folder_path.trim().trim_matches('/').to_ascii_lowercase();
+                                let inherited = selected_collection_paths.iter().any(|selected| {
+                                    selected == &folder_path_lower
+                                        || folder_path_lower.starts_with(&format!("{}/", selected))
+                                });
+
+                                inherited
+                                    || (!matches.is_empty()
+                                        && matches.iter().all(|name| {
+                                            selected_collection_addons.contains(&name.to_ascii_lowercase())
+                                                || selected_collection_keys.contains(
+                                                    &service::normalize_collection_entry_key(name),
+                                                )
+                                        }))
+                            };
+                            let folder_some_selected = |folder_path: &str,
+                                                         matches: &[String],
+                                                         fallback_children: Option<&Vec<service::RepoFileEntry>>| {
+                                if folder_all_selected(folder_path, matches) {
+                                    return false;
+                                }
+
+                                if !matches.is_empty() {
+                                    return matches.iter().any(|name| {
+                                        selected_collection_addons.contains(&name.to_ascii_lowercase())
+                                            || selected_collection_keys.contains(
+                                                &service::normalize_collection_entry_key(name),
+                                            )
+                                    });
+                                }
+
+                                let folder_path_lower = folder_path.trim().trim_matches('/').to_ascii_lowercase();
+                                let descendant_prefix = format!("{}/", folder_path_lower);
+                                if selected_collection_paths
+                                    .iter()
+                                    .any(|selected| selected.starts_with(&descendant_prefix))
+                                {
+                                    return true;
+                                }
+
+                                fallback_children
+                                    .map(|children| {
+                                        children.iter().any(|child| {
+                                            selected_collection_addons
+                                                .contains(&child.name.to_ascii_lowercase())
+                                                || selected_collection_keys.contains(
+                                                    &service::normalize_collection_entry_key(
+                                                        &child.name,
+                                                    ),
+                                                )
+                                                || selected_collection_paths.contains(
+                                                    &child.path
+                                                        .trim()
+                                                        .trim_matches('/')
+                                                        .to_ascii_lowercase(),
+                                                )
+                                        })
+                                    })
+                                    .unwrap_or(false)
+                            };
                             let resolve_collection_folder_matches = |folder_path: &str, folder_name: &str| {
                                 let folder_path_key = folder_path.trim_matches('/').to_ascii_lowercase();
                                 let folder_path_prefix = format!("{}/", folder_path_key);
@@ -1905,42 +1981,13 @@ impl App {
                                         resolve_collection_folder_matches(&f.path, &f.name);
                                     let show_toggle = manage_mode || !top_level_matches.is_empty() || treat_preview_as_collection;
                                     let all_selected = show_toggle
-                                        && !top_level_matches.is_empty()
-                                        && top_level_matches.iter().all(|name| {
-                                            selected_collection_addons.contains(&name.to_ascii_lowercase())
-                                                || selected_collection_keys.contains(
-                                                    &service::normalize_collection_entry_key(name),
-                                                )
-                                        });
-                                    // some_selected: use probe matches when available; fall back to
-                                    // checking dir_contents (names already stored in selected_addons
-                                    // before the probe finishes loading).
-                                    let some_selected = !all_selected
-                                        && show_toggle
-                                        && if !top_level_matches.is_empty() {
-                                            top_level_matches.iter().any(|name| {
-                                                selected_collection_addons.contains(&name.to_ascii_lowercase())
-                                                    || selected_collection_keys.contains(
-                                                        &service::normalize_collection_entry_key(name),
-                                                    )
-                                            })
-                                        } else {
-                                            // Probe not loaded yet — check children we already fetched
-                                            self.add_repo_dir_contents
-                                                .get(&f.path)
-                                                .map(|children| {
-                                                    children.iter().any(|child| {
-                                                        selected_collection_addons
-                                                            .contains(&child.name.to_ascii_lowercase())
-                                                            || selected_collection_keys.contains(
-                                                                &service::normalize_collection_entry_key(
-                                                                    &child.name,
-                                                                ),
-                                                            )
-                                                    })
-                                                })
-                                                .unwrap_or(false)
-                                        };
+                                        && folder_all_selected(&f.path, &top_level_matches);
+                                    let some_selected = show_toggle
+                                        && folder_some_selected(
+                                            &f.path,
+                                            &top_level_matches,
+                                            self.add_repo_dir_contents.get(&f.path),
+                                        );
                                     let folder_row: Element<Message> = if show_toggle {
                                         let folder_toggle: Element<Message> = if some_selected {
                                             let fp = f.path.clone();
@@ -2098,13 +2145,7 @@ impl App {
                                                 let show_toggle = child.is_dir
                                                     && (manage_mode || !child_matches.is_empty() || treat_preview_as_collection);
                                                 let checked = show_toggle
-                                                    && !child_matches.is_empty()
-                                                    && child_matches.iter().all(|name| {
-                                                        selected_collection_addons.contains(&name.to_ascii_lowercase())
-                                                            || selected_collection_keys.contains(
-                                                                &service::normalize_collection_entry_key(name),
-                                                            )
-                                                    });
+                                                    && folder_all_selected(&child.path, &child_matches);
                                                 let child_row: Element<Message> = if show_toggle {
                                                     let child_toggle: Element<Message> = iced::widget::checkbox(checked)
                                                         .on_toggle({
@@ -2229,13 +2270,7 @@ impl App {
                                                             let gc_show_toggle = gc.is_dir
                                                                 && (manage_mode || !gc_matches.is_empty() || treat_preview_as_collection);
                                                             let gc_checked = gc_show_toggle
-                                                                && !gc_matches.is_empty()
-                                                                && gc_matches.iter().all(|name| {
-                                                                    selected_collection_addons.contains(&name.to_ascii_lowercase())
-                                                                        || selected_collection_keys.contains(
-                                                                            &service::normalize_collection_entry_key(name),
-                                                                        )
-                                                                });
+                                                                && folder_all_selected(&gc.path, &gc_matches);
                                                             let gc_row: Element<Message> = if gc_show_toggle {
                                                                 let gc_toggle: Element<Message> = iced::widget::checkbox(gc_checked)
                                                                     .on_toggle({
@@ -3469,6 +3504,21 @@ impl App {
                 mode,
                 conflicts,
             } => addon_conflict(url, mode, conflicts, colors),
+            Dialog::CollectionAddonConflict {
+                repo_id,
+                repo_name,
+                selected_addons,
+                conflicts,
+                existing_repos,
+                ..
+            } => collection_addon_conflict(
+                *repo_id,
+                repo_name,
+                selected_addons,
+                conflicts,
+                existing_repos,
+                colors,
+            ),
 
             Dialog::CollectionChoice { url, addon_names } => {
                 let c = *colors;

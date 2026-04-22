@@ -13,6 +13,98 @@ use serde::Deserialize;
 use iced;
 use crate::types::LogLevel;
 
+#[derive(Debug, Clone)]
+pub struct CollectionConflictOwnerGroup {
+    pub repo_id: i64,
+    pub repo_label: String,
+    pub addon_names: Vec<String>,
+    pub conflicting_addons: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CollectionSelectionError {
+    Conflict {
+        repo_id: i64,
+        repo_name: String,
+        repo_url: String,
+        selected_addons: Vec<String>,
+        conflicts: Vec<wuddle_engine::AddonProbeConflict>,
+        existing_repos: Vec<CollectionConflictOwnerGroup>,
+    },
+    Other(String),
+}
+
+fn addon_name_from_manifest_path(path: &str) -> Option<String> {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+}
+
+fn build_collection_conflict_owner_groups(
+    eng: &Engine,
+    conflicts: &[wuddle_engine::AddonProbeConflict],
+) -> Result<Vec<CollectionConflictOwnerGroup>, CollectionSelectionError> {
+    let mut groups = std::collections::BTreeMap::<i64, CollectionConflictOwnerGroup>::new();
+    let mut untracked_locals = Vec::<String>::new();
+
+    for conflict in conflicts {
+        if conflict.owners.is_empty() {
+            untracked_locals.push(conflict.addon_name.clone());
+            continue;
+        }
+
+        for owner in &conflict.owners {
+            let group = groups.entry(owner.repo_id).or_insert_with(|| {
+                let addon_names = eng
+                    .db()
+                    .list_installs(owner.repo_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|entry| entry.kind == "addon")
+                    .filter_map(|entry| addon_name_from_manifest_path(&entry.path))
+                    .collect::<Vec<_>>();
+
+                CollectionConflictOwnerGroup {
+                    repo_id: owner.repo_id,
+                    repo_label: format!("{}/{}", owner.owner, owner.name),
+                    addon_names,
+                    conflicting_addons: Vec::new(),
+                }
+            });
+
+            if !group
+                .conflicting_addons
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&conflict.addon_name))
+            {
+                group.conflicting_addons.push(conflict.addon_name.clone());
+            }
+        }
+    }
+
+    let mut out = groups.into_values().collect::<Vec<_>>();
+    for group in &mut out {
+        group.addon_names.sort_by_key(|name| name.to_ascii_lowercase());
+        group.addon_names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        group.conflicting_addons.sort_by_key(|name| name.to_ascii_lowercase());
+        group.conflicting_addons.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    }
+
+    if !untracked_locals.is_empty() {
+        untracked_locals.sort_by_key(|name| name.to_ascii_lowercase());
+        untracked_locals.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        out.push(CollectionConflictOwnerGroup {
+            repo_id: 0,
+            repo_label: "Untracked local folders".to_string(),
+            addon_names: untracked_locals.clone(),
+            conflicting_addons: untracked_locals,
+        });
+    }
+
+    Ok(out)
+}
+
 
 // ---------------------------------------------------------------------------
 // Row types for the UI (Clone-friendly, owned data)
@@ -718,31 +810,67 @@ pub async fn update_collection_selection(
     wow_dir: String,
     selected_addons: Vec<String>,
     opts: InstallOptions,
-) -> Result<String, String> {
+) -> Result<String, CollectionSelectionError> {
     tokio::task::spawn_blocking(move || {
-        let eng = open_engine(db_path.as_deref())?;
-        let repo = eng.db().get_repo(repo_id).map_err(|e| e.to_string())?;
+        let eng = open_engine(db_path.as_deref())
+            .map_err(CollectionSelectionError::Other)?;
+        let repo = eng
+            .db()
+            .get_repo(repo_id)
+            .map_err(|e| CollectionSelectionError::Other(e.to_string()))?;
+        let previous_selected = parse_selected_addons(repo.selected_addons_json.as_deref());
+
+        if !opts.replace_addon_conflicts {
+            let conflicts = eng
+                .addon_selection_conflicts(repo_id, Path::new(&wow_dir), &selected_addons)
+                .map_err(|e| CollectionSelectionError::Other(e.to_string()))?;
+            if !conflicts.is_empty() {
+                let existing_repos = build_collection_conflict_owner_groups(&eng, &conflicts)?;
+                return Err(CollectionSelectionError::Conflict {
+                    repo_id,
+                    repo_name: format!("{}/{}", repo.owner, repo.name),
+                    repo_url: repo.url.clone(),
+                    selected_addons,
+                    conflicts,
+                    existing_repos,
+                });
+            }
+        }
 
         eng.set_repo_selected_addons(repo_id, Some(selected_addons.clone()))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CollectionSelectionError::Other(e.to_string()))?;
 
         if selected_addons.is_empty() {
             eng.remove_repo(repo_id, Some(Path::new(&wow_dir)), true)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| CollectionSelectionError::Other(e.to_string()))?;
             return Ok(format!("Removed collection {}/{}.", repo.owner, repo.name));
         }
 
-        let plan = tokio::runtime::Builder::new_current_thread()
+        let reinstall_result = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| e.to_string())?
-            .block_on(async { eng.reinstall_repo(repo_id, Path::new(&wow_dir), None, opts).await })
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CollectionSelectionError::Other(e.to_string()))?
+            .block_on(async { eng.reinstall_repo(repo_id, Path::new(&wow_dir), None, opts).await });
+
+        let plan = match reinstall_result {
+            Ok(plan) => plan,
+            Err(e) => {
+                let _ = eng.set_repo_selected_addons(
+                    repo_id,
+                    if previous_selected.is_empty() {
+                        None
+                    } else {
+                        Some(previous_selected)
+                    },
+                );
+                return Err(CollectionSelectionError::Other(e.to_string()));
+            }
+        };
 
         Ok(format!("Updated collection selection for {}/{}.", plan.owner, plan.name))
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| CollectionSelectionError::Other(e.to_string()))?
 }
 
 pub async fn probe_conflicts(

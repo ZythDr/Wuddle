@@ -626,16 +626,17 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
 
             if matching_addons.is_empty() {
-                // Use the display name (last path component) not the full path, so the view
-                // closure can immediately resolve it via normalize(name) == folder_key, and
-                // it survives the probe's retain check (probe.addon_names uses bare names).
-                matching_addons.push(folder_display_name.clone());
+                // When the probe is unavailable, keep the full folder path so selection state
+                // can still propagate to descendant preview rows and later resolve by path prefix.
+                matching_addons.push(folder_name.clone());
             }
 
             matching_addons.sort_by_key(|name| name.to_ascii_lowercase());
             matching_addons.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
 
             let resolved_addons = matching_addons.join(", ");
+            let folder_path_lower = folder_name.trim().trim_matches('/').to_ascii_lowercase();
+            let descendant_prefix = format!("{}/", folder_path_lower);
 
             let all_selected = matching_addons
                 .iter()
@@ -647,10 +648,22 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                                 || service::normalize_collection_entry_key(selected)
                                     == service::normalize_collection_entry_key(name)
                         })
+                })
+                || app.add_repo_selected_addons.iter().any(|selected| {
+                    let selected_path = selected.trim().trim_matches('/').to_ascii_lowercase();
+                    selected_path == folder_path_lower
                 });
 
-            if all_selected {
+            let has_any_selected = all_selected
+                || app.add_repo_selected_addons.iter().any(|selected| {
+                    let selected_path = selected.trim().trim_matches('/').to_ascii_lowercase();
+                    selected_path == folder_path_lower
+                        || selected_path.starts_with(&descendant_prefix)
+                });
+
+            if has_any_selected {
                 app.add_repo_selected_addons.retain(|selected| {
+                    let selected_path = selected.trim().trim_matches('/').to_ascii_lowercase();
                     !matching_addons
                         .iter()
                         .any(|addon_name| {
@@ -658,6 +671,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                                 || service::normalize_collection_entry_key(addon_name)
                                     == service::normalize_collection_entry_key(selected)
                         })
+                        && selected_path != folder_path_lower
+                        && !selected_path.starts_with(&descendant_prefix)
                 });
             } else {
                 for addon_name in matching_addons {
@@ -688,7 +703,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.show_toast(
                 format!(
                     "{} {}",
-                    if all_selected { "Marked for removal:" } else { "Marked to keep/install:" },
+                    if has_any_selected { "Marked for removal:" } else { "Marked to keep/install:" },
                     folder_display_name
                 ),
                 ToastKind::Info,
@@ -843,13 +858,62 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Message::SaveCollectionSelectionResult,
             ))
         }
+        Message::SaveCollectionSelectionOverride { repo_id, selected_addons } => {
+            if app.wow_dir.trim().is_empty() {
+                app.log(LogLevel::Error, "Set a WoW directory in Options first.");
+                return Some(Task::none());
+            }
+
+            let db = app.db_path.clone();
+            let wow = app.wow_dir.clone();
+            let mut opts = app.install_options();
+            opts.replace_addon_conflicts = true;
+            app.dialog = None;
+            app.log(
+                LogLevel::Info,
+                &format!("Retrying collection selection for repo id={} with conflict replacement enabled...", repo_id),
+            );
+            Some(Task::perform(
+                service::update_collection_selection(db, repo_id, wow, selected_addons, opts),
+                Message::SaveCollectionSelectionResult,
+            ))
+        }
         Message::SaveCollectionSelectionResult(result) => {
             match result {
                 Ok(msg) => {
                     app.log(LogLevel::Info, &msg);
                     app.show_toast(msg, ToastKind::Info);
+                    app.reset_add_repo_state();
+                    return Some(refresh_repos_task(app));
                 }
-                Err(e) => {
+                Err(service::CollectionSelectionError::Conflict {
+                    repo_id,
+                    repo_name,
+                    repo_url,
+                    selected_addons,
+                    conflicts,
+                    existing_repos,
+                }) => {
+                    app.log(
+                        LogLevel::Info,
+                        &format!(
+                            "Collection update for '{}' requires replacing {} conflicting addon(s).",
+                            repo_name,
+                            conflicts.len()
+                        ),
+                    );
+                    app.add_repo_selected_addons = app.add_repo_existing_addons.clone();
+                    app.dialog = Some(Dialog::CollectionAddonConflict {
+                        repo_id,
+                        repo_name,
+                        repo_url,
+                        selected_addons,
+                        conflicts,
+                        existing_repos,
+                    });
+                    return Some(Task::none());
+                }
+                Err(service::CollectionSelectionError::Other(e)) => {
                     app.log(LogLevel::Error, &format!("Collection update failed: {}", e));
                     app.show_toast(format!("Collection update failed: {}", e), ToastKind::Error);
                 }

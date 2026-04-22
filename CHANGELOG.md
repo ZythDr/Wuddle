@@ -4,16 +4,20 @@ All notable changes to Wuddle are documented in this file.
 
 ## v3.2.3
 
+### Improvements
+- **Symlink Option Clarification** — Added a tooltip clarifying that `Use symlink installs when possible` applies to DLL and other non-`addon_git` installs only.
+- **Recursive Collection Selection** — Top-level collection folder selections now resolve to nested `.toc` addon folders, and manage-collection checkboxes correctly reflect inherited and partial selection state even when the background probe is unavailable or still loading.
+- **Install Toast Timing** — Add/install success toasts now fire only after the installation step actually completes, so large collection installs no longer report success before the work finishes.
+- **GAM-Compatible Addon-Git Unpack** — `addon_git` installs now follow GitAddonsManager-style unpack/move behavior across Linux and Windows for collections and multi-directory single addons, instead of exposing sub-addon folders from the `.repo` worktree as symlinks or junctions.
+
 ### Bug Fixes
 - **Windows Close Handling** — Fixed a Windows issue where closing Wuddle while it was still working could leave `Wuddle.exe` running in the background and keep files locked until the process was killed manually.
 - **Busy State Recovery** — Fixed stuck busy/spinner states caused by update flows not always clearing their in-progress state after failures or no-op results.
-- **Collection Selection on Windows** — Fixed addon-git collection installs so explicit collection selections are preserved even when the addon probe fails before submit, instead of silently falling back to the wrong install set.
+- **Collection Selection Fallback** — Fixed addon-git collection installs so explicit collection selections are preserved even when the addon probe fails before submit, instead of silently falling back to the wrong install set.
 - **Collection Removal on Windows** — Fixed tracked collection removal with `Delete local files` so junction-backed addon folders and `.repo` worktrees are removed instead of being left behind on disk.
 - **Collection Child Removal on Windows** — Fixed removing a single addon from an installed collection so Windows junction-backed addon entries are deleted as links instead of recursing into the backing worktree and failing with `Access is denied`.
 - **Windows Directory Link Cleanup** — Fixed collection uninstall paths to remove directory symlinks and junctions using Windows link-aware deletion instead of generic file or recursive directory removal.
-- **GAM-Compatible Windows Unpack** — Multi-addon `addon_git` installs on Windows now follow GitAddonsManager's unpack workflow by moving selected addon folders out of the `.repo` worktree instead of creating junction-backed entries.
-- **Install Toast Timing** — Add/install success toasts now fire only after the installation step actually completes, so large collection installs no longer report success before the work finishes.
-- **Cross-Platform Symlink Toggle** — The `Use symlink installs when possible` option now also governs `addon_git` unpacking on Unix-like systems. With the option off, multi-addon git repos follow the same move/unpack behavior as Windows; with it on, Wuddle may use link-based installs again.
+- **Collection Conflict Prompting** — Changing a collection selection now opens a repo-aware overwrite confirmation instead of failing with an `ADDON_CONFLICT` error toast. The dialog shows which tracked addon folders would be removed and which conflicting folders would be installed, and the attempted selection is rolled back until the overwrite is confirmed.
 - **Windows Launcher Icon** — Added the Wuddle icon resource to the Windows launcher executable so `Wuddle.exe` no longer shows the generic placeholder icon.
 
 ## v3.2.2

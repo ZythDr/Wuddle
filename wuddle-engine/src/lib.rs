@@ -230,6 +230,69 @@ fn selected_addons_from_json(raw: Option<&str>) -> Vec<String> {
     parsed
 }
 
+fn normalize_collection_entry_key(name: &str) -> String {
+    let mut key = name.trim().trim_matches('/').to_ascii_lowercase();
+
+    for suffix in ["-master", "_master", "-main", "_main"] {
+        if let Some(stripped) = key.strip_suffix(suffix) {
+            key = stripped.to_string();
+            break;
+        }
+    }
+
+    key
+}
+
+fn addon_git_selection_matches(
+    worktree_dir: &Path,
+    src: &Path,
+    addon_name: &str,
+    selected_paths: &HashSet<String>,
+    selected_keys: &HashSet<String>,
+) -> bool {
+    if selected_keys.contains(&normalize_collection_entry_key(addon_name)) {
+        return true;
+    }
+
+    let Ok(rel_src) = src.strip_prefix(worktree_dir) else {
+        return false;
+    };
+
+    let rel_components = rel_src
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => part.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if rel_components.is_empty() {
+        return false;
+    }
+
+    let rel_path = rel_components.join("/");
+    let rel_path_lower = rel_path.to_ascii_lowercase();
+    if selected_paths.contains(&rel_path_lower) {
+        return true;
+    }
+
+    let mut prefix = String::new();
+    for (index, component) in rel_components.iter().enumerate() {
+        if index > 0 {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+
+        if selected_paths.contains(&prefix.to_ascii_lowercase())
+            || selected_keys.contains(&normalize_collection_entry_key(component))
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[derive(Debug, Clone)]
 pub struct AddonProbeOwner {
     pub repo_id: i64,
@@ -399,6 +462,107 @@ impl Engine {
         self.db()
             .set_repo_selected_addons(repo_id, normalized.as_deref())?;
         Ok(())
+    }
+
+    pub fn addon_selection_conflicts(
+        &self,
+        repo_id: i64,
+        wow_dir: &Path,
+        addon_folder_names: &[String],
+    ) -> Result<Vec<AddonProbeConflict>> {
+        let repo = self.db().get_repo(repo_id)?;
+        let resolved_addons = if matches!(repo.mode, InstallMode::AddonGit) {
+            self.resolve_addon_git_selected_addons(&repo, wow_dir, addon_folder_names)?
+        } else {
+            addon_folder_names.to_vec()
+        };
+
+        Ok(self
+            .addon_install_conflicts(repo_id, wow_dir, &resolved_addons)?
+            .into_iter()
+            .map(|conflict| AddonProbeConflict {
+                addon_name: conflict.addon_name,
+                target_path: conflict.target_path.display().to_string(),
+                owners: conflict
+                    .owners
+                    .into_iter()
+                    .map(|owner| AddonProbeOwner {
+                        repo_id: owner.repo_id,
+                        owner: owner.owner,
+                        name: owner.name,
+                    })
+                    .collect(),
+            })
+            .collect())
+    }
+
+    fn resolve_addon_git_selected_addons(
+        &self,
+        repo: &Repo,
+        wow_dir: &Path,
+        selected_addons: &[String],
+    ) -> Result<Vec<String>> {
+        let worktree_dir = self.addon_git_worktree_dir(repo.id, wow_dir, repo);
+        if !worktree_dir.is_dir() {
+            return Ok(selected_addons.to_vec());
+        }
+
+        let mut detected = install::detect_addons_in_tree(&worktree_dir);
+
+        if detected.is_empty() {
+            if let Ok(prev_installs) = self.db().list_installs(repo.id) {
+                for prev in prev_installs {
+                    if prev.kind != "addon" {
+                        continue;
+                    }
+                    if let Some(full) = Self::resolve_install_path(&prev.path, Some(wow_dir)) {
+                        if !full.is_dir() {
+                            continue;
+                        }
+                        let rel_name = full.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        let src_in_repo = worktree_dir.join(rel_name);
+                        if src_in_repo.exists() {
+                            if let Some(folder_name) = install::detect_single_addon_folder(&src_in_repo) {
+                                detected.push((src_in_repo, folder_name));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        detected.sort_by_key(|(src, name)| (src.components().count(), name.clone()));
+
+        let mut chosen = Vec::<(PathBuf, String)>::new();
+        let mut seen_names = HashSet::<String>::new();
+        for (src, addon_name) in detected {
+            let key = addon_name.to_lowercase();
+            if seen_names.insert(key) {
+                chosen.push((src, addon_name));
+            }
+        }
+
+        if !selected_addons.is_empty() {
+            let selected_paths: HashSet<String> = selected_addons
+                .iter()
+                .map(|name| name.trim().trim_matches('/').to_ascii_lowercase())
+                .collect();
+            let selected_keys: HashSet<String> = selected_addons
+                .iter()
+                .map(|name| normalize_collection_entry_key(name))
+                .collect();
+            chosen.retain(|(src, addon_name)| {
+                addon_git_selection_matches(
+                    &worktree_dir,
+                    src,
+                    addon_name,
+                    &selected_paths,
+                    &selected_keys,
+                )
+            });
+        }
+
+        Ok(chosen.into_iter().map(|(_, name)| name).collect())
     }
 
     pub async fn probe_addon_repo_conflicts(
@@ -900,6 +1064,17 @@ impl Engine {
 
         if !meta.file_type().is_symlink() && !meta.is_dir() {
             return false;
+        }
+
+        // For addon_git subfolder installs, GAM-compatible state means the addon
+        // lives as a real folder in AddOns, not as a link back into the worktree.
+        // If the tracked entry still resolves inside the repo worktree, treat it as
+        // stale so repair/rescan will unpack it.
+        let resolved_worktree = fs::canonicalize(worktree_dir).unwrap_or_else(|_| worktree_dir.to_path_buf());
+        if let Ok(resolved_entry) = fs::canonicalize(full_link_path) {
+            if full_link_path != worktree_dir && resolved_entry.starts_with(&resolved_worktree) {
+                return false;
+            }
         }
 
         install::detect_single_addon_folder(full_link_path)
@@ -2762,22 +2937,29 @@ impl Engine {
         wow_dir: &Path,
         conflicts: &[AddonInstallConflict],
     ) -> Result<()> {
-        let mut by_repo = HashMap::<i64, HashSet<String>>::new();
+        let mut repo_ids = HashSet::<i64>::new();
         for conflict in conflicts {
             for owner in &conflict.owners {
                 if owner.repo_id == current_repo_id {
                     continue;
                 }
-                by_repo
-                    .entry(owner.repo_id)
-                    .or_default()
-                    .insert(owner.manifest_path.clone());
+                repo_ids.insert(owner.repo_id);
             }
         }
 
-        for (repo_id, manifest_paths) in by_repo {
-            for path in manifest_paths {
-                self.db().remove_install(repo_id, &path)?;
+        for repo_id in repo_ids {
+            let addon_installs = self
+                .db()
+                .list_installs(repo_id)?
+                .into_iter()
+                .filter(|entry| entry.kind == "addon")
+                .collect::<Vec<_>>();
+
+            for entry in &addon_installs {
+                if let Some(full_path) = Self::resolve_install_path(&entry.path, Some(wow_dir)) {
+                    let _ = Self::remove_any_target(&full_path)?;
+                }
+                self.db().remove_install(repo_id, &entry.path)?;
             }
 
             let remaining_installs = self.db().list_installs(repo_id)?;
@@ -3257,21 +3439,22 @@ impl Engine {
 
             let selected_addons = selected_addons_from_json(repo.selected_addons_json.as_deref());
             if !selected_addons.is_empty() {
-                let selected_set: HashSet<String> = selected_addons
+                let selected_paths: HashSet<String> = selected_addons
                     .iter()
-                    .map(|name| name.to_ascii_lowercase())
+                    .map(|name| name.trim().trim_matches('/').to_ascii_lowercase())
+                    .collect();
+                let selected_keys: HashSet<String> = selected_addons
+                    .iter()
+                    .map(|name| normalize_collection_entry_key(name))
                     .collect();
                 chosen.retain(|(src, addon_name)| {
-                    let folder_name = src
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .map(|name| name.to_ascii_lowercase());
-
-                    selected_set.contains(&addon_name.to_ascii_lowercase())
-                        || folder_name
-                            .as_ref()
-                            .map(|name| selected_set.contains(name))
-                            .unwrap_or(false)
+                    addon_git_selection_matches(
+                        &worktree_dir,
+                        src,
+                        addon_name,
+                        &selected_paths,
+                        &selected_keys,
+                    )
                 });
             }
 
@@ -3411,7 +3594,9 @@ impl Engine {
                         kind: "addon",
                     });
                 } else {
-                    // Multi-addon repo subfolder: unpack it using GAM's link-or-move strategy.
+                    // Any addon-git subfolder, including bundled modules from an otherwise
+                    // single-addon repo, should follow GAM's unpack/move workflow rather than
+                    // exposing link-backed entries from the worktree.
                     let rel_src = src_dir
                         .strip_prefix(&worktree_dir)
                         .ok()
@@ -3421,7 +3606,7 @@ impl Engine {
                         &worktree_dir,
                         rel_src,
                         &dst_dir,
-                        opts.use_symlinks,
+                        false,
                     )?;
                     records.push(rec);
                 }

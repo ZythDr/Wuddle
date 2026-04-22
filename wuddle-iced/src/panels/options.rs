@@ -130,9 +130,14 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             checkbox(app.opt_desktop_notify)
                 .label("Desktop notifications for updates")
                 .on_toggle(Message::ToggleDesktopNotify),
-            checkbox(app.opt_symlinks)
-                .label("Use symlink installs when possible")
-                .on_toggle(Message::ToggleSymlinks),
+            tip(
+                checkbox(app.opt_symlinks)
+                    .label("Use symlink installs when possible")
+                    .on_toggle(Message::ToggleSymlinks),
+                "Applies to DLL and other non-addon_git installs only. Addons installed from the Addons tab use addon_git and follow GAM-compatible unpack behavior instead.",
+                tooltip::Position::Top,
+                colors,
+            ),
             checkbox(app.opt_xattr)
                 .label("Set xattr file comments")
                 .on_toggle(Message::ToggleXattr),
