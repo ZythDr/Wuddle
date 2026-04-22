@@ -284,11 +284,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
 
                 let url = url.clone();
                 let mode = mode.clone();
+                let mut explicit_collection_mode = false;
                 let selected_addons = if mode == "addon_git" {
                     let hinted = service::selected_addon_hint_from_url(&url);
                     let treat_as_collection = app.add_repo_manage_repo_id.is_some()
                         || hinted.is_some()
                         || app.add_repo_collection_choice == Some(true);
+                    explicit_collection_mode = app.add_repo_collection_choice == Some(true);
 
                     // If the probe is still scanning, block submit so the user sees the choice prompt.
                     if app.add_repo_probe_loading {
@@ -302,22 +304,44 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     // Default to Single modular addon when the user hasn't explicitly chosen.
                     // (No blocking prompt — Collection must be opted into manually.)
 
+                    let mut selected = if treat_as_collection {
+                        let mut selected = app
+                            .add_repo_selected_addons
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        selected.sort_by_key(|name| name.to_ascii_lowercase());
+                        selected
+                    } else {
+                        Vec::new()
+                    };
+
                     app.add_repo_probe
                         .as_ref()
                         .filter(|probe| probe.addon_names.len() > 1 && treat_as_collection)
-                        .map(|_| {
-                            let mut selected = app
-                                .add_repo_selected_addons
-                                .iter()
-                                .cloned()
-                                .collect::<Vec<_>>();
-                            selected.sort_by_key(|name| name.to_ascii_lowercase());
-                            selected
+                        .map(|_| selected.clone())
+                        .or_else(|| {
+                            if !selected.is_empty() {
+                                Some(std::mem::take(&mut selected))
+                            } else {
+                                hinted.map(|name| vec![name])
+                            }
                         })
-                        .or_else(|| hinted.map(|name| vec![name]))
                 } else {
                     None
                 };
+
+                if explicit_collection_mode && selected_addons.is_none() {
+                    app.log(
+                        LogLevel::Error,
+                        "Collection scan failed before submit. Re-scan the repo or switch Collection mode off.",
+                    );
+                    app.show_toast(
+                        "Collection scan failed before submit. Re-scan the repo or switch Collection mode off.",
+                        ToastKind::Warn,
+                    );
+                    return Some(Task::none());
+                }
 
                 if matches!(selected_addons.as_ref(), Some(selected) if selected.is_empty()) {
                     app.log(LogLevel::Error, "Select at least one addon from the collection.");
@@ -345,7 +369,6 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             match result {
                 Ok(id) => {
                     app.log(LogLevel::Info, &format!("Repo added (id={}).", id));
-                    app.show_toast("Repo added successfully.", ToastKind::Info);
                     if !app.wow_dir.is_empty() {
                         let db = app.db_path.clone();
                         let wow = app.wow_dir.clone();
@@ -357,6 +380,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             Message::InstallAfterAddResult,
                         ));
                     }
+                    app.show_toast("Repo added successfully.", ToastKind::Info);
                     return Some(refresh_repos_task(app));
                 }
                 Err(e) => {
@@ -369,8 +393,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::InstallAfterAddResult(result) => {
             match result {
-                Ok(msg) => app.log(LogLevel::Info, &msg),
-                Err(e) => app.log(LogLevel::Error, &format!("Install failed: {}", e)),
+                Ok(msg) => {
+                    app.log(LogLevel::Info, &msg);
+                    app.show_toast(msg, ToastKind::Info);
+                }
+                Err(e) => {
+                    app.log(LogLevel::Error, &format!("Install failed: {}", e));
+                    app.show_toast(format!("Install failed: {}", e), ToastKind::Error);
+                }
             }
             app.updating_repo_ids.clear();
             Some(refresh_repos_task(app))
@@ -596,16 +626,17 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
 
             if matching_addons.is_empty() {
-                // Use the display name (last path component) not the full path, so the view
-                // closure can immediately resolve it via normalize(name) == folder_key, and
-                // it survives the probe's retain check (probe.addon_names uses bare names).
-                matching_addons.push(folder_display_name.clone());
+                // When the probe is unavailable, keep the full folder path so selection state
+                // can still propagate to descendant preview rows and later resolve by path prefix.
+                matching_addons.push(folder_name.clone());
             }
 
             matching_addons.sort_by_key(|name| name.to_ascii_lowercase());
             matching_addons.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
 
             let resolved_addons = matching_addons.join(", ");
+            let folder_path_lower = folder_name.trim().trim_matches('/').to_ascii_lowercase();
+            let descendant_prefix = format!("{}/", folder_path_lower);
 
             let all_selected = matching_addons
                 .iter()
@@ -617,10 +648,22 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                                 || service::normalize_collection_entry_key(selected)
                                     == service::normalize_collection_entry_key(name)
                         })
+                })
+                || app.add_repo_selected_addons.iter().any(|selected| {
+                    let selected_path = selected.trim().trim_matches('/').to_ascii_lowercase();
+                    selected_path == folder_path_lower
                 });
 
-            if all_selected {
+            let has_any_selected = all_selected
+                || app.add_repo_selected_addons.iter().any(|selected| {
+                    let selected_path = selected.trim().trim_matches('/').to_ascii_lowercase();
+                    selected_path == folder_path_lower
+                        || selected_path.starts_with(&descendant_prefix)
+                });
+
+            if has_any_selected {
                 app.add_repo_selected_addons.retain(|selected| {
+                    let selected_path = selected.trim().trim_matches('/').to_ascii_lowercase();
                     !matching_addons
                         .iter()
                         .any(|addon_name| {
@@ -628,6 +671,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                                 || service::normalize_collection_entry_key(addon_name)
                                     == service::normalize_collection_entry_key(selected)
                         })
+                        && selected_path != folder_path_lower
+                        && !selected_path.starts_with(&descendant_prefix)
                 });
             } else {
                 for addon_name in matching_addons {
@@ -658,7 +703,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.show_toast(
                 format!(
                     "{} {}",
-                    if all_selected { "Marked for removal:" } else { "Marked to keep/install:" },
+                    if has_any_selected { "Marked for removal:" } else { "Marked to keep/install:" },
                     folder_display_name
                 ),
                 ToastKind::Info,
@@ -813,13 +858,62 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Message::SaveCollectionSelectionResult,
             ))
         }
+        Message::SaveCollectionSelectionOverride { repo_id, selected_addons } => {
+            if app.wow_dir.trim().is_empty() {
+                app.log(LogLevel::Error, "Set a WoW directory in Options first.");
+                return Some(Task::none());
+            }
+
+            let db = app.db_path.clone();
+            let wow = app.wow_dir.clone();
+            let mut opts = app.install_options();
+            opts.replace_addon_conflicts = true;
+            app.dialog = None;
+            app.log(
+                LogLevel::Info,
+                &format!("Retrying collection selection for repo id={} with conflict replacement enabled...", repo_id),
+            );
+            Some(Task::perform(
+                service::update_collection_selection(db, repo_id, wow, selected_addons, opts),
+                Message::SaveCollectionSelectionResult,
+            ))
+        }
         Message::SaveCollectionSelectionResult(result) => {
             match result {
                 Ok(msg) => {
                     app.log(LogLevel::Info, &msg);
                     app.show_toast(msg, ToastKind::Info);
+                    app.reset_add_repo_state();
+                    return Some(refresh_repos_task(app));
                 }
-                Err(e) => {
+                Err(service::CollectionSelectionError::Conflict {
+                    repo_id,
+                    repo_name,
+                    repo_url,
+                    selected_addons,
+                    conflicts,
+                    existing_repos,
+                }) => {
+                    app.log(
+                        LogLevel::Info,
+                        &format!(
+                            "Collection update for '{}' requires replacing {} conflicting addon(s).",
+                            repo_name,
+                            conflicts.len()
+                        ),
+                    );
+                    app.add_repo_selected_addons = app.add_repo_existing_addons.clone();
+                    app.dialog = Some(Dialog::CollectionAddonConflict {
+                        repo_id,
+                        repo_name,
+                        repo_url,
+                        selected_addons,
+                        conflicts,
+                        existing_repos,
+                    });
+                    return Some(Task::none());
+                }
+                Err(service::CollectionSelectionError::Other(e)) => {
                     app.log(LogLevel::Error, &format!("Collection update failed: {}", e));
                     app.show_toast(format!("Collection update failed: {}", e), ToastKind::Error);
                 }
@@ -1051,9 +1145,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::UpdateRepoResult(result) => {
+            app.updating_repo_ids.clear();
             match result {
                 Ok(Some(plan)) => {
-                    app.updating_repo_ids.remove(&plan.repo_id);
                     let name = format!("{}/{}", plan.owner, plan.name);
                     app.log(LogLevel::Info, &format!("Updated {}.", name));
                     app.show_toast(format!("Updated {}.", name), ToastKind::Info);
@@ -1140,12 +1234,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::UpdateAllResult(result) => {
+            app.updating_repo_ids.clear();
             match result {
                 Ok(results) => {
                     let mut applied = 0;
                     let mut errors = 0;
                     for r in results {
-                        app.updating_repo_ids.remove(&r.repo_id);
                         let name = format!("{}/{}", r.owner, r.name);
                         if let Some(e) = r.error {
                             errors += 1;

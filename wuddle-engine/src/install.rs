@@ -7,6 +7,37 @@ use std::{
     process::Command,
 };
 
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+#[cfg(windows)]
+fn is_reparse_dir(meta: &fs::Metadata) -> bool {
+    meta.is_dir() && (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+}
+
+#[cfg(windows)]
+fn remove_windows_dir_link(path: &Path) -> Result<()> {
+    if junction::delete(path).is_ok() {
+        return Ok(());
+    }
+    if fs::remove_dir(path).is_ok() {
+        return Ok(());
+    }
+    let status = Command::new("cmd")
+        .args(["/C", "rmdir"])
+        .arg(path)
+        .status()
+        .with_context(|| format!("spawn rmdir {:?}", path))?;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("remove dir link {:?}: rmdir exited with {}", path, status)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct InstallOptions {
     pub use_symlinks: bool,
@@ -197,10 +228,33 @@ fn remove_any_target(path: &Path) -> Result<()> {
     if let Ok(meta) = fs::symlink_metadata(path) {
         let ft = meta.file_type();
         if ft.is_symlink() {
-            fs::remove_file(path).with_context(|| format!("remove symlink {:?}", path))?;
+            #[cfg(windows)]
+            {
+                if path.is_dir() {
+                    remove_windows_dir_link(path)
+                        .with_context(|| format!("remove dir symlink {:?}", path))?;
+                } else {
+                    fs::remove_file(path).with_context(|| format!("remove symlink {:?}", path))?;
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                fs::remove_file(path).with_context(|| format!("remove symlink {:?}", path))?;
+            }
             return Ok(());
         }
         if ft.is_dir() {
+            #[cfg(windows)]
+            {
+                if is_reparse_dir(&meta) {
+                    remove_windows_dir_link(path)
+                        .with_context(|| format!("remove junction {:?}", path))?;
+                    return Ok(());
+                }
+                if fs::remove_dir(path).is_ok() {
+                    return Ok(());
+                }
+            }
             fs::remove_dir_all(path).with_context(|| format!("remove dir {:?}", path))?;
             return Ok(());
         }
@@ -777,16 +831,20 @@ fn walk_dir(root: &Path, cb: &mut dyn FnMut(&Path)) {
     }
 }
 
-/// Create a symlink (or directory junction on Windows) from `dst` pointing at
-/// `src` for a sub-addon folder inside a multi-addon git repository.
+/// Expose a sub-addon folder from a multi-addon git repository at `dst`.
 ///
-/// This matches GAM's `unpackSubfolders()` behaviour: a multi-addon repo lives
-/// at `Interface/AddOns/{repo_name}.repo/` and each sub-addon appears as a sibling
-/// symlink `Interface/AddOns/{SubAddon}` → `{repo_name}.repo/{SubAddon}/`.
-///
-/// It uses a "link then move" approach: it tries to create a relative symlink,
-/// and if that fails, it renames (moves) the folder out of the repository.
-pub fn link_addon_subfolder(repo_dir: &Path, sub_path: &str, dst: &Path) -> Result<InstallRecord> {
+/// This follows GAM's `unpackSubfolders()` behaviour by default, while still
+/// allowing Wuddle's explicit symlink option to override the install primitive.
+/// - When `use_symlink` is false, move the folder out of the repo worktree.
+/// - When `use_symlink` is true, try a relative symlink on Unix or a junction
+///   on Windows before falling back to moving the folder.
+/// - If the link path is unavailable, rename (move) the folder out of the repo.
+pub fn link_addon_subfolder(
+    repo_dir: &Path,
+    sub_path: &str,
+    dst: &Path,
+    use_symlink: bool,
+) -> Result<InstallRecord> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).with_context(|| format!("mkdir {:?}", parent))?;
     }
@@ -799,19 +857,19 @@ pub fn link_addon_subfolder(repo_dir: &Path, sub_path: &str, dst: &Path) -> Resu
 
     let mut linked = false;
 
-    // Try relative symlink first (GAM-style).
-    #[cfg(unix)]
-    {
-        if std::os::unix::fs::symlink(&rel_src, dst).is_ok() {
-            linked = true;
+    if use_symlink {
+        #[cfg(unix)]
+        {
+            if std::os::unix::fs::symlink(&rel_src, dst).is_ok() {
+                linked = true;
+            }
         }
-    }
 
-    #[cfg(windows)]
-    {
-        // Try junction first on Windows as it's the safest non-privileged link type.
-        if junction::create(&src, dst).is_ok() {
-            linked = true;
+        #[cfg(windows)]
+        {
+            if junction::create(&src, dst).is_ok() {
+                linked = true;
+            }
         }
     }
 
