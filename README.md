@@ -40,6 +40,7 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **Collection Child Removal on Windows** — Fixed removing a single addon from an installed collection so Windows junction-backed addon entries are deleted as links instead of recursing into the backing worktree and failing with `Access is denied`.
 - **Windows Directory Link Cleanup** — Fixed collection uninstall paths to remove directory symlinks and junctions using Windows link-aware deletion instead of generic file or recursive directory removal.
 - **GAM-Compatible Windows Unpack** — Multi-addon `addon_git` installs on Windows now follow GitAddonsManager's unpack workflow by moving selected addon folders out of the `.repo` worktree instead of creating junction-backed entries.
+- **Install Toast Timing** — Add/install success toasts now fire only after the installation step actually completes, so large collection installs no longer report success before the work finishes.
 - **Windows Launcher Icon** — Added the Wuddle icon resource to the Windows launcher executable so `Wuddle.exe` no longer shows the generic placeholder icon.
 
 <details>

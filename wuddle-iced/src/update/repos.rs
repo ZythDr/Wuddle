@@ -369,7 +369,6 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             match result {
                 Ok(id) => {
                     app.log(LogLevel::Info, &format!("Repo added (id={}).", id));
-                    app.show_toast("Repo added successfully.", ToastKind::Info);
                     if !app.wow_dir.is_empty() {
                         let db = app.db_path.clone();
                         let wow = app.wow_dir.clone();
@@ -381,6 +380,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             Message::InstallAfterAddResult,
                         ));
                     }
+                    app.show_toast("Repo added successfully.", ToastKind::Info);
                     return Some(refresh_repos_task(app));
                 }
                 Err(e) => {
@@ -393,8 +393,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::InstallAfterAddResult(result) => {
             match result {
-                Ok(msg) => app.log(LogLevel::Info, &msg),
-                Err(e) => app.log(LogLevel::Error, &format!("Install failed: {}", e)),
+                Ok(msg) => {
+                    app.log(LogLevel::Info, &msg);
+                    app.show_toast(msg, ToastKind::Info);
+                }
+                Err(e) => {
+                    app.log(LogLevel::Error, &format!("Install failed: {}", e));
+                    app.show_toast(format!("Install failed: {}", e), ToastKind::Error);
+                }
             }
             app.updating_repo_ids.clear();
             Some(refresh_repos_task(app))
