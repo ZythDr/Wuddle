@@ -14,6 +14,8 @@ use std::{
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
+#[cfg(windows)]
+use std::process::Command;
 use url::Url;
 
 mod db;
@@ -37,6 +39,26 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 #[cfg(windows)]
 fn is_reparse_dir(meta: &fs::Metadata) -> bool {
     meta.is_dir() && (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+}
+
+#[cfg(windows)]
+fn remove_windows_dir_link(path: &Path) -> Result<()> {
+    if junction::delete(path).is_ok() {
+        return Ok(());
+    }
+    if fs::remove_dir(path).is_ok() {
+        return Ok(());
+    }
+    let status = Command::new("cmd")
+        .args(["/C", "rmdir"])
+        .arg(path)
+        .status()
+        .with_context(|| format!("spawn rmdir {:?}", path))?;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("remove dir link {:?}: rmdir exited with {}", path, status)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2616,18 +2638,31 @@ impl Engine {
         };
         let ft = meta.file_type();
 
-        if ft.is_file() || ft.is_symlink() {
+        if ft.is_symlink() {
+            #[cfg(windows)]
+            {
+                if p.is_dir() {
+                    remove_windows_dir_link(p)?;
+                } else {
+                    fs::remove_file(p)?;
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                fs::remove_file(p)?;
+            }
+            Ok(true)
+        } else if ft.is_file() {
             fs::remove_file(p)?;
             Ok(true)
         } else if ft.is_dir() {
             #[cfg(windows)]
             {
-                let remove_dir_result = fs::remove_dir(p);
-                if remove_dir_result.is_ok() {
+                if is_reparse_dir(&meta) {
+                    remove_windows_dir_link(p)?;
                     return Ok(true);
                 }
-                if is_reparse_dir(&meta) {
-                    remove_dir_result?;
+                if fs::remove_dir(p).is_ok() {
                     return Ok(true);
                 }
             }

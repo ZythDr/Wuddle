@@ -18,6 +18,26 @@ fn is_reparse_dir(meta: &fs::Metadata) -> bool {
     meta.is_dir() && (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
 }
 
+#[cfg(windows)]
+fn remove_windows_dir_link(path: &Path) -> Result<()> {
+    if junction::delete(path).is_ok() {
+        return Ok(());
+    }
+    if fs::remove_dir(path).is_ok() {
+        return Ok(());
+    }
+    let status = Command::new("cmd")
+        .args(["/C", "rmdir"])
+        .arg(path)
+        .status()
+        .with_context(|| format!("spawn rmdir {:?}", path))?;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("remove dir link {:?}: rmdir exited with {}", path, status)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct InstallOptions {
     pub use_symlinks: bool,
@@ -208,19 +228,30 @@ fn remove_any_target(path: &Path) -> Result<()> {
     if let Ok(meta) = fs::symlink_metadata(path) {
         let ft = meta.file_type();
         if ft.is_symlink() {
-            fs::remove_file(path).with_context(|| format!("remove symlink {:?}", path))?;
+            #[cfg(windows)]
+            {
+                if path.is_dir() {
+                    remove_windows_dir_link(path)
+                        .with_context(|| format!("remove dir symlink {:?}", path))?;
+                } else {
+                    fs::remove_file(path).with_context(|| format!("remove symlink {:?}", path))?;
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                fs::remove_file(path).with_context(|| format!("remove symlink {:?}", path))?;
+            }
             return Ok(());
         }
         if ft.is_dir() {
             #[cfg(windows)]
             {
-                let remove_dir_result = fs::remove_dir(path);
-                if remove_dir_result.is_ok() {
+                if is_reparse_dir(&meta) {
+                    remove_windows_dir_link(path)
+                        .with_context(|| format!("remove junction {:?}", path))?;
                     return Ok(());
                 }
-                if is_reparse_dir(&meta) {
-                    remove_dir_result
-                        .with_context(|| format!("remove junction {:?}", path))?;
+                if fs::remove_dir(path).is_ok() {
                     return Ok(());
                 }
             }
