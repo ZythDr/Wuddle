@@ -268,14 +268,15 @@ jobs:
           python3 - "${VERSION}" << 'PYEOF' > dist/RELEASE_BODY.md
           import sys, re
           version = sys.argv[1]
+          base_version = version.split('-', 1)[0]
           with open('CHANGELOG.md') as f:
               text = f.read()
-          pattern = r'## v' + re.escape(version) + r'[^\n]*\n(.*?)(?=\n## v|\Z)'
+          pattern = r'## v' + re.escape(base_version) + r'[^\n]*\n(.*?)(?=\n## v|\Z)'
           m = re.search(pattern, text, re.DOTALL)
           if m:
               sys.stdout.write(m.group(1).strip() + '\n')
           else:
-              sys.stdout.write(f'See CHANGELOG.md for v{version} release notes.\n')
+            sys.stdout.write(f'See CHANGELOG.md for v{base_version} release notes.\n')
           PYEOF
 
       - name: Derive release metadata

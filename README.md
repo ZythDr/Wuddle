@@ -37,6 +37,7 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **Busy State Recovery** — Fixed stuck busy/spinner states caused by update flows not always clearing their in-progress state after failures or no-op results.
 - **Collection Selection on Windows** — Fixed addon-git collection installs so explicit collection selections are preserved even when the addon probe fails before submit, instead of silently falling back to the wrong install set.
 - **Collection Removal on Windows** — Fixed tracked collection removal with `Delete local files` so junction-backed addon folders and `.repo` worktrees are removed instead of being left behind on disk.
+- **Collection Child Removal on Windows** — Fixed removing a single addon from an installed collection so Windows junction-backed addon entries are deleted as links instead of recursing into the backing worktree and failing with `Access is denied`.
 - **Windows Launcher Icon** — Added the Wuddle icon resource to the Windows launcher executable so `Wuddle.exe` no longer shows the generic placeholder icon.
 
 <details>
