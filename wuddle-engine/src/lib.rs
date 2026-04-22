@@ -949,7 +949,12 @@ impl Engine {
         } else {
             if let Ok(rel_src) = src.strip_prefix(worktree_dir) {
                 if let Some(rel_src) = rel_src.to_str() {
-                    let _ = install::link_addon_subfolder(worktree_dir, rel_src, full_link_path);
+                    let _ = install::link_addon_subfolder(
+                        worktree_dir,
+                        rel_src,
+                        full_link_path,
+                        false,
+                    );
                 }
             }
         }
@@ -1442,8 +1447,7 @@ impl Engine {
                         "[Wuddle] Auto-repairing repo (authoritative): {}",
                         plan.name
                     );
-                    let mut opts = InstallOptions::default();
-                    opts.use_symlinks = true;
+                    let opts = InstallOptions::default();
                     let _ = self.apply_one(&plan, wow_dir, None, opts).await;
                     fixed += 1;
                 }
@@ -3413,7 +3417,12 @@ impl Engine {
                         .ok()
                         .and_then(|path| path.to_str())
                         .unwrap_or(&addon_folder_name);
-                    let rec = install::link_addon_subfolder(&worktree_dir, rel_src, &dst_dir)?;
+                    let rec = install::link_addon_subfolder(
+                        &worktree_dir,
+                        rel_src,
+                        &dst_dir,
+                        opts.use_symlinks,
+                    )?;
                     records.push(rec);
                 }
             }

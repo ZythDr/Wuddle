@@ -13,6 +13,7 @@ All notable changes to Wuddle are documented in this file.
 - **Windows Directory Link Cleanup** — Fixed collection uninstall paths to remove directory symlinks and junctions using Windows link-aware deletion instead of generic file or recursive directory removal.
 - **GAM-Compatible Windows Unpack** — Multi-addon `addon_git` installs on Windows now follow GitAddonsManager's unpack workflow by moving selected addon folders out of the `.repo` worktree instead of creating junction-backed entries.
 - **Install Toast Timing** — Add/install success toasts now fire only after the installation step actually completes, so large collection installs no longer report success before the work finishes.
+- **Cross-Platform Symlink Toggle** — The `Use symlink installs when possible` option now also governs `addon_git` unpacking on Unix-like systems. With the option off, multi-addon git repos follow the same move/unpack behavior as Windows; with it on, Wuddle may use link-based installs again.
 - **Windows Launcher Icon** — Added the Wuddle icon resource to the Windows launcher executable so `Wuddle.exe` no longer shows the generic placeholder icon.
 
 ## v3.2.2

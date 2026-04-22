@@ -833,11 +833,18 @@ fn walk_dir(root: &Path, cb: &mut dyn FnMut(&Path)) {
 
 /// Expose a sub-addon folder from a multi-addon git repository at `dst`.
 ///
-/// This follows GAM's `unpackSubfolders()` behaviour:
-/// - On Unix, try a relative symlink first.
-/// - On Windows, do not create a junction; fall through to moving the folder.
+/// This follows GAM's `unpackSubfolders()` behaviour by default, while still
+/// allowing Wuddle's explicit symlink option to override the install primitive.
+/// - When `use_symlink` is false, move the folder out of the repo worktree.
+/// - When `use_symlink` is true, try a relative symlink on Unix or a junction
+///   on Windows before falling back to moving the folder.
 /// - If the link path is unavailable, rename (move) the folder out of the repo.
-pub fn link_addon_subfolder(repo_dir: &Path, sub_path: &str, dst: &Path) -> Result<InstallRecord> {
+pub fn link_addon_subfolder(
+    repo_dir: &Path,
+    sub_path: &str,
+    dst: &Path,
+    use_symlink: bool,
+) -> Result<InstallRecord> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).with_context(|| format!("mkdir {:?}", parent))?;
     }
@@ -850,11 +857,19 @@ pub fn link_addon_subfolder(repo_dir: &Path, sub_path: &str, dst: &Path) -> Resu
 
     let mut linked = false;
 
-    // Try relative symlink first (GAM-style).
-    #[cfg(unix)]
-    {
-        if std::os::unix::fs::symlink(&rel_src, dst).is_ok() {
-            linked = true;
+    if use_symlink {
+        #[cfg(unix)]
+        {
+            if std::os::unix::fs::symlink(&rel_src, dst).is_ok() {
+                linked = true;
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            if junction::create(&src, dst).is_ok() {
+                linked = true;
+            }
         }
     }
 
