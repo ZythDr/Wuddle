@@ -284,11 +284,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
 
                 let url = url.clone();
                 let mode = mode.clone();
+                let mut explicit_collection_mode = false;
                 let selected_addons = if mode == "addon_git" {
                     let hinted = service::selected_addon_hint_from_url(&url);
                     let treat_as_collection = app.add_repo_manage_repo_id.is_some()
                         || hinted.is_some()
                         || app.add_repo_collection_choice == Some(true);
+                    explicit_collection_mode = app.add_repo_collection_choice == Some(true);
 
                     // If the probe is still scanning, block submit so the user sees the choice prompt.
                     if app.add_repo_probe_loading {
@@ -302,22 +304,44 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     // Default to Single modular addon when the user hasn't explicitly chosen.
                     // (No blocking prompt — Collection must be opted into manually.)
 
+                    let mut selected = if treat_as_collection {
+                        let mut selected = app
+                            .add_repo_selected_addons
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        selected.sort_by_key(|name| name.to_ascii_lowercase());
+                        selected
+                    } else {
+                        Vec::new()
+                    };
+
                     app.add_repo_probe
                         .as_ref()
                         .filter(|probe| probe.addon_names.len() > 1 && treat_as_collection)
-                        .map(|_| {
-                            let mut selected = app
-                                .add_repo_selected_addons
-                                .iter()
-                                .cloned()
-                                .collect::<Vec<_>>();
-                            selected.sort_by_key(|name| name.to_ascii_lowercase());
-                            selected
+                        .map(|_| selected.clone())
+                        .or_else(|| {
+                            if !selected.is_empty() {
+                                Some(std::mem::take(&mut selected))
+                            } else {
+                                hinted.map(|name| vec![name])
+                            }
                         })
-                        .or_else(|| hinted.map(|name| vec![name]))
                 } else {
                     None
                 };
+
+                if explicit_collection_mode && selected_addons.is_none() {
+                    app.log(
+                        LogLevel::Error,
+                        "Collection scan failed before submit. Re-scan the repo or switch Collection mode off.",
+                    );
+                    app.show_toast(
+                        "Collection scan failed before submit. Re-scan the repo or switch Collection mode off.",
+                        ToastKind::Warn,
+                    );
+                    return Some(Task::none());
+                }
 
                 if matches!(selected_addons.as_ref(), Some(selected) if selected.is_empty()) {
                     app.log(LogLevel::Error, "Select at least one addon from the collection.");

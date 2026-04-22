@@ -2,3 +2,6 @@
 name = "wuddle-launcher"
 version = "0.1.0"
 edition = "2021"
+
+[build-dependencies]
+embed-resource = "3"

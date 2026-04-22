@@ -2590,7 +2590,7 @@ impl Engine {
             if keep.contains(&full) {
                 continue;
             }
-            let _ = Self::remove_any_target(&full);
+            Self::remove_any_target(&full)?;
         }
         Ok(())
     }
@@ -2602,6 +2602,12 @@ impl Engine {
             fs::remove_file(p)?;
             Ok(true)
         } else if p.is_dir() {
+            #[cfg(windows)]
+            {
+                if fs::remove_dir(p).is_ok() {
+                    return Ok(true);
+                }
+            }
             fs::remove_dir_all(p)?;
             Ok(true)
         } else {
@@ -2953,8 +2959,9 @@ impl Engine {
             // 1. Remove tracked install folders/files
             for entry in self.db().list_installs(repo_id)? {
                 if let Some(full) = Self::resolve_install_path(&entry.path, wow_dir) {
-                    let _ = Self::remove_any_target(&full);
-                    removed_paths += 1;
+                    if Self::remove_any_target(&full)? {
+                        removed_paths += 1;
+                    }
                 }
                 if entry.kind == "dll" {
                     if let Some(name) = Path::new(&entry.path).file_name().and_then(|s| s.to_str())
@@ -2974,17 +2981,13 @@ impl Engine {
                     let addons_base = base.join("Interface").join("AddOns");
                     // Standard location: Interface/AddOns/{name}
                     let std_dir = addons_base.join(&repo.name);
-                    if let Some(actual) = Self::find_actual_case(&std_dir) {
-                        if actual.is_dir() {
-                            let _ = fs::remove_dir_all(&actual);
-                        }
+                    if Self::remove_any_target(&std_dir)? {
+                        removed_paths += 1;
                     }
                     // Collision-renamed location: Interface/AddOns/{name}.repo
                     let repo_dir = addons_base.join(format!("{}.repo", repo.name));
-                    if let Some(actual) = Self::find_actual_case(&repo_dir) {
-                        if actual.is_dir() {
-                            let _ = fs::remove_dir_all(&actual);
-                        }
+                    if Self::remove_any_target(&repo_dir)? {
+                        removed_paths += 1;
                     }
                 }
             }
@@ -3282,7 +3285,7 @@ impl Engine {
                     if full == worktree_dir || full.starts_with(&worktree_dir) {
                         continue;
                     }
-                    let _ = Self::remove_any_target(&full);
+                    Self::remove_any_target(&full)?;
                 }
             }
 

@@ -201,6 +201,12 @@ fn remove_any_target(path: &Path) -> Result<()> {
             return Ok(());
         }
         if ft.is_dir() {
+            #[cfg(windows)]
+            {
+                if fs::remove_dir(path).is_ok() {
+                    return Ok(());
+                }
+            }
             fs::remove_dir_all(path).with_context(|| format!("remove dir {:?}", path))?;
             return Ok(());
         }

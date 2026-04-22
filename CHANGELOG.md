@@ -7,7 +7,9 @@ All notable changes to Wuddle are documented in this file.
 ### Bug Fixes
 - **Windows Close Handling** — Fixed a Windows issue where closing Wuddle while it was still working could leave `Wuddle.exe` running in the background and keep files locked until the process was killed manually.
 - **Busy State Recovery** — Fixed stuck busy/spinner states caused by update flows not always clearing their in-progress state after failures or no-op results.
-- **Collection Selection on Windows** — Fixed addon-git collection installs incorrectly leaving every addon linked or copied on disk instead of honoring the selected addon folders.
+- **Collection Selection on Windows** — Fixed addon-git collection installs so explicit collection selections are preserved even when the addon probe fails before submit, instead of silently falling back to the wrong install set.
+- **Collection Removal on Windows** — Fixed tracked collection removal with `Delete local files` so junction-backed addon folders and `.repo` worktrees are removed instead of being left behind on disk.
+- **Windows Launcher Icon** — Added the Wuddle icon resource to the Windows launcher executable so `Wuddle.exe` no longer shows the generic placeholder icon.
 
 ## v3.2.2
 
