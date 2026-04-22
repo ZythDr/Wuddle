@@ -11,6 +11,7 @@ All notable changes to Wuddle are documented in this file.
 - **Collection Removal on Windows** — Fixed tracked collection removal with `Delete local files` so junction-backed addon folders and `.repo` worktrees are removed instead of being left behind on disk.
 - **Collection Child Removal on Windows** — Fixed removing a single addon from an installed collection so Windows junction-backed addon entries are deleted as links instead of recursing into the backing worktree and failing with `Access is denied`.
 - **Windows Directory Link Cleanup** — Fixed collection uninstall paths to remove directory symlinks and junctions using Windows link-aware deletion instead of generic file or recursive directory removal.
+- **GAM-Compatible Windows Unpack** — Multi-addon `addon_git` installs on Windows now follow GitAddonsManager's unpack workflow by moving selected addon folders out of the `.repo` worktree instead of creating junction-backed entries.
 - **Windows Launcher Icon** — Added the Wuddle icon resource to the Windows launcher executable so `Wuddle.exe` no longer shows the generic placeholder icon.
 
 ## v3.2.2

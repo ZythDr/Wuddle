@@ -831,15 +831,12 @@ fn walk_dir(root: &Path, cb: &mut dyn FnMut(&Path)) {
     }
 }
 
-/// Create a symlink (or directory junction on Windows) from `dst` pointing at
-/// `src` for a sub-addon folder inside a multi-addon git repository.
+/// Expose a sub-addon folder from a multi-addon git repository at `dst`.
 ///
-/// This matches GAM's `unpackSubfolders()` behaviour: a multi-addon repo lives
-/// at `Interface/AddOns/{repo_name}.repo/` and each sub-addon appears as a sibling
-/// symlink `Interface/AddOns/{SubAddon}` → `{repo_name}.repo/{SubAddon}/`.
-///
-/// It uses a "link then move" approach: it tries to create a relative symlink,
-/// and if that fails, it renames (moves) the folder out of the repository.
+/// This follows GAM's `unpackSubfolders()` behaviour:
+/// - On Unix, try a relative symlink first.
+/// - On Windows, do not create a junction; fall through to moving the folder.
+/// - If the link path is unavailable, rename (move) the folder out of the repo.
 pub fn link_addon_subfolder(repo_dir: &Path, sub_path: &str, dst: &Path) -> Result<InstallRecord> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).with_context(|| format!("mkdir {:?}", parent))?;
@@ -857,14 +854,6 @@ pub fn link_addon_subfolder(repo_dir: &Path, sub_path: &str, dst: &Path) -> Resu
     #[cfg(unix)]
     {
         if std::os::unix::fs::symlink(&rel_src, dst).is_ok() {
-            linked = true;
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        // Try junction first on Windows as it's the safest non-privileged link type.
-        if junction::create(&src, dst).is_ok() {
             linked = true;
         }
     }

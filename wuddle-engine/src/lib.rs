@@ -910,7 +910,7 @@ impl Engine {
     fn repair_tracked_addon_entry(
         &self,
         repo: &Repo,
-        wow_dir: &Path,
+        _wow_dir: &Path,
         worktree_dir: &Path,
         addon_name: &str,
         full_link_path: &Path,
@@ -936,20 +936,16 @@ impl Engine {
             repo.name, addon_name, src
         );
 
-        let _ = fs::remove_file(full_link_path);
-        let _ = fs::remove_dir_all(full_link_path);
+        if full_link_path != worktree_dir {
+            let _ = Self::remove_any_target(full_link_path);
+        }
 
         if src == worktree_dir {
-            let _ = install::install_addon_folder(
-                src,
-                wow_dir,
+            return Ok(Self::tracked_addon_entry_is_healthy(
+                worktree_dir,
+                full_link_path,
                 actual_toc_name,
-                InstallOptions {
-                    use_symlinks: true,
-                    ..Default::default()
-                },
-                "Wuddle Repair",
-            );
+            ));
         } else {
             if let Ok(rel_src) = src.strip_prefix(worktree_dir) {
                 if let Some(rel_src) = rel_src.to_str() {
