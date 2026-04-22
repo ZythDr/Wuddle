@@ -8,11 +8,11 @@ on:
 jobs:
   # ------------------------------------------------------------------
   # Guard: only proceed if the tag commit is reachable from
-  # main. This keeps the Iced workflow from firing on
-  # stable Tauri tags (which live on main).
+  # main or a prerelease/* branch. This allows Windows-test
+  # prereleases to build without consuming the final stable tag.
   # ------------------------------------------------------------------
   guard:
-    name: Check tag is on main
+    name: Check tag is on allowed branch
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
@@ -24,15 +24,28 @@ jobs:
       - id: check
         run: |
           set -euo pipefail
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main || true
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' || true
           TAG_SHA="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
+
+          allowed_ref=""
           if git show-ref --verify --quiet refs/remotes/origin/main && \
              git merge-base --is-ancestor "${TAG_SHA}" origin/main; then
+            allowed_ref="origin/main"
+          else
+            while IFS= read -r ref; do
+              if git merge-base --is-ancestor "${TAG_SHA}" "$ref"; then
+                allowed_ref="$ref"
+                break
+              fi
+            done < <(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/prerelease/*')
+          fi
+
+          if [ -n "${allowed_ref}" ]; then
             echo "should_build=true" >> "${GITHUB_OUTPUT}"
-            echo "Tag ${GITHUB_REF_NAME} is on main — building Iced release."
+            echo "Tag ${GITHUB_REF_NAME} is on ${allowed_ref} — building Iced release."
           else
             echo "should_build=false" >> "${GITHUB_OUTPUT}"
-            echo "Tag ${GITHUB_REF_NAME} is not on main — skipping Iced build."
+            echo "Tag ${GITHUB_REF_NAME} is not on main or prerelease/* — skipping Iced build."
           fi
 
   # ------------------------------------------------------------------
