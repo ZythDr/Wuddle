@@ -129,6 +129,7 @@ pub struct RepoRow {
     pub is_collection: bool,
     pub merge_installs: bool,
     pub pinned_version: Option<String>,
+    pub installed_at_unix: Option<i64>,
     pub published_at_unix: Option<i64>,
 }
 
@@ -172,6 +173,7 @@ impl From<Repo> for RepoRow {
                 .map_or(false, |raw| !raw.is_empty()),
             merge_installs: r.merge_installs,
             pinned_version: r.pinned_version,
+            installed_at_unix: r.installed_at_unix,
             published_at_unix: r.published_at_unix,
         }
     }
@@ -897,6 +899,57 @@ pub async fn probe_conflicts(
     .await
     .map_err(|e| e.to_string())
     .and_then(|r| r)
+}
+
+/// Result of the lightweight pre-install conflict check.
+#[derive(Debug, Clone)]
+pub struct PreInstallConflictInfo {
+    pub conflicts: Vec<wuddle_engine::AddonProbeConflict>,
+    pub existing_repos: Vec<CollectionConflictOwnerGroup>,
+    pub new_repo_label: String,
+    pub addon_names: Vec<String>,
+}
+
+/// Lightweight pre-install conflict check that runs after `add_repo` but before
+/// `install_new_repo`. Uses the engine's DB + filesystem queries (no network call)
+/// to detect whether the repo's target files already exist or are tracked by
+/// another repository.
+pub async fn check_pre_install_conflicts(
+    db_path: Option<PathBuf>,
+    repo_id: i64,
+    wow_dir: String,
+    addon_names: Vec<String>,
+) -> Result<PreInstallConflictInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        let repo = eng.db().get_repo(repo_id).map_err(|e| e.to_string())?;
+        
+        let names_to_check = if addon_names.is_empty() {
+            vec![repo.name.clone()]
+        } else {
+            addon_names
+        };
+
+        let conflicts = eng
+            .addon_selection_conflicts(repo_id, Path::new(&wow_dir), &names_to_check)
+            .map_err(|e| e.to_string())?;
+
+        let existing_repos = if conflicts.is_empty() {
+            Vec::new()
+        } else {
+            build_collection_conflict_owner_groups(&eng, &conflicts)
+                .unwrap_or_else(|_| Vec::new())
+        };
+
+        Ok(PreInstallConflictInfo {
+            conflicts,
+            existing_repos,
+            new_repo_label: format!("{}/{}", repo.owner, repo.name),
+            addon_names: names_to_check,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 pub async fn remove_repo(

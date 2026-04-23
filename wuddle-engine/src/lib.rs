@@ -444,6 +444,7 @@ impl Engine {
             installed_asset_name: None,
             installed_asset_size: None,
             installed_asset_url: None,
+            installed_at_unix: None,
             published_at_unix: None,
             merge_installs: false,
             pinned_version: None,
@@ -1291,6 +1292,7 @@ impl Engine {
                                             installed_asset_name: None,
                                             installed_asset_size: None,
                                             installed_asset_url: None,
+                                            installed_at_unix: None,
                                             published_at_unix: None,
                                             merge_installs: false,
                                             pinned_version: None,
@@ -1352,6 +1354,7 @@ impl Engine {
                     installed_asset_name: None,
                     installed_asset_size: None,
                     installed_asset_url: None,
+                    installed_at_unix: None,
                     published_at_unix: None,
                     merge_installs: false,
                     pinned_version: None,
@@ -2978,7 +2981,7 @@ impl Engine {
                     let _ = self.remove_repo(repo_id, Some(wow_dir), true)?;
                 } else {
                     self.db()
-                        .set_installed_asset_state(repo_id, None, None, None, None, None)?;
+                        .set_installed_asset_state(repo_id, None, None, None, None, None, None)?;
                 }
             }
         }
@@ -3627,6 +3630,7 @@ impl Engine {
                 Some(&format!("git:{}", synced.branch)),
                 None,
                 Some(&plan.url),
+                Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64),
             )?;
             return Ok(());
         }
@@ -3771,6 +3775,7 @@ impl Engine {
             Some(&plan.asset_name),
             Self::size_u64_to_i64(plan.asset_size),
             Some(&plan.asset_url),
+            Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64),
         )?;
 
         self.prune_release_cache(plan, opts.cache_keep_versions, Some(wow_dir));

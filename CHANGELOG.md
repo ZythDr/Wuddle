@@ -2,6 +2,14 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.2.4
+
+### New Features
+- **Up-To-Date Status Tooltips** — The "Up to date" status badge now features an informative hover tooltip displaying the latest version (or commit ID) alongside the exact local installation timestamp.
+
+### Improvements
+- **Streamlined Conflict Resolution UI** — The file tree preview in the "Addon Conflict" dialog has been significantly cleaned up to exclusively display directories and filter out hidden system files/folders (such as `.git` and `.editorconfig`).
+
 ## v3.2.3
 
 ### Improvements

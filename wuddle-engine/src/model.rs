@@ -69,6 +69,7 @@ pub struct Repo {
     pub installed_asset_name: Option<String>,
     pub installed_asset_size: Option<i64>,
     pub installed_asset_url: Option<String>,
+    pub installed_at_unix: Option<i64>, // when it was installed/updated locally
     pub published_at_unix: Option<i64>, // latest release timestamp for adaptive frequency
     pub merge_installs: bool, // keep existing files when updating (don't delete unmatched)
     pub pinned_version: Option<String>, // lock to a specific release tag (None = latest)

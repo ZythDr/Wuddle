@@ -30,7 +30,18 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.2.3
+### What's New in v3.2.4
+
+#### New Features
+- **Up-To-Date Status Tooltips** — The "Up to date" status badge now features an informative hover tooltip displaying the latest version (or commit ID) alongside the exact local installation timestamp.
+
+#### Improvements
+- **Streamlined Conflict Resolution UI** — The file tree preview in the "Addon Conflict" dialog has been significantly cleaned up to exclusively display directories and filter out hidden system files/folders (such as `.git` and `.editorconfig`).
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.2.3
 
 #### Improvements
 - **Symlink Option Clarification** — Added a tooltip clarifying that `Use symlink installs when possible` applies to DLL and other non-`addon_git` installs only.
@@ -47,9 +58,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **Windows Directory Link Cleanup** — Fixed collection uninstall paths to remove directory symlinks and junctions using Windows link-aware deletion instead of generic file or recursive directory removal.
 - **Collection Conflict Prompting** — Changing a collection selection now opens a repo-aware overwrite confirmation instead of failing with an `ADDON_CONFLICT` error toast. The dialog shows which tracked addon folders would be removed and which conflicting folders would be installed, and the attempted selection is rolled back until the overwrite is confirmed.
 - **Windows Launcher Icon** — Added the Wuddle icon resource to the Windows launcher executable so `Wuddle.exe` no longer shows the generic placeholder icon.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.2.2
 

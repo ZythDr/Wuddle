@@ -631,7 +631,7 @@ fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: &ThemeColors) -> Element
         col_cell(text(current_str).size(12).color(colors.muted), COL_INSTALLED),
         col_cell(version_picker, COL_VERSION),
         col_cell(checkbox(enabled).on_toggle(move |b| Message::ToggleRepoEnabled(rid, b)), COL_ENABLED),
-        col_cell(status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, colors), COL_STATUS),
+        col_cell(status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, repo, colors), COL_STATUS),
         col_cell(action_buttons(repo, menu_key, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
@@ -935,7 +935,7 @@ fn addon_collection_parent_row<'a>(
         name_col,
         col_cell(branch_display, COL_BRANCH),
         col_cell(
-            status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, colors),
+            status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, repo, colors),
             COL_STATUS,
         ),
         col_cell(action_buttons(repo, menu_key, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
@@ -1106,7 +1106,7 @@ fn addon_row<'a>(
     let row_content = row![
         name_col,
         col_cell(branch_display, COL_BRANCH),
-        col_cell(status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, colors), COL_STATUS),
+        col_cell(status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, repo, colors), COL_STATUS),
         col_cell(action_buttons(repo, menu_key, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
     ]
     .spacing(0)
@@ -1325,6 +1325,7 @@ fn status_badge<'a>(
     enabled: bool,
     update_ignored: bool,
     latest_str: &str,
+    repo: &RepoRow,
     colors: &ThemeColors,
 ) -> Element<'a, Message> {
     let (label, text_color, base_color) = status_info(has_error, has_update, externally_modified, enabled, update_ignored, colors);
@@ -1363,6 +1364,41 @@ fn status_badge<'a>(
         })
         .padding(6.0)
         .into()
+    } else if !has_update && !has_error && !externally_modified && enabled && !update_ignored {
+        let c = *colors;
+        let mut tip_lines = Vec::new();
+        if let Some(v) = &repo.last_version {
+            if repo.mode == "addon_git" {
+                tip_lines.push(format!("Commit: {}", v));
+            } else {
+                tip_lines.push(format!("Version: {}", v));
+            }
+        }
+        if let Some(ts) = repo.installed_at_unix {
+            if let Some(dt) = chrono::DateTime::from_timestamp(ts, 0) {
+                let formatted = dt.format("%Y-%m-%d %H:%M").to_string();
+                tip_lines.push(format!("Installed: {}", formatted));
+            }
+        }
+        
+        if tip_lines.is_empty() {
+            badge.into()
+        } else {
+            tooltip(
+                badge,
+                text(tip_lines.join("\n")).size(13).color(c.text),
+                tooltip::Position::Top,
+            )
+            .style(move |_theme| container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgba(0.1, 0.1, 0.1, 0.95))),
+                border: iced::Border { color: c.border, width: 1.0, radius: 4.0.into() },
+                shadow: iced::Shadow::default(),
+                text_color: Some(c.text),
+                snap: true,
+            })
+            .padding(6.0)
+            .into()
+        }
     } else {
         badge.into()
     }

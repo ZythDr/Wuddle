@@ -48,7 +48,7 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        const SCHEMA_VERSION: i32 = 9;
+        const SCHEMA_VERSION: i32 = 10;
 
         let current: i32 = self
             .conn
@@ -180,6 +180,16 @@ impl Db {
                     .execute_batch("ALTER TABLE repos ADD COLUMN selected_addons_json TEXT")?;
             }
             self.conn.execute_batch("PRAGMA user_version = 9")?;
+        }
+
+        // v9 -> v10: add installed_at_unix to track when an addon was last installed/updated.
+        if current < 10 {
+            let cols = self.existing_repo_columns()?;
+            if !cols.contains("installed_at_unix") {
+                self.conn
+                    .execute_batch("ALTER TABLE repos ADD COLUMN installed_at_unix INTEGER")?;
+            }
+            self.conn.execute_batch("PRAGMA user_version = 10")?;
         }
 
         Ok(())
@@ -341,13 +351,13 @@ impl Db {
             r#"
             INSERT INTO repos(
               url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
-              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
+              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url, installed_at_unix,
                             published_at_unix, merge_installs, pinned_version, selected_addons_json
             )
             VALUES (
               ?1,  ?2,   ?3,   ?4,    ?5,   ?6,   ?7,      ?8,         ?9,         ?10,         ?11,
-              ?12,               ?13,                 ?14,                  ?15,
-                            ?16, ?17, ?18, ?19
+              ?12,               ?13,                 ?14,                  ?15,                 ?16,
+                            ?17, ?18, ?19, ?20
             )
             "#,
             params![
@@ -366,6 +376,7 @@ impl Db {
                 repo.installed_asset_name,
                 repo.installed_asset_size,
                 repo.installed_asset_url,
+                repo.installed_at_unix,
                 repo.published_at_unix,
                 if repo.merge_installs { 1 } else { 0 },
                 repo.pinned_version,
@@ -430,7 +441,7 @@ impl Db {
             r#"
             SELECT
               id, url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
-              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
+              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url, installed_at_unix,
                             published_at_unix, merge_installs, pinned_version, selected_addons_json
             FROM repos
             ORDER BY host, owner, name
@@ -456,10 +467,11 @@ impl Db {
                 installed_asset_name: row.get(13)?,
                 installed_asset_size: row.get(14)?,
                 installed_asset_url: row.get(15)?,
-                published_at_unix: row.get(16)?,
-                merge_installs: row.get::<_, i64>(17).unwrap_or(0) != 0,
-                pinned_version: row.get(18)?,
-                selected_addons_json: row.get(19)?,
+                installed_at_unix: row.get(16)?,
+                published_at_unix: row.get(17)?,
+                merge_installs: row.get::<_, i64>(18).unwrap_or(0) != 0,
+                pinned_version: row.get(19)?,
+                selected_addons_json: row.get(20)?,
             })
         })?;
 
@@ -475,7 +487,7 @@ impl Db {
             r#"
             SELECT
               id, url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
-              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
+              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url, installed_at_unix,
                             published_at_unix, merge_installs, pinned_version, selected_addons_json
             FROM repos
             WHERE host=?1 COLLATE NOCASE AND owner=?2 COLLATE NOCASE AND name=?3 COLLATE NOCASE
@@ -502,10 +514,11 @@ impl Db {
                  installed_asset_name: row.get(13)?,
                  installed_asset_size: row.get(14)?,
                  installed_asset_url: row.get(15)?,
-                 published_at_unix: row.get(16)?,
-                 merge_installs: row.get::<_, i64>(17).unwrap_or(0) != 0,
-                 pinned_version: row.get(18)?,
-                 selected_addons_json: row.get(19)?,
+                 installed_at_unix: row.get(16)?,
+                 published_at_unix: row.get(17)?,
+                 merge_installs: row.get::<_, i64>(18).unwrap_or(0) != 0,
+                 pinned_version: row.get(19)?,
+                 selected_addons_json: row.get(20)?,
              })
         })?;
 
@@ -521,7 +534,7 @@ impl Db {
             r#"
             SELECT
               id, url, forge, host, owner, name, mode, enabled, git_branch, asset_regex, last_version, etag,
-              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url,
+              installed_asset_id, installed_asset_name, installed_asset_size, installed_asset_url, installed_at_unix,
                             published_at_unix, merge_installs, pinned_version, selected_addons_json
             FROM repos
             WHERE id=?1
@@ -547,10 +560,11 @@ impl Db {
                 installed_asset_name: row.get(13)?,
                 installed_asset_size: row.get(14)?,
                 installed_asset_url: row.get(15)?,
-                published_at_unix: row.get(16)?,
-                merge_installs: row.get::<_, i64>(17).unwrap_or(0) != 0,
-                pinned_version: row.get(18)?,
-                selected_addons_json: row.get(19)?,
+                installed_at_unix: row.get(16)?,
+                published_at_unix: row.get(17)?,
+                merge_installs: row.get::<_, i64>(18).unwrap_or(0) != 0,
+                pinned_version: row.get(19)?,
+                selected_addons_json: row.get(20)?,
             })
         })?;
 
@@ -595,6 +609,7 @@ impl Db {
         asset_name: Option<&str>,
         asset_size: Option<i64>,
         asset_url: Option<&str>,
+        installed_at_unix: Option<i64>,
     ) -> Result<()> {
         self.conn.execute(
             r#"
@@ -604,10 +619,11 @@ impl Db {
               installed_asset_id=?2,
               installed_asset_name=?3,
               installed_asset_size=?4,
-              installed_asset_url=?5
-            WHERE id=?6
+              installed_asset_url=?5,
+              installed_at_unix=?6
+            WHERE id=?7
             "#,
-            params![version, asset_id, asset_name, asset_size, asset_url, id],
+            params![version, asset_id, asset_name, asset_size, asset_url, installed_at_unix, id],
         )?;
         Ok(())
     }
