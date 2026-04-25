@@ -31,6 +31,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
         Message::SetTheme(theme) => {
             app.wuddle_theme = theme;
+            let mut colors = theme.colors();
+            colors.body_font = app.body_font();
+            app.theme_colors = colors;
             app.save_settings();
             app.log(LogLevel::Info, &format!("Theme switched to: {}.", theme.key()));
             Some(Task::none())
@@ -77,6 +80,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::ToggleFrizFont(b) => {
             app.opt_friz_font = b;
+            app.theme_colors.body_font = app.body_font();
             app.save_settings();
             app.log(LogLevel::Info, "Friz Quadrata font setting saved. Restart Wuddle to apply.");
             Some(Task::none())
@@ -261,14 +265,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::SettingsLoaded(s) => {
-            app.wuddle_theme = WuddleTheme::from_key(&s.theme);
-            app.active_profile_id = s.active_profile_id.clone();
-            app.opt_auto_check = s.opt_auto_check;
-            app.opt_desktop_notify = s.opt_desktop_notify;
-            app.opt_symlinks = s.opt_symlinks;
-            app.opt_xattr = s.opt_xattr;
-            app.opt_clock12 = s.opt_clock12;
+            let theme = WuddleTheme::from_key(&s.theme);
+            app.wuddle_theme = theme;
             app.opt_friz_font = s.opt_friz_font;
+            let mut colors = theme.colors();
+            colors.body_font = app.body_font();
+            app.theme_colors = colors;
+            app.active_profile_id = s.active_profile_id.clone();
             app.log_wrap = s.log_wrap;
             app.log_autoscroll = s.log_autoscroll;
             app.auto_check_minutes = s.auto_check_minutes.max(1);

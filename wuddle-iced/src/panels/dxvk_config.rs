@@ -349,9 +349,9 @@ pub fn view<'a>(
     wow_dir: &str,
     show_preview: bool,
     preview_content: &'a iced::widget::text_editor::Content,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let has_wow_dir = !wow_dir.is_empty();
     let conf_text = generate_conf(cfg);
 
@@ -365,7 +365,7 @@ pub fn view<'a>(
         ]
         .spacing(2),
         Space::new().width(Length::Fill),
-        crate::close_button(&c),
+        crate::close_button(c),
     ]
     .align_y(iced::Alignment::Center);
 
@@ -385,7 +385,7 @@ pub fn view<'a>(
                 [comment_gray, c.link, c.muted, c.text],
                 conf_highlight_format,
             )
-            .style(move |t, s| theme::log_editor_style(&c)(t, s))
+            .style(move |t, s| theme::log_editor_style(c)(t, s))
             .into()
     } else {
         // Full-width scrollable settings cards
@@ -400,25 +400,25 @@ pub fn view<'a>(
                             "* Frame rates above 240 may increase the chances of weird behavior such as invisible Player & NPC models in some situations. This issue can still occur below 240 FPS, but is more likely to occur at higher frame rates.",
                             &cfg.max_frame_rate,
                             |s| Message::SetDxvkField(DxvkField::MaxFrameRate(s)),
-                            &c,
+                            c,
                         ),
                         num_row(
                             "Max Frame Latency",
                             "How many frames the GPU may buffer ahead (1-16). Fewer frames means lower input latency. 1 is recommended for the most responsive feel.",
                             &cfg.max_frame_latency,
                             |s| Message::SetDxvkField(DxvkField::MaxFrameLatency(s)),
-                            &c,
+                            c,
                         ),
                         tristate_row(
                             "Latency Sleep (NVAPI / Reflex)",
                             "Enables NVIDIA Reflex / NVAPI latency-sleep to reduce input latency on NVIDIA GPUs. Auto detects support at runtime and enables it automatically.",
                             cfg.latency_sleep.clone(),
                             |v| Message::SetDxvkField(DxvkField::LatencySleep(v)),
-                            &c,
+                            c,
                         ),
                     ]
                     .spacing(16),
-                    &c,
+                    c,
                 ),
                 section_card(
                     "Async Shader Compilation",
@@ -429,32 +429,32 @@ pub fn view<'a>(
                             "May cause incorrectly rendered 2D portrait images on UnitFrames. Not an issue if you use 3D, animated, or custom portrait addons.",
                             cfg.enable_async,
                             |b| Message::SetDxvkField(DxvkField::EnableAsync(b)),
-                            &c,
+                            c,
                         ),
                         num_row(
                             "Compiler Threads",
                             "Number of background threads dedicated to compiling graphics pipelines. 0 = use all available CPU cores. Reducing this can free cores for the game but may increase compile stutter.",
                             &cfg.num_compiler_threads,
                             |s| Message::SetDxvkField(DxvkField::NumCompilerThreads(s)),
-                            &c,
+                            c,
                         ),
                         tristate_row_warn(
                             "Graphics Pipeline Library (GPL)",
                             "Uses the Vulkan GPL extension to pre-compile partial pipelines and reduce stutter. Warning: setting True may result in crashes or rendering issues on some clients or server setups. Recommended to leave it on Auto.",
                             cfg.enable_gpl.clone(),
                             |v| Message::SetDxvkField(DxvkField::EnableGpl(v)),
-                            &c,
+                            c,
                         ),
                         tristate_row(
                             "Track Pipeline Lifetime",
                             "Tracks how long each pipeline has been in use and frees pipelines that are no longer referenced. Reduces long-session VRAM consumption at the cost of minor bookkeeping overhead.",
                             cfg.track_pipeline_lifetime.clone(),
                             |v| Message::SetDxvkField(DxvkField::TrackPipelineLifetime(v)),
-                            &c,
+                            c,
                         ),
                     ]
                     .spacing(16),
-                    &c,
+                    c,
                 ),
                 section_card(
                     "Display",
@@ -464,14 +464,14 @@ pub fn view<'a>(
                             "Enabling this setting will make DXVK run in Borderless Windowed Mode. Enable for a much better alt-tab experience. Most users will want this setting to be ON.",
                             cfg.enable_dialog_mode,
                             |b| Message::SetDxvkField(DxvkField::EnableDialogMode(b)),
-                            &c,
+                            c,
                         ),
                         check_row(
                             "DPI Aware",
                             "Lets DXVK call SetProcessDPIAware. Disable this when VanillaFixes or Wine already make the process DPI-aware, to avoid double-scaling artifacts.",
                             cfg.dpi_aware,
                             |b| Message::SetDxvkField(DxvkField::DpiAware(b)),
-                            &c,
+                            c,
                         ),
                         pick_row(
                             "VSync / Present Interval",
@@ -484,18 +484,18 @@ pub fn view<'a>(
                             ][..],
                             cfg.present_interval.clone(),
                             |v| Message::SetDxvkField(DxvkField::PresentInterval(v)),
-                            &c,
+                            c,
                         ),
                         tristate_row(
                             "Tear-Free",
                             "Inserts a compositor-level tear-free pass to prevent screen tearing without incurring the full ~1-frame input latency of VSync. Requires a compatible compositor.",
                             cfg.tear_free.clone(),
                             |v| Message::SetDxvkField(DxvkField::TearFree(v)),
-                            &c,
+                            c,
                         ),
                     ]
                     .spacing(16),
-                    &c,
+                    c,
                 ),
                 section_card(
                     "Image Quality",
@@ -513,18 +513,18 @@ pub fn view<'a>(
                             ][..],
                             cfg.sampler_anisotropy.clone(),
                             |v| Message::SetDxvkField(DxvkField::SamplerAnisotropy(v)),
-                            &c,
+                            c,
                         ),
                         check_row(
                             "Clamp Negative LOD Bias",
                             "Clamps negative mipmap LOD bias values to zero. Prevents the over-sharpening that causes visible terrain shimmer and texture flickering at a distance in WoW.",
                             cfg.clamp_negative_lod_bias,
                             |b| Message::SetDxvkField(DxvkField::ClampNegativeLodBias(b)),
-                            &c,
+                            c,
                         ),
                     ]
                     .spacing(16),
-                    &c,
+                    c,
                 ),
                 section_card(
                     "D3D9 Misc",
@@ -534,18 +534,18 @@ pub fn view<'a>(
                             "Delays Vulkan swapchain surface creation until the first Present call instead of at device creation. Can fix startup crashes or black screens on some hardware/driver combos.",
                             cfg.defer_surface_creation,
                             |b| Message::SetDxvkField(DxvkField::DeferSurfaceCreation(b)),
-                            &c,
+                            c,
                         ),
                         check_row(
                             "Lenient Clear",
                             "Uses a fast-path clear when the scissor rectangle covers nearly the entire render target. Provides a small performance gain with no visual difference in WoW.",
                             cfg.lenient_clear,
                             |b| Message::SetDxvkField(DxvkField::LenientClear(b)),
-                            &c,
+                            c,
                         ),
                     ]
                     .spacing(16),
-                    &c,
+                    c,
                 ),
                 section_card(
                     "Logging & HUD",
@@ -555,12 +555,12 @@ pub fn view<'a>(
                             "Directory where dxvk.log is written. Use \".\" to write it next to the game executable. Leave empty to disable DXVK file logging (errors still go to stderr).",
                             &cfg.log_path,
                             |s| Message::SetDxvkField(DxvkField::LogPath(s)),
-                            &c,
+                            c,
                         ),
-                        hud_row(&cfg.hud, &c),
+                        hud_row(&cfg.hud, c),
                     ]
                     .spacing(16),
-                    &c,
+                    c,
                 ),
             ]
             .spacing(10)
@@ -573,7 +573,7 @@ pub fn view<'a>(
         )
         .height(Length::Fill)
         .direction(theme::vscroll())
-        .style(move |t, s| theme::scrollable_style(&c)(t, s))
+        .style(move |t, s| theme::scrollable_style(c)(t, s))
         .into()
     };
 
@@ -584,8 +584,8 @@ pub fn view<'a>(
             .on_press(Message::ToggleDxvkPreview)
             .padding([7, 16])
             .style(move |_t, status| match status {
-                button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                _ => theme::tab_button_style(&c2),
+                button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                _ => theme::tab_button_style(c2),
             })
     } else {
         let icon_color = c2.text;
@@ -606,8 +606,8 @@ pub fn view<'a>(
             .on_press(Message::ToggleDxvkPreview)
             .padding([7, 16])
             .style(move |_t, status| match status {
-                button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                _ => theme::tab_button_style(&c2),
+                button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                _ => theme::tab_button_style(c2),
             })
     };
 
@@ -616,8 +616,8 @@ pub fn view<'a>(
         .on_press(Message::CopyToClipboard(conf_text))
         .padding([7, 16])
         .style(move |_t, status| match status {
-            button::Status::Hovered => theme::tab_button_hovered_style(&c3),
-            _ => theme::tab_button_style(&c3),
+            button::Status::Hovered => theme::tab_button_hovered_style(c3),
+            _ => theme::tab_button_style(c3),
         });
 
     let save_btn = {
@@ -631,9 +631,9 @@ pub fn view<'a>(
             .padding([7, 16])
             .style(move |_t, _s| {
                 if has_wow_dir {
-                    theme::tab_button_active_style(&c4)
+                    theme::tab_button_active_style(c4)
                 } else {
-                    let mut s = theme::tab_button_style(&c4);
+                    let mut s = theme::tab_button_style(c4);
                     s.text_color = iced::Color { a: 0.4, ..c4.text };
                     s
                 }
@@ -650,7 +650,7 @@ pub fn view<'a>(
         preview_toggle_btn,
         container(text(String::from(preview_tip)).size(13).color(c.text))
             .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(&c)),
+            .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Top,
     ).gap(4.0);
 
@@ -658,7 +658,7 @@ pub fn view<'a>(
         copy_btn,
         container(text("Copy the DXVK config to clipboard").size(13).color(c.text))
             .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(&c)),
+            .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Top,
     ).gap(4.0);
 
@@ -667,7 +667,7 @@ pub fn view<'a>(
         save_btn,
         container(text(String::from(save_tip)).size(13).color(c.text))
             .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(&c)),
+            .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Top,
     ).gap(4.0);
 
@@ -683,9 +683,9 @@ pub fn view<'a>(
     // ---- Full layout ----
     column![
         title_row,
-        rule::horizontal(1).style(move |_t| theme::update_line_style(&c)),
+        rule::horizontal(1).style(move |_t| theme::update_line_style(c)),
         body,
-        rule::horizontal(1).style(move |_t| theme::update_line_style(&c)),
+        rule::horizontal(1).style(move |_t| theme::update_line_style(c)),
         footer,
     ]
     .spacing(10)
@@ -701,14 +701,14 @@ pub fn view<'a>(
 fn section_card<'a>(
     title: &str,
     content: impl Into<Element<'a, Message>>,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     container(
         container(
             column![
                 text(String::from(title)).size(18).color(c.title),
-                rule::horizontal(1).style(move |_t| theme::update_line_style(&c)),
+                rule::horizontal(1).style(move |_t| theme::update_line_style(c)),
                 content.into(),
             ]
             .spacing(8),
@@ -716,12 +716,12 @@ fn section_card<'a>(
         .padding(14),
     )
     .width(Length::Fill)
-    .style(move |_t| theme::card_style(&c))
+    .style(move |_t| theme::card_style(c))
     .into()
 }
 
 /// Label + short description — shown below the label in every row.
-fn label_desc<'a>(label: &str, desc: &str, colors: &ThemeColors) -> Element<'a, Message> {
+fn label_desc<'a>(label: &str, desc: &str, colors: ThemeColors) -> Element<'a, Message> {
     column![
         text(String::from(label)).size(15).color(colors.text),
         text(String::from(desc)).size(14).color(colors.muted),
@@ -740,7 +740,7 @@ fn with_tip<'a>(
     let tip_box = container(text(String::from(tip)).size(13).color(c.text))
         .max_width(360)
         .padding([6, 10])
-        .style(move |_t| theme::tooltip_style(&c));
+        .style(move |_t| theme::tooltip_style(c));
     container(tooltip(content, tip_box, tooltip::Position::Bottom))
         .width(Length::Fill)
         .into()
@@ -752,12 +752,12 @@ fn check_row<'a, F>(
     desc: &str,
     value: bool,
     on_toggle: F,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message>
 where
     F: 'a + Fn(bool) -> Message,
 {
-    let c = *colors;
+    let c = colors;
     let inner = row![
         label_desc(label, desc, colors),
         Space::new().width(Length::FillPortion(3)),
@@ -775,12 +775,12 @@ fn check_row_note<'a, F>(
     note: &str,
     value: bool,
     on_toggle: F,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message>
 where
     F: 'a + Fn(bool) -> Message,
 {
-    let c = *colors;
+    let c = colors;
     let label_col: Element<Message> = column![
         text(String::from(label)).size(15).color(c.text),
         text(String::from(desc)).size(14).color(c.muted),
@@ -810,12 +810,12 @@ fn num_row<'a, F>(
     desc: &str,
     value: &str,
     on_input: F,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message>
 where
     F: 'a + Fn(String) -> Message,
 {
-    let c = *colors;
+    let c = colors;
     let inner = row![
         label_desc(label, desc, colors),
         Space::new().width(Length::FillPortion(3)),
@@ -836,12 +836,12 @@ fn num_row_tip<'a, F>(
     tip: &str,
     value: &str,
     on_input: F,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message>
 where
     F: 'a + Fn(String) -> Message,
 {
-    let c = *colors;
+    let c = colors;
     let inner = row![
         label_desc(label, desc, colors),
         Space::new().width(Length::FillPortion(3)),
@@ -861,12 +861,12 @@ fn input_row<'a, F>(
     desc: &str,
     value: &str,
     on_input: F,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message>
 where
     F: 'a + Fn(String) -> Message,
 {
-    let c = *colors;
+    let c = colors;
     let inner = row![
         label_desc(label, desc, colors),
         Space::new().width(Length::FillPortion(3)),
@@ -886,12 +886,12 @@ fn tristate_row<'a, F>(
     desc: &str,
     value: TriState,
     on_select: F,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message>
 where
     F: 'a + Fn(TriState) -> Message,
 {
-    let c = *colors;
+    let c = colors;
     let inner = row![
         label_desc(label, desc, colors),
         Space::new().width(Length::FillPortion(3)),
@@ -914,12 +914,12 @@ fn tristate_row_warn<'a, F>(
     desc: &str,
     value: TriState,
     on_select: F,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message>
 where
     F: 'a + Fn(TriState) -> Message,
 {
-    let c = *colors;
+    let c = colors;
     let label_col: Element<Message> = column![
         row![
             text(String::from(label)).size(15).color(c.text),
@@ -956,13 +956,13 @@ fn pick_row<'a, T, F>(
     options: &'a [T],
     value: T,
     on_select: F,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message>
 where
     T: 'a + Clone + PartialEq + std::fmt::Display,
     F: 'a + Fn(T) -> Message,
 {
-    let c = *colors;
+    let c = colors;
     let inner = row![
         label_desc(label, desc, colors),
         Space::new().width(Length::FillPortion(3)),
@@ -976,8 +976,8 @@ where
 }
 
 /// HUD row with a label, description, text input, and quick-preset buttons.
-fn hud_row<'a>(value: &str, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn hud_row<'a>(value: &str, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     let desc = "On-screen performance overlay. Combine tokens: fps, memory, devinfo, pipelines. Leave empty to disable.";
 
     let preset_btn = |label: &'static str, preset: &'static str| {
@@ -986,8 +986,8 @@ fn hud_row<'a>(value: &str, colors: &ThemeColors) -> Element<'a, Message> {
             .on_press(Message::SetDxvkField(DxvkField::Hud(preset.to_string())))
             .padding([3, 6])
             .style(move |_t, status| match status {
-                button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                _ => theme::tab_button_style(&c2),
+                button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                _ => theme::tab_button_style(c2),
             })
     };
 

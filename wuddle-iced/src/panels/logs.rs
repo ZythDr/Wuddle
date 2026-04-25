@@ -73,8 +73,8 @@ pub fn is_fetch_error(msg: &str) -> bool {
 
 const MONO: Font = Font::MONOSPACE;
 
-pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
 
     // Header
     let header = row![
@@ -91,8 +91,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                     .on_press(Message::ClearLogs)
                     .padding([6, 12])
                     .style(move |_theme, status| match status {
-                        button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                        _ => theme::tab_button_style(&c2),
+                        button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                        _ => theme::tab_button_style(c2),
                     })
             },
             "Clear all log messages",
@@ -107,8 +107,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                     .on_press(Message::CopyToClipboard(log_text_copy))
                     .padding([6, 12])
                     .style(move |_theme, status| match status {
-                        button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                        _ => theme::tab_button_style(&c2),
+                        button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                        _ => theme::tab_button_style(c2),
                     })
             },
             "Copy all log output to clipboard",
@@ -121,10 +121,10 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
 
     // Filter toolbar
     let toolbar = row![
-        filter_btn("All", LogFilter::All, app.log_filter, &c),
-        filter_btn("Info", LogFilter::Info, app.log_filter, &c),
-        filter_btn("API", LogFilter::Api, app.log_filter, &c),
-        filter_btn("Errors", LogFilter::Errors, app.log_filter, &c),
+        filter_btn("All", LogFilter::All, app.log_filter, c),
+        filter_btn("Info", LogFilter::Info, app.log_filter, c),
+        filter_btn("API", LogFilter::Api, app.log_filter, c),
+        filter_btn("Errors", LogFilter::Errors, app.log_filter, c),
         Space::new().width(Length::Fill),
         checkbox(app.log_wrap)
             .label("Wrap lines")
@@ -199,7 +199,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         .padding(12)
         .wrapping(if app.log_wrap { Wrapping::Word } else { Wrapping::None })
         .highlight_with::<LogHighlighter>((c.bad, iced::Color::from_rgb8(0, 191, 255)), log_to_format)
-        .style(move |theme, status| theme::log_editor_style(&c)(theme, status));
+        .style(move |theme, status| theme::log_editor_style(c)(theme, status));
 
     let mut col = column![header, toolbar];
     if let Some(sub) = error_subfilter {
@@ -228,14 +228,14 @@ pub fn build_log_text(app: &App) -> String {
 }
 
 /// Wrap any element in a tooltip with consistent styling.
-fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     let tip_str = String::from(tip_text);
     tooltip(
         content,
         container(text(tip_str).size(13).color(c.text))
             .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(&c)),
+            .style(move |_theme| theme::tooltip_style(c)),
         pos,
     )
     .gap(4.0)
@@ -246,20 +246,20 @@ fn filter_btn<'a>(
     label: &str,
     filter: LogFilter,
     active_filter: LogFilter,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let active = filter == active_filter;
     let b = button(text(String::from(label)).size(12))
         .on_press(Message::SetLogFilter(filter))
         .padding([4, 10]);
     if active {
-        b.style(move |_theme, _status| theme::tab_button_active_style(&c))
+        b.style(move |_theme, _status| theme::tab_button_active_style(c))
             .into()
     } else {
         b.style(move |_theme, status| match status {
-            button::Status::Hovered => theme::tab_button_hovered_style(&c),
-            _ => theme::tab_button_style(&c),
+            button::Status::Hovered => theme::tab_button_hovered_style(c),
+            _ => theme::tab_button_style(c),
         })
         .into()
     }

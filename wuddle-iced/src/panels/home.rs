@@ -6,8 +6,8 @@ use crate::service::is_mod;
 use crate::theme::{self, ThemeColors};
 use crate::{App, Dialog, Message};
 
-pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
 
     let update_count = app
         .plans
@@ -25,12 +25,12 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 .on_press(Message::ToggleAddNewMenu)
                 .padding([6, 14])
                 .style(move |_theme, status| match status {
-                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
+                    button::Status::Hovered => theme::tab_button_hovered_style(c2),
                     _ => {
                         if menu_open {
-                            theme::tab_button_active_style(&c2)
+                            theme::tab_button_active_style(c2)
                         } else {
-                            theme::tab_button_style(&c2)
+                            theme::tab_button_style(c2)
                         }
                     }
                 });
@@ -44,7 +44,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                             is_addons: false,
                             advanced: false,
                         }),
-                        &c,
+                        c,
                     ),
                     add_new_menu_item(
                         "Add Addon",
@@ -54,29 +54,29 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                             is_addons: true,
                             advanced: false,
                         }),
-                        &c,
+                        c,
                     ),
                 ]
                 .spacing(2),
             )
             .padding(6)
             .width(160)
-            .style(move |_theme| theme::context_menu_style(&c2))
+            .style(move |_theme| theme::context_menu_style(c2))
             .into();
             let overlay: Element<Message> = AnchoredOverlay::new(add_btn, menu_items, menu_open)
                 .on_dismiss(Message::CloseMenu)
                 .into();
             overlay
         },
-        separator(&c),
+        separator(c),
         tip(
-            btn_styled("Check for updates", Message::CheckUpdates, &c),
+            btn_styled("Check for updates", Message::CheckUpdates, c),
             "Fetch the latest versions for all addons and mods",
             tooltip::Position::Bottom,
             colors,
         ),
         tip(
-            btn_styled(&format!("Update All ({})", update_count), Message::UpdateAll, &c),
+            btn_styled(&format!("Update All ({})", update_count), Message::UpdateAll, c),
             "Download and install all available updates",
             tooltip::Position::Bottom,
             colors,
@@ -113,20 +113,20 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         let c2 = c;
         container(column![header, updates_row].spacing(12).padding(18))
             .width(Length::Fill)
-            .style(move |_theme| theme::card_style(&c2))
+            .style(move |_theme| theme::card_style(c2))
     };
 
     scrollable(column![updates_card].spacing(10).width(Length::Fill))
         .height(Length::Fill)
         .direction(theme::vscroll())
-        .style(move |t, s| theme::scrollable_style(&c)(t, s))
+        .style(move |t, s| theme::scrollable_style(c)(t, s))
         .into()
 }
 
 fn update_column<'a>(
     title: &'a str,
     plans: &[&'a crate::service::PlanRow],
-    colors: &ThemeColors,
+    colors: ThemeColors,
     c: ThemeColors,
 ) -> Element<'a, Message> {
     let header = {
@@ -140,7 +140,7 @@ fn update_column<'a>(
             .padding([6, 8]),
         )
         .width(Length::Fill)
-        .style(move |_theme| theme::col_header_style(&c2))
+        .style(move |_theme| theme::col_header_style(c2))
     };
 
     let body: Element<Message> = if plans.is_empty() {
@@ -151,7 +151,7 @@ fn update_column<'a>(
         )
         .height(Length::Fill)
         .direction(theme::vscroll())
-        .style(move |t, s| theme::scrollable_style(&c)(t, s))
+        .style(move |t, s| theme::scrollable_style(c)(t, s))
         .into()
     } else {
         let lines: Vec<Element<Message>> = plans
@@ -163,7 +163,7 @@ fn update_column<'a>(
                 if i > 0 {
                     col_items.push(
                         rule::horizontal(1)
-                            .style(move |_theme| theme::update_line_style(&c2))
+                            .style(move |_theme| theme::update_line_style(c2))
                             .into(),
                     );
                 }
@@ -180,7 +180,7 @@ fn update_column<'a>(
         scrollable(column(lines).width(Length::Fill))
             .height(Length::Fill)
             .direction(theme::vscroll())
-            .style(move |t, s| theme::scrollable_style(&c)(t, s))
+            .style(move |t, s| theme::scrollable_style(c)(t, s))
             .into()
     };
 
@@ -188,18 +188,18 @@ fn update_column<'a>(
     container(column![header, body].spacing(0).width(Length::Fill).height(Length::Fill))
         .width(Length::FillPortion(1))
         .height(Length::Fill)
-        .style(move |_theme| theme::update_col_style(&c2))
+        .style(move |_theme| theme::update_col_style(c2))
         .into()
 }
 
-fn btn_styled<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn btn_styled<'a>(label: &str, msg: Message, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     button(text(String::from(label)).size(13))
         .on_press(msg)
         .padding([6, 14])
         .style(move |_theme, status| match status {
-            button::Status::Hovered => theme::tab_button_hovered_style(&c),
-            _ => theme::tab_button_style(&c),
+            button::Status::Hovered => theme::tab_button_hovered_style(c),
+            _ => theme::tab_button_style(c),
         })
         .into()
 }
@@ -208,22 +208,22 @@ fn tip<'a>(
     content: Element<'a, Message>,
     label: &str,
     position: tooltip::Position,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     tooltip(
         content,
         container(text(String::from(label)).size(13).color(c.text))
             .padding([4, 8])
-            .style(move |_theme| theme::tooltip_style(&c)),
+            .style(move |_theme| theme::tooltip_style(c)),
         position,
     )
     .gap(4.0)
     .into()
 }
 
-fn separator<'a>(colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn separator<'a>(colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     container(Space::new().width(1).height(24))
         .style(move |_theme| container::Style {
             background: Some(iced::Background::Color(c.border)),
@@ -236,14 +236,14 @@ fn separator<'a>(colors: &ThemeColors) -> Element<'a, Message> {
         .into()
 }
 
-fn add_new_menu_item<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn add_new_menu_item<'a>(label: &str, msg: Message, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     button(text(String::from(label)).size(13))
         .on_press(msg)
         .padding([6, 14])
         .width(Length::Fill)
         .style(move |_theme, status| match status {
-            button::Status::Hovered => theme::tab_button_hovered_style(&c),
+            button::Status::Hovered => theme::tab_button_hovered_style(c),
             _ => button::Style {
                 background: None,
                 text_color: c.text,

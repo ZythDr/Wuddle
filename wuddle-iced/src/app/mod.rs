@@ -1,7 +1,7 @@
 use iced::widget::{
     button, canvas, checkbox, column, container, pick_list, row, rule, scrollable, stack, text, Space,
 };
-use iced::{Element, Font, Length, Subscription, Task, Theme};
+use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -169,13 +169,36 @@ pub struct App {
     // Global markdown caches (for dialogs)
     pub markdown_image_cache: HashMap<String, iced::widget::image::Handle>,
     pub markdown_gif_cache: HashMap<String, std::sync::Arc<iced_gif::Frames>>,
+    pub theme_colors: ThemeColors,
 }
 
 impl App {
+    pub fn expansion_hint(&self) -> Option<&'static str> {
+        let info = self.tweak_client_info.as_ref()?;
+        let version = info.file_version.as_ref().or(info.product_version.as_ref())?;
+
+        if version.starts_with("1.") {
+            Some("vanilla")
+        } else if version.starts_with("2.") {
+            Some("tbc")
+        } else if version.starts_with("3.") {
+            Some("wotlk")
+        } else if version.starts_with("4.") {
+            Some("cata")
+        } else {
+            None
+        }
+    }
+
     pub fn new() -> (Self, Task<Message>) {
+        let theme = WuddleTheme::default();
+        let mut theme_colors = theme.colors();
+        let opt_friz_font = false; // Default
+        theme_colors.body_font = if opt_friz_font { FRIZ } else { NOTO };
         let app = Self {
             active_tab: Tab::default(),
-            wuddle_theme: WuddleTheme::default(),
+            theme_colors,
+            wuddle_theme: theme,
             filter: Filter::default(),
             project_search: String::new(),
             sort_key: SortKey::default(),
@@ -586,10 +609,8 @@ impl App {
         Subscription::batch(subs)
     }
 
-    pub fn colors(&self) -> ThemeColors {
-        let mut c = self.wuddle_theme.colors();
-        c.body_font = self.body_font();
-        c
+    pub fn colors(&self) -> &ThemeColors {
+        &self.theme_colors
     }
 
     pub fn body_font(&self) -> Font {
@@ -1054,16 +1075,16 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let colors = self.colors();
+        let colors = self.theme_colors;
         let bg_start = colors.bg_grad_start;
         let bg_mid = colors.bg_grad_mid;
         let bg_end = colors.bg_grad_end;
 
-        let topbar = self.view_topbar(&colors);
+        let topbar = self.view_topbar(colors);
         let topbar_border =
-            rule::horizontal(1).style(move |_theme| theme::topbar_rule_style(&colors));
-        let body = self.view_panel(&colors);
-        let footer = self.view_footer(&colors);
+            rule::horizontal(1).style(move |_theme| theme::topbar_rule_style(colors));
+        let body = self.view_panel(colors);
+        let footer = self.view_footer(colors);
 
         let main_layout = container(column![topbar, topbar_border, body, footer])
             .width(Length::Fill)
@@ -1102,19 +1123,19 @@ impl App {
 
             let dialog_box: Element<Message> = if has_two_cards {
                 // Two-card layout fills the padded window area
-                container(self.view_dialog(dialog, &c))
+                container(self.view_dialog(dialog, self.theme_colors))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into()
             } else if matches!(dialog, Dialog::DxvkConfig { .. }) {
                 // DXVK config: two-column layout, constrained width, fills height
                 let c_dlg = c;
-                container(self.view_dialog(dialog, &c))
+                container(self.view_dialog(dialog, self.theme_colors))
                     .max_width(960u32)
                     .padding(24)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .style(move |_theme| theme::dialog_style(&c_dlg))
+                    .style(move |_theme| theme::dialog_style(c_dlg))
                     .into()
             } else {
                 let (dialog_max_w, dialog_pad) = match dialog {
@@ -1122,34 +1143,34 @@ impl App {
                     Dialog::InstanceSettings { .. } => (600u32, 24),
                     Dialog::Changelog { .. } => (720u32, 24),
                     Dialog::AvWarning { .. }
-                    | Dialog::AddonConflict { .. }
                     | Dialog::CollectionChoice { .. }
                     | Dialog::RemoveCollectionAddon { .. } => (650u32, 24),
+                    Dialog::AddonConflict { .. } => (920u32, 24),
                     Dialog::CollectionAddonConflict { .. } => (920u32, 24),
                     _ => (480u32, 24),
                 };
                 let c_dlg = c;
                 let is_add_repo = matches!(dialog, Dialog::AddRepo { .. });
                 if is_add_repo && add_repo_use_fill_h {
-                    container(self.view_dialog(dialog, &c))
+                    container(self.view_dialog(dialog, self.theme_colors))
                         .max_width(dialog_max_w)
                         .padding(dialog_pad)
                         .width(Length::Fill)
                         .height(Length::Fill)
-                        .style(move |_theme| theme::dialog_style(&c_dlg))
+                        .style(move |_theme| theme::dialog_style(c_dlg))
                         .into()
                 } else if is_add_repo {
-                    container(self.view_dialog(dialog, &c))
+                    container(self.view_dialog(dialog, self.theme_colors))
                         .max_width(dialog_max_w)
                         .padding(dialog_pad)
                         .width(Length::Fill)
-                        .style(move |_theme| theme::dialog_style(&c_dlg))
+                        .style(move |_theme| theme::dialog_style(c_dlg))
                         .into()
                 } else {
-                    container(self.view_dialog(dialog, &c))
+                    container(self.view_dialog(dialog, self.theme_colors))
                         .max_width(dialog_max_w)
                         .padding(dialog_pad)
-                        .style(move |_theme| theme::dialog_style(&c_dlg))
+                        .style(move |_theme| theme::dialog_style(c_dlg))
                         .into()
                 }
             };
@@ -1187,16 +1208,16 @@ impl App {
             .height(Length::Fill)
             .into();
 
-        self.layer_toasts(base, &colors)
+        self.layer_toasts(base, colors)
     }
 
     /// Renders the toast notification overlay on top of the given base element.
     pub fn layer_toasts<'a>(
         &'a self,
         base: Element<'a, Message>,
-        colors: &ThemeColors,
+        colors: ThemeColors,
     ) -> Element<'a, Message> {
-        let c = *colors;
+        let c = colors;
 
         let toast_overlay: Element<Message> = if self.toasts.is_empty() {
             Space::new().width(0).height(0).into()
@@ -1301,9 +1322,9 @@ impl App {
     pub fn view_dialog<'a>(
         &'a self,
         dialog: &'a Dialog,
-        colors: &ThemeColors,
+        colors: ThemeColors,
     ) -> Element<'a, Message> {
-        let c = *colors;
+        let c = colors;
         match dialog {
             Dialog::AddRepo {
                 url,
@@ -1417,26 +1438,52 @@ impl App {
 
                     let is_collection = self.add_repo_collection_choice == Some(true);
 
-                    // Status line: scanning / folder count / nothing yet
-                    let status_text: Element<Message> = if self.add_repo_probe_loading {
-                        text("Scanning addon folders…").size(11).color(colors.muted).into()
-                    } else if let Some(probe) = self.add_repo_probe.as_ref() {
-                        if probe.addon_names.len() > 1 {
-                            let detail = if is_collection {
-                                let n = self.add_repo_selected_addons.len();
-                                format!("{} of {} folders selected", n, probe.addon_names.len())
-                            } else {
-                                format!("{} folders — installing as one addon", probe.addon_names.len())
-                            };
-                            text(detail).size(11).color(colors.muted).into()
-                        } else {
-                            Space::new().height(0).into()
-                        }
-                    } else {
-                        Space::new().height(0).into()
+                    if self.add_repo_probe_loading {
+                        return text("Scanning addon folders\u{2026}").size(11).color(colors.muted).into();
+                    }
+
+                    let Some(probe) = self.add_repo_probe.as_ref() else {
+                        return Space::new().height(0).into();
                     };
 
-                    status_text
+                    if probe.addon_names.len() <= 1 {
+                        return Space::new().height(0).into();
+                    }
+
+                    if is_collection {
+                        let n = self.add_repo_selected_addons.len();
+                        return text(format!("{} of {} folders selected", n, probe.addon_names.len()))
+                            .size(11)
+                            .color(colors.muted)
+                            .into();
+                    }
+
+                    // Single Addon mode with multiple TOCs: show pick list for Primary TOC
+                    let mut options = probe.addon_names.clone();
+                    options.sort();
+                    
+                    let current_selection = if self.add_repo_selected_addons.len() == 1 {
+                        self.add_repo_selected_addons.iter().next().cloned()
+                    } else {
+                        // Default to the first alphabetical one (matching engine fallback)
+                        options.first().cloned()
+                    };
+
+                    row![
+                        text("Main Addon:").size(12).color(colors.text),
+                        pick_list(options, current_selection, Message::SetAddRepoPrimaryAddon)
+                            .text_size(11)
+                            .padding([4, 8]),
+                        tip(
+                            text("\u{1f6c8}").size(14).color(colors.muted),
+                            "Multiple .toc files found at the root.\nSelect which one should define the addon folder name.",
+                            iced::widget::tooltip::Position::Bottom,
+                            colors,
+                        )
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center)
+                    .into()
                 };
 
                 // --- Footer: mode section + optional forge/release-notes + Cancel + Add ---
@@ -1522,8 +1569,8 @@ impl App {
                             .on_press(Message::OpenUrl(furl))
                             .padding([6, 10])
                             .style(move |_t, s| match s {
-                                button::Status::Hovered => theme::tab_button_hovered_style(&c),
-                                _ => theme::tab_button_style(&c),
+                                button::Status::Hovered => theme::tab_button_hovered_style(c),
+                                _ => theme::tab_button_style(c),
                             });
                             tip(
                                 forge_btn,
@@ -1549,8 +1596,8 @@ impl App {
                                 .on_press(msg)
                                 .padding([6, 10])
                                 .style(move |_t, s| match s {
-                                    button::Status::Hovered => theme::tab_button_hovered_style(&c),
-                                    _ => theme::tab_button_style(&c),
+                                    button::Status::Hovered => theme::tab_button_hovered_style(c),
+                                    _ => theme::tab_button_style(c),
                                 });
                             tip(rn_btn, rn_tip, iced::widget::tooltip::Position::Top, colors)
                         });
@@ -1569,8 +1616,8 @@ impl App {
                             .on_press(Message::CloseDialog)
                             .padding([6, 14])
                             .style(move |_t, s| match s {
-                                button::Status::Hovered => theme::tab_button_hovered_style(&c),
-                                _ => theme::tab_button_style(&c),
+                                button::Status::Hovered => theme::tab_button_hovered_style(c),
+                                _ => theme::tab_button_style(c),
                             })
                             .into(),
                     );
@@ -1615,11 +1662,11 @@ impl App {
                         let mut add_btn = button(text(add_label).size(13)).padding([6, 14]).style(
                             move |_t, _s| {
                                 if manage_mode {
-                                    theme::tab_button_active_style(&c)
+                                    theme::tab_button_active_style(colors)
                                 } else if is_installed {
-                                    theme::tab_button_style(&c)
+                                    theme::tab_button_style(colors)
                                 } else {
-                                    theme::tab_button_active_style(&c)
+                                    theme::tab_button_active_style(colors)
                                 }
                             },
                         );
@@ -1925,7 +1972,7 @@ impl App {
                             };
                             sidebar_col.push(
                                 rule::horizontal(1)
-                                    .style(move |_t| theme::update_line_style(&c_divider))
+                                    .style(move |_t| theme::update_line_style(c_divider))
                                     .into(),
                             );
                             let files_label: Element<Message> = if detected_collection_addons.is_empty() {
@@ -2430,7 +2477,7 @@ impl App {
                                 .width(Length::Fill)
                                 .height(Length::Fill)
                                 .direction(theme::vscroll())
-                                .style(move |t, s| theme::scrollable_style(&c_sp)(t, s))
+                                .style(move |t, s| theme::scrollable_style(c_sp)(t, s))
                                 .into(),
                             );
                         }
@@ -2469,7 +2516,7 @@ impl App {
                     .width(280)
                     .height(Length::Fill)
                     .padding([16, 10])
-                    .style(move |_theme| theme::dialog_style(&c_sp));
+                    .style(move |_theme| theme::dialog_style(c_sp));
 
                     // --- MAIN FORM CARD ---
                     // Build the content label row \u{2014} includes source toggle when showing README
@@ -2505,8 +2552,8 @@ impl App {
                                 .on_press(Message::ToggleReadmeSourceView)
                                 .padding([3, 8])
                                 .style(move |_theme, status| match status {
-                                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                                    _ => theme::tab_button_style(&c2),
+                                    button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                                    _ => theme::tab_button_style(c2),
                                 });
                             row![readme_label, Space::new().width(Length::Fill), source_btn,]
                                 .align_y(iced::Alignment::Center)
@@ -2529,7 +2576,7 @@ impl App {
                             )
                             .height(Length::Fill)
                             .direction(theme::vscroll())
-                            .style(move |t, s| theme::scrollable_style(&c_form)(t, s)),
+                            .style(move |t, s| theme::scrollable_style(c_form)(t, s)),
                         )
                         .width(Length::Fill)
                         .height(Length::Fill)
@@ -2597,7 +2644,7 @@ impl App {
                                         container(column(col_items).spacing(3))
                                             .width(Length::Fill)
                                             .padding([8, 12])
-                                            .style(move |_t| theme::card_style(&c_rl))
+                                            .style(move |_t| theme::card_style(c_rl))
                                             .into()
                                     })
                                     .collect();
@@ -2606,7 +2653,7 @@ impl App {
                                 )
                                 .height(Length::Fill)
                                 .direction(theme::vscroll())
-                                .style(move |t, s| theme::scrollable_style(&c_rl)(t, s))
+                                .style(move |t, s| theme::scrollable_style(c_rl)(t, s))
                                 .into()
                             }
                         } else {
@@ -2705,7 +2752,7 @@ impl App {
                             iced::widget::scrollable(readme_view)
                                 .height(Length::Fill)
                                 .direction(theme::vscroll())
-                                .style(move |t, s| theme::scrollable_style(&c_form)(t, s))
+                                .style(move |t, s| theme::scrollable_style(c_form)(t, s))
                                 .into()
                         };
                         // Wrap the scrollable in a dark card (source toggle now lives on the label row)
@@ -2767,11 +2814,11 @@ impl App {
                             row![
                                 text(title).size(17).color(colors.title),
                                 Space::new().width(Length::Fill),
-                                close_button(&c_form),
+                                close_button(c_form),
                             ]
                             .align_y(iced::Alignment::Center),
                             text(subtitle).size(12).color(colors.text_soft),
-                            rule::horizontal(1).style(move |_t| theme::update_line_style(&c_form)),
+                            rule::horizontal(1).style(move |_t| theme::update_line_style(c_form)),
                             text(url_label).size(12).color(colors.text),
                             url_row,
                             build_collection_section(),
@@ -2779,7 +2826,7 @@ impl App {
                             content_label,
                             // Scrollable content fills remaining space
                             scrollable_content,
-                            rule::horizontal(1).style(move |_t| theme::update_line_style(&c_form)),
+                            rule::horizontal(1).style(move |_t| theme::update_line_style(c_form)),
                             footer,
                         ]
                         .spacing(6)
@@ -2788,7 +2835,7 @@ impl App {
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .padding([16, 20])
-                    .style(move |_theme| theme::dialog_style(&c_form));
+                    .style(move |_theme| theme::dialog_style(c_form));
 
                     row![sidebar_card, form_card]
                         .spacing(8)
@@ -2836,7 +2883,7 @@ impl App {
                                 iced::widget::scrollable(body_content)
                                     .height(Length::Fill)
                                     .direction(theme::vscroll())
-                                    .style(move |t, s| theme::scrollable_style(&c)(t, s)),
+                                    .style(move |t, s| theme::scrollable_style(c)(t, s)),
                             ]
                             .spacing(4)
                             .height(Length::Fill)
@@ -2849,16 +2896,16 @@ impl App {
                         row![
                             text(title).size(17).color(colors.title),
                             Space::new().width(Length::Fill),
-                            close_button(&c),
+                            close_button(c),
                         ]
                         .align_y(iced::Alignment::Center),
                         text(subtitle).size(12).color(colors.text_soft),
-                        rule::horizontal(1).style(move |_t| theme::update_line_style(&c)),
+                        rule::horizontal(1).style(move |_t| theme::update_line_style(c)),
                         text(url_label).size(12).color(colors.text),
                         url_row,
                         build_collection_section(),
                         body_section,
-                        rule::horizontal(1).style(move |_t| theme::update_line_style(&c)),
+                        rule::horizontal(1).style(move |_t| theme::update_line_style(c)),
                         footer,
                     ]
                     .spacing(6)
@@ -2917,7 +2964,7 @@ impl App {
                     ))
                     .height(Length::Fixed(480.0))
                     .direction(theme::vscroll())
-                    .style(move |t, s| theme::scrollable_style(&c)(t, s))
+                    .style(move |t, s| theme::scrollable_style(c)(t, s))
                     .into()
                 };
                 column![
@@ -2930,7 +2977,7 @@ impl App {
                             })
                             .color(colors.title),
                         Space::new().width(Length::Fill),
-                        close_button(&c),
+                        close_button(c),
                     ]
                     .align_y(iced::Alignment::Center),
                     body,
@@ -2973,7 +3020,7 @@ impl App {
                     scrollable(column(file_rows).spacing(0).width(Length::Fill))
                         .height(iced::Length::Fixed(160.0))
                         .direction(theme::vscroll_overlay())
-                        .style(move |t, s| theme::scrollable_style(&c)(t, s))
+                        .style(move |t, s| theme::scrollable_style(c)(t, s))
                         .into()
                 };
 
@@ -2998,7 +3045,7 @@ impl App {
                     row![
                         text("Remove Repository").size(18).color(colors.title),
                         Space::new().width(Length::Fill),
-                        close_button(&c),
+                        close_button(c),
                     ].align_y(iced::Alignment::Center),
                     text(format!("Remove \"{}\" from Wuddle?", name))
                         .size(13)
@@ -3021,8 +3068,8 @@ impl App {
                             .on_press(Message::CloseDialog)
                             .padding([6, 12])
                             .style(move |_theme, status| match status {
-                                button::Status::Hovered => theme::tab_button_hovered_style(&c),
-                                _ => theme::tab_button_style(&c),
+                                button::Status::Hovered => theme::tab_button_hovered_style(c),
+                                _ => theme::tab_button_style(c),
                             }),
                         {
                             let c2 = c;
@@ -3032,7 +3079,7 @@ impl App {
                                     .on_press(Message::RemoveRepoConfirm(rid, rf))
                                     .padding([6, 12])
                                     .style(move |_theme, _status| {
-                                        let mut s = theme::tab_button_style(&c2);
+                                        let mut s = theme::tab_button_style(c2);
                                         s.border.color = c2.bad;
                                         s
                                     }),
@@ -3073,7 +3120,7 @@ impl App {
                     scrollable(column(file_rows).spacing(0).width(Length::Fill))
                         .height(iced::Length::Fixed(120.0))
                         .direction(theme::vscroll_overlay())
-                        .style(move |t, s| theme::scrollable_style(&c)(t, s)),
+                        .style(move |t, s| theme::scrollable_style(c)(t, s)),
                 )
                 .width(Length::Fill)
                 .padding([6, 0])
@@ -3092,7 +3139,7 @@ impl App {
                     row![
                         text("Remove Collection Addon").size(18).color(colors.title),
                         Space::new().width(Length::Fill),
-                        close_button(&c),
+                        close_button(c),
                     ]
                     .align_y(iced::Alignment::Center),
                     text(format!(
@@ -3114,8 +3161,8 @@ impl App {
                             .on_press(Message::CloseDialog)
                             .padding([6, 12])
                             .style(move |_theme, status| match status {
-                                button::Status::Hovered => theme::tab_button_hovered_style(&c),
-                                _ => theme::tab_button_style(&c),
+                                button::Status::Hovered => theme::tab_button_hovered_style(c),
+                                _ => theme::tab_button_style(c),
                             }),
                         {
                             let c2 = c;
@@ -3127,7 +3174,7 @@ impl App {
                                     })
                                     .padding([6, 12])
                                     .style(move |_theme, _status| {
-                                        let mut s = theme::tab_button_style(&c2);
+                                        let mut s = theme::tab_button_style(c2);
                                         s.border.color = c2.bad;
                                         s
                                     }),
@@ -3176,7 +3223,7 @@ impl App {
                     row![
                         text("DLL File Count Changed").size(18).color(colors.title),
                         Space::new().width(Length::Fill),
-                        close_button(&c),
+                        close_button(c),
                     ]
                     .align_y(iced::Alignment::Center),
                     text(format!("\"{}\"", repo_name))
@@ -3206,8 +3253,8 @@ impl App {
                             .width(Length::FillPortion(1))
                             .style(
                                 move |_theme, status| match status {
-                                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                                    _ => theme::tab_button_style(&c2),
+                                    button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                                    _ => theme::tab_button_style(c2),
                                 },
                             )
                         },
@@ -3230,8 +3277,8 @@ impl App {
                             .width(Length::FillPortion(1))
                             .style(
                                 move |_theme, status| match status {
-                                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                                    _ => theme::tab_button_style(&c2),
+                                    button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                                    _ => theme::tab_button_style(c2),
                                 },
                             )
                         },
@@ -3280,12 +3327,12 @@ impl App {
                         )))
                         .padding([4, 10]);
                     if is_active {
-                        btn.style(move |_t, _s| theme::tab_button_active_style(&c2))
+                        btn.style(move |_t, _s| theme::tab_button_active_style(c2))
                             .into()
                     } else {
                         btn.style(move |_t, s| match s {
-                            button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                            _ => theme::tab_button_style(&c2),
+                            button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                            _ => theme::tab_button_style(c2),
                         })
                         .into()
                     }
@@ -3352,7 +3399,7 @@ impl App {
                     row![
                         text(title_text).size(18).color(colors.title),
                         Space::new().width(Length::Fill),
-                        close_button(&c),
+                        close_button(c),
                     ]
                     .align_y(iced::Alignment::Center),
                     text("Configure name, game path, and launch behavior for this instance.")
@@ -3376,9 +3423,9 @@ impl App {
                                     .padding([8, 12])
                                     .style(move |_t, s| match s {
                                         button::Status::Hovered => {
-                                            theme::tab_button_hovered_style(&c2)
+                                            theme::tab_button_hovered_style(c2)
                                         }
-                                        _ => theme::tab_button_style(&c2),
+                                        _ => theme::tab_button_style(c2),
                                     }),
                                 "Pick the WoW installation folder",
                                 iced::widget::tooltip::Position::Top,
@@ -3393,9 +3440,9 @@ impl App {
                                     .padding([8, 12])
                                     .style(move |_t, s| match s {
                                         button::Status::Hovered => {
-                                            theme::tab_button_hovered_style(&c2)
+                                            theme::tab_button_hovered_style(c2)
                                         }
-                                        _ => theme::tab_button_style(&c2),
+                                        _ => theme::tab_button_style(c2),
                                     }),
                                 "Pick a specific game executable for Auto launch",
                                 iced::widget::tooltip::Position::Top,
@@ -3440,7 +3487,7 @@ impl App {
                                             .color(c2.text),
                                     )
                                     .padding([4, 8])
-                                    .style(move |_theme| theme::tooltip_style(&c2)),
+                                    .style(move |_theme| theme::tooltip_style(c2)),
                                     iced::widget::tooltip::Position::Top,
                                 )
                                 .into()
@@ -3449,7 +3496,7 @@ impl App {
                                     .on_press(Message::RemoveProfile(remove_id))
                                     .padding([6, 14])
                                     .style(move |_theme, _status| {
-                                        let mut s = theme::tab_button_style(&c2);
+                                        let mut s = theme::tab_button_style(c2);
                                         s.border.color = c2.bad;
                                         s
                                     });
@@ -3468,8 +3515,8 @@ impl App {
                                 .on_press(Message::CloseDialog)
                                 .padding([6, 14])
                                 .style(move |_theme, status| match status {
-                                    button::Status::Hovered => theme::tab_button_hovered_style(&c),
-                                    _ => theme::tab_button_style(&c),
+                                    button::Status::Hovered => theme::tab_button_hovered_style(c),
+                                    _ => theme::tab_button_style(c),
                                 })
                                 .into(),
                         );
@@ -3477,7 +3524,7 @@ impl App {
                             button(text("Save").size(13))
                                 .on_press(Message::SaveInstanceSettings)
                                 .padding([6, 14])
-                                .style(move |_theme, _status| theme::tab_button_active_style(&c)),
+                                .style(move |_theme, _status| theme::tab_button_active_style(c)),
                             "Save instance settings",
                             iced::widget::tooltip::Position::Top,
                             colors,
@@ -3503,7 +3550,22 @@ impl App {
                 url,
                 mode,
                 conflicts,
-            } => addon_conflict(url, mode, conflicts, colors),
+                pending_repo_id,
+                new_repo_label,
+                existing_repos,
+                selected_addons,
+                new_repo_preview,
+            } => addon_conflict(
+                url,
+                mode,
+                conflicts,
+                *pending_repo_id,
+                new_repo_label,
+                existing_repos,
+                selected_addons,
+                new_repo_preview.as_deref(),
+                colors,
+            ),
             Dialog::CollectionAddonConflict {
                 repo_id,
                 repo_name,
@@ -3521,7 +3583,7 @@ impl App {
             ),
 
             Dialog::CollectionChoice { url, addon_names } => {
-                let c = *colors;
+                let c = colors;
                 let count = addon_names.len();
                 let domain = url
                     .trim_start_matches("https://")
@@ -3534,7 +3596,7 @@ impl App {
                     row![
                         text("Multiple addon folders detected").size(15).color(colors.title),
                         Space::new().width(Length::Fill),
-                        close_button(&c),
+                        close_button(c),
                     ]
                     .align_y(iced::Alignment::Center)
                     .into(),
@@ -3545,7 +3607,7 @@ impl App {
                     .size(12)
                     .color(colors.text_soft)
                     .into(),
-                    rule::horizontal(1).style(move |_t| theme::update_line_style(&c)).into(),
+                    rule::horizontal(1).style(move |_t| theme::update_line_style(c)).into(),
                 ];
 
                 // Show addon folder list (up to 8, then "… and N more")
@@ -3570,7 +3632,7 @@ impl App {
                     );
                 }
 
-                rows.push(rule::horizontal(1).style(move |_t| theme::update_line_style(&c)).into());
+                rows.push(rule::horizontal(1).style(move |_t| theme::update_line_style(c)).into());
 
                 rows.push(
                     column![
@@ -3586,7 +3648,7 @@ impl App {
                         .on_press(Message::SetAddRepoCollectionMode(true))
                         .width(Length::Fill)
                         .padding([10, 14])
-                        .style(move |_t, _s| theme::tab_button_style(&c)),
+                        .style(move |_t, _s| theme::tab_button_style(c)),
                         button(
                             column![
                                 text("Single addon with modules").size(13).color(colors.text),
@@ -3599,7 +3661,7 @@ impl App {
                         .on_press(Message::SetAddRepoCollectionMode(false))
                         .width(Length::Fill)
                         .padding([10, 14])
-                        .style(move |_t, _s| theme::tab_button_style(&c)),
+                        .style(move |_t, _s| theme::tab_button_style(c)),
                     ]
                     .spacing(6)
                     .into(),
@@ -3608,14 +3670,125 @@ impl App {
                 container(column(rows).spacing(10))
                     .padding([16, 20])
                     .width(Length::Fill)
-                    .style(move |_t| theme::dialog_style(&c))
+                    .style(move |_t| theme::dialog_style(c))
+                    .into()
+            }
+
+            Dialog::SelectMainAddon { url, options, suggested } => {
+                let c = colors;
+                let domain = url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .splitn(4, '/')
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join("/");
+
+                let mut rows: Vec<Element<Message>> = vec![
+                    row![
+                        text("Primary Addon Selection").size(15).color(colors.title),
+                        Space::new().width(Length::Fill),
+                        close_button(c),
+                    ]
+                    .align_y(iced::Alignment::Center)
+                    .into(),
+                    text(format!(
+                        "\"{}\" contains multiple .toc files at the root. Which one should define the folder name?",
+                        domain
+                    ))
+                    .size(12)
+                    .color(colors.text_soft)
+                    .into(),
+                ];
+
+                let mut scroll_rows = Vec::new();
+                let mut sorted_options = options.clone();
+                sorted_options.sort_by_key(|n| n.to_ascii_lowercase());
+
+                for name in sorted_options {
+                    let name_cb = name.clone();
+                    let is_suggested = suggested.as_ref().map(|s| s == &name).unwrap_or(false);
+
+                    let mut row_items = vec![
+                        text("\u{1f4c1}").size(14).color(colors.muted).into(),
+                        text(name).size(13).color(colors.text).into(),
+                    ];
+
+                    if is_suggested {
+                        row_items.push(Space::new().width(Length::Fill).into());
+                        row_items.push(
+                            tip(
+                                container(text("Suggested").size(13).color(colors.good))
+                                    .padding([2, 6])
+                                    .style(move |_t| theme::badge_suggested_style(c)),
+                                "This version is suggested based on the detected WoW client version number.",
+                                iced::widget::tooltip::Position::Top,
+                                colors,
+                            )
+                        );
+                    }
+
+                    scroll_rows.push(
+                        button(
+                            row(row_items)
+                                .spacing(10)
+                                .align_y(iced::Alignment::Center)
+                        )
+                        .on_press(Message::SetAddRepoPrimaryAddon(name_cb))
+                        .width(Length::Fill)
+                        .padding([10, 14])
+                        .style(move |_t, s| match s {
+                            button::Status::Hovered => theme::tab_button_hovered_style(c),
+                            _ => theme::tab_button_style(c),
+                        })
+                        .into()
+                    );
+                }
+
+                rows.push(
+                    scrollable(column(scroll_rows).spacing(6))
+                        .height(Length::Shrink)
+                        .into()
+                );
+                
+                rows.push(
+                    row![
+                        Space::new().width(Length::Fill),
+                        button(text("Install as Collection instead").size(11))
+                            .on_press(Message::SetAddRepoCollectionMode(true))
+                            .padding([6, 12])
+                            .style(move |_t, status| {
+                                let c = colors.muted;
+                                let is_hovered = matches!(status, button::Status::Hovered);
+                                let alpha_text = if is_hovered { 0.8 } else { 0.5 };
+                                let alpha_border = if is_hovered { 0.4 } else { 0.2 };
+                                
+                                button::Style {
+                                     background: None,
+                                     text_color: Color { a: alpha_text, ..c },
+                                     border: iced::Border {
+                                         color: Color { a: alpha_border, ..c },
+                                         width: 1.0,
+                                         radius: 4.0.into(),
+                                     },
+                                     shadow: iced::Shadow::default(),
+                                     snap: true,
+                                }
+                            }),
+                    ]
+                    .into()
+                );
+
+                column(rows)
+                    .spacing(10)
+                    .width(Length::Fixed(440.0))
                     .into()
             }
         }
     }
 
-    pub fn view_topbar(&self, colors: &ThemeColors) -> Element<'_, Message> {
-        let c = *colors;
+    pub fn view_topbar(&self, colors: ThemeColors) -> Element<'_, Message> {
+        let c = colors;
 
         let title = text("Wuddle")
             .size(44)
@@ -3711,7 +3884,7 @@ impl App {
                 .text_size(13)
                 .into();
 
-            let divider = rule::vertical(1).style(move |_theme| theme::divider_style(&c));
+            let divider = rule::vertical(1).style(move |_theme| theme::divider_style(c));
             right_items.push(profile_picker);
             right_items.push(divider.into());
         }
@@ -3753,13 +3926,13 @@ impl App {
 
         container(bar)
             .width(Length::Fill)
-            .style(move |_theme| theme::topbar_style(&c))
+            .style(move |_theme| theme::topbar_style(c))
             .into()
     }
 
-    pub fn view_tab_button(&self, tab: Tab, colors: &ThemeColors) -> Element<'_, Message> {
+    pub fn view_tab_button(&self, tab: Tab, colors: ThemeColors) -> Element<'_, Message> {
         let is_active = self.active_tab == tab;
-        let c = *colors;
+        let c = colors;
 
         let is_icon = matches!(tab, Tab::Options | Tab::Logs);
         // About uses its Unicode \u{24d8} glyph \u{2014} compact width like SVG icon tabs
@@ -3806,13 +3979,13 @@ impl App {
             });
 
         let styled_btn: Element<Message> = if is_active {
-            btn.style(move |_theme, _status| theme::tab_button_active_style(&c))
+            btn.style(move |_theme, _status| theme::tab_button_active_style(c))
                 .into()
         } else {
             btn.style(move |_theme, status| match status {
-                button::Status::Hovered => theme::tab_button_hovered_style(&c),
-                button::Status::Pressed => theme::tab_button_active_style(&c),
-                _ => theme::tab_button_style(&c),
+                button::Status::Hovered => theme::tab_button_hovered_style(c),
+                button::Status::Pressed => theme::tab_button_active_style(c),
+                _ => theme::tab_button_style(c),
             })
             .into()
         };
@@ -3823,7 +3996,7 @@ impl App {
                 styled_btn,
                 container(text(tab.tooltip()).size(13).color(c.text))
                     .padding([3, 8])
-                    .style(move |_theme| theme::tooltip_style(&c)),
+                    .style(move |_theme| theme::tooltip_style(c)),
                 iced::widget::tooltip::Position::Bottom,
             )
             .into()
@@ -3832,7 +4005,7 @@ impl App {
         }
     }
 
-    pub fn view_panel(&self, colors: &ThemeColors) -> Element<'_, Message> {
+    pub fn view_panel(&self, colors: ThemeColors) -> Element<'_, Message> {
         let content: Element<Message> = match self.active_tab {
             Tab::Home => panels::home::view(self, colors),
             Tab::Mods => panels::projects::view(self, colors, "Mods"),
@@ -3850,8 +4023,8 @@ impl App {
             .into()
     }
 
-    pub fn view_footer(&self, colors: &ThemeColors) -> Element<'_, Message> {
-        let c = *colors;
+    pub fn view_footer(&self, colors: ThemeColors) -> Element<'_, Message> {
+        let c = colors;
 
         let hint: Element<Message> = if self.wow_dir.is_empty() {
             text("No WoW directory set. Go to Options to configure.")
@@ -3908,7 +4081,7 @@ impl App {
                 tooltip_content,
                 iced::widget::tooltip::Position::Top,
             )
-            .style(move |_t| theme::tooltip_style(&c))
+            .style(move |_t| theme::tooltip_style(c))
             .into()
         };
 
@@ -3917,8 +4090,8 @@ impl App {
             .padding([10, 36])
             .width(108)
             .style(move |_theme, status| match status {
-                button::Status::Hovered => theme::play_button_hovered_style(&c),
-                _ => theme::play_button_style(&c),
+                button::Status::Hovered => theme::play_button_hovered_style(c),
+                _ => theme::play_button_style(c),
             });
         let bar = row![hint, Space::new().width(Length::Fill), play_btn,]
             .spacing(12)
@@ -3927,7 +4100,7 @@ impl App {
 
         container(bar)
             .width(Length::Fill)
-            .style(move |_theme| theme::footer_style(&c))
+            .style(move |_theme| theme::footer_style(c))
             .into()
     }
 }

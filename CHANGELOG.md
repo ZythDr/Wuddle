@@ -2,6 +2,21 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.2.5
+
+### New Features
+- **Intelligent Addon Suggestions** — Automatically badges the most compatible addon version during installation based on the detected WoW client version.
+- **Fast GitHub Repository Probing** — Utilizes the GitHub Tree API to analyze repository structures and detect nested addons in milliseconds without requiring a full git clone.
+- **Primary Addon Selection UI** — A new selection dialog for repositories with multiple .toc files that allows users to explicitly choose which version defines the addon folder name.
+
+### Improvements
+- **Multi-TOC Health Support** — Updated tracked addon health checks to correctly support folders containing multiple .toc files.
+- **Robust Manual Pruning** — Enhanced maintenance logic to protect manual repositories with multiple expansion versions from incorrect database pruning.
+- **Refined Dialog Aesthetics** — Removed redundant internal borders and increased internal padding for a cleaner, more spacious dialog interface.
+- **Enhanced Visual Feedback** — Added a translucent suggestion badge style with high-contrast outlines and descriptive tooltips explaining the suggestion logic.
+- **Optimized Secondary Selection** — Refined the "Install as Collection instead" button with subtle bordering and dimmed text for a more distinct secondary action.
+- **Engine Reliability** — Improved error handling and folder detection robustness in the `wuddle-engine` library for complex repository structures.
+
 ## v3.2.4
 
 ### New Features

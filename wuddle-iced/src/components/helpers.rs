@@ -15,15 +15,15 @@ pub fn tip<'a>(
     content: impl Into<Element<'a, Message>>,
     tip_text: &str,
     pos: iced::widget::tooltip::Position,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let tip_str = String::from(tip_text);
     iced::widget::tooltip(
         content,
         container(text(tip_str).size(13).color(c.text))
             .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(&c)),
+            .style(move |_theme| theme::tooltip_style(c)),
         pos,
     )
     .gap(4.0)
@@ -34,8 +34,8 @@ pub fn tip<'a>(
 // Close button (dialog ✕)
 // ---------------------------------------------------------------------------
 
-pub fn close_button<'a>(colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+pub fn close_button<'a>(colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     button(text("\u{2715}").size(14).color(c.bad)) // ✕ in red
         .on_press(Message::CloseDialog)
         .padding([4, 8])
@@ -95,14 +95,14 @@ pub fn badge_tag<'a>(
 // Context menu item
 // ---------------------------------------------------------------------------
 
-pub fn ctx_menu_item<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+pub fn ctx_menu_item<'a>(label: &str, msg: Message, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     button(text(String::from(label)).size(12))
         .on_press(msg)
         .padding([6, 12])
         .width(Length::Fill)
         .style(move |_theme, status| match status {
-            button::Status::Hovered => theme::tab_button_hovered_style(&c),
+            button::Status::Hovered => theme::tab_button_hovered_style(c),
             _ => button::Style {
                 background: None,
                 text_color: c.text,
@@ -123,9 +123,9 @@ pub fn inline_context_menu<'a>(
     app: &crate::App,
     repo: &service::RepoRow,
     collection_addon: Option<&str>,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let rid = repo.id;
     let has_update = app.plans.iter().any(|p| p.repo_id == rid && p.has_update);
     let enabled = repo.enabled;
@@ -136,14 +136,14 @@ pub fn inline_context_menu<'a>(
     let mut items: Vec<Element<Message>> = Vec::new();
 
     if has_update && !update_ignored {
-        items.push(ctx_menu_item("\u{2193} Update", Message::UpdateRepo(rid), &c));
+        items.push(ctx_menu_item("\u{2193} Update", Message::UpdateRepo(rid), c));
     }
-    items.push(ctx_menu_item("Reinstall / Repair", Message::ReinstallRepo(rid), &c));
+    items.push(ctx_menu_item("Reinstall / Repair", Message::ReinstallRepo(rid), c));
     if let Some(addon_name) = collection_addon {
         items.push(ctx_menu_item(
             "Manage Collection\u{2026}",
             Message::OpenCollectionManager(rid),
-            &c,
+            c,
         ));
         items.push(ctx_menu_item(
             "Browse\u{2026}",
@@ -151,31 +151,31 @@ pub fn inline_context_menu<'a>(
                 repo_id: rid,
                 addon_name: addon_name.to_string(),
             },
-            &c,
+            c,
         ));
     } else {
         if repo.is_collection {
             items.push(ctx_menu_item(
                 "Manage Collection\u{2026}",
                 Message::OpenCollectionManager(rid),
-                &c,
+                c,
             ));
         }
-        items.push(ctx_menu_item("Browse\u{2026}", Message::BrowseRepo(rid), &c));
+        items.push(ctx_menu_item("Browse\u{2026}", Message::BrowseRepo(rid), c));
     }
     if crate::panels::projects::is_dxvk_repo(&repo.name) {
-        items.push(ctx_menu_item("\u{2699} Configure DXVK\u{2026}", Message::OpenDxvkConfig, &c));
+        items.push(ctx_menu_item("\u{2699} Configure DXVK\u{2026}", Message::OpenDxvkConfig, c));
     }
     if is_mod_val {
         let label = if enabled { "Disable" } else { "Enable" };
-        items.push(ctx_menu_item(label, Message::ToggleRepoEnabled(rid, !enabled), &c));
+        items.push(ctx_menu_item(label, Message::ToggleRepoEnabled(rid, !enabled), c));
     }
     let ignore_label = if update_ignored { "Unignore Updates" } else { "Ignore Updates" };
-    items.push(ctx_menu_item(ignore_label, Message::ToggleIgnoreUpdates(rid), &c));
+    items.push(ctx_menu_item(ignore_label, Message::ToggleIgnoreUpdates(rid), c));
 
     if is_mod_val {
         let merge_label = if repo.merge_installs { "\u{2713} Merge Updates" } else { "Merge Updates" };
-        items.push(ctx_menu_item(merge_label, Message::ToggleMergeInstalls(rid, !repo.merge_installs), &c));
+        items.push(ctx_menu_item(merge_label, Message::ToggleMergeInstalls(rid, !repo.merge_installs), c));
     }
 
     let c3 = c;
@@ -199,7 +199,7 @@ pub fn inline_context_menu<'a>(
             .width(Length::Fill)
             .style(move |_theme, status| {
                 let mut s = match status {
-                    button::Status::Hovered => theme::tab_button_hovered_style(&c3),
+                    button::Status::Hovered => theme::tab_button_hovered_style(c3),
                     _ => button::Style {
                         background: None,
                         text_color: c3.text,
@@ -217,7 +217,7 @@ pub fn inline_context_menu<'a>(
     container(column(items).spacing(2))
         .padding(6)
         .width(200)
-        .style(move |_theme| theme::context_menu_style(&c))
+        .style(move |_theme| theme::context_menu_style(c))
         .into()
 }
 

@@ -11,9 +11,9 @@ pub fn view<'a>(
     items: &'a [iced::widget::markdown::Item],
     loading: bool,
     app_theme: &iced::Theme,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
 
     let body: Element<Message> = if loading {
         iced::widget::container(text("Loading changelog…").size(13).color(colors.muted))
@@ -34,7 +34,7 @@ pub fn view<'a>(
         scrollable(iced::widget::markdown::view_with(items, md_settings, &viewer))
             .height(Length::Fixed(480.0))
             .direction(theme::vscroll())
-            .style(move |t, s| theme::scrollable_style(&c)(t, s))
+            .style(move |t, s| theme::scrollable_style(c)(t, s))
             .into()
     };
 
@@ -42,7 +42,7 @@ pub fn view<'a>(
         row![
             text("Changelog").size(18).color(colors.title),
             Space::new().width(Length::Fill),
-            close_button(&c),
+            close_button(c),
         ]
         .align_y(iced::Alignment::Center),
         body,

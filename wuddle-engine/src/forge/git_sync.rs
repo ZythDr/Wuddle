@@ -178,16 +178,10 @@ fn choose_remote_head_with_url(
     for candidate in candidates {
         match choose_remote_head_for_url(&candidate, preferred_branch) {
             Ok(state) => return Ok((state, candidate)),
-            Err(e) => {
-                last_err = Some((candidate, e));
-            }
+            Err(e) => last_err = Some(e),
         }
     }
-
-    if let Some((candidate, e)) = last_err {
-        anyhow::bail!("connect remote {} (last tried {}): {}", url, candidate, e);
-    }
-    anyhow::bail!("connect remote {}", url);
+    Err(last_err.unwrap_or_else(|| anyhow!("Could not connect to git repository at {}", url)))
 }
 
 fn choose_remote_head_for_branch(

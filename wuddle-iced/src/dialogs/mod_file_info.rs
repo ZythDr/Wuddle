@@ -12,9 +12,9 @@ pub fn view<'a>(
     name: &'a str,
     items: &'a [markdown::Item],
     app_theme: &iced::Theme,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
 
     let mut md_style = markdown::Style::from(app_theme);
     md_style.link_color = colors.link;
@@ -53,12 +53,12 @@ pub fn view<'a>(
                     ..Default::default()
                 }),
             Space::new().width(Length::Fill),
-            close_button(&c),
+            close_button(c),
         ]
         .align_y(iced::Alignment::Center),
         scrollable(markdown::view_with(items, md_settings, &viewer))
             .height(400)
-            .style(move |t, s| theme::scrollable_style(&c)(t, s)),
+            .style(move |t, s| theme::scrollable_style(c)(t, s)),
     ]
     .spacing(16)
     .width(Length::Fixed(750.0))

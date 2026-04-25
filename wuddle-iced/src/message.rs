@@ -71,7 +71,20 @@ pub enum Message {
     GithubRateInfoResult(Option<service::GitHubRateInfo>),
     AddRepoSubmit,
     AddRepoResult(Result<i64, String>),
-    InstallAfterAddResult(Result<String, String>),
+    /// Result of the lightweight pre-install conflict check that runs after add_repo.
+    PreInstallConflictResult {
+        repo_id: i64,
+        result: Result<service::PreInstallConflictInfo, String>,
+    },
+    /// Result of the install that fires immediately after a repo is added.
+    /// Carries `repo_id` so the conflict handler can force-reinstall the right repo.
+    InstallAfterAddResult { repo_id: i64, result: Result<String, String> },
+    /// Fires when the user confirms overwriting file conflicts for a repo that is
+    /// already in the DB (the initial install attempt raised ADDON_CONFLICT).
+    InstallConflictOverride { repo_id: i64 },
+    /// Fires when the user clicks Cancel on the conflict dialog for a freshly-added
+    /// repo. Removes the repo from the DB so it doesn't remain tracked.
+    CancelConflictInstall { repo_id: i64 },
     RemoveRepoConfirm(i64, bool),
     ToggleRemoveFiles(bool),
     RemoveRepoFilesLoaded(Result<Vec<(String, String)>, String>),
@@ -107,13 +120,14 @@ pub enum Message {
     // Collection addon management
     OpenCollectionManager(i64),
     FetchCollectionProbe(String),
-    FetchCollectionProbeResult(Result<wuddle_engine::AddonProbeResult, String>),
+    FetchCollectionProbeResult(String, Result<wuddle_engine::AddonProbeResult, String>),
     SetAddRepoCollectionMode(bool),
     ToggleCollectionFolder(String),
     ToggleCollectionAddon(String),
     SaveCollectionSelection,
     SaveCollectionSelectionOverride { repo_id: i64, selected_addons: Vec<String> },
     SaveCollectionSelectionResult(Result<String, service::CollectionSelectionError>),
+    SetAddRepoPrimaryAddon(String),
     RemoveCollectionAddonPrompt { repo_id: i64, addon_name: String },
     RemoveCollectionAddonConfirm { repo_id: i64, addon_name: String },
 
@@ -181,7 +195,7 @@ pub enum Message {
     QuickInstallPreset(String),
     SetAddRepoUrl(String),
     FetchRepoPreview(String),
-    FetchRepoPreviewResult(Result<service::RepoPreviewInfo, String>),
+    FetchRepoPreviewResult(String, Result<service::RepoPreviewInfo, String>),
     ToggleAddRepoDir(String),
     PreviewRepoFile(String),
     PreviewRepoFileResult(Result<(String, String), String>),

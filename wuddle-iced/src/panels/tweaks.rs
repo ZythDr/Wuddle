@@ -4,8 +4,8 @@ use iced::{Element, Length};
 use crate::theme::{self, ThemeColors};
 use crate::{App, Message, TweakId};
 
-pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     let tv = &app.tweak_values;
     let t = &app.tweaks;
     let has_wow_dir = !app.wow_dir.is_empty();
@@ -35,10 +35,10 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         ]
         .spacing(2),
         Space::new().width(Length::Fill),
-        tip(btn_action("Read Current", tweaks_enabled.then_some(Message::ReadTweaks), &c), &format!("Read current tweak values from {}", tweak_target_name), tooltip::Position::Bottom, colors),
-        tip(btn("Reset to Default", Message::ResetTweaksToDefault, &c), "Reset all sliders to default values", tooltip::Position::Bottom, colors),
-        tip(btn_action("Restore", tweaks_enabled.then_some(Message::RestoreTweaks), &c), &format!("Restore {} from backup", tweak_target_name), tooltip::Position::Bottom, colors),
-        tip(btn_primary_action("Apply", tweaks_enabled.then_some(Message::ApplyTweaks), &c), &format!("Patch {} with selected tweaks (creates backup first)", tweak_target_name), tooltip::Position::Bottom, colors),
+        tip(btn_action("Read Current", tweaks_enabled.then_some(Message::ReadTweaks), c), &format!("Read current tweak values from {}", tweak_target_name), tooltip::Position::Bottom, colors),
+        tip(btn("Reset to Default", Message::ResetTweaksToDefault, c), "Reset all sliders to default values", tooltip::Position::Bottom, colors),
+        tip(btn_action("Restore", tweaks_enabled.then_some(Message::RestoreTweaks), c), &format!("Restore {} from backup", tweak_target_name), tooltip::Position::Bottom, colors),
+        tip(btn_primary_action("Apply", tweaks_enabled.then_some(Message::ApplyTweaks), c), &format!("Patch {} with selected tweaks (creates backup first)", tweak_target_name), tooltip::Position::Bottom, colors),
     ]
     .spacing(6)
     .align_y(iced::Alignment::Center);
@@ -123,7 +123,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             ),
         ]
         .spacing(8),
-        &c,
+        c,
     );
 
     // Camera section — height(Fill) stretches to match Rendering's natural height.
@@ -148,7 +148,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             ),
         ]
         .spacing(8),
-        &c,
+        c,
     );
 
     // Audio section
@@ -173,7 +173,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             ),
         ]
         .spacing(8),
-        &c,
+        c,
     );
 
     // System section — height(Fill) stretches to match Audio's natural height.
@@ -196,7 +196,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             ),
         ]
         .spacing(8),
-        &c,
+        c,
     );
 
     let footnote = text("* Raising this option too high can result in a severe loss of FPS/performance.")
@@ -216,7 +216,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     )
     .height(Length::Fill)
     .direction(theme::vscroll())
-    .style(move |t, s| theme::scrollable_style(&c)(t, s))
+    .style(move |t, s| theme::scrollable_style(c)(t, s))
     .into()
 }
 
@@ -231,7 +231,7 @@ fn tweak_row_slider<'a, F>(
     step: f32,
     on_change: F,
     value_display: String,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message>
 where
     F: 'a + Fn(f32) -> Message,
@@ -263,7 +263,7 @@ fn tweak_row_check<'a>(
     desc: &str,
     id: TweakId,
     checked: bool,
-    _colors: &ThemeColors,
+    _colors: ThemeColors,
 ) -> Element<'a, Message> {
     column![
         checkbox(checked)
@@ -285,7 +285,7 @@ fn tweak_row_input<'a, F>(
     checked: bool,
     value_str: &str,
     on_change: F,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message>
 where
     F: 'a + Fn(String) -> Message,
@@ -312,12 +312,12 @@ where
 
 fn settings_card<'a>(
     content: impl Into<Element<'a, Message>>,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     container(container(content).padding(16))
         .width(Length::Fill)
-        .style(move |_theme| theme::card_style(&c))
+        .style(move |_theme| theme::card_style(c))
         .into()
 }
 
@@ -325,37 +325,37 @@ fn settings_card<'a>(
 /// so sibling cards in the same row always match the tallest card's height.
 fn settings_card_fill<'a>(
     content: impl Into<Element<'a, Message>>,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     container(container(content).padding(16))
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(move |_theme| theme::card_style(&c))
+        .style(move |_theme| theme::card_style(c))
         .into()
 }
 
 /// Wrap any element in a tooltip with consistent styling.
-fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     let tip_str = String::from(tip_text);
     tooltip(
         content,
         container(text(tip_str).size(13).color(c.text))
             .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(&c)),
+            .style(move |_theme| theme::tooltip_style(c)),
         pos,
     )
     .gap(4.0)
     .into()
 }
 
-fn btn<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
+fn btn<'a>(label: &str, msg: Message, colors: ThemeColors) -> Element<'a, Message> {
     btn_action(label, Some(msg), colors)
 }
 
-fn btn_action<'a>(label: &str, msg: Option<Message>, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn btn_action<'a>(label: &str, msg: Option<Message>, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     let mut button = button(text(String::from(label)).size(13));
     if let Some(ref message) = msg {
         button = button.on_press(message.clone());
@@ -363,11 +363,11 @@ fn btn_action<'a>(label: &str, msg: Option<Message>, colors: &ThemeColors) -> El
     button
         .padding([6, 12])
         .style(move |_theme, status| match status {
-            button::Status::Hovered if msg.is_some() => theme::tab_button_hovered_style(&c),
-            button::Status::Pressed if msg.is_some() => theme::tab_button_active_style(&c),
-            _ if msg.is_some() => theme::tab_button_style(&c),
+            button::Status::Hovered if msg.is_some() => theme::tab_button_hovered_style(c),
+            button::Status::Pressed if msg.is_some() => theme::tab_button_active_style(c),
+            _ if msg.is_some() => theme::tab_button_style(c),
             _ => {
-                let mut style = theme::tab_button_style(&c);
+                let mut style = theme::tab_button_style(c);
                 style.text_color = c.muted;
                 style
             }
@@ -375,8 +375,8 @@ fn btn_action<'a>(label: &str, msg: Option<Message>, colors: &ThemeColors) -> El
         .into()
 }
 
-fn btn_primary_action<'a>(label: &str, msg: Option<Message>, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn btn_primary_action<'a>(label: &str, msg: Option<Message>, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     let mut button = button(text(String::from(label)).size(13));
     if let Some(ref message) = msg {
         button = button.on_press(message.clone());
@@ -385,9 +385,9 @@ fn btn_primary_action<'a>(label: &str, msg: Option<Message>, colors: &ThemeColor
         .padding([6, 12])
         .style(move |_theme, _status| {
             if msg.is_some() {
-                theme::tab_button_active_style(&c)
+                theme::tab_button_active_style(c)
             } else {
-                let mut style = theme::tab_button_style(&c);
+                let mut style = theme::tab_button_style(c);
                 style.text_color = c.muted;
                 style
             }

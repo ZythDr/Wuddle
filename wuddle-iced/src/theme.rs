@@ -7,7 +7,6 @@ use iced::widget::rule;
 use iced::widget::text_editor;
 use iced::{Border, Color, Font, Gradient, Radians, Shadow, Theme, Vector};
 
-
 pub const LIFECRAFT: Font = Font::with_name("LifeCraft");
 pub const FRIZ: Font = Font::with_name("Friz Quadrata Std");
 pub const NOTO: Font = Font::with_name("Noto Sans");
@@ -28,7 +27,7 @@ impl Default for WuddleTheme {
     }
 }
 
-/// Extended color palette for Wuddle themes — covers gradients, borders, etc.
+/// Extended color palette for Wuddle themes — covers gradients, borders, etcolors.
 #[derive(Debug, Clone, Copy)]
 pub struct ThemeColors {
     pub bg: Color,
@@ -81,9 +80,9 @@ pub struct ThemeColors {
     pub border: Color,
 
     // Background gradient (approximates the radial orange+blue gradient)
-    pub bg_grad_start: Color,  // top-left (orange-tinted)
-    pub bg_grad_mid: Color,    // center
-    pub bg_grad_end: Color,    // bottom
+    pub bg_grad_start: Color, // top-left (orange-tinted)
+    pub bg_grad_mid: Color,   // center
+    pub bg_grad_end: Color,   // bottom
 
     /// Body text font (Friz Quadrata when enabled, system default otherwise)
     pub body_font: Font,
@@ -166,9 +165,9 @@ impl WuddleTheme {
                 footer_top: hex(0x33231a),
                 footer_bottom: hex(0x100e16),
                 border: rgba(196, 136, 73, 0.30),
-                bg_grad_start: hex(0x1f1614),  // top (warm brown, blending Tauri's orange radial)
-                bg_grad_mid: hex(0x0f0c12),    // middle
-                bg_grad_end: hex(0x090a0e),     // bottom
+                bg_grad_start: hex(0x1f1614), // top (warm brown, blending Tauri's orange radial)
+                bg_grad_mid: hex(0x0f0c12),   // middle
+                bg_grad_end: hex(0x090a0e),   // bottom
                 body_font: Font::DEFAULT,
             },
             WuddleTheme::Obsidian => ThemeColors {
@@ -339,16 +338,16 @@ impl WuddleTheme {
     }
 
     pub fn to_iced_theme(self) -> Theme {
-        let c = self.colors();
+        let colors = self.colors();
         Theme::custom(
             self.label().to_string(),
             Palette {
-                background: c.bg,
-                text: c.text,
-                primary: c.primary,
-                success: c.good,
-                warning: c.warn,
-                danger: c.bad,
+                background: colors.bg,
+                text: colors.text,
+                primary: colors.primary,
+                success: colors.good,
+                warning: colors.warn,
+                danger: colors.bad,
             },
         )
     }
@@ -359,7 +358,7 @@ impl WuddleTheme {
 // ---------------------------------------------------------------------------
 
 /// Tab button — idle state
-pub fn tab_button_style(colors: &ThemeColors) -> button::Style {
+pub fn tab_button_style(colors: ThemeColors) -> button::Style {
     button::Style {
         background: Some(v_gradient(colors.tab_idle_top, colors.tab_idle_bottom)),
         text_color: colors.text,
@@ -374,12 +373,15 @@ pub fn tab_button_style(colors: &ThemeColors) -> button::Style {
 }
 
 /// Tab button — active/selected state
-pub fn tab_button_active_style(colors: &ThemeColors) -> button::Style {
+pub fn tab_button_active_style(colors: ThemeColors) -> button::Style {
     button::Style {
         background: Some(v_gradient(colors.tab_active_top, colors.tab_active_bottom)),
         text_color: colors.primary_text,
         border: Border {
-            color: Color { a: 0.65, ..colors.tab_active_top },
+            color: Color {
+                a: 0.65,
+                ..colors.tab_active_top
+            },
             width: 1.0,
             radius: Radius::new(0.0),
         },
@@ -389,7 +391,7 @@ pub fn tab_button_active_style(colors: &ThemeColors) -> button::Style {
 }
 
 /// Tab button — hovered state
-pub fn tab_button_hovered_style(colors: &ThemeColors) -> button::Style {
+pub fn tab_button_hovered_style(colors: ThemeColors) -> button::Style {
     button::Style {
         background: Some(v_gradient(colors.btn_hover_top, colors.btn_hover_bottom)),
         text_color: colors.text,
@@ -404,17 +406,15 @@ pub fn tab_button_hovered_style(colors: &ThemeColors) -> button::Style {
 }
 
 /// Topbar container style — subtle gradient with orange/blue tint
-pub fn topbar_style(colors: &ThemeColors) -> container::Style {
+pub fn topbar_style(colors: ThemeColors) -> container::Style {
     // Horizontal gradient: blue tint on left, orange tint on right (matches Tauri's radial gradients)
-    let bg = iced::Background::Gradient(
-        Gradient::Linear(
-            gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_2 * 3.0))  // left to right
-                .add_stop(0.0, Color::from_rgba(0.22, 0.46, 0.67, 0.12))   // blue tint
-                .add_stop(0.35, colors.topbar_grad_bottom)                   // fade
-                .add_stop(0.65, colors.topbar_grad_top)                      // theme tint
-                .add_stop(1.0, Color::from_rgba(0.84, 0.35, 0.11, 0.22)),   // orange tint
-        ),
-    );
+    let bg = iced::Background::Gradient(Gradient::Linear(
+        gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_2 * 3.0)) // left to right
+            .add_stop(0.0, Color::from_rgba(0.22, 0.46, 0.67, 0.12)) // blue tint
+            .add_stop(0.35, colors.topbar_grad_bottom) // fade
+            .add_stop(0.65, colors.topbar_grad_top) // theme tint
+            .add_stop(1.0, Color::from_rgba(0.84, 0.35, 0.11, 0.22)), // orange tint
+    ));
     container::Style {
         background: Some(bg),
         border: Border {
@@ -433,9 +433,11 @@ pub fn topbar_style(colors: &ThemeColors) -> container::Style {
 }
 
 /// Card / panel container style — nearly transparent with border (matches Tauri's see-through cards)
-pub fn card_style(colors: &ThemeColors) -> container::Style {
+pub fn card_style(colors: ThemeColors) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.02))),
+        background: Some(iced::Background::Color(Color::from_rgba(
+            1.0, 1.0, 1.0, 0.02,
+        ))),
         border: Border {
             color: colors.border,
             width: 1.0,
@@ -448,7 +450,7 @@ pub fn card_style(colors: &ThemeColors) -> container::Style {
 }
 
 /// Card style for sections with background artwork — no background color, only border
-pub fn card_artwork_style(colors: &ThemeColors) -> container::Style {
+pub fn card_artwork_style(colors: ThemeColors) -> container::Style {
     container::Style {
         background: None,
         border: Border {
@@ -463,9 +465,11 @@ pub fn card_artwork_style(colors: &ThemeColors) -> container::Style {
 }
 
 /// Table head uses a slightly more visible background
-pub fn table_card_style(colors: &ThemeColors) -> container::Style {
+pub fn table_card_style(colors: ThemeColors) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.02))),
+        background: Some(iced::Background::Color(Color::from_rgba(
+            1.0, 1.0, 1.0, 0.02,
+        ))),
         border: Border {
             color: colors.border,
             width: 1.0,
@@ -482,7 +486,7 @@ pub fn table_card_style(colors: &ThemeColors) -> container::Style {
 }
 
 /// Topbar bottom rule/divider
-pub fn topbar_rule_style(colors: &ThemeColors) -> rule::Style {
+pub fn topbar_rule_style(colors: ThemeColors) -> rule::Style {
     rule::Style {
         color: colors.topbar_border,
         radius: Radius::new(0.0),
@@ -492,7 +496,7 @@ pub fn topbar_rule_style(colors: &ThemeColors) -> rule::Style {
 }
 
 /// Vertical divider between profile picker and icon buttons
-pub fn divider_style(colors: &ThemeColors) -> rule::Style {
+pub fn divider_style(colors: ThemeColors) -> rule::Style {
     rule::Style {
         color: colors.border,
         radius: Radius::new(0.0),
@@ -502,7 +506,7 @@ pub fn divider_style(colors: &ThemeColors) -> rule::Style {
 }
 
 /// Theme picker button — idle
-pub fn theme_button_style(colors: &ThemeColors) -> button::Style {
+pub fn theme_button_style(colors: ThemeColors) -> button::Style {
     button::Style {
         background: Some(iced::Background::Color(blend_over_bg(
             colors.tab_idle_top,
@@ -520,12 +524,15 @@ pub fn theme_button_style(colors: &ThemeColors) -> button::Style {
 }
 
 /// Theme picker button — selected
-pub fn theme_button_active_style(colors: &ThemeColors) -> button::Style {
+pub fn theme_button_active_style(colors: ThemeColors) -> button::Style {
     button::Style {
         background: Some(iced::Background::Color(colors.primary)),
         text_color: colors.primary_text,
         border: Border {
-            color: Color { a: 0.70, ..colors.primary },
+            color: Color {
+                a: 0.70,
+                ..colors.primary
+            },
             width: 1.0,
             radius: Radius::new(0.0),
         },
@@ -535,7 +542,7 @@ pub fn theme_button_active_style(colors: &ThemeColors) -> button::Style {
 }
 
 /// Play button style — gradient from play_top to play_bottom
-pub fn play_button_style(colors: &ThemeColors) -> button::Style {
+pub fn play_button_style(colors: ThemeColors) -> button::Style {
     button::Style {
         background: Some(v_gradient(colors.play_top, colors.play_bottom)),
         text_color: colors.play_text,
@@ -554,14 +561,14 @@ pub fn play_button_style(colors: &ThemeColors) -> button::Style {
 }
 
 /// Play button hovered — brighter gradient
-pub fn play_button_hovered_style(colors: &ThemeColors) -> button::Style {
+pub fn play_button_hovered_style(colors: ThemeColors) -> button::Style {
     let mut s = play_button_style(colors);
     s.background = Some(v_gradient(colors.play_hover_top, colors.play_bottom));
     s
 }
 
 /// Footer bar container — gradient
-pub fn footer_style(colors: &ThemeColors) -> container::Style {
+pub fn footer_style(colors: ThemeColors) -> container::Style {
     container::Style {
         background: Some(v_gradient(colors.footer_top, colors.footer_bottom)),
         border: Border {
@@ -576,9 +583,11 @@ pub fn footer_style(colors: &ThemeColors) -> container::Style {
 }
 
 /// Column header (MODS / ADDONS) style — dark bg, bottom border only
-pub fn col_header_style(_colors: &ThemeColors) -> container::Style {
+pub fn col_header_style(_colors: ThemeColors) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.20))),
+        background: Some(iced::Background::Color(Color::from_rgba(
+            0.0, 0.0, 0.0, 0.20,
+        ))),
         border: Border {
             color: rgba_color(255, 255, 255, 0.08),
             width: 1.0,
@@ -591,9 +600,11 @@ pub fn col_header_style(_colors: &ThemeColors) -> container::Style {
 }
 
 /// Update column container — border + dark overlay
-pub fn update_col_style(colors: &ThemeColors) -> container::Style {
+pub fn update_col_style(colors: ThemeColors) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.20))),
+        background: Some(iced::Background::Color(Color::from_rgba(
+            0.0, 0.0, 0.0, 0.20,
+        ))),
         border: Border {
             color: colors.border,
             width: 1.0,
@@ -606,7 +617,7 @@ pub fn update_col_style(colors: &ThemeColors) -> container::Style {
 }
 
 /// Table header gradient style
-pub fn table_head_style(colors: &ThemeColors) -> container::Style {
+pub fn table_head_style(colors: ThemeColors) -> container::Style {
     container::Style {
         background: Some(iced::Background::Gradient(Gradient::Linear(
             gradient::Linear::new(Radians(std::f32::consts::PI))
@@ -625,7 +636,7 @@ pub fn table_head_style(colors: &ThemeColors) -> container::Style {
 }
 
 /// Table row hover style
-pub fn row_hover_style(colors: &ThemeColors) -> container::Style {
+pub fn row_hover_style(colors: ThemeColors) -> container::Style {
     container::Style {
         background: Some(iced::Background::Color(Color::from_rgba(
             colors.primary.r,
@@ -645,7 +656,7 @@ pub fn row_hover_style(colors: &ThemeColors) -> container::Style {
 }
 
 /// Update line separator (thin border between rows)
-pub fn update_line_style(_colors: &ThemeColors) -> rule::Style {
+pub fn update_line_style(_colors: ThemeColors) -> rule::Style {
     rule::Style {
         color: Color::from_rgba(1.0, 1.0, 1.0, 0.06),
         radius: Radius::new(0.0),
@@ -654,8 +665,29 @@ pub fn update_line_style(_colors: &ThemeColors) -> rule::Style {
     }
 }
 
+pub fn badge_suggested_style(colors: ThemeColors) -> container::Style {
+    container::Style {
+        background: Some(
+            Color::from_rgba(
+                colors.good.r * 0.3,
+                colors.good.g * 0.3,
+                colors.good.b * 0.3,
+                0.50,
+            )
+            .into(),
+        ),
+        text_color: Some(colors.good),
+        border: Border {
+            color: Color::from_rgba(colors.good.r, colors.good.g, colors.good.b, 0.7),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
 /// Danger button style (red border/text)
-pub fn btn_danger_style(_colors: &ThemeColors) -> button::Style {
+pub fn btn_danger_style(_colors: ThemeColors) -> button::Style {
     button::Style {
         background: Some(iced::Background::Color(Color::from_rgba(
             0.937, 0.267, 0.267, 0.18,
@@ -672,12 +704,15 @@ pub fn btn_danger_style(_colors: &ThemeColors) -> button::Style {
 }
 
 /// Primary button style (gradient look)
-pub fn btn_primary_style(colors: &ThemeColors) -> button::Style {
+pub fn btn_primary_style(colors: ThemeColors) -> button::Style {
     button::Style {
         background: Some(iced::Background::Color(colors.primary)),
         text_color: colors.primary_text,
         border: Border {
-            color: Color { a: 0.70, ..colors.primary },
+            color: Color {
+                a: 0.70,
+                ..colors.primary
+            },
             width: 1.0,
             radius: Radius::new(0.0),
         },
@@ -689,7 +724,9 @@ pub fn btn_primary_style(colors: &ThemeColors) -> button::Style {
 /// Dialog scrim (dark overlay) style
 pub fn scrim_style() -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
+        background: Some(iced::Background::Color(Color::from_rgba(
+            0.0, 0.0, 0.0, 0.55,
+        ))),
         border: Border::default(),
         shadow: Shadow::default(),
         text_color: None,
@@ -698,7 +735,7 @@ pub fn scrim_style() -> container::Style {
 }
 
 /// Dialog box style (distinct from card_style — uses card gradient, more prominent shadow)
-pub fn dialog_style(colors: &ThemeColors) -> container::Style {
+pub fn dialog_style(colors: ThemeColors) -> container::Style {
     container::Style {
         background: Some(v_gradient(colors.card_grad_top, colors.card_grad_bottom)),
         border: Border {
@@ -717,7 +754,7 @@ pub fn dialog_style(colors: &ThemeColors) -> container::Style {
 }
 
 /// Log terminal area — dark solid background like a terminal
-pub fn log_terminal_style(colors: &ThemeColors) -> container::Style {
+pub fn log_terminal_style(colors: ThemeColors) -> container::Style {
     container::Style {
         background: Some(iced::Background::Color(hex(0x0a0f16))),
         border: Border {
@@ -732,7 +769,9 @@ pub fn log_terminal_style(colors: &ThemeColors) -> container::Style {
 }
 
 /// text_editor style matching the log terminal area (dark bg, no visible border, light text)
-pub fn log_editor_style(colors: &ThemeColors) -> impl Fn(&Theme, text_editor::Status) -> text_editor::Style + '_ {
+pub fn log_editor_style(
+    colors: ThemeColors,
+) -> impl Fn(&Theme, text_editor::Status) -> text_editor::Style + 'static {
     move |_theme, _status| text_editor::Style {
         background: iced::Background::Color(hex(0x0a0f16)),
         border: Border {
@@ -742,12 +781,15 @@ pub fn log_editor_style(colors: &ThemeColors) -> impl Fn(&Theme, text_editor::St
         },
         placeholder: hex(0x4a5568),
         value: hex(0xdbe7ff),
-        selection: Color { a: 0.35, ..hex(0x4a90d9) },
+        selection: Color {
+            a: 0.35,
+            ..hex(0x4a90d9)
+        },
     }
 }
 
 /// Floating context menu style (solid background, border, drop shadow)
-pub fn context_menu_style(colors: &ThemeColors) -> container::Style {
+pub fn context_menu_style(colors: ThemeColors) -> container::Style {
     container::Style {
         background: Some(iced::Background::Color(colors.card)),
         border: Border {
@@ -765,7 +807,7 @@ pub fn context_menu_style(colors: &ThemeColors) -> container::Style {
     }
 }
 
-pub fn tooltip_style(colors: &ThemeColors) -> container::Style {
+pub fn tooltip_style(colors: ThemeColors) -> container::Style {
     container::Style {
         background: Some(iced::Background::Color(colors.card)),
         border: Border {
@@ -783,11 +825,14 @@ pub fn tooltip_style(colors: &ThemeColors) -> container::Style {
     }
 }
 
-pub fn name_font(colors: &ThemeColors) -> Font {
+pub fn name_font(colors: ThemeColors) -> Font {
     if colors.body_font == FRIZ {
         FRIZ
     } else {
-        Font { weight: iced::font::Weight::Bold, ..colors.body_font }
+        Font {
+            weight: iced::font::Weight::Bold,
+            ..colors.body_font
+        }
     }
 }
 
@@ -854,9 +899,9 @@ pub fn vscroll_overlay() -> iced::widget::scrollable::Direction {
 /// The thumb uses the same gradient colors as the idle/hover tab buttons.
 /// The track is a darker version of the idle-bottom color blended over the background.
 pub fn scrollable_style(
-    colors: &ThemeColors,
-) -> impl Fn(&Theme, iced::widget::scrollable::Status) -> iced::widget::scrollable::Style + use<'_> {
-    let c = *colors;
+    colors: ThemeColors,
+) -> impl Fn(&Theme, iced::widget::scrollable::Status) -> iced::widget::scrollable::Style + 'static
+{
     move |_theme, status| {
         use iced::widget::scrollable::{Rail, Scroller, Style};
         use iced::Background;
@@ -870,21 +915,29 @@ pub fn scrollable_style(
         };
 
         let (thumb_bg, border_a) = match status {
-            iced::widget::scrollable::Status::Hovered { is_vertical_scrollbar_hovered: true, .. }
-            | iced::widget::scrollable::Status::Dragged { .. } => {
-                (mk_grad(c.btn_hover_top, c.btn_hover_bottom), 0.70)
+            iced::widget::scrollable::Status::Hovered {
+                is_vertical_scrollbar_hovered: true,
+                ..
             }
-            _ => (mk_grad(c.tab_idle_top, c.tab_idle_bottom), 0.42),
+            | iced::widget::scrollable::Status::Dragged { .. } => {
+                (mk_grad(colors.btn_hover_top, colors.btn_hover_bottom), 0.70)
+            }
+            _ => (mk_grad(colors.tab_idle_top, colors.tab_idle_bottom), 0.42),
         };
 
-        let border_color = Color { a: border_a, r: c.btn_border.r, g: c.btn_border.g, b: c.btn_border.b };
+        let border_color = Color {
+            a: border_a,
+            r: colors.btn_border.r,
+            g: colors.btn_border.g,
+            b: colors.btn_border.b,
+        };
 
         // Track: blend tab_idle_bottom at reduced opacity over bg → darker than the thumb
-        let ta = c.tab_idle_bottom.a * 0.55;
+        let ta = colors.tab_idle_bottom.a * 0.55;
         let track_color = Color {
-            r: c.tab_idle_bottom.r * ta + c.bg.r * (1.0 - ta),
-            g: c.tab_idle_bottom.g * ta + c.bg.g * (1.0 - ta),
-            b: c.tab_idle_bottom.b * ta + c.bg.b * (1.0 - ta),
+            r: colors.tab_idle_bottom.r * ta + colors.bg.r * (1.0 - ta),
+            g: colors.tab_idle_bottom.g * ta + colors.bg.g * (1.0 - ta),
+            b: colors.tab_idle_bottom.b * ta + colors.bg.b * (1.0 - ta),
             a: 1.0,
         };
 
@@ -909,7 +962,7 @@ pub fn scrollable_style(
                 background: Background::Color(Color::TRANSPARENT),
                 border: Border::default(),
                 shadow: Shadow::default(),
-                icon: c.text,
+                icon: colors.text,
             },
         }
     }

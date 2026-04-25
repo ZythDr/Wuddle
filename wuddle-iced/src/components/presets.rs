@@ -176,8 +176,8 @@ pub fn is_av_false_positive(url: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Build the Quick Add preset card list (shown when URL input is empty in mods dialog).
-pub fn build_quick_add_presets<'a>(repos: &[RepoRow], colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+pub fn build_quick_add_presets<'a>(repos: &[RepoRow], colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
 
     let presets = create_quick_add_presets();
     let cards: Vec<Element<Message>> = presets.iter().map(|preset| {
@@ -322,7 +322,7 @@ pub fn build_quick_add_presets<'a>(repos: &[RepoRow], colors: &ThemeColors) -> E
             button(text("Add").size(12))
                 .on_press(Message::QuickInstallPreset(pu))
                 .padding([4, 14])
-                .style(move |_t, _s| theme::tab_button_active_style(&c))
+                .style(move |_t, _s| theme::tab_button_active_style(c))
                 .into()
         };
 
@@ -337,7 +337,7 @@ pub fn build_quick_add_presets<'a>(repos: &[RepoRow], colors: &ThemeColors) -> E
         container(card_content)
             .width(Length::Fill)
             .padding([10, 14])
-            .style(move |_t| theme::card_style(&c))
+            .style(move |_t| theme::card_style(c))
             .into()
     }).collect();
 

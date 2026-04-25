@@ -209,3 +209,61 @@ pub async fn list_releases(
     }
     Ok(all)
 }
+
+#[derive(Debug, Deserialize)]
+struct GhTreeResponse {
+    tree: Vec<GhTreeEntry>,
+    truncated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhTreeEntry {
+    path: String,
+    #[serde(rename = "type")]
+    kind: String, // "blob" or "tree"
+}
+
+pub struct RepoFile {
+    pub path: String,
+    pub is_dir: bool,
+}
+
+/// Fetch all files in a repo recursively using the Tree API.
+pub async fn list_files_recursive(
+    client: &Client,
+    owner: &str,
+    repo: &str,
+    branch: Option<&str>,
+) -> Result<Vec<RepoFile>> {
+    let branch = branch.unwrap_or("HEAD");
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+        owner, repo, branch
+    );
+
+    let mut req = client
+        .get(&url)
+        .header("User-Agent", "wuddle-engine")
+        .header("Accept", "application/vnd.github+json");
+
+    if let Some(token) = crate::github_token() {
+        req = req.bearer_auth(token);
+    }
+
+    let resp = req.send().await.context("github tree request failed")?;
+    if resp.status() == StatusCode::NOT_FOUND && branch != "HEAD" {
+        // Try fallback to HEAD if branch failed
+        return Box::pin(list_files_recursive(client, owner, repo, None)).await;
+    }
+
+    if !resp.status().is_success() {
+        anyhow::bail!("GitHub Tree API error: HTTP {}", resp.status());
+    }
+
+    let tree: GhTreeResponse = resp.json().await.context("invalid github tree json")?;
+    
+    Ok(tree.tree.into_iter().map(|e| RepoFile {
+        path: e.path,
+        is_dir: e.kind == "tree",
+    }).collect())
+}

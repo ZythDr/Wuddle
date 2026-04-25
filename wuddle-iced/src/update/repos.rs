@@ -16,6 +16,42 @@ pub fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
+/// Extract the conflicting file/folder names from an engine ADDON_CONFLICT error string.
+///
+/// The engine formats these as:
+///   "ADDON_CONFLICT: Existing addon files were found for: NAME (/path) [owner]; NAME2 ..."
+///
+/// Returns a deduplicated list of names in the order they appear.
+pub fn parse_addon_conflict_error(err: &str) -> Vec<String> {
+    // Find the part after the prefix
+    let Some(after_for) = err
+        .find("found for: ")
+        .map(|pos| &err[pos + "found for: ".len()..])
+    else {
+        // Fallback: return a single generic entry so the dialog still appears
+        return vec!["conflicting files".to_string()];
+    };
+
+    // Each entry is "NAME (path) [owner_text]" separated by "; "
+    let mut names = Vec::new();
+    for entry in after_for.split("; ") {
+        let name = entry
+            .find(" (")
+            .map(|pos| entry[..pos].trim())
+            .unwrap_or_else(|| entry.trim());
+        if !name.is_empty() {
+            let name = name.to_string();
+            if !names.iter().any(|n: &String| n.eq_ignore_ascii_case(&name)) {
+                names.push(name);
+            }
+        }
+    }
+
+    if names.is_empty() {
+        names.push("conflicting files".to_string());
+    }
+    names
+}
 
 
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
@@ -304,17 +340,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     // Default to Single modular addon when the user hasn't explicitly chosen.
                     // (No blocking prompt — Collection must be opted into manually.)
 
-                    let mut selected = if treat_as_collection {
-                        let mut selected = app
-                            .add_repo_selected_addons
-                            .iter()
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        selected.sort_by_key(|name| name.to_ascii_lowercase());
-                        selected
-                    } else {
-                        Vec::new()
-                    };
+                    let mut selected = app
+                        .add_repo_selected_addons
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    selected.sort_by_key(|name| name.to_ascii_lowercase());
 
                     app.add_repo_probe
                         .as_ref()
@@ -370,14 +401,25 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Ok(id) => {
                     app.log(LogLevel::Info, &format!("Repo added (id={}).", id));
                     if !app.wow_dir.is_empty() {
+                        // Run a lightweight pre-install conflict check before installing.
                         let db = app.db_path.clone();
                         let wow = app.wow_dir.clone();
-                        let opts = app.install_options();
-                        app.log(LogLevel::Info, "Installing…");
                         app.updating_repo_ids.insert(id);
+
+                        // Collect all addon names that this repo will install.
+                        let addon_names = if app.add_repo_selected_addons.is_empty() {
+                            app.add_repo_probe
+                                .as_ref()
+                                .map(|p| p.addon_names.clone())
+                                .unwrap_or_default()
+                        } else {
+                            app.add_repo_selected_addons.iter().cloned().collect()
+                        };
+
+                        app.log(LogLevel::Info, "Checking for conflicts\u{2026}");
                         return Some(Task::perform(
-                            service::install_new_repo(db, id, wow, opts),
-                            Message::InstallAfterAddResult,
+                            service::check_pre_install_conflicts(db, id, wow, addon_names),
+                            move |result| Message::PreInstallConflictResult { repo_id: id, result },
                         ));
                     }
                     app.show_toast("Repo added successfully.", ToastKind::Info);
@@ -391,11 +433,114 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
-        Message::InstallAfterAddResult(result) => {
+        Message::PreInstallConflictResult { repo_id, result } => {
+            let info = match result {
+                Ok(info) => info,
+                Err(e) => {
+                    // Conflict check itself failed — log and proceed to install
+                    // (the engine's own ADDON_CONFLICT guard is still active).
+                    app.log(LogLevel::Error, &format!(
+                        "Pre-install conflict check failed for repo id={}: {}",
+                        repo_id, e
+                    ));
+                    service::PreInstallConflictInfo {
+                        conflicts: Vec::new(),
+                        existing_repos: Vec::new(),
+                        new_repo_label: String::new(),
+                        addon_names: Vec::new(),
+                    }
+                }
+            };
+
+            if info.conflicts.is_empty() {
+                // No conflicts — proceed to install.
+                let db = app.db_path.clone();
+                let wow = app.wow_dir.clone();
+                let opts = app.install_options();
+                app.log(LogLevel::Info, "Installing\u{2026}");
+                return Some(Task::perform(
+                    service::install_new_repo(db, repo_id, wow, opts),
+                    move |result| Message::InstallAfterAddResult { repo_id, result },
+                ));
+            }
+
+            // Conflicts detected — show the rich two-panel dialog.
+            app.updating_repo_ids.remove(&repo_id);
+            let (url, mode) = app
+                .repos
+                .iter()
+                .find(|r| r.id == repo_id)
+                .map(|r| (r.url.clone(), r.mode.clone()))
+                .unwrap_or_default();
+            let (url, mode) = if url.is_empty() {
+                if let Some(Dialog::AddRepo { url, mode, .. }) = app.dialog.as_ref() {
+                    (url.clone(), mode.clone())
+                } else {
+                    (url, mode)
+                }
+            } else {
+                (url, mode)
+            };
+            app.log(
+                LogLevel::Error,
+                &format!(
+                    "Addon conflict detected for repo id={}: {} conflicting file(s).",
+                    repo_id,
+                    info.conflicts.len()
+                ),
+            );
+            app.dialog = Some(Dialog::AddonConflict {
+                url,
+                mode,
+                conflicts: info.conflicts,
+                pending_repo_id: Some(repo_id),
+                new_repo_label: info.new_repo_label,
+                existing_repos: info.existing_repos,
+                selected_addons: info.addon_names,
+                new_repo_preview: app.add_repo_preview.as_ref().map(|p| p.files.clone()),
+            });
+            Some(refresh_repos_task(app))
+        }
+        Message::InstallAfterAddResult { repo_id, result } => {
+            app.updating_repo_ids.remove(&repo_id);
             match result {
                 Ok(msg) => {
                     app.log(LogLevel::Info, &msg);
                     app.show_toast(msg, ToastKind::Info);
+                    return Some(refresh_repos_task(app));
+                }
+                Err(ref e) if e.contains("ADDON_CONFLICT:") => {
+                    // Fallback: the engine caught conflicts that the pre-check missed.
+                    let conflict_names = parse_addon_conflict_error(e);
+                    let conflicts: Vec<wuddle_engine::AddonProbeConflict> = conflict_names
+                        .iter()
+                        .map(|name| wuddle_engine::AddonProbeConflict {
+                            addon_name: name.clone(),
+                            target_path: String::new(),
+                            owners: Vec::new(),
+                        })
+                        .collect();
+                    app.log(
+                        LogLevel::Error,
+                        &format!("Addon conflict detected for repo id={}: {}", repo_id, e),
+                    );
+                    let (url, mode, new_label) = app
+                        .repos
+                        .iter()
+                        .find(|r| r.id == repo_id)
+                        .map(|r| (r.url.clone(), r.mode.clone(), format!("{}/{}", r.owner, r.name)))
+                        .unwrap_or_default();
+                    app.dialog = Some(Dialog::AddonConflict {
+                        url,
+                        mode,
+                        conflicts,
+                        pending_repo_id: Some(repo_id),
+                        new_repo_label: new_label,
+                        existing_repos: Vec::new(),
+                        selected_addons: conflict_names,
+                        new_repo_preview: app.add_repo_preview.as_ref().map(|p| p.files.clone()),
+                    });
+                    return Some(Task::none());
                 }
                 Err(e) => {
                     app.log(LogLevel::Error, &format!("Install failed: {}", e));
@@ -405,7 +550,42 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.updating_repo_ids.clear();
             Some(refresh_repos_task(app))
         }
+        Message::CancelConflictInstall { repo_id } => {
+            // User clicked Cancel on the conflict dialog for a freshly-added repo.
+            // Remove the repo from the DB so it doesn't remain tracked without files.
+            app.dialog = None;
+            let db = app.db_path.clone();
+            app.log(
+                LogLevel::Info,
+                &format!("Conflict cancelled, removing repo id={}.", repo_id),
+            );
+            Some(Task::perform(
+                service::remove_repo(db, repo_id, None, false),
+                |_result| Message::RefreshRepos,
+            ))
+        }
+        Message::InstallConflictOverride { repo_id } => {
+            // The user confirmed overwriting conflicts for an already-added repo.
+            app.dialog = None;
+            if app.wow_dir.is_empty() {
+                return Some(Task::none());
+            }
+            let db = app.db_path.clone();
+            let wow = app.wow_dir.clone();
+            let mut opts = app.install_options();
+            opts.replace_addon_conflicts = true;
+            app.log(
+                LogLevel::Info,
+                &format!("Overwriting conflicts and installing repo id={}...", repo_id),
+            );
+            return Some(Task::perform(
+                service::install_new_repo(db, repo_id, wow, opts),
+                move |result| Message::InstallAfterAddResult { repo_id, result },
+            ));
+        }
         Message::InstallRepoOverride { url, mode } => {
+            // Re-add from scratch with replace_addon_conflicts = true so the engine
+            // skips its own conflict guard on this install.
             let db = app.db_path.clone();
             app.dialog = None;
             app.reset_add_repo_state();
@@ -451,15 +631,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::FetchCollectionProbe(url) => {
             app.add_repo_probe_loading = true;
             let db = app.db_path.clone();
-            // Pass wow_dir for conflict detection; an empty string means no conflicts will
-            // be found, which is fine — we primarily need addon folder structure detection.
             let wow = app.wow_dir.clone();
+            let probe_url = url.clone();
             Some(Task::perform(
                 service::probe_conflicts(db, url, wow),
-                Message::FetchCollectionProbeResult,
+                move |result| Message::FetchCollectionProbeResult(probe_url, result),
             ))
         }
-        Message::FetchCollectionProbeResult(result) => {
+        Message::FetchCollectionProbeResult(url, result) => {
             app.add_repo_probe_loading = false;
             match result {
                 Ok(probe) => {
@@ -474,17 +653,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         .map(|name| name.to_ascii_lowercase())
                         .collect::<HashSet<_>>();
                     if hinted_addon.is_some() {
-                        // URL hints (e.g. ?addon=Foo) lock to collection mode.
                         app.add_repo_collection_choice = Some(true);
                     } else if app.add_repo_manage_repo_id.is_some() {
-                        // Manage mode is always collection.
                         app.add_repo_collection_choice = Some(true);
                     }
-                    // For the multi-folder case with no prior choice, leave as None —
-                    // the always-visible toggle in the form lets the user decide.
-                    // Resolve any path-based fallback names (e.g. "Collection/AddonA") that
-                    // were stored before the probe loaded. Keep names that match a probe
-                    // addon_name directly, or resolve them via source_path matching.
+
                     let old_selected: Vec<String> = std::mem::take(&mut app.add_repo_selected_addons).into_iter().collect();
                     for selected_name in old_selected {
                         let name_lower = selected_name.to_ascii_lowercase();
@@ -492,7 +665,6 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             app.add_repo_selected_addons.insert(selected_name);
                             continue;
                         }
-                        // Path-based resolution: find probe entries whose source_path matches
                         let path_prefix = format!("{}/", name_lower);
                         for entry in &probe.addon_entries {
                             let src = entry.source_path.to_ascii_lowercase();
@@ -500,7 +672,6 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                                 app.add_repo_selected_addons.insert(entry.addon_name.clone());
                             }
                         }
-                        // Names with no resolution are dropped (not a known addon)
                     }
                     if app.add_repo_selected_addons.is_empty() && app.add_repo_collection_choice == Some(true) {
                         if let Some(hint) = hinted_addon {
@@ -515,16 +686,45 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             }
                         }
                     }
-                    if app.add_repo_selected_addons.is_empty()
-                        && probe.addon_names.len() > 1
-                        && app.add_repo_collection_choice == Some(true)
-                    {
-                        app.add_repo_selected_addons = probe.addon_names.iter().cloned().collect();
+
+                    // Update AddonConflict dialog if visible for this repo
+                    if let Some(Dialog::AddonConflict { url: ref d_url, ref mut selected_addons, .. }) = app.dialog {
+                        if service::normalize_repo_input_url(d_url) == service::normalize_repo_input_url(&url) {
+                            *selected_addons = probe.addon_names.clone();
+                        }
                     }
+
                     app.add_repo_probe = Some(probe);
+
+                    if let Some(probe) = app.add_repo_probe.as_ref() {
+                        if probe.addon_names.len() > 1 
+                            && app.add_repo_collection_choice.is_none() 
+                            && app.add_repo_manage_repo_id.is_none()
+                            && matches!(app.dialog, Some(Dialog::AddRepo { .. }))
+                        {
+                            let all_root = probe.addon_entries.iter().all(|e| e.source_path.is_empty() || e.source_path == ".");
+                            if all_root {
+                                let hint = app.expansion_hint();
+                                let suggested = hint.and_then(|h| {
+                                    probe.addon_names.iter().find(|name| name.to_lowercase().contains(h)).cloned()
+                                });
+
+                                app.dialog = Some(Dialog::SelectMainAddon { 
+                                    url: url.clone(), 
+                                    options: probe.addon_names.clone(),
+                                    suggested
+                                });
+                            } else {
+                                app.dialog = Some(Dialog::CollectionChoice { 
+                                    url: url.clone(), 
+                                    addon_names: probe.addon_names.clone() 
+                                });
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
-                    app.add_repo_probe = None;
+            app.add_repo_probe = None;
                     app.log(LogLevel::Error, &format!("Addon probe failed: {:#}", e));
                 }
             }
@@ -538,7 +738,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         app.add_repo_selected_addons = probe.addon_names.iter().cloned().collect();
                     }
                 }
-            } else {
+            } else if app.add_repo_selected_addons.len() != 1 {
                 app.add_repo_selected_addons.clear();
             }
             // If we came from the CollectionChoice popup, restore the AddRepo dialog.
@@ -551,6 +751,21 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         advanced: false,
                     });
                 }
+            }
+            Some(Task::none())
+        }
+        Message::SetAddRepoPrimaryAddon(name) => {
+            app.add_repo_selected_addons.clear();
+            if !name.is_empty() {
+                app.add_repo_selected_addons.insert(name);
+            }
+            if let Some(Dialog::SelectMainAddon { url, .. }) = app.dialog.take() {
+                app.dialog = Some(Dialog::AddRepo {
+                    url,
+                    mode: "addon_git".to_string(),
+                    is_addons: true,
+                    advanced: false,
+                });
             }
             Some(Task::none())
         }
@@ -1397,12 +1612,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::FetchRepoPreview(url) => {
             app.add_repo_preview_loading = true;
+            let preview_url = url.clone();
             Some(Task::perform(
                 service::fetch_repo_preview(url),
-                Message::FetchRepoPreviewResult,
+                move |result| Message::FetchRepoPreviewResult(preview_url, result),
             ))
         }
-        Message::FetchRepoPreviewResult(result) => {
+        Message::FetchRepoPreviewResult(url, result) => {
             app.add_repo_preview_loading = false;
             match result {
                 Ok(info) => {
@@ -1414,8 +1630,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.add_repo_expanded_dirs.clear();
                     app.add_repo_dir_contents.clear();
 
-                    // In manage/collection mode, pre-fetch contents of all top-level dirs so
-                    // the "−" indeterminate indicator works before the user expands anything.
+                    // In manage/collection mode, pre-fetch contents of all top-level dirs
                     let is_collection = app.add_repo_manage_repo_id.is_some()
                         || app.add_repo_collection_choice == Some(true)
                         || !app.add_repo_selected_addons.is_empty()
@@ -1437,7 +1652,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         vec![]
                     };
 
-                    app.add_repo_preview = Some(info);
+                    app.add_repo_preview = Some(info.clone());
+
+                    // Update AddonConflict dialog if visible for this repo
+                    if let Some(Dialog::AddonConflict { url: ref d_url, ref mut new_repo_preview, .. }) = app.dialog {
+                        if service::normalize_repo_input_url(d_url) == service::normalize_repo_input_url(&url) {
+                            *new_repo_preview = Some(info.files.clone());
+                        }
+                    }
+
                     if prefetch_tasks.is_empty() {
                         return Some(Task::none());
                     }

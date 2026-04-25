@@ -572,13 +572,64 @@ impl Engine {
         wow_dir: &Path,
         preferred_branch: Option<&str>,
     ) -> Result<AddonProbeResult> {
-        let preferred_branch = preferred_branch
+        let preferred_branch_inner = preferred_branch
             .map(str::trim)
             .filter(|b| !b.is_empty())
             .unwrap_or("master");
 
+        // Try API probe first for supported forges (extremely fast, avoids full clone)
+        if let Ok(repo) = forge::detect_repo(url) {
+            if repo.kind == forge::ForgeKind::GitHub {
+                let client = reqwest::Client::builder()
+                    .user_agent("wuddle-engine")
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()?;
+                if let Ok(files) = forge::github::list_files_recursive(&client, &repo.owner, &repo.name, preferred_branch).await {
+                    let mut addon_names = Vec::<String>::new();
+                    let mut addon_entries = Vec::<AddonProbeEntry>::new();
+                    let mut seen_names = HashSet::<String>::new();
+
+                    // Map forge files to (path, is_dir) for detection
+                    let mut paths = Vec::new();
+                    for f in &files {
+                        paths.push((f.path.clone(), f.is_dir));
+                    }
+
+                    // A simple version of detection for path strings
+                    for f in &files {
+                        if !f.is_dir && f.path.to_ascii_lowercase().ends_with(".toc") {
+                            let path = Path::new(&f.path);
+                            let parent = path.parent().unwrap_or(Path::new(""));
+                            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                            
+                            // Check if stem matches parent dir name OR if it's in the root
+                            let parent_name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            if stem.eq_ignore_ascii_case(parent_name) || parent.to_str() == Some("") {
+                                if seen_names.insert(stem.to_lowercase()) {
+                                    addon_names.push(stem.to_string());
+                                    addon_entries.push(AddonProbeEntry {
+                                        addon_name: stem.to_string(),
+                                        source_path: parent.to_str().unwrap_or("").replace('\\', "/"),
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    if !addon_names.is_empty() {
+                        return Ok(AddonProbeResult {
+                            addon_names: addon_names.clone(),
+                            addon_entries: addon_entries.clone(),
+                            conflicts: self.check_conflicts_for_addons(&addon_names, wow_dir)?,
+                            resolved_branch: preferred_branch_inner.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
         let probe_dir = tempfile::tempdir().context("create addon probe dir")?;
-        let synced = git_sync::sync_repo(url, probe_dir.path(), Some(preferred_branch))
+        let synced = git_sync::sync_repo(url, probe_dir.path(), Some(preferred_branch_inner))
             .with_context(|| format!("git sync {}", url))?;
 
         let mut detected = install::detect_addons_in_tree(probe_dir.path());
@@ -609,8 +660,23 @@ impl Engine {
             );
         }
 
+        let conflicts = self.check_conflicts_for_addons(&addon_names, wow_dir)?;
+
+        Ok(AddonProbeResult {
+            addon_names,
+            addon_entries,
+            conflicts,
+            resolved_branch: synced.branch,
+        })
+    }
+
+    fn check_conflicts_for_addons(
+        &self,
+        addon_names: &[String],
+        wow_dir: &Path,
+    ) -> Result<Vec<AddonProbeConflict>> {
         let mut conflicts = Vec::<AddonProbeConflict>::new();
-        for addon_name in &addon_names {
+        for addon_name in addon_names {
             let target_path = wow_dir.join("Interface").join("AddOns").join(addon_name);
             let manifest_path = Self::to_manifest_path(&target_path, wow_dir);
             let owners = self.db().find_addon_install_owners(&manifest_path, None)?;
@@ -632,13 +698,7 @@ impl Engine {
                     .collect(),
             });
         }
-
-        Ok(AddonProbeResult {
-            addon_names,
-            addon_entries,
-            conflicts,
-            resolved_branch: synced.branch,
-        })
+        Ok(conflicts)
     }
 
     fn blank_plan(r: &Repo) -> UpdatePlan {
@@ -1049,9 +1109,9 @@ impl Engine {
         addon_name: &str,
     ) -> bool {
         if full_link_path == worktree_dir {
-            return install::detect_single_addon_folder(worktree_dir)
-                .map(|name| name.eq_ignore_ascii_case(addon_name))
-                .unwrap_or(false);
+            return install::detect_addon_folders_in_dir(worktree_dir)
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(addon_name));
         }
 
         let meta = match fs::symlink_metadata(full_link_path) {
@@ -1078,9 +1138,9 @@ impl Engine {
             }
         }
 
-        install::detect_single_addon_folder(full_link_path)
-            .map(|name| name.eq_ignore_ascii_case(addon_name))
-            .unwrap_or(false)
+        install::detect_addon_folders_in_dir(full_link_path)
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(addon_name))
     }
 
     fn repair_tracked_addon_entry(
@@ -1722,7 +1782,7 @@ impl Engine {
             // Strict TOC check for Manual repos: MUST have a .toc at the root.
             if !force_prune && matches!(repo.mode, InstallMode::Manual) {
                 let repo_root = wow_dir.join("Interface").join("AddOns").join(&repo.name);
-                if install::detect_single_addon_folder(&repo_root).is_none() {
+                if install::detect_addon_folders_in_dir(&repo_root).is_empty() {
                     eprintln!(
                         "[prune] removing manual repo '{}' — no .toc file found at root",
                         repo.name
@@ -3433,14 +3493,22 @@ impl Engine {
 
             let mut chosen = Vec::<(PathBuf, String)>::new();
             let mut seen_names = HashSet::<String>::new();
+            let mut seen_paths = HashSet::<PathBuf>::new();
+            
+            let selected_addons = selected_addons_from_json(repo.selected_addons_json.as_deref());
+
             for (src, addon_name) in detected {
                 let key = addon_name.to_lowercase();
-                if seen_names.insert(key) {
+                let is_new_name = seen_names.insert(key);
+                let is_new_path = seen_paths.insert(src.clone());
+                
+                // If we have a selection, keep all names for filtering later.
+                // Otherwise, only keep one name per source folder path to avoid 
+                // multiple installs of the same directory.
+                if is_new_name && (is_new_path || !selected_addons.is_empty()) {
                     chosen.push((src, addon_name));
                 }
             }
-
-            let selected_addons = selected_addons_from_json(repo.selected_addons_json.as_deref());
             if !selected_addons.is_empty() {
                 let selected_paths: HashSet<String> = selected_addons
                     .iter()
@@ -3459,6 +3527,12 @@ impl Engine {
                         &selected_keys,
                     )
                 });
+
+                // Deduplicate by source path: if multiple selected TOCs point to the 
+                // same folder, only keep one (the first matching one) to avoid 
+                // double-installation crashes.
+                let mut path_seen = HashSet::new();
+                chosen.retain(|(src, _)| path_seen.insert(src.clone()));
             }
 
             if chosen.is_empty() {

@@ -30,16 +30,31 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.2.4
+### What's New in v3.2.5
+
+#### New Features
+- **Intelligent Addon Suggestions** — Automatically badges the most compatible addon version during installation based on the detected WoW client version.
+- **Fast GitHub Repository Probing** — Utilizes the GitHub Tree API to analyze repository structures and detect nested addons in milliseconds without requiring a full git clone.
+- **Primary Addon Selection UI** — A new selection dialog for repositories with multiple .toc files that allows users to explicitly choose which version defines the addon folder name.
+
+#### Improvements
+- **Multi-TOC Health Support** — Updated tracked addon health checks to correctly support folders containing multiple .toc files.
+- **Robust Manual Pruning** — Enhanced maintenance logic to protect manual repositories with multiple expansion versions from incorrect database pruning.
+- **Refined Dialog Aesthetics** — Removed redundant internal borders and increased internal padding for a cleaner, more spacious dialog interface.
+- **Enhanced Visual Feedback** — Added a translucent suggestion badge style with high-contrast outlines and descriptive tooltips explaining the suggestion logic.
+- **Optimized Secondary Selection** — Refined the "Install as Collection instead" button with subtle bordering and dimmed text for a more distinct secondary action.
+- **Engine Reliability** — Improved error handling and folder detection robustness in the `wuddle-engine` library for complex repository structures.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.2.4
 
 #### New Features
 - **Up-To-Date Status Tooltips** — The "Up to date" status badge now features an informative hover tooltip displaying the latest version (or commit ID) alongside the exact local installation timestamp.
 
 #### Improvements
 - **Streamlined Conflict Resolution UI** — The file tree preview in the "Addon Conflict" dialog has been significantly cleaned up to exclusively display directories and filter out hidden system files/folders (such as `.git` and `.editorconfig`).
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.2.3
 

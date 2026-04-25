@@ -5,8 +5,8 @@ use crate::settings::{self, UiScaleMode};
 use crate::theme::{self, ThemeColors, WuddleTheme};
 use crate::{App, Dialog, Message};
 
-pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
 
     // --- Instances section ---
     let instances_head = row![
@@ -37,8 +37,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                     }))
                     .padding([6, 12])
                     .style(move |_theme, status| match status {
-                        button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                        _ => theme::tab_button_style(&c2),
+                        button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                        _ => theme::tab_button_style(c2),
                     })
             },
             "Create a new WoW instance profile",
@@ -83,7 +83,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         .padding([10, 12])
         .width(260)
         .style(move |_theme, status| {
-            let base = theme::card_style(&c2);
+            let base = theme::card_style(c2);
             match status {
                 button::Status::Hovered => button::Style {
                     background: Some(iced::Background::Color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.06))),
@@ -106,7 +106,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
 
     let instances_section = settings_card(
         column![instances_head, row(profile_cards).spacing(12)].spacing(10),
-        &c,
+        c,
     );
 
     // --- Behavior section ---
@@ -143,7 +143,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                 .on_toggle(Message::ToggleXattr),
         ]
         .spacing(8),
-        &c,
+        c,
     );
 
     // --- Time and display section ---
@@ -202,7 +202,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                     }),
                 container(text(t.label()).size(13).color(c2.text))
                     .padding([3, 8])
-                    .style(move |_| theme::tooltip_style(&c2)),
+                    .style(move |_| theme::tooltip_style(c2)),
                 tooltip::Position::Bottom,
             )
             .gap(4.0)
@@ -222,14 +222,14 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                     .padding([6, 12])
                     .style(move |_theme, _status| {
                         if is_active {
-                            theme::tab_button_active_style(&c2)
+                            theme::tab_button_active_style(c2)
                         } else {
-                            theme::tab_button_style(&c2)
+                            theme::tab_button_style(c2)
                         }
                     }),
                 container(text(mode.tooltip()).size(13).color(c2.text))
                     .padding([3, 8])
-                    .style(move |_| theme::tooltip_style(&c2)),
+                    .style(move |_| theme::tooltip_style(c2)),
                 tooltip::Position::Bottom,
             )
             .gap(4.0)
@@ -254,7 +254,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             row(theme_buttons).spacing(6),
         ]
         .spacing(8),
-        &c,
+        c,
     );
 
     // --- GitHub Authentication section ---
@@ -278,12 +278,12 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                             .on_press(Message::OpenUrl("https://github.com/settings/tokens".to_string()))
                             .padding([6, 12])
                             .style(move |_theme, status| match status {
-                                button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                                _ => theme::tab_button_style(&c2),
+                                button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                                _ => theme::tab_button_style(c2),
                             }),
                         container(text("Opens GitHub in your browser so you can create or manage a token.").size(13).color(c.text))
                             .padding([3, 8])
-                            .style(move |_theme| theme::tooltip_style(&c2)),
+                            .style(move |_theme| theme::tooltip_style(c2)),
                         tooltip::Position::Bottom,
                     )
                 },
@@ -336,7 +336,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                         button(text("Save token").size(13))
                             .on_press(Message::SaveGithubToken)
                             .padding([6, 12])
-                            .style(move |_theme, _status| theme::tab_button_active_style(&c2))
+                            .style(move |_theme, _status| theme::tab_button_active_style(c2))
                     },
                     "Store this token for authenticated GitHub API access",
                     tooltip::Position::Top,
@@ -349,7 +349,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
                             .on_press(Message::ForgetGithubToken)
                             .padding([6, 12])
                             .style(move |_theme, _status| {
-                                let mut s = theme::tab_button_style(&c2);
+                                let mut s = theme::tab_button_style(c2);
                                 s.border.color = c2.bad;
                                 s
                             })
@@ -364,7 +364,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             text(token_status).size(12).color(token_status_color),
         ]
         .spacing(8),
-        &c,
+        c,
     );
 
     scrollable(
@@ -383,19 +383,19 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
     )
     .height(Length::Fill)
     .direction(theme::vscroll())
-    .style(move |t, s| theme::scrollable_style(&c)(t, s))
+    .style(move |t, s| theme::scrollable_style(c)(t, s))
     .into()
 }
 
 /// Wrap any element in a tooltip with consistent styling.
-fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     let tip_str = String::from(tip_text);
     tooltip(
         content,
         container(text(tip_str).size(13).color(c.text))
             .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(&c)),
+            .style(move |_theme| theme::tooltip_style(c)),
         pos,
     )
     .gap(4.0)
@@ -404,23 +404,23 @@ fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: toolti
 
 fn settings_card<'a>(
     content: impl Into<Element<'a, Message>>,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     container(container(content).padding(16))
         .width(Length::Fill)
-        .style(move |_theme| theme::card_style(&c))
+        .style(move |_theme| theme::card_style(c))
         .into()
 }
 
 fn settings_card_fill<'a>(
     content: impl Into<Element<'a, Message>>,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     container(container(content).padding(16))
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(move |_theme| theme::card_style(&c))
+        .style(move |_theme| theme::card_style(c))
         .into()
 }

@@ -11,9 +11,9 @@ pub fn view<'a>(
     name: &'a str,
     remove_files: bool,
     files: &'a [(String, String)],
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let rf = remove_files;
 
     let file_rows: Vec<Element<Message>> = files.iter().map(|(path, kind)| {
@@ -39,7 +39,7 @@ pub fn view<'a>(
         scrollable(column(file_rows).spacing(0).width(Length::Fill))
             .height(Length::Fixed(160.0))
             .direction(theme::vscroll_overlay())
-            .style(move |t, s| theme::scrollable_style(&c)(t, s))
+            .style(move |t, s| theme::scrollable_style(c)(t, s))
             .into()
     };
 
@@ -61,7 +61,7 @@ pub fn view<'a>(
         row![
             text("Remove Repository").size(18).color(colors.title),
             Space::new().width(Length::Fill),
-            close_button(&c),
+            close_button(c),
         ]
         .align_y(iced::Alignment::Center),
         text(format!("Remove \"{}\" from Wuddle?", name))
@@ -85,8 +85,8 @@ pub fn view<'a>(
                 .on_press(Message::CloseDialog)
                 .padding([6, 12])
                 .style(move |_theme, status| match status {
-                    button::Status::Hovered => theme::tab_button_hovered_style(&c),
-                    _ => theme::tab_button_style(&c),
+                    button::Status::Hovered => theme::tab_button_hovered_style(c),
+                    _ => theme::tab_button_style(c),
                 }),
             {
                 let c2 = c;
@@ -100,7 +100,7 @@ pub fn view<'a>(
                         .on_press(Message::RemoveRepoConfirm(repo_id, rf))
                         .padding([6, 12])
                         .style(move |_theme, _status| {
-                            let mut s = theme::tab_button_style(&c2);
+                            let mut s = theme::tab_button_style(c2);
                             s.border.color = c2.bad;
                             s
                         }),

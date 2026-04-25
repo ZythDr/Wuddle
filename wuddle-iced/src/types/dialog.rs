@@ -126,7 +126,22 @@ pub enum Dialog {
         custom_args: String,
     },
     AvWarning { url: String, mode: String },
-    AddonConflict { url: String, mode: String, conflicts: Vec<wuddle_engine::AddonProbeConflict> },
+    AddonConflict {
+        url: String,
+        mode: String,
+        conflicts: Vec<wuddle_engine::AddonProbeConflict>,
+        /// If the repo is already in the DB (install failed mid-way), store its id so the
+        /// "Overwrite" button can force-reinstall rather than re-adding from scratch.
+        pending_repo_id: Option<i64>,
+        /// Display label for the new repo, e.g. "owner/name".
+        new_repo_label: String,
+        /// Existing repos that own the conflicting files (for the "Old" panel).
+        existing_repos: Vec<crate::service::CollectionConflictOwnerGroup>,
+        /// All addons that the new repo will install (for the "New" panel).
+        selected_addons: Vec<String>,
+        /// Full file list for the new repo (for a richer preview).
+        new_repo_preview: Option<Vec<crate::service::RepoFileEntry>>,
+    },
     CollectionAddonConflict {
         repo_id: i64,
         repo_name: String,
@@ -140,5 +155,11 @@ pub enum Dialog {
     CollectionChoice {
         url: String,
         addon_names: Vec<String>,
+    },
+    /// Shown when a single-addon repo has multiple .toc files at the root.
+    SelectMainAddon {
+        url: String,
+        options: Vec<String>,
+        suggested: Option<String>,
     },
 }

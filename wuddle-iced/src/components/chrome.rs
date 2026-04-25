@@ -16,8 +16,8 @@ use crate::components::helpers::SpinnerCanvas;
 // Top bar
 // ---------------------------------------------------------------------------
 
-pub fn view_topbar<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+pub fn view_topbar<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
 
     let title = iced::widget::text("Wuddle")
         .size(44)
@@ -102,7 +102,7 @@ pub fn view_topbar<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Messag
         .text_size(13)
         .into();
 
-        let divider = rule::vertical(1).style(move |_theme| theme::divider_style(&c));
+        let divider = rule::vertical(1).style(move |_theme| theme::divider_style(c));
         right_items.push(profile_picker);
         right_items.push(divider.into());
     }
@@ -136,7 +136,7 @@ pub fn view_topbar<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Messag
 
     container(bar)
         .width(Length::Fill)
-        .style(move |_theme| theme::topbar_style(&c))
+        .style(move |_theme| theme::topbar_style(c))
         .into()
 }
 
@@ -144,9 +144,9 @@ pub fn view_topbar<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Messag
 // Tab button
 // ---------------------------------------------------------------------------
 
-pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: &ThemeColors) -> Element<'a, Message> {
+pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: ThemeColors) -> Element<'a, Message> {
     let is_active = app.active_tab == tab;
-    let c = *colors;
+    let c = colors;
     let disabled_reason = if tab == Tab::Tweaks {
         app.tweaks_disabled_reason()
     } else {
@@ -202,14 +202,14 @@ pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: &ThemeColors) -> Elem
         .on_press(Message::SetTab(tab));
 
     let styled_btn: Element<Message> = if is_active {
-        btn.style(move |_theme, _status| theme::tab_button_active_style(&c)).into()
+        btn.style(move |_theme, _status| theme::tab_button_active_style(c)).into()
     } else {
         btn.style(move |_theme, status| match status {
-            button::Status::Hovered if !is_disabled => theme::tab_button_hovered_style(&c),
-            button::Status::Pressed if !is_disabled => theme::tab_button_active_style(&c),
-            _ if !is_disabled => theme::tab_button_style(&c),
+            button::Status::Hovered if !is_disabled => theme::tab_button_hovered_style(c),
+            button::Status::Pressed if !is_disabled => theme::tab_button_active_style(c),
+            _ if !is_disabled => theme::tab_button_style(c),
             _ => {
-                let mut style = theme::tab_button_style(&c);
+                let mut style = theme::tab_button_style(c);
                 style.text_color = c.muted;
                 style
             }
@@ -223,7 +223,7 @@ pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: &ThemeColors) -> Elem
             container(iced::widget::text(reason).size(13).color(c.text))
                 .max_width(320)
                 .padding([3, 8])
-                .style(move |_theme| theme::tooltip_style(&c)),
+                .style(move |_theme| theme::tooltip_style(c)),
             iced::widget::tooltip::Position::Bottom,
         )
         .into()
@@ -232,7 +232,7 @@ pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: &ThemeColors) -> Elem
             styled_btn,
             container(iced::widget::text(tab.tooltip()).size(13).color(c.text))
                 .padding([3, 8])
-                .style(move |_theme| theme::tooltip_style(&c)),
+                .style(move |_theme| theme::tooltip_style(c)),
             iced::widget::tooltip::Position::Bottom,
         )
         .into()
@@ -245,7 +245,7 @@ pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: &ThemeColors) -> Elem
 // Panel body
 // ---------------------------------------------------------------------------
 
-pub fn view_panel<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
+pub fn view_panel<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     let content: Element<Message> = match app.active_tab {
         Tab::Home    => crate::panels::home::view(app, colors),
         Tab::Mods    => crate::panels::projects::view(app, colors, "Mods"),
@@ -267,8 +267,8 @@ pub fn view_panel<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message
 // Footer
 // ---------------------------------------------------------------------------
 
-pub fn view_footer<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+pub fn view_footer<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
 
     let hint: Element<Message> = if app.wow_dir.is_empty() {
         iced::widget::text("No WoW directory set. Go to Options to configure.")
@@ -309,7 +309,7 @@ pub fn view_footer<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Messag
             tooltip_content,
             iced::widget::tooltip::Position::Top,
         )
-        .style(move |_t| theme::tooltip_style(&c))
+        .style(move |_t| theme::tooltip_style(c))
         .into()
     };
 
@@ -321,8 +321,8 @@ pub fn view_footer<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Messag
     .padding([10, 36])
     .width(108)
     .style(move |_theme, status| match status {
-        button::Status::Hovered => theme::play_button_hovered_style(&c),
-        _ => theme::play_button_style(&c),
+        button::Status::Hovered => theme::play_button_hovered_style(c),
+        _ => theme::play_button_style(c),
     });
 
     let bar = row![
@@ -336,7 +336,7 @@ pub fn view_footer<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Messag
 
     container(bar)
         .width(Length::Fill)
-        .style(move |_theme| theme::footer_style(&c))
+        .style(move |_theme| theme::footer_style(c))
         .into()
 }
 

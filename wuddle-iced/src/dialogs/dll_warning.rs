@@ -11,9 +11,9 @@ pub fn view<'a>(
     repo_name: &'a str,
     previous_count: usize,
     new_count: usize,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let fewer = new_count < previous_count;
 
     let description = if fewer {
@@ -39,7 +39,7 @@ pub fn view<'a>(
         row![
             text("DLL File Count Changed").size(18).color(colors.title),
             Space::new().width(Length::Fill),
-            close_button(&c),
+            close_button(c),
         ]
         .align_y(iced::Alignment::Center),
         text(format!("\"{}\"", repo_name)).size(13).color(colors.text),
@@ -61,8 +61,8 @@ pub fn view<'a>(
                 .padding([10, 16])
                 .width(Length::FillPortion(1))
                 .style(move |_theme, status| match status {
-                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                    _ => theme::tab_button_style(&c2),
+                    button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                    _ => theme::tab_button_style(c2),
                 })
             },
             {
@@ -80,8 +80,8 @@ pub fn view<'a>(
                 .padding([10, 16])
                 .width(Length::FillPortion(1))
                 .style(move |_theme, status| match status {
-                    button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                    _ => theme::tab_button_style(&c2),
+                    button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                    _ => theme::tab_button_style(c2),
                 })
             },
         ]

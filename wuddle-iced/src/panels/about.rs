@@ -9,30 +9,30 @@ const GITHUB_URL: &str = "https://github.com/ZythDr/Wuddle";
 const RELEASES_URL: &str = "https://github.com/ZythDr/Wuddle/releases";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
 
     // Header action buttons — varies based on update state
     let mut header_btns: Vec<Element<Message>> = Vec::new();
-    header_btns.push(btn_tip("Refresh", "Re-check for Wuddle updates", Message::CheckSelfUpdate, &c));
-    header_btns.push(btn_tip("Changelog", "View Wuddle changelog in-app", Message::ShowChangelog, &c));
+    header_btns.push(btn_tip("Refresh", "Re-check for Wuddle updates", Message::CheckSelfUpdate, c));
+    header_btns.push(btn_tip("Changelog", "View Wuddle changelog in-app", Message::ShowChangelog, c));
 
     if app.self_update_done {
-        header_btns.push(action_btn("Restart", Message::RestartAfterUpdate, &c));
+        header_btns.push(action_btn("Restart", Message::RestartAfterUpdate, c));
     } else if app.self_update_in_progress {
-        header_btns.push(btn_disabled("Updating\u{2026}", "Downloading and staging update\u{2026}", &c));
+        header_btns.push(btn_disabled("Updating\u{2026}", "Downloading and staging update\u{2026}", c));
     } else if app.self_update_available {
         let label = if let Some(ref ver) = app.latest_version {
             format!("Update to v{}", ver)
         } else {
             "Update Wuddle".to_string()
         };
-        header_btns.push(action_btn(&label, Message::ApplySelfUpdate, &c));
+        header_btns.push(action_btn(&label, Message::ApplySelfUpdate, c));
     } else if !app.self_update_supported && app.update_message.is_some() {
         header_btns.push(btn_disabled(
             "Update",
             app.update_message.as_deref().unwrap_or("In-app updates are not supported for this install type."),
-            &c,
+            c,
         ));
     } else if app.self_update_assets_pending {
         let label = if let Some(ref ver) = app.latest_version {
@@ -40,21 +40,21 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         } else {
             "Update building\u{2026}".to_string()
         };
-        header_btns.push(btn_disabled(&label, "Release assets are still being built by CI. Click Refresh to check again.", &c));
+        header_btns.push(btn_disabled(&label, "Release assets are still being built by CI. Click Refresh to check again.", c));
     } else if app.latest_version.is_some() && !app.self_update_available {
-        header_btns.push(btn_disabled("Up to date", app.update_message.as_deref().unwrap_or("No newer release detected."), &c));
+        header_btns.push(btn_disabled("Up to date", app.update_message.as_deref().unwrap_or("No newer release detected."), c));
     } else if app.update_message.is_some() {
         // Fallback: version check failed or unknown state
         header_btns.push(btn_disabled(
             app.update_message.as_deref().unwrap_or("Check for updates"),
             "Click Refresh to re-check.",
-            &c,
+            c,
         ));
     } else {
-        header_btns.push(btn_tip("Check for updates", "Check if a newer Wuddle version is available", Message::CheckSelfUpdate, &c));
+        header_btns.push(btn_tip("Check for updates", "Check if a newer Wuddle version is available", Message::CheckSelfUpdate, c));
     }
 
-    header_btns.push(open_on_github_btn(GITHUB_URL, &c));
+    header_btns.push(open_on_github_btn(GITHUB_URL, c));
 
     let header = {
         let mut r = row![
@@ -79,11 +79,11 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
         column![
             text("Application").size(16).color(colors.title),
             about_row("Current version:", APP_VERSION, colors),
-            latest_version_row(latest_display, app.update_channel, &c),
+            latest_version_row(latest_display, app.update_channel, c),
             about_row("Package name:", "wuddle-iced", colors),
         ]
         .spacing(8),
-        &c,
+        c,
     );
 
     let credits_card = card_fill(
@@ -103,7 +103,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
             ),
         ]
         .spacing(8),
-        &c,
+        c,
     );
 
     // Update info section — mirrors Tauri's status line below the cards
@@ -133,9 +133,9 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors) -> Element<'a, Message> {
 fn latest_version_row<'a>(
     latest: &str,
     channel: UpdateChannel,
-    c: &ThemeColors,
+    c: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *c;
+    let c = c;
     let val_owned = String::from(latest);
 
     let version_link = button(
@@ -162,7 +162,7 @@ fn latest_version_row<'a>(
     )
     .max_width(300)
     .padding([6, 10])
-    .style(move |_t| crate::theme::tooltip_style(&c));
+    .style(move |_t| crate::theme::tooltip_style(c));
 
     let channel_picker = pick_list(
         &[UpdateChannel::Stable, UpdateChannel::Beta][..],
@@ -177,7 +177,7 @@ fn latest_version_row<'a>(
             text("?").size(10).color(c.muted)
         )
         .padding([2, 5])
-        .style(move |_t| crate::theme::tooltip_style(&c)),
+        .style(move |_t| crate::theme::tooltip_style(c)),
         tip_box,
         tooltip::Position::Bottom,
     );
@@ -194,7 +194,7 @@ fn latest_version_row<'a>(
     .into()
 }
 
-fn about_row<'a>(key: &str, value: &str, colors: &ThemeColors) -> Element<'a, Message> {
+fn about_row<'a>(key: &str, value: &str, colors: ThemeColors) -> Element<'a, Message> {
     row![
         text(String::from(key)).size(13).color(colors.muted).width(160),
         text(String::from(value)).size(13).color(colors.text),
@@ -208,9 +208,9 @@ fn credit_row<'a>(
     key: &str,
     label: &str,
     url: &str,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let url_owned = String::from(url);
     row![
         text(String::from(key)).size(13).color(colors.muted).width(160),
@@ -239,29 +239,29 @@ fn credit_row<'a>(
 #[allow(dead_code)]
 fn card<'a>(
     content: impl Into<Element<'a, Message>>,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     container(container(content).padding(16))
         .width(Length::Fill)
-        .style(move |_theme| theme::card_style(&c))
+        .style(move |_theme| theme::card_style(c))
         .into()
 }
 
 fn card_fill<'a>(
     content: impl Into<Element<'a, Message>>,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     container(container(content).padding(16))
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(move |_theme| theme::card_style(&c))
+        .style(move |_theme| theme::card_style(c))
         .into()
 }
 
-fn open_on_github_btn<'a>(url: &str, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn open_on_github_btn<'a>(url: &str, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     let url_owned = url.to_string();
     let icon = crate::forge_svg_handle("github", url);
     let icon_color = c.text;
@@ -279,21 +279,21 @@ fn open_on_github_btn<'a>(url: &str, colors: &ThemeColors) -> Element<'a, Messag
     .on_press(Message::OpenUrl(url_owned))
     .padding([6, 12])
     .style(move |_theme, status| match status {
-        iced::widget::button::Status::Hovered => theme::tab_button_hovered_style(&c),
-        _ => theme::tab_button_style(&c),
+        iced::widget::button::Status::Hovered => theme::tab_button_hovered_style(c),
+        _ => theme::tab_button_style(c),
     });
     tooltip(
         btn,
         container(text("Open the Wuddle repository on GitHub").size(13).color(c.text))
             .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(&c)),
+            .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Bottom,
     )
     .into()
 }
 
-fn action_btn<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn action_btn<'a>(label: &str, msg: Message, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     button(text(String::from(label)).size(13).color(iced::Color::WHITE))
         .on_press(msg)
         .padding([6, 14])
@@ -307,8 +307,8 @@ fn action_btn<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a
         .into()
 }
 
-fn btn_disabled<'a>(label: &str, tip: &str, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn btn_disabled<'a>(label: &str, tip: &str, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     let tip_str = String::from(tip);
     let btn_container = container(text(String::from(label)).size(13).color(c.muted))
         .padding([6, 14])
@@ -322,27 +322,27 @@ fn btn_disabled<'a>(label: &str, tip: &str, colors: &ThemeColors) -> Element<'a,
         container(text(tip_str).size(13).color(c.text))
             .max_width(300)
             .padding([3, 8])
-            .style(move |_theme| crate::theme::tooltip_style(&c)),
+            .style(move |_theme| crate::theme::tooltip_style(c)),
         tooltip::Position::Bottom,
     )
     .into()
 }
 
-fn btn_tip<'a>(label: &str, tip: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn btn_tip<'a>(label: &str, tip: &str, msg: Message, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     let tip_str = String::from(tip);
     let btn = button(text(String::from(label)).size(13))
         .on_press(msg)
         .padding([6, 12])
         .style(move |_theme, status| match status {
-            button::Status::Hovered => theme::tab_button_hovered_style(&c),
-            _ => theme::tab_button_style(&c),
+            button::Status::Hovered => theme::tab_button_hovered_style(c),
+            _ => theme::tab_button_style(c),
         });
     tooltip(
         btn,
         container(text(tip_str).size(13).color(c.text))
             .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(&c)),
+            .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Bottom,
     )
     .into()

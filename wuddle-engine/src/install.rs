@@ -505,9 +505,11 @@ const MAX_ADDON_SCAN_DEPTH: usize = 5;
 fn detect_addons(root: &Path) -> Vec<(PathBuf, String)> {
     let mut candidates: Vec<(PathBuf, String)> = Vec::new();
 
-    // 1. Check if the root itself is an addon (contains a .toc matching the dir name or common name)
-    if let Some(folder_name) = addon_folder_name_from_toc(root, root) {
+    // 1. Check if the root itself is an addon
+    for folder_name in addon_folder_names_from_toc(root, root) {
         candidates.push((root.to_path_buf(), folder_name));
+    }
+    if !candidates.is_empty() {
         return candidates;
     }
 
@@ -546,8 +548,11 @@ fn scan_addon_dirs(
             continue;
         }
 
-        if let Some(folder_name) = addon_folder_name_from_toc(&path, scan_root) {
-            candidates.push((path, folder_name));
+        let names = addon_folder_names_from_toc(&path, scan_root);
+        if !names.is_empty() {
+            for folder_name in names {
+                candidates.push((path.clone(), folder_name));
+            }
             continue;
         }
 
@@ -565,7 +570,11 @@ pub fn detect_addons_in_tree(root: &Path) -> Vec<(PathBuf, String)> {
 }
 
 pub fn detect_single_addon_folder(dir: &Path) -> Option<String> {
-    addon_folder_name_from_toc(dir, dir)
+    addon_folder_names_from_toc(dir, dir).into_iter().next()
+}
+
+pub fn detect_addon_folders_in_dir(dir: &Path) -> Vec<String> {
+    addon_folder_names_from_toc(dir, dir)
 }
 
 pub fn detect_addons_in_git_tree(root: &Path) -> Result<Vec<(PathBuf, String)>> {
@@ -574,7 +583,7 @@ pub fn detect_addons_in_git_tree(root: &Path) -> Result<Vec<(PathBuf, String)>> 
     let mut candidates = Vec::new();
 
     // 1. Check root
-    if let Some(name) = addon_folder_name_from_git_tree(&repo, &head, "", true) {
+    for name in addon_folder_names_from_git_tree(&repo, &head, "", true) {
         candidates.push((root.to_path_buf(), name));
     }
 
@@ -613,8 +622,11 @@ fn scan_git_addon_dirs(
             format!("{}/{}", rel_path, name)
         };
 
-        if let Some(addon_name) = addon_folder_name_from_git_tree(repo, &subtree, name, false) {
-            candidates.push((root.join(&child_rel), addon_name));
+        let names = addon_folder_names_from_git_tree(repo, &subtree, name, false);
+        if !names.is_empty() {
+            for addon_name in names {
+                candidates.push((root.join(&child_rel), addon_name));
+            }
             continue;
         }
 
@@ -624,12 +636,12 @@ fn scan_git_addon_dirs(
     Ok(())
 }
 
-fn addon_folder_name_from_git_tree(
+fn addon_folder_names_from_git_tree(
     _repo: &Repository,
     tree: &Tree,
     dir_name: &str,
     is_root: bool,
-) -> Option<String> {
+) -> Vec<String> {
     let mut stems = Vec::new();
     for entry in tree.iter() {
         if entry.kind() == Some(git2::ObjectType::Blob) {
@@ -644,29 +656,28 @@ fn addon_folder_name_from_git_tree(
     }
 
     if stems.is_empty() {
-        return None;
+        return vec![];
     }
 
-    resolve_addon_name_from_stems(stems, dir_name, is_root)
+    resolve_addon_names_from_stems(stems, dir_name, is_root)
 }
 
-fn resolve_addon_name_from_stems(
+fn resolve_addon_names_from_stems(
     stems: Vec<String>,
     dir_name: &str,
     is_root: bool,
-) -> Option<String> {
+) -> Vec<String> {
     let normalized: Vec<String> = stems.iter().map(|s| normalize_toc_stem(s)).collect();
 
     // GAM strict rule: for subfolders, matches folder name (or normalized folder name).
     if !is_root && !dir_name.is_empty() {
         // Prefer the exact TOC stem if it matches the folder name case-insensitively.
-        // This ensures "autolfm" folder becomes "AutoLFM" if AutoLFM.toc is inside.
         if let Some(matching_stem) = stems.iter().find(|name| name.eq_ignore_ascii_case(dir_name)) {
-            return Some(matching_stem.clone());
+            return vec![matching_stem.clone()];
         }
         // Also check normalized stems (e.g. Atlas-classic matches Atlas)
         if let Some(idx) = normalized.iter().position(|name| name.eq_ignore_ascii_case(dir_name)) {
-            return Some(stems[idx].clone());
+            return vec![stems[idx].clone()];
         }
     }
 
@@ -676,11 +687,19 @@ fn resolve_addon_name_from_stems(
         .all(|name| name.to_ascii_lowercase() == first_norm);
 
     if all_same_norm {
-        return normalized.into_iter().next();
+        // In root mode, if all TOCs normalize to the same name, return all original stems
+        // so the user can pick the exact casing/suffix they want.
+        if is_root {
+            let mut out = stems;
+            out.sort();
+            out.dedup();
+            return out;
+        }
+        return vec![normalized.into_iter().next().unwrap()];
     }
 
     if is_root {
-        return None;
+        return vec![];
     }
 
     // Fallback for subfolders if no direct match but multiple TOCs agree on a name.
@@ -699,40 +718,42 @@ fn resolve_addon_name_from_stems(
             }
         }
     }
-    best.map(|(name, _)| name)
+    best.map(|(name, _)| vec![name]).unwrap_or_default()
 }
 
-fn addon_folder_name_from_toc(dir: &Path, scan_root: &Path) -> Option<String> {
+fn addon_folder_names_from_toc(dir: &Path, scan_root: &Path) -> Vec<String> {
     let is_root = dir == scan_root;
     let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or_default();
     let mut stems: Vec<String> = Vec::new();
 
-    let rd = fs::read_dir(dir).ok()?;
-    for entry in rd.flatten() {
-        let p = entry.path();
-        if p.is_file() {
-            if p.extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("toc"))
-                .unwrap_or(false)
-            {
-                let stem = p
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
-                if let Some(name) = stem {
-                    stems.push(name);
+    let rd = fs::read_dir(dir).ok();
+    if let Some(rd) = rd {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                if p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("toc"))
+                    .unwrap_or(false)
+                {
+                    let stem = p
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    if let Some(name) = stem {
+                        stems.push(name);
+                    }
                 }
             }
         }
     }
 
     if stems.is_empty() {
-        return None;
+        return vec![];
     }
 
-    resolve_addon_name_from_stems(stems, dir_name, is_root)
+    resolve_addon_names_from_stems(stems, dir_name, is_root)
 }
 
 fn normalize_toc_stem(stem: &str) -> String {

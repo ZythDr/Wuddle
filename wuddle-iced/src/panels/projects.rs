@@ -92,8 +92,8 @@ fn col_cell<'a>(content: impl Into<Element<'a, Message>>, width: u32) -> Element
     .into()
 }
 
-pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, Message> {
-    let c = *colors;
+pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, Message> {
+    let c = colors;
     let is_mods_tab = label == "Mods";
 
     let addon_rows = if is_mods_tab {
@@ -208,10 +208,10 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
 
     // Toolbar: filters on left, search + buttons on right, all on one row
     let filters_part = row![
-        filter_button(&format!("All ({})", total), Filter::All, app.filter, &c),
-        filter_button(&format!("Updates ({})", update_count), Filter::Updates, app.filter, &c),
-        filter_button(&format!("Errors ({})", error_count), Filter::Errors, app.filter, &c),
-        filter_button(&format!("{} ({})", if is_mods_tab { "Disabled" } else { "Ignored" }, ignored_count), Filter::Ignored, app.filter, &c),
+        filter_button(&format!("All ({})", total), Filter::All, app.filter, c),
+        filter_button(&format!("Updates ({})", update_count), Filter::Updates, app.filter, c),
+        filter_button(&format!("Errors ({})", error_count), Filter::Errors, app.filter, c),
+        filter_button(&format!("{} ({})", if is_mods_tab { "Disabled" } else { "Ignored" }, ignored_count), Filter::Ignored, app.filter, c),
         Space::new().width(8),
         {
             let c2 = c;
@@ -261,7 +261,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
                 text(api_label).size(12).color(api_color),
                 container(text(tip_str).size(12).color(c2.text))
                     .padding([4, 8])
-                    .style(move |_theme| crate::theme::tooltip_style(&c2)),
+                    .style(move |_theme| crate::theme::tooltip_style(c2)),
                 tooltip::Position::Bottom,
             )
             .gap(4.0)
@@ -316,8 +316,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
                     .on_press(Message::RefreshRepos)
                     .padding([4, 10])
                     .style(move |_theme, status| match status {
-                        button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                        _ => theme::tab_button_style(&c2),
+                        button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                        _ => theme::tab_button_style(c2),
                     }),
                 "Rescan for new addons in your WoW directory",
                 tooltip::Position::Bottom,
@@ -339,8 +339,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
                     }))
                     .padding([4, 14])
                     .style(move |_theme, status| match status {
-                        button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-                        _ => theme::tab_button_style(&c2),
+                        button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                        _ => theme::tab_button_style(c2),
                     }),
                 add_tip,
                 tooltip::Position::Bottom,
@@ -373,8 +373,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
     // Table header — different columns for Addons vs Mods
     let header_row = {
         let c2 = c;
-        let name_hdr = sort_header_button(&format!("Name{}", sort_arrow(SortKey::Name)), SortKey::Name, &c);
-        let status_hdr = sort_header_button(&format!("Status{}", sort_arrow(SortKey::Status)), SortKey::Status, &c);
+        let name_hdr = sort_header_button(&format!("Name{}", sort_arrow(SortKey::Name)), SortKey::Name, c);
+        let status_hdr = sort_header_button(&format!("Status{}", sort_arrow(SortKey::Status)), SortKey::Status, c);
 
         let header_inner = if is_mods_tab {
             row![
@@ -395,7 +395,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         };
         container(header_inner.spacing(0).padding([10, 12]))
             .width(Length::Fill)
-            .style(move |_theme| theme::table_head_style(&c2))
+            .style(move |_theme| theme::table_head_style(c2))
     };
 
     // Sort filtered repos
@@ -528,7 +528,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
             .id(scroll_id)
             .height(Length::Fill)
             .direction(theme::vscroll_overlay())
-            .style(move |t, s| theme::scrollable_style(&c)(t, s))
+            .style(move |t, s| theme::scrollable_style(c)(t, s))
             .into()
     };
 
@@ -545,7 +545,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(move |_theme| theme::card_style(&c2))
+        .style(move |_theme| theme::card_style(c2))
     };
 
     // Footer
@@ -562,11 +562,11 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
         let b = button(text("Update All").size(13)).padding([6, 14]);
         let btn_el: Element<Message> = if total_update_count > 0 {
             b.on_press(Message::UpdateAll)
-                .style(move |_t, _s| theme::tab_button_active_style(&c2))
+                .style(move |_t, _s| theme::tab_button_active_style(c2))
                 .into()
         } else {
             b.style(move |_t, _s| {
-                let mut s = theme::tab_button_style(&c2);
+                let mut s = theme::tab_button_style(c2);
                 s.text_color = iced::Color::from_rgba(1.0, 1.0, 1.0, 0.25);
                 s
             })
@@ -576,7 +576,7 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
     };
 
     let check_btn = tip(
-        btn("Check for updates", Message::CheckUpdates, &c),
+        btn("Check for updates", Message::CheckUpdates, c),
         "Fetch the latest versions for all addons and mods",
         tooltip::Position::Top,
         colors,
@@ -600,8 +600,8 @@ pub fn view<'a>(app: &'a App, colors: &ThemeColors, label: &str) -> Element<'a, 
 }
 
 /// Mods row: Name | Installed | Version | Enabled | Status | Actions
-fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     let plan = app.plans.iter().find(|p| p.repo_id == repo.id);
     let current_str = plan.and_then(|p| p.current.clone())
         .or_else(|| repo.last_version.clone())
@@ -621,7 +621,7 @@ fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: &ThemeColors) -> Element
     let name_col = name_cell_with_expand(repo, is_multi_dll, is_expanded, is_infrequent, colors);
     let menu_key = format!("repo:{}", repo.id);
     let is_menu_open = app.open_menu.as_deref() == Some(menu_key.as_str());
-    let menu_content = crate::inline_context_menu(app, repo, None, &c);
+    let menu_content = crate::inline_context_menu(app, repo, None, c);
 
     // Version picker dropdown — build options list with "Latest" as first entry
     let version_picker = version_picker_cell(app, repo, colors);
@@ -632,13 +632,13 @@ fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: &ThemeColors) -> Element
         col_cell(version_picker, COL_VERSION),
         col_cell(checkbox(enabled).on_toggle(move |b| Message::ToggleRepoEnabled(rid, b)), COL_ENABLED),
         col_cell(status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, repo, colors), COL_STATUS),
-        col_cell(action_buttons(repo, menu_key, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
+        col_cell(action_buttons(repo, menu_key, has_update && !update_ignored, is_menu_open, menu_content, c), COL_ACTIONS),
     ]
     .spacing(0)
     .padding([9, 12])
     .align_y(iced::Alignment::Center);
 
-    let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(&c));
+    let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(c));
 
     column![separator, row_content].into()
 }
@@ -650,9 +650,9 @@ fn dll_child_row<'a>(
     dll_name: &'a str,
     dll_enabled: bool,
     dll_version: Option<&'a str>,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let name_owned = dll_name.to_string();
     let name_owned2 = dll_name.to_string();
 
@@ -734,13 +734,13 @@ fn dll_child_row<'a>(
     .padding([6, 12])
     .align_y(iced::Alignment::Center);
 
-    let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(&c));
+    let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(c));
     column![separator, row_content].into()
 }
 
 /// Version picker dropdown for a mod row.
 /// Shows "Latest" + all fetched version tags. Auto-fetches versions if not loaded yet.
-fn version_picker_cell<'a>(app: &'a App, repo: &'a RepoRow, _colors: &ThemeColors) -> Element<'a, Message> {
+fn version_picker_cell<'a>(app: &'a App, repo: &'a RepoRow, _colors: ThemeColors) -> Element<'a, Message> {
     let rid = repo.id;
 
     // Build options list: "Latest" first, then fetched version tags
@@ -784,9 +784,9 @@ fn addon_collection_name_cell<'a>(
     is_infrequent: bool,
     member_count: usize,
     member_label: &str,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let url = repo.url.clone();
     let subtitle = if repo.enabled {
         format!("{} \u{2022} {}", repo.owner, repo.forge)
@@ -896,9 +896,9 @@ fn addon_collection_parent_row<'a>(
     is_expanded: bool,
     member_count: usize,
     member_label: &'a str,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let plan = app.plans.iter().find(|p| p.repo_id == repo.id);
     let has_update = plan.map(|p| p.has_update).unwrap_or(false);
     let has_error = plan.and_then(|p| p.error.as_ref()).is_some();
@@ -913,7 +913,7 @@ fn addon_collection_parent_row<'a>(
 
     let menu_key = format!("repo:{}", repo.id);
     let is_menu_open = app.open_menu.as_deref() == Some(menu_key.as_str());
-    let menu_content = crate::inline_context_menu(app, repo, None, &c);
+    let menu_content = crate::inline_context_menu(app, repo, None, c);
 
     let current_branch = repo.git_branch.clone().unwrap_or_else(|| "master".to_string());
     let branch_options = app.branches.get(&repo.id).cloned().unwrap_or_default();
@@ -938,13 +938,13 @@ fn addon_collection_parent_row<'a>(
             status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, repo, colors),
             COL_STATUS,
         ),
-        col_cell(action_buttons(repo, menu_key, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
+        col_cell(action_buttons(repo, menu_key, has_update && !update_ignored, is_menu_open, menu_content, c), COL_ACTIONS),
     ]
     .spacing(0)
     .padding([9, 12])
     .align_y(iced::Alignment::Center);
 
-    let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(&c));
+    let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(c));
     column![separator, row_content].into()
 }
 
@@ -953,9 +953,9 @@ fn addon_name_cell<'a>(
     addon_name: String,
     is_collection_member: bool,
     is_infrequent: bool,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let url = repo.url.clone();
     let subtitle = if repo.enabled {
         format!("{} • {}", repo.owner, repo.forge)
@@ -1053,9 +1053,9 @@ fn addon_row<'a>(
     repo: &'a RepoRow,
     addon_name: String,
     is_collection_member: bool,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let plan = app.plans.iter().find(|p| p.repo_id == repo.id);
     let has_update = plan.map(|p| p.has_update).unwrap_or(false);
     let has_error = plan.and_then(|p| p.error.as_ref()).is_some();
@@ -1077,7 +1077,7 @@ fn addon_row<'a>(
         app,
         repo,
         if is_collection_member { Some(addon_name.as_str()) } else { None },
-        &c,
+        c,
     );
 
     let rid = repo.id;
@@ -1107,13 +1107,13 @@ fn addon_row<'a>(
         name_col,
         col_cell(branch_display, COL_BRANCH),
         col_cell(status_badge(has_error, has_update, externally_modified, enabled, update_ignored, &latest_str, repo, colors), COL_STATUS),
-        col_cell(action_buttons(repo, menu_key, has_update && !update_ignored, is_menu_open, menu_content, &c), COL_ACTIONS),
+        col_cell(action_buttons(repo, menu_key, has_update && !update_ignored, is_menu_open, menu_content, c), COL_ACTIONS),
     ]
     .spacing(0)
     .padding([9, 12])
     .align_y(iced::Alignment::Center);
 
-    let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(&c));
+    let separator = rule::horizontal(1).style(move |_theme| theme::update_line_style(c));
 
     column![separator, row_content].into()
 }
@@ -1124,9 +1124,9 @@ fn name_cell_with_expand<'a>(
     is_multi_dll: bool,
     is_expanded: bool,
     is_infrequent: bool,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let url = repo.url.clone();
     let sub_text = if repo.enabled {
         format!("{} \u{2022} {}", repo.owner, repo.forge)
@@ -1299,7 +1299,7 @@ fn status_info(
     externally_modified: bool,
     enabled: bool,
     update_ignored: bool,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> (&'static str, iced::Color, iced::Color) {
     if update_ignored {
         ("Ignored", colors.muted, colors.muted)
@@ -1326,7 +1326,7 @@ fn status_badge<'a>(
     update_ignored: bool,
     latest_str: &str,
     repo: &RepoRow,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
     let (label, text_color, base_color) = status_info(has_error, has_update, externally_modified, enabled, update_ignored, colors);
     let bg = iced::Color::from_rgba(base_color.r, base_color.g, base_color.b, 0.18);
@@ -1344,7 +1344,7 @@ fn status_badge<'a>(
     });
 
     if (has_update || externally_modified) && !update_ignored && !latest_str.is_empty() {
-        let c = *colors;
+        let c = colors;
         let tip = if externally_modified {
             "Modified externally. Reinstall or update to restore.".to_string()
         } else {
@@ -1365,7 +1365,7 @@ fn status_badge<'a>(
         .padding(6.0)
         .into()
     } else if !has_update && !has_error && !externally_modified && enabled && !update_ignored {
-        let c = *colors;
+        let c = colors;
         let mut tip_lines = Vec::new();
         if let Some(v) = &repo.last_version {
             if repo.mode == "addon_git" {
@@ -1411,9 +1411,9 @@ fn action_buttons<'a>(
     has_update: bool,
     is_menu_open: bool,
     menu_content: Element<'a, Message>,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let rid = repo.id;
 
     let mut items: Vec<Element<Message>> = Vec::new();
@@ -1426,11 +1426,11 @@ fn action_buttons<'a>(
             .width(30);
         let btn_el: Element<Message> = if has_update {
             btn.on_press(Message::UpdateRepo(rid))
-                .style(move |_theme, _status| theme::tab_button_active_style(&c2))
+                .style(move |_theme, _status| theme::tab_button_active_style(c2))
                 .into()
         } else {
             btn.style(move |_theme, _status| {
-                let mut s = theme::tab_button_style(&c2);
+                let mut s = theme::tab_button_style(c2);
                 s.text_color = iced::Color::from_rgba(1.0, 1.0, 1.0, 0.2);
                 s
             })
@@ -1448,8 +1448,8 @@ fn action_buttons<'a>(
         .padding([4, 0])
         .width(30)
         .style(move |_theme, status| match status {
-            button::Status::Hovered => theme::tab_button_hovered_style(&c2),
-            _ => theme::tab_button_style(&c2),
+            button::Status::Hovered => theme::tab_button_hovered_style(c2),
+            _ => theme::tab_button_style(c2),
         });
 
     items.push(
@@ -1465,54 +1465,54 @@ fn filter_button<'a>(
     label: &str,
     filter: Filter,
     active_filter: Filter,
-    colors: &ThemeColors,
+    colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = *colors;
+    let c = colors;
     let active = filter == active_filter;
     let b = button(text(String::from(label)).size(12))
         .on_press(Message::SetFilter(filter))
         .padding([4, 10]);
     if active {
-        b.style(move |_theme, _status| theme::tab_button_active_style(&c))
+        b.style(move |_theme, _status| theme::tab_button_active_style(c))
             .into()
     } else {
         b.style(move |_theme, status| match status {
-            button::Status::Hovered => theme::tab_button_hovered_style(&c),
-            _ => theme::tab_button_style(&c),
+            button::Status::Hovered => theme::tab_button_hovered_style(c),
+            _ => theme::tab_button_style(c),
         })
         .into()
     }
 }
 
-fn btn<'a>(label: &str, msg: Message, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn btn<'a>(label: &str, msg: Message, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     button(text(String::from(label)).size(13))
         .on_press(msg)
         .padding([6, 14])
         .style(move |_theme, status| match status {
-            button::Status::Hovered => theme::tab_button_hovered_style(&c),
-            _ => theme::tab_button_style(&c),
+            button::Status::Hovered => theme::tab_button_hovered_style(c),
+            _ => theme::tab_button_style(c),
         })
         .into()
 }
 
 /// Wrap any element in a tooltip with consistent styling.
-fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     let tip_str = String::from(tip_text);
     tooltip(
         content,
         container(text(tip_str).size(13).color(c.text))
             .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(&c)),
+            .style(move |_theme| theme::tooltip_style(c)),
         pos,
     )
     .gap(4.0)
     .into()
 }
 
-fn sort_header_button<'a>(label: &str, key: SortKey, colors: &ThemeColors) -> Element<'a, Message> {
-    let c = *colors;
+fn sort_header_button<'a>(label: &str, key: SortKey, colors: ThemeColors) -> Element<'a, Message> {
+    let c = colors;
     button(text(String::from(label)).size(13).color(c.muted))
         .on_press(Message::ToggleSort(key))
         .padding(0)
