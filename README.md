@@ -32,18 +32,15 @@ If this happens, you need to add the game installation folder to your Anti-virus
 
 ### What's New in v3.2.5
 
-#### New Features
-- **Intelligent Addon Suggestions** — Automatically badges the most compatible addon version during installation based on the detected WoW client version.
-- **Fast GitHub Repository Probing** — Utilizes the GitHub Tree API to analyze repository structures and detect nested addons in milliseconds without requiring a full git clone.
-- **Primary Addon Selection UI** — A new selection dialog for repositories with multiple .toc files that allows users to explicitly choose which version defines the addon folder name.
+### New Features
+- **Primary Addon Selection UI** — A new selection dialog for repositories with multiple .toc files that allows users to explicitly choose which version defines the addon folder name. This is intended for addons like pfQuest where Vanilla 1.12, TBC 2.4.3, and WotLK 3.3.5 versions of the addon are all included in the same reposi
 
-#### Improvements
+### Improvements
+- **Faster GitHub Repository Probing** — Utilizes the GitHub Tree API to analyze repository structures and detect nested addons in milliseconds without requiring a full git clone.
 - **Multi-TOC Health Support** — Updated tracked addon health checks to correctly support folders containing multiple .toc files.
 - **Robust Manual Pruning** — Enhanced maintenance logic to protect manual repositories with multiple expansion versions from incorrect database pruning.
-- **Refined Dialog Aesthetics** — Removed redundant internal borders and increased internal padding for a cleaner, more spacious dialog interface.
-- **Enhanced Visual Feedback** — Added a translucent suggestion badge style with high-contrast outlines and descriptive tooltips explaining the suggestion logic.
-- **Optimized Secondary Selection** — Refined the "Install as Collection instead" button with subtle bordering and dimmed text for a more distinct secondary action.
 - **Engine Reliability** — Improved error handling and folder detection robustness in the `wuddle-engine` library for complex repository structures.
+
 
 <details>
 <summary><strong>v3.x Changelog</strong></summary>
