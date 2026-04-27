@@ -1,6 +1,6 @@
 [package]
 name = "wuddle-iced"
-version = "3.2.5"
+version = "3.2.6"
 description = "Wuddle v3 — native GPU-rendered frontend using Iced"
 edition = "2021"
 

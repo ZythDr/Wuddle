@@ -2,6 +2,11 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.2.6
+
+### Bug Fixes
+- **Persistent Option State** — Fixed an issue where "Auto check for updates," "Desktop notifications," and other preference toggles would revert to their default states after restarting the application.
+
 ## v3.2.5
 
 ### New Features

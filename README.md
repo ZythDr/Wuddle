@@ -30,20 +30,28 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.2.5
+### What's New in v3.2.6
 
-### New Features
-- **Primary Addon Selection UI** — A new selection dialog for repositories with multiple .toc files that allows users to explicitly choose which version defines the addon folder name. This is intended for addons like pfQuest where Vanilla 1.12, TBC 2.4.3, and WotLK 3.3.5 versions of the addon are all included in the same reposi
-
-### Improvements
-- **Faster GitHub Repository Probing** — Utilizes the GitHub Tree API to analyze repository structures and detect nested addons in milliseconds without requiring a full git clone.
-- **Multi-TOC Health Support** — Updated tracked addon health checks to correctly support folders containing multiple .toc files.
-- **Robust Manual Pruning** — Enhanced maintenance logic to protect manual repositories with multiple expansion versions from incorrect database pruning.
-- **Engine Reliability** — Improved error handling and folder detection robustness in the `wuddle-engine` library for complex repository structures.
-
+#### Bug Fixes
+- **Persistent Option State** — Fixed an issue where "Auto check for updates," "Desktop notifications," and other preference toggles would revert to their default states after restarting the application.
 
 <details>
 <summary><strong>v3.x Changelog</strong></summary>
+
+### v3.2.5
+
+#### New Features
+- **Intelligent Addon Suggestions** — Automatically badges the most compatible addon version during installation based on the detected WoW client version.
+- **Fast GitHub Repository Probing** — Utilizes the GitHub Tree API to analyze repository structures and detect nested addons in milliseconds without requiring a full git clone.
+- **Primary Addon Selection UI** — A new selection dialog for repositories with multiple .toc files that allows users to explicitly choose which version defines the addon folder name.
+
+#### Improvements
+- **Multi-TOC Health Support** — Updated tracked addon health checks to correctly support folders containing multiple .toc files.
+- **Robust Manual Pruning** — Enhanced maintenance logic to protect manual repositories with multiple expansion versions from incorrect database pruning.
+- **Refined Dialog Aesthetics** — Removed redundant internal borders and increased internal padding for a cleaner, more spacious dialog interface.
+- **Enhanced Visual Feedback** — Added a translucent suggestion badge style with high-contrast outlines and descriptive tooltips explaining the suggestion logic.
+- **Optimized Secondary Selection** — Refined the "Install as Collection instead" button with subtle bordering and dimmed text for a more distinct secondary action.
+- **Engine Reliability** — Improved error handling and folder detection robustness in the `wuddle-engine` library for complex repository structures.
 
 ### v3.2.4
 
@@ -215,12 +223,11 @@ Wuddle is its own implementation, but parts of the functionality and UX were ins
 - **[GitAddonsManager](https://gitlab.com/woblight/GitAddonsManager)** by WobLight  
   Git addon update workflows, `.toc`-driven addon deployment ideas, and branch-oriented addon management.  
 
-  
+
 - **[WoWRetroLauncher](https://github.com/Parquelle/WoWRetroLauncher)** by Parquelle  
   Sparked the idea for Wuddle's themes.  
 
-  
+
 - **[vanilla-tweaks](https://github.com/brndd/vanilla-tweaks)** by brndd  
   WoW.exe binary patching logic for the Tweaks tab (FoV, farclip, quickloot, camera fixes, etc.).  
 
-  

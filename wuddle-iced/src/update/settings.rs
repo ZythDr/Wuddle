@@ -272,6 +272,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             colors.body_font = app.body_font();
             app.theme_colors = colors;
             app.active_profile_id = s.active_profile_id.clone();
+            
+            app.opt_auto_check = s.opt_auto_check;
+            app.opt_desktop_notify = s.opt_desktop_notify;
+            app.opt_symlinks = s.opt_symlinks;
+            app.opt_xattr = s.opt_xattr;
+            app.opt_clock12 = s.opt_clock12;
+            
             app.log_wrap = s.log_wrap;
             app.log_autoscroll = s.log_autoscroll;
             app.auto_check_minutes = s.auto_check_minutes.max(1);
