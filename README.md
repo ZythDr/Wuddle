@@ -30,13 +30,29 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.2.6
+### What's New in v3.2.7
+
+#### New Features
+- **Mods Safety Warning** — Added a per-profile warning when opening the Mods tab, with a "do not show again" option for each profile.
+
+#### Improvements
+- **Profile-Local Databases** — New profile databases now initialize from that profile's own `Interface/AddOns` folder instead of borrowing state from another profile.
+- **Add Dialog URL Flow** — Repo previews now resolve after pressing Enter, so incomplete URLs no longer interrupt typing or steal focus.
+- **Project Row Layout** — Cleaned up tracked addon/mod row sizing, column widths, and expandable-row alignment.
+- **Collection Row Controls** — Collection badges now open collection management, while the chevron or empty row space still expands and collapses the row.
+- **Per-Profile Update State** — Ignored updates are now stored separately per profile.
 
 #### Bug Fixes
-- **Persistent Option State** — Fixed an issue where "Auto check for updates," "Desktop notifications," and other preference toggles would revert to their default states after restarting the application.
+- **Profile Isolation** — Fixed cross-profile addon leakage caused by old shared database fallback behavior.
+- **Overlapping Addon Folder Names** — Fixed cases where different repos installing to the same folder name could make the wrong tracked project appear.
 
 <details>
 <summary><strong>v3.x Changelog</strong></summary>
+
+### v3.2.6
+
+#### Bug Fixes
+- **Persistent Option State** — Fixed an issue where "Auto check for updates," "Desktop notifications," and other preference toggles would revert to their default states after restarting the application.
 
 ### v3.2.5
 
@@ -230,4 +246,3 @@ Wuddle is its own implementation, but parts of the functionality and UX were ins
 
 - **[vanilla-tweaks](https://github.com/brndd/vanilla-tweaks)** by brndd  
   WoW.exe binary patching logic for the Tweaks tab (FoV, farclip, quickloot, camera fixes, etc.).  
-

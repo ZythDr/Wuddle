@@ -640,6 +640,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::FetchCollectionProbeResult(url, result) => {
             app.add_repo_probe_loading = false;
+            if let Some(Dialog::AddRepo { url: current_url, .. }) = app.dialog.as_ref() {
+                if service::normalize_repo_input_url(current_url)
+                    != service::normalize_repo_input_url(&url)
+                {
+                    return Some(Task::none());
+                }
+            }
             match result {
                 Ok(probe) => {
                     let hinted_addon = if let Some(Dialog::AddRepo { url, .. }) = app.dialog.as_ref() {
@@ -1620,6 +1627,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::FetchRepoPreviewResult(url, result) => {
             app.add_repo_preview_loading = false;
+            if let Some(Dialog::AddRepo { url: current_url, .. }) = app.dialog.as_ref() {
+                if service::normalize_repo_input_url(current_url)
+                    != service::normalize_repo_input_url(&url)
+                {
+                    return Some(Task::none());
+                }
+            }
             match result {
                 Ok(info) => {
                     app.readme_editor_content = iced::widget::text_editor::Content::with_text(&info.readme_text);
@@ -1793,12 +1807,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             ));
         }
         Message::SetAddRepoUrl(url) => {
-            let is_addons = if let Some(Dialog::AddRepo { url: ref mut old_url, is_addons, .. }) = app.dialog {
+            if let Some(Dialog::AddRepo { url: ref mut old_url, .. }) = app.dialog {
                 *old_url = url.clone();
-                is_addons
-            } else {
-                false
-            };
+            }
+            app.add_repo_preview = None;
+            app.add_repo_preview_loading = false;
+            app.add_repo_release_notes = None;
+            app.add_repo_show_releases = false;
+            app.add_repo_file_preview = None;
+            app.add_repo_expanded_dirs.clear();
+            app.add_repo_dir_contents.clear();
             app.add_repo_probe = None;
             app.add_repo_probe_loading = false;
             if app.add_repo_manage_repo_id.is_none() {
@@ -1807,8 +1825,20 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if app.add_repo_manage_repo_id.is_none() {
                 app.add_repo_selected_addons.clear();
             }
-            // Also trigger preview fetch automatically as the user types
-            if !url.is_empty() && (url.contains('/') || url.contains(':')) {
+            Some(Task::none())
+        }
+        Message::ResolveAddRepoUrl => {
+            let (url, is_addons) = if let Some(Dialog::AddRepo {
+                ref url,
+                is_addons,
+                ..
+            }) = app.dialog
+            {
+                (url.trim().to_string(), is_addons)
+            } else {
+                (String::new(), false)
+            };
+            if !url.is_empty() {
                 let mut tasks = vec![Task::done(Message::FetchRepoPreview(url.clone()))];
                 // Always probe for addon structure — wow_dir is not required for folder detection.
                 if is_addons {

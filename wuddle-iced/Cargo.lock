@@ -7026,7 +7026,7 @@ dependencies = [
 
 [[package]]
 name = "wuddle-iced"
-version = "3.2.6"
+version = "3.2.7"
 dependencies = [
  "arboard",
  "async-stream",

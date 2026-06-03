@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -132,8 +133,11 @@ pub struct AppSettings {
     pub auto_check_minutes: u32,
     pub profiles: Vec<ProfileConfig>,
     pub ignored_update_ids: Vec<i64>,
+    pub ignored_update_ids_by_profile: HashMap<String, Vec<i64>>,
+    pub mods_warning_dismissed_profile_ids: Vec<String>,
     pub update_channel: UpdateChannel,
     pub ui_scale_mode: UiScaleMode,
+    pub migrated_from_tauri: bool,
 }
 
 impl Default for AppSettings {
@@ -153,10 +157,51 @@ impl Default for AppSettings {
             auto_check_minutes: 15,
             profiles: vec![ProfileConfig::default()],
             ignored_update_ids: Vec::new(),
+            ignored_update_ids_by_profile: HashMap::new(),
+            mods_warning_dismissed_profile_ids: Vec::new(),
             update_channel: UpdateChannel::Beta,
             ui_scale_mode: UiScaleMode::Auto,
+            migrated_from_tauri: false,
         }
     }
+}
+
+pub fn profile_id_from_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_dash = false;
+
+    for ch in name.trim().to_ascii_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash {
+            out.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        "profile".to_string()
+    } else {
+        out
+    }
+}
+
+pub fn unique_profile_id(name: &str, profiles: &[ProfileConfig]) -> String {
+    let base = profile_id_from_name(name);
+    if !profiles.iter().any(|p| p.id == base) {
+        return base;
+    }
+
+    for n in 2.. {
+        let candidate = format!("{}-{}", base, n);
+        if !profiles.iter().any(|p| p.id == candidate) {
+            return candidate;
+        }
+    }
+
+    unreachable!()
 }
 
 pub fn normalize_wow_path_input(raw: &str) -> (String, Option<String>) {
@@ -245,9 +290,7 @@ fn portable_app_dir() -> Result<PathBuf, String> {
 
 fn portable_root_dir() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let exe_dir = exe
-        .parent()
-        .ok_or_else(|| "no exe parent".to_string())?;
+    let exe_dir = exe.parent().ok_or_else(|| "no exe parent".to_string())?;
     // AppImage: exe is inside a version dir, go up one more
     if exe_dir
         .file_name()
@@ -274,38 +317,10 @@ pub fn profile_db_path(profile_id: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// Like `profile_db_path`, but falls back to `wuddle.sqlite` when the
-/// profile-specific DB doesn't exist or has zero repos.  This ensures mods
-/// installed under the "default" profile remain visible when the active
-/// profile switches to a Tauri-originated ID like "wow1".
+/// Resolve the database path for exactly one profile.
+/// Profile data must not fall back to another profile's database.
 pub fn resolve_profile_db_path(profile_id: &str) -> Result<PathBuf, String> {
-    let path = profile_db_path(profile_id)?;
-    if profile_id == "default" {
-        return Ok(path);
-    }
-    let should_fallback = if path.exists() {
-        // Check whether this DB has any repos
-        match rusqlite::Connection::open_with_flags(
-            &path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ) {
-            Ok(conn) => conn
-                .query_row("SELECT COUNT(*) FROM repos", [], |row| row.get::<_, i64>(0))
-                .unwrap_or(0)
-                == 0,
-            Err(_) => true,
-        }
-    } else {
-        true
-    };
-    if should_fallback {
-        let dir = app_dir()?;
-        let default_path = dir.join("wuddle.sqlite");
-        if default_path.exists() {
-            return Ok(default_path);
-        }
-    }
-    Ok(path)
+    profile_db_path(profile_id)
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -329,48 +344,58 @@ pub fn load_settings() -> AppSettings {
         import_tauri_options(&mut settings);
     }
 
-    // Discover orphaned profile databases and import from Tauri localStorage
+    // Discover orphaned profile databases and import from Tauri localStorage.
+    // This is primarily for the first launch or migration from Tauri v2.
+    // Once migrated, we stop auto-discovering so that deleted profiles stay deleted.
     if let Ok(dir) = app_dir() {
-        let before = settings.profiles.len();
-        discover_orphan_profiles(&mut settings, &dir);
-        let discovered = settings.profiles.len() > before;
+        if !settings.migrated_from_tauri {
+            let before = settings.profiles.len();
+            discover_orphan_profiles(&mut settings, &dir);
+            let discovered = settings.profiles.len() > before;
 
-        // Import active profile ID from Tauri localStorage
-        if discovered || settings.active_profile_id == "default" {
-            import_tauri_active_profile(&mut settings);
-        }
+            // Import active profile ID from Tauri localStorage
+            if discovered || settings.active_profile_id == "default" {
+                import_tauri_active_profile(&mut settings);
+            }
 
-        // Remove the Iced-only "default" placeholder profile when real Tauri
-        // profiles exist. Two cases:
-        //   (a) The "default" profile has an empty wow_dir (it was never configured
-        //       in Iced) but at least one other profile has a real wow_dir.
-        //   (b) The "default" profile's wow_dir duplicates another profile's wow_dir
-        //       (the Tauri profile is the canonical one for that installation).
-        // In both cases the "default" placeholder is redundant and causes confusion.
-        {
-            let default_wow = settings.profiles.iter()
-                .find(|p| p.id == "default")
-                .map(|p| p.wow_dir.clone());
-            if let Some(ref dw) = default_wow {
-                let has_other_real = settings.profiles.iter()
-                    .any(|p| p.id != "default" && !p.wow_dir.is_empty());
-                let is_placeholder = dw.is_empty() && has_other_real;
-                let is_duplicate = !dw.is_empty() && settings.profiles.iter()
-                    .any(|p| p.id != "default" && p.wow_dir == *dw);
-                if is_placeholder || is_duplicate {
-                    settings.profiles.retain(|p| p.id != "default");
-                    // Switch active profile away from the removed placeholder
-                    if settings.active_profile_id == "default" {
-                        if let Some(first) = settings.profiles.first() {
-                            settings.active_profile_id = first.id.clone();
-                            settings.wow_dir = first.wow_dir.clone();
+            // Remove the Iced-only "default" placeholder profile when real Tauri
+            // profiles exist. Two cases:
+            //   (a) The "default" profile has an empty wow_dir (it was never configured
+            //       in Iced) but at least one other profile has a real wow_dir.
+            //   (b) The "default" profile's wow_dir duplicates another profile's wow_dir
+            //       (the Tauri profile is the canonical one for that installation).
+            // In both cases the "default" placeholder is redundant and causes confusion.
+            {
+                let default_wow = settings
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == "default")
+                    .map(|p| p.wow_dir.clone());
+                if let Some(ref dw) = default_wow {
+                    let has_other_real = settings
+                        .profiles
+                        .iter()
+                        .any(|p| p.id != "default" && !p.wow_dir.is_empty());
+                    let is_placeholder = dw.is_empty() && has_other_real;
+                    let is_duplicate = !dw.is_empty()
+                        && settings
+                            .profiles
+                            .iter()
+                            .any(|p| p.id != "default" && p.wow_dir == *dw);
+                    if is_placeholder || is_duplicate {
+                        settings.profiles.retain(|p| p.id != "default");
+                        // Switch active profile away from the removed placeholder
+                        if settings.active_profile_id == "default" {
+                            if let Some(first) = settings.profiles.first() {
+                                settings.active_profile_id = first.id.clone();
+                                settings.wow_dir = first.wow_dir.clone();
+                            }
                         }
                     }
                 }
             }
-        }
 
-        if discovered || settings.profiles.len() != before {
+            settings.migrated_from_tauri = true;
             let _ = save_settings(&settings);
         }
     }
@@ -500,18 +525,57 @@ fn read_tauri_localstorage_profiles() -> Vec<ProfileConfig> {
             let (wow_dir, auto_launch_exe) = normalize_wow_path_input(raw_wow_dir);
             Some(ProfileConfig {
                 id,
-                name: p.get("name").and_then(|v| v.as_str()).unwrap_or("WoW").to_string(),
+                name: p
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("WoW")
+                    .to_string(),
                 wow_dir,
                 auto_launch_exe,
-                launch_method: launch.get("method").and_then(|v| v.as_str()).unwrap_or("auto").to_string(),
-                clear_wdb: launch.get("clearWdb").and_then(|v| v.as_bool()).unwrap_or(false),
-                lutris_target: launch.get("lutrisTarget").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                wine_command: launch.get("wineCommand").and_then(|v| v.as_str()).unwrap_or("wine").to_string(),
-                wine_args: launch.get("wineArgs").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                custom_command: launch.get("customCommand").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                custom_args: launch.get("customArgs").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                working_dir: launch.get("workingDir").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                env_text: launch.get("envText").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                launch_method: launch
+                    .get("method")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("auto")
+                    .to_string(),
+                clear_wdb: launch
+                    .get("clearWdb")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                lutris_target: launch
+                    .get("lutrisTarget")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                wine_command: launch
+                    .get("wineCommand")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("wine")
+                    .to_string(),
+                wine_args: launch
+                    .get("wineArgs")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                custom_command: launch
+                    .get("customCommand")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                custom_args: launch
+                    .get("customArgs")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                working_dir: launch
+                    .get("workingDir")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                env_text: launch
+                    .get("envText")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             })
         })
         .collect()
@@ -546,7 +610,10 @@ fn import_tauri_active_profile(settings: &mut AppSettings) {
         |row| row.get(0),
     ) {
         if let Ok(text) = String::from_utf16(
-            &blob.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<u16>>(),
+            &blob
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect::<Vec<u16>>(),
         ) {
             let id = text.trim().trim_matches('"').to_string();
             if settings.profiles.iter().any(|p| p.id == id) {
@@ -556,7 +623,11 @@ fn import_tauri_active_profile(settings: &mut AppSettings) {
     }
 
     // Also sync wow_dir from active profile
-    if let Some(p) = settings.profiles.iter().find(|p| p.id == settings.active_profile_id) {
+    if let Some(p) = settings
+        .profiles
+        .iter()
+        .find(|p| p.id == settings.active_profile_id)
+    {
         if !p.wow_dir.is_empty() {
             settings.wow_dir = p.wow_dir.clone();
         }
@@ -589,11 +660,9 @@ fn import_tauri_options(settings: &mut AppSettings) {
     // Helper: read a UTF-16LE WebKit localStorage value by key.
     let read_ls = |key: &str| -> Option<String> {
         let blob: Vec<u8> = conn
-            .query_row(
-                "SELECT value FROM ItemTable WHERE key = ?1",
-                [key],
-                |row| row.get(0),
-            )
+            .query_row("SELECT value FROM ItemTable WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
             .ok()?;
         String::from_utf16(
             &blob

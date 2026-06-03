@@ -1,7 +1,12 @@
 use crate::Message;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToastKind { Info, Warn, Error }
+pub enum ToastKind {
+    Info,
+    Success,
+    Warn,
+    Error,
+}
 
 #[derive(Debug, Clone)]
 pub struct Toast {

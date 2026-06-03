@@ -50,6 +50,8 @@ pub enum Message {
     // Dialogs
     OpenDialog(Dialog),
     CloseDialog,
+    ToggleModsWarningDoNotShow(bool),
+    AcceptModsWarning,
     RequestExit,
     ConsumeDialogClick,
 
@@ -78,13 +80,20 @@ pub enum Message {
     },
     /// Result of the install that fires immediately after a repo is added.
     /// Carries `repo_id` so the conflict handler can force-reinstall the right repo.
-    InstallAfterAddResult { repo_id: i64, result: Result<String, String> },
+    InstallAfterAddResult {
+        repo_id: i64,
+        result: Result<String, String>,
+    },
     /// Fires when the user confirms overwriting file conflicts for a repo that is
     /// already in the DB (the initial install attempt raised ADDON_CONFLICT).
-    InstallConflictOverride { repo_id: i64 },
+    InstallConflictOverride {
+        repo_id: i64,
+    },
     /// Fires when the user clicks Cancel on the conflict dialog for a freshly-added
     /// repo. Removes the repo from the DB so it doesn't remain tracked.
-    CancelConflictInstall { repo_id: i64 },
+    CancelConflictInstall {
+        repo_id: i64,
+    },
     RemoveRepoConfirm(i64, bool),
     ToggleRemoveFiles(bool),
     RemoveRepoFilesLoaded(Result<Vec<(String, String)>, String>),
@@ -112,7 +121,10 @@ pub enum Message {
     OpenUrl(String),
     OpenDirectory(String),
     BrowseRepo(i64),
-    BrowseAddonInstall { repo_id: i64, addon_name: String },
+    BrowseAddonInstall {
+        repo_id: i64,
+        addon_name: String,
+    },
     CopyToClipboard(String),
     LaunchGame,
     LaunchGameResult(Result<String, String>),
@@ -125,11 +137,20 @@ pub enum Message {
     ToggleCollectionFolder(String),
     ToggleCollectionAddon(String),
     SaveCollectionSelection,
-    SaveCollectionSelectionOverride { repo_id: i64, selected_addons: Vec<String> },
+    SaveCollectionSelectionOverride {
+        repo_id: i64,
+        selected_addons: Vec<String>,
+    },
     SaveCollectionSelectionResult(Result<String, service::CollectionSelectionError>),
     SetAddRepoPrimaryAddon(String),
-    RemoveCollectionAddonPrompt { repo_id: i64, addon_name: String },
-    RemoveCollectionAddonConfirm { repo_id: i64, addon_name: String },
+    RemoveCollectionAddonPrompt {
+        repo_id: i64,
+        addon_name: String,
+    },
+    RemoveCollectionAddonConfirm {
+        repo_id: i64,
+        addon_name: String,
+    },
 
     // GitHub token
     SaveGithubToken,
@@ -142,7 +163,8 @@ pub enum Message {
     UpdateInstanceField(InstanceField),
     SwitchProfile(String),
     RemoveProfile(String),
-    RemoveProfileResult(Result<String, String>),
+    RemoveProfileResult(String, Option<String>),
+    InitializeProfileDbResult(String, Result<usize, String>),
 
     // File dialog
     PickWowDirectory,
@@ -194,6 +216,7 @@ pub enum Message {
     // Add-repo preview
     QuickInstallPreset(String),
     SetAddRepoUrl(String),
+    ResolveAddRepoUrl,
     FetchRepoPreview(String),
     FetchRepoPreviewResult(String, Result<service::RepoPreviewInfo, String>),
     ToggleAddRepoDir(String),

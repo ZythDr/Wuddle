@@ -414,6 +414,23 @@ fn open_engine(db_path: Option<&Path>) -> Result<Engine, String> {
     }
 }
 
+pub async fn initialize_profile_database(
+    db_path: PathBuf,
+    wow_dir: String,
+) -> Result<usize, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = Engine::open(&db_path).map_err(|e| e.to_string())?;
+        let wow_dir = wow_dir.trim();
+        if wow_dir.is_empty() {
+            return Ok(0);
+        }
+        eng.import_existing_addons(Path::new(wow_dir))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---------------------------------------------------------------------------
 // Repo queries
 // ---------------------------------------------------------------------------
@@ -564,8 +581,22 @@ pub async fn list_repos(
         }
     };
     let wow_path_buf = PathBuf::from(dir);
+    let db_existed_before_open = db_path.as_ref().map(|p| p.exists()).unwrap_or(true);
     let eng = open_engine(db_path.as_deref())?;
     let mut logs = Vec::new();
+
+    if !db_existed_before_open {
+        let imported = eng
+            .import_existing_addons(&wow_path_buf)
+            .map_err(|e| e.to_string())?;
+        logs.push(RepoLoadLog {
+            level: LogLevel::Info,
+            text: format!(
+                "Initialized profile database and imported {} existing addon repo(s).",
+                imported
+            ),
+        });
+    }
 
     // Cheap tracked-link verification runs on normal refresh/load.
     // Full repair/reconciliation stays behind explicit Rescan only.

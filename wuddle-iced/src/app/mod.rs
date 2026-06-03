@@ -1,5 +1,6 @@
 use iced::widget::{
-    button, canvas, checkbox, column, container, pick_list, row, rule, scrollable, stack, text, Space,
+    button, canvas, checkbox, column, container, pick_list, row, rule, scrollable, stack, text,
+    Space,
 };
 use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
 use std::collections::{HashMap, HashSet};
@@ -9,14 +10,17 @@ use std::time::Instant;
 use crate::components::helpers::*;
 use crate::components::markdown::ImageViewer;
 use crate::components::presets::build_quick_add_presets;
-use crate::dialogs::simple_warnings::{addon_conflict, av_false_positive_warning, collection_addon_conflict};
+use crate::dialogs::mods_warning;
+use crate::dialogs::simple_warnings::{
+    addon_conflict, av_false_positive_warning, collection_addon_conflict,
+};
 use crate::message::Message;
+use crate::panels;
 use crate::service::{self, is_mod, PlanRow, RepoRow};
 use crate::settings::{self, UpdateChannel};
 use crate::theme::{self, ThemeColors, WuddleTheme, FRIZ, LIFECRAFT, NOTO};
 use crate::types::*;
 use crate::{chrono_now, chrono_now_fmt, monitor};
-use crate::panels;
 
 pub struct App {
     pub active_tab: Tab,
@@ -140,6 +144,8 @@ pub struct App {
 
     // Repos whose updates are being ignored
     pub ignored_update_ids: HashSet<i64>,
+    pub ignored_update_ids_by_profile: HashMap<String, HashSet<i64>>,
+    pub mods_warning_dismissed_profile_ids: HashSet<String>,
 
     // GitHub API rate limit info (fetched after update checks)
     pub github_rate_info: Option<service::GitHubRateInfo>,
@@ -165,8 +171,7 @@ pub struct App {
     pub update_channel: UpdateChannel,
     pub ui_scale: f32,
     pub ui_scale_mode: settings::UiScaleMode,
-
-    // Global markdown caches (for dialogs)
+    pub migrated_from_tauri: bool,
     pub markdown_image_cache: HashMap<String, iced::widget::image::Handle>,
     pub markdown_gif_cache: HashMap<String, std::sync::Arc<iced_gif::Frames>>,
     pub theme_colors: ThemeColors,
@@ -175,7 +180,10 @@ pub struct App {
 impl App {
     pub fn expansion_hint(&self) -> Option<&'static str> {
         let info = self.tweak_client_info.as_ref()?;
-        let version = info.file_version.as_ref().or(info.product_version.as_ref())?;
+        let version = info
+            .file_version
+            .as_ref()
+            .or(info.product_version.as_ref())?;
 
         if version.starts_with("1.") {
             Some("vanilla")
@@ -296,6 +304,8 @@ impl App {
             toasts: Vec::new(),
             toast_counter: 0,
             ignored_update_ids: HashSet::new(),
+            ignored_update_ids_by_profile: HashMap::new(),
+            mods_warning_dismissed_profile_ids: HashSet::new(),
             github_rate_info: None,
             repo_versions: HashMap::new(),
             repo_versions_loading: HashSet::new(),
@@ -311,6 +321,7 @@ impl App {
             update_channel: UpdateChannel::Beta,
             ui_scale: *crate::AUTO_UI_SCALE.get().unwrap_or(&1.0),
             ui_scale_mode: settings::UiScaleMode::Auto,
+            migrated_from_tauri: false,
             markdown_image_cache: HashMap::new(),
             markdown_gif_cache: HashMap::new(),
         };
@@ -391,6 +402,20 @@ impl App {
     }
 
     pub fn save_settings(&self) {
+        let mut ignored_update_ids_by_profile: std::collections::HashMap<String, Vec<i64>> = self
+            .ignored_update_ids_by_profile
+            .iter()
+            .map(|(profile_id, ids)| {
+                let mut ids = ids.iter().cloned().collect::<Vec<_>>();
+                ids.sort_unstable();
+                (profile_id.clone(), ids)
+            })
+            .collect();
+        let mut current_ignored = self.ignored_update_ids.iter().cloned().collect::<Vec<_>>();
+        current_ignored.sort_unstable();
+        ignored_update_ids_by_profile
+            .insert(self.active_profile_id.clone(), current_ignored.clone());
+
         let s = settings::AppSettings {
             wow_dir: self.wow_dir.clone(),
             theme: self.wuddle_theme.key().to_string(),
@@ -405,9 +430,20 @@ impl App {
             log_autoscroll: self.log_autoscroll,
             auto_check_minutes: self.auto_check_minutes,
             profiles: self.profiles.clone(),
-            ignored_update_ids: self.ignored_update_ids.iter().cloned().collect(),
+            ignored_update_ids: current_ignored,
+            ignored_update_ids_by_profile,
+            mods_warning_dismissed_profile_ids: {
+                let mut ids = self
+                    .mods_warning_dismissed_profile_ids
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                ids.sort();
+                ids
+            },
             update_channel: self.update_channel,
             ui_scale_mode: self.ui_scale_mode,
+            migrated_from_tauri: self.migrated_from_tauri,
         };
         let _ = settings::save_settings(&s);
     }
@@ -633,7 +669,9 @@ impl App {
     }
 
     pub fn active_profile(&self) -> Option<&settings::ProfileConfig> {
-        self.profiles.iter().find(|p| p.id == self.active_profile_id)
+        self.profiles
+            .iter()
+            .find(|p| p.id == self.active_profile_id)
     }
 
     pub fn show_tweaks_tab(&self) -> bool {
@@ -649,7 +687,9 @@ impl App {
         }
 
         if self.tweak_client_checking {
-            return Some("Inspecting the selected client executable for Tweaks compatibility.".to_string());
+            return Some(
+                "Inspecting the selected client executable for Tweaks compatibility.".to_string(),
+            );
         }
 
         if let Some(info) = &self.tweak_client_info {
@@ -669,7 +709,10 @@ impl App {
         }
 
         if let Some(err) = &self.tweak_client_error {
-            return Some(format!("Unable to inspect the selected client executable: {}", err));
+            return Some(format!(
+                "Unable to inspect the selected client executable: {}",
+                err
+            ));
         }
 
         Some("Tweaks are only available for legacy WoW 1.12.1 clients.".to_string())
@@ -725,6 +768,15 @@ impl App {
                 }
                 self.active_tab = tab;
                 self.log(LogLevel::Info, &format!("Switched to tab: {:?}.", tab));
+                if tab == Tab::Mods
+                    && !self
+                        .mods_warning_dismissed_profile_ids
+                        .contains(&self.active_profile_id)
+                {
+                    self.dialog = Some(Dialog::ModsWarning {
+                        do_not_show_again: false,
+                    });
+                }
                 // Fire self-update check whenever the About tab becomes active
                 if tab == Tab::About {
                     return self.finish_update(Task::perform(
@@ -835,7 +887,9 @@ impl App {
                             if !url.trim().is_empty() {
                                 tasks.push(Task::done(Message::FetchRepoPreview(url.clone())));
                                 if !self.wow_dir.trim().is_empty() {
-                                    tasks.push(Task::done(Message::FetchCollectionProbe(url.clone())));
+                                    tasks.push(Task::done(Message::FetchCollectionProbe(
+                                        url.clone(),
+                                    )));
                                 }
                             }
                         }
@@ -865,6 +919,26 @@ impl App {
                     self.reset_add_repo_state();
                 }
             }
+            Message::ToggleModsWarningDoNotShow(checked) => {
+                if let Some(Dialog::ModsWarning {
+                    ref mut do_not_show_again,
+                }) = self.dialog
+                {
+                    *do_not_show_again = checked;
+                }
+            }
+            Message::AcceptModsWarning => {
+                if let Some(Dialog::ModsWarning {
+                    do_not_show_again,
+                }) = self.dialog.take()
+                {
+                    if do_not_show_again {
+                        self.mods_warning_dismissed_profile_ids
+                            .insert(self.active_profile_id.clone());
+                        self.save_settings();
+                    }
+                }
+            }
             Message::RequestExit => {
                 self.save_settings();
 
@@ -873,7 +947,10 @@ impl App {
                     let busy = self.busy_summary();
                     std::thread::spawn(move || {
                         if let Some(summary) = busy {
-                            eprintln!("[Wuddle] Forced shutdown on close request while busy: {}", summary);
+                            eprintln!(
+                                "[Wuddle] Forced shutdown on close request while busy: {}",
+                                summary
+                            );
                         }
                         std::thread::sleep(std::time::Duration::from_millis(150));
                         std::process::exit(0);
@@ -930,41 +1007,7 @@ impl App {
             | Message::SwitchProfile(_) => {}
 
             // --- File dialog ---
-            Message::RemoveProfile(profile_id) => {
-                if profile_id == self.active_profile_id {
-                    self.log(LogLevel::Error, "Cannot remove the active profile.");
-                    return self.finish_update(Task::none());
-                }
-                let db = settings::profile_db_path(&profile_id).ok();
-                self.profiles.retain(|p| p.id != profile_id);
-                self.dialog = None;
-                self.log(LogLevel::Info, &format!("Removed profile: {}", profile_id));
-                self.save_settings();
-                // Delete the profile's SQLite database in the background
-                return self.finish_update(Task::perform(
-                    async move {
-                        if let Some(path) = db {
-                            // Remove main db + WAL/SHM sidecars
-                            for suffix in &["", "-wal", "-shm"] {
-                                let p = format!("{}{}", path.display(), suffix);
-                                let _ = tokio::fs::remove_file(&p).await;
-                            }
-                        }
-                        Ok(profile_id)
-                    },
-                    Message::RemoveProfileResult,
-                ));
-            }
-            Message::RemoveProfileResult(result) => match result {
-                Ok(id) => self.log(
-                    LogLevel::Info,
-                    &format!("Deleted database for profile: {}", id),
-                ),
-                Err(e) => self.log(
-                    LogLevel::Error,
-                    &format!("Failed to delete profile db: {}", e),
-                ),
-            },
+            Message::RemoveProfile(_) | Message::RemoveProfileResult(_, _) => {}
 
             // --- File dialog ---
             Message::PickWowDirectory | Message::PickWowExecutable | Message::WowPathPicked(_) => {}
@@ -1143,6 +1186,7 @@ impl App {
                     Dialog::InstanceSettings { .. } => (600u32, 24),
                     Dialog::Changelog { .. } => (720u32, 24),
                     Dialog::AvWarning { .. }
+                    | Dialog::ModsWarning { .. }
                     | Dialog::CollectionChoice { .. }
                     | Dialog::RemoveCollectionAddon { .. } => (650u32, 24),
                     Dialog::AddonConflict { .. } => (920u32, 24),
@@ -1228,6 +1272,7 @@ impl App {
                 .map(|t| {
                     let accent = match t.kind {
                         ToastKind::Info => c.primary,
+                        ToastKind::Success => c.good,
                         ToastKind::Warn => c.warn,
                         ToastKind::Error => c.bad,
                     };
@@ -1368,7 +1413,7 @@ impl App {
                         iced::widget::text_input(placeholder, url)
                             .id(iced::widget::Id::new("add_repo_url"))
                             .on_input(Message::SetAddRepoUrl)
-                            .on_submit(Message::AddRepoSubmit)
+                            .on_submit(Message::ResolveAddRepoUrl)
                             .padding(iced::Padding {
                                 top: 8.0,
                                 right: if show_url_clear { 32.0 } else { 12.0 },
@@ -1439,7 +1484,10 @@ impl App {
                     let is_collection = self.add_repo_collection_choice == Some(true);
 
                     if self.add_repo_probe_loading {
-                        return text("Scanning addon folders\u{2026}").size(11).color(colors.muted).into();
+                        return text("Scanning addon folders\u{2026}")
+                            .size(11)
+                            .color(colors.muted)
+                            .into();
                     }
 
                     let Some(probe) = self.add_repo_probe.as_ref() else {
@@ -1452,16 +1500,20 @@ impl App {
 
                     if is_collection {
                         let n = self.add_repo_selected_addons.len();
-                        return text(format!("{} of {} folders selected", n, probe.addon_names.len()))
-                            .size(11)
-                            .color(colors.muted)
-                            .into();
+                        return text(format!(
+                            "{} of {} folders selected",
+                            n,
+                            probe.addon_names.len()
+                        ))
+                        .size(11)
+                        .color(colors.muted)
+                        .into();
                     }
 
                     // Single Addon mode with multiple TOCs: show pick list for Primary TOC
                     let mut options = probe.addon_names.clone();
                     options.sort();
-                    
+
                     let current_selection = if self.add_repo_selected_addons.len() == 1 {
                         self.add_repo_selected_addons.iter().next().cloned()
                     } else {
@@ -1798,7 +1850,9 @@ impl App {
                             let mut detected_collection_addons = self
                                 .add_repo_probe
                                 .as_ref()
-                                .filter(|probe| probe.addon_names.len() > 1 && treat_preview_as_collection)
+                                .filter(|probe| {
+                                    probe.addon_names.len() > 1 && treat_preview_as_collection
+                                })
                                 .map(|probe| {
                                     probe
                                         .addon_names
@@ -1835,7 +1889,8 @@ impl App {
                                 .map(|name| service::normalize_collection_entry_key(name))
                                 .collect::<HashSet<_>>();
                             let folder_all_selected = |folder_path: &str, matches: &[String]| {
-                                let folder_path_lower = folder_path.trim().trim_matches('/').to_ascii_lowercase();
+                                let folder_path_lower =
+                                    folder_path.trim().trim_matches('/').to_ascii_lowercase();
                                 let inherited = selected_collection_paths.iter().any(|selected| {
                                     selected == &folder_path_lower
                                         || folder_path_lower.starts_with(&format!("{}/", selected))
@@ -1844,29 +1899,34 @@ impl App {
                                 inherited
                                     || (!matches.is_empty()
                                         && matches.iter().all(|name| {
-                                            selected_collection_addons.contains(&name.to_ascii_lowercase())
+                                            selected_collection_addons
+                                                .contains(&name.to_ascii_lowercase())
                                                 || selected_collection_keys.contains(
                                                     &service::normalize_collection_entry_key(name),
                                                 )
                                         }))
                             };
                             let folder_some_selected = |folder_path: &str,
-                                                         matches: &[String],
-                                                         fallback_children: Option<&Vec<service::RepoFileEntry>>| {
+                                                        matches: &[String],
+                                                        fallback_children: Option<
+                                &Vec<service::RepoFileEntry>,
+                            >| {
                                 if folder_all_selected(folder_path, matches) {
                                     return false;
                                 }
 
                                 if !matches.is_empty() {
                                     return matches.iter().any(|name| {
-                                        selected_collection_addons.contains(&name.to_ascii_lowercase())
+                                        selected_collection_addons
+                                            .contains(&name.to_ascii_lowercase())
                                             || selected_collection_keys.contains(
                                                 &service::normalize_collection_entry_key(name),
                                             )
                                     });
                                 }
 
-                                let folder_path_lower = folder_path.trim().trim_matches('/').to_ascii_lowercase();
+                                let folder_path_lower =
+                                    folder_path.trim().trim_matches('/').to_ascii_lowercase();
                                 let descendant_prefix = format!("{}/", folder_path_lower);
                                 if selected_collection_paths
                                     .iter()
@@ -1886,7 +1946,8 @@ impl App {
                                                     ),
                                                 )
                                                 || selected_collection_paths.contains(
-                                                    &child.path
+                                                    &child
+                                                        .path
                                                         .trim()
                                                         .trim_matches('/')
                                                         .to_ascii_lowercase(),
@@ -1895,43 +1956,63 @@ impl App {
                                     })
                                     .unwrap_or(false)
                             };
-                            let resolve_collection_folder_matches = |folder_path: &str, folder_name: &str| {
-                                let folder_path_key = folder_path.trim_matches('/').to_ascii_lowercase();
-                                let folder_path_prefix = format!("{}/", folder_path_key);
-                                let folder_key = service::normalize_collection_entry_key(folder_name);
-                                let mut matches = self
-                                    .add_repo_probe
-                                    .as_ref()
-                                    .map(|probe| {
-                                        probe
-                                            .addon_entries
-                                            .iter()
-                                            .filter(|entry| {
-                                                let source_path = entry.source_path.to_ascii_lowercase();
-                                                let source_top = entry
-                                                    .source_path
-                                                    .split('/')
-                                                    .next()
-                                                    .unwrap_or(entry.addon_name.as_str());
-
-                                                source_path == folder_path_key
-                                                    || source_path.starts_with(&folder_path_prefix)
-                                                    || service::normalize_collection_entry_key(source_top)
-                                                        == folder_key
-                                                    || service::normalize_collection_entry_key(
-                                                        &entry.addon_name,
-                                                    ) == folder_key
-                                            })
-                                            .map(|entry| entry.addon_name.clone())
-                                            .collect::<Vec<_>>()
-                                    })
-                                    .unwrap_or_default();
-
-                                if matches.is_empty() {
-                                    if let Some(probe) = self.add_repo_probe.as_ref() {
-                                        matches.extend(
+                            let resolve_collection_folder_matches =
+                                |folder_path: &str, folder_name: &str| {
+                                    let folder_path_key =
+                                        folder_path.trim_matches('/').to_ascii_lowercase();
+                                    let folder_path_prefix = format!("{}/", folder_path_key);
+                                    let folder_key =
+                                        service::normalize_collection_entry_key(folder_name);
+                                    let mut matches = self
+                                        .add_repo_probe
+                                        .as_ref()
+                                        .map(|probe| {
                                             probe
-                                                .addon_names
+                                                .addon_entries
+                                                .iter()
+                                                .filter(|entry| {
+                                                    let source_path =
+                                                        entry.source_path.to_ascii_lowercase();
+                                                    let source_top = entry
+                                                        .source_path
+                                                        .split('/')
+                                                        .next()
+                                                        .unwrap_or(entry.addon_name.as_str());
+
+                                                    source_path == folder_path_key
+                                                        || source_path
+                                                            .starts_with(&folder_path_prefix)
+                                                        || service::normalize_collection_entry_key(
+                                                            source_top,
+                                                        ) == folder_key
+                                                        || service::normalize_collection_entry_key(
+                                                            &entry.addon_name,
+                                                        ) == folder_key
+                                                })
+                                                .map(|entry| entry.addon_name.clone())
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .unwrap_or_default();
+
+                                    if matches.is_empty() {
+                                        if let Some(probe) = self.add_repo_probe.as_ref() {
+                                            matches.extend(
+                                                probe
+                                                    .addon_names
+                                                    .iter()
+                                                    .filter(|name| {
+                                                        service::normalize_collection_entry_key(
+                                                            name,
+                                                        ) == folder_key
+                                                    })
+                                                    .cloned(),
+                                            );
+                                        }
+                                    }
+
+                                    if matches.is_empty() {
+                                        matches.extend(
+                                            self.add_repo_selected_addons
                                                 .iter()
                                                 .filter(|name| {
                                                     service::normalize_collection_entry_key(name)
@@ -1940,49 +2021,41 @@ impl App {
                                                 .cloned(),
                                         );
                                     }
-                                }
 
-                                if matches.is_empty() {
-                                    matches.extend(
-                                        self.add_repo_selected_addons
-                                            .iter()
-                                            .filter(|name| {
-                                                service::normalize_collection_entry_key(name)
-                                                    == folder_key
-                                            })
-                                            .cloned(),
-                                    );
-                                }
+                                    if matches.is_empty() {
+                                        matches.extend(
+                                            self.add_repo_existing_addons
+                                                .iter()
+                                                .filter(|name| {
+                                                    service::normalize_collection_entry_key(name)
+                                                        == folder_key
+                                                })
+                                                .cloned(),
+                                        );
+                                    }
 
-                                if matches.is_empty() {
-                                    matches.extend(
-                                        self.add_repo_existing_addons
-                                            .iter()
-                                            .filter(|name| {
-                                                service::normalize_collection_entry_key(name)
-                                                    == folder_key
-                                            })
-                                            .cloned(),
-                                    );
-                                }
-
-                                matches.sort_by_key(|name| name.to_ascii_lowercase());
-                                matches.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-                                matches
-                            };
+                                    matches.sort_by_key(|name| name.to_ascii_lowercase());
+                                    matches
+                                        .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+                                    matches
+                                };
                             sidebar_col.push(
                                 rule::horizontal(1)
                                     .style(move |_t| theme::update_line_style(c_divider))
                                     .into(),
                             );
-                            let files_label: Element<Message> = if detected_collection_addons.is_empty() {
+                            let files_label: Element<Message> = if detected_collection_addons
+                                .is_empty()
+                            {
                                 if manage_mode {
                                     row![
                                         text("Files").size(12).color(colors.muted),
                                         Space::new().width(Length::Fill),
-                                        text("Use the checkbox to keep or remove collection folders")
-                                            .size(11)
-                                            .color(colors.link),
+                                        text(
+                                            "Use the checkbox to keep or remove collection folders"
+                                        )
+                                        .size(11)
+                                        .color(colors.link),
                                     ]
                                     .align_y(iced::Alignment::Center)
                                     .into()
@@ -2011,7 +2084,8 @@ impl App {
                                 let b_toggle = detected_collection_addons.contains(&b_key)
                                     || (collection_mode && b.is_dir);
 
-                                b_toggle.cmp(&a_toggle)
+                                b_toggle
+                                    .cmp(&a_toggle)
                                     .then(b.is_dir.cmp(&a.is_dir))
                                     .then(a.name.cmp(&b.name))
                             });
@@ -2026,7 +2100,9 @@ impl App {
                                         if expanded { "\u{1f4c2}" } else { "\u{1f4c1}" }; // \u{1f4c2} / \u{1f4c1}
                                     let top_level_matches =
                                         resolve_collection_folder_matches(&f.path, &f.name);
-                                    let show_toggle = manage_mode || !top_level_matches.is_empty() || treat_preview_as_collection;
+                                    let show_toggle = manage_mode
+                                        || !top_level_matches.is_empty()
+                                        || treat_preview_as_collection;
                                     let all_selected = show_toggle
                                         && folder_all_selected(&f.path, &top_level_matches);
                                     let some_selected = show_toggle
@@ -2072,15 +2148,20 @@ impl App {
                                             iced::widget::checkbox(all_selected)
                                                 .on_toggle({
                                                     let folder_path = f.path.clone();
-                                                    move |_| Message::ToggleCollectionFolder(folder_path.clone())
+                                                    move |_| {
+                                                        Message::ToggleCollectionFolder(
+                                                            folder_path.clone(),
+                                                        )
+                                                    }
                                                 })
                                                 .into()
                                         };
-                                        let folder_action_slot: Element<Message> = container(folder_toggle)
-                                            .align_x(iced::Alignment::Start)
-                                            .align_y(iced::Alignment::Center)
-                                            .width(Length::Shrink)
-                                            .into();
+                                        let folder_action_slot: Element<Message> =
+                                            container(folder_toggle)
+                                                .align_x(iced::Alignment::Start)
+                                                .align_y(iced::Alignment::Center)
+                                                .width(Length::Shrink)
+                                                .into();
                                         let folder_label_button = button(
                                             text(format!("{} {}", folder_icon, f.name))
                                                 .size(12)
@@ -2158,12 +2239,15 @@ impl App {
                                             sorted_children.sort_by(|a, b| {
                                                 let a_key = a.name.to_ascii_lowercase();
                                                 let b_key = b.name.to_ascii_lowercase();
-                                                let a_toggle = detected_collection_addons.contains(&a_key)
+                                                let a_toggle = detected_collection_addons
+                                                    .contains(&a_key)
                                                     || (collection_mode && a.is_dir);
-                                                let b_toggle = detected_collection_addons.contains(&b_key)
+                                                let b_toggle = detected_collection_addons
+                                                    .contains(&b_key)
                                                     || (collection_mode && b.is_dir);
 
-                                                b_toggle.cmp(&a_toggle)
+                                                b_toggle
+                                                    .cmp(&a_toggle)
                                                     .then(b.is_dir.cmp(&a.is_dir))
                                                     .then(a.name.cmp(&b.name))
                                             });
@@ -2171,9 +2255,15 @@ impl App {
                                                 let c_ch = c;
                                                 let child_path = child.path.clone();
                                                 let child_expanded = child.is_dir
-                                                    && self.add_repo_expanded_dirs.contains(&child.path);
+                                                    && self
+                                                        .add_repo_expanded_dirs
+                                                        .contains(&child.path);
                                                 let child_icon = if child.is_dir {
-                                                    if child_expanded { "\u{1f4c2}" } else { "\u{1f4c1}" }
+                                                    if child_expanded {
+                                                        "\u{1f4c2}"
+                                                    } else {
+                                                        "\u{1f4c1}"
+                                                    }
                                                 } else {
                                                     "\u{1f4c4}"
                                                 };
@@ -2188,29 +2278,48 @@ impl App {
                                                     colors.text_soft
                                                 };
                                                 let child_matches =
-                                                    resolve_collection_folder_matches(&child.path, &child.name);
+                                                    resolve_collection_folder_matches(
+                                                        &child.path,
+                                                        &child.name,
+                                                    );
                                                 let show_toggle = child.is_dir
-                                                    && (manage_mode || !child_matches.is_empty() || treat_preview_as_collection);
+                                                    && (manage_mode
+                                                        || !child_matches.is_empty()
+                                                        || treat_preview_as_collection);
                                                 let checked = show_toggle
-                                                    && folder_all_selected(&child.path, &child_matches);
+                                                    && folder_all_selected(
+                                                        &child.path,
+                                                        &child_matches,
+                                                    );
                                                 let child_row: Element<Message> = if show_toggle {
-                                                    let child_toggle: Element<Message> = iced::widget::checkbox(checked)
-                                                        .on_toggle({
-                                                            let folder_path = child.path.clone();
-                                                            move |_| Message::ToggleCollectionFolder(folder_path.clone())
-                                                        })
-                                                        .into();
-                                                    let child_action_slot: Element<Message> = container(child_toggle)
-                                                        .align_x(iced::Alignment::Start)
-                                                        .width(Length::Shrink)
-                                                        .into();
-                                                    let child_label_button = button(text(format!(
-                                                        "{} {}",
-                                                        child_icon, child.name
-                                                    ))
-                                                    .size(11)
-                                                    .color(child_color)
-                                                    .wrapping(iced::advanced::text::Wrapping::None))
+                                                    let child_toggle: Element<Message> =
+                                                        iced::widget::checkbox(checked)
+                                                            .on_toggle({
+                                                                let folder_path =
+                                                                    child.path.clone();
+                                                                move |_| {
+                                                                    Message::ToggleCollectionFolder(
+                                                                        folder_path.clone(),
+                                                                    )
+                                                                }
+                                                            })
+                                                            .into();
+                                                    let child_action_slot: Element<Message> =
+                                                        container(child_toggle)
+                                                            .align_x(iced::Alignment::Start)
+                                                            .width(Length::Shrink)
+                                                            .into();
+                                                    let child_label_button = button(
+                                                        text(format!(
+                                                            "{} {}",
+                                                            child_icon, child.name
+                                                        ))
+                                                        .size(11)
+                                                        .color(child_color)
+                                                        .wrapping(
+                                                            iced::advanced::text::Wrapping::None,
+                                                        ),
+                                                    )
                                                     .on_press(child_msg)
                                                     .padding([1, 4])
                                                     .width(Length::Fill)
@@ -2245,13 +2354,17 @@ impl App {
                                                     .align_y(iced::Alignment::Center)
                                                     .into()
                                                 } else {
-                                                    let child_label_button = button(text(format!(
-                                                        "{} {}",
-                                                        child_icon, child.name
-                                                    ))
-                                                    .size(11)
-                                                    .color(child_color)
-                                                    .wrapping(iced::advanced::text::Wrapping::None))
+                                                    let child_label_button = button(
+                                                        text(format!(
+                                                            "{} {}",
+                                                            child_icon, child.name
+                                                        ))
+                                                        .size(11)
+                                                        .color(child_color)
+                                                        .wrapping(
+                                                            iced::advanced::text::Wrapping::None,
+                                                        ),
+                                                    )
                                                     .on_press(child_msg)
                                                     .padding([1, 4])
                                                     .width(Length::Fill)
@@ -2300,36 +2413,67 @@ impl App {
 
                                                 // --- Sub-level 2 (grandchildren) ---
                                                 if child_expanded {
-                                                    if let Some(grandchildren) = self.add_repo_dir_contents.get(&child.path) {
+                                                    if let Some(grandchildren) =
+                                                        self.add_repo_dir_contents.get(&child.path)
+                                                    {
                                                         let mut sorted_gc = grandchildren.clone();
-                                                        sorted_gc.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+                                                        sorted_gc.sort_by(|a, b| {
+                                                            b.is_dir
+                                                                .cmp(&a.is_dir)
+                                                                .then(a.name.cmp(&b.name))
+                                                        });
                                                         for gc in sorted_gc.iter() {
                                                             let c_gc = c;
                                                             let gc_path = gc.path.clone();
-                                                            let gc_icon = if gc.is_dir { "\u{1f4c1}" } else { "\u{1f4c4}" };
-                                                            let gc_msg = if gc.is_dir {
-                                                                Message::ToggleAddRepoDir(gc_path.clone())
+                                                            let gc_icon = if gc.is_dir {
+                                                                "\u{1f4c1}"
                                                             } else {
-                                                                Message::PreviewRepoFile(gc_path.clone())
+                                                                "\u{1f4c4}"
                                                             };
-                                                            let gc_color = if gc.is_dir { colors.text } else { colors.text_soft };
-                                                            let gc_matches = resolve_collection_folder_matches(&gc.path, &gc.name);
+                                                            let gc_msg = if gc.is_dir {
+                                                                Message::ToggleAddRepoDir(
+                                                                    gc_path.clone(),
+                                                                )
+                                                            } else {
+                                                                Message::PreviewRepoFile(
+                                                                    gc_path.clone(),
+                                                                )
+                                                            };
+                                                            let gc_color = if gc.is_dir {
+                                                                colors.text
+                                                            } else {
+                                                                colors.text_soft
+                                                            };
+                                                            let gc_matches =
+                                                                resolve_collection_folder_matches(
+                                                                    &gc.path, &gc.name,
+                                                                );
                                                             let gc_show_toggle = gc.is_dir
-                                                                && (manage_mode || !gc_matches.is_empty() || treat_preview_as_collection);
+                                                                && (manage_mode
+                                                                    || !gc_matches.is_empty()
+                                                                    || treat_preview_as_collection);
                                                             let gc_checked = gc_show_toggle
-                                                                && folder_all_selected(&gc.path, &gc_matches);
-                                                            let gc_row: Element<Message> = if gc_show_toggle {
-                                                                let gc_toggle: Element<Message> = iced::widget::checkbox(gc_checked)
+                                                                && folder_all_selected(
+                                                                    &gc.path,
+                                                                    &gc_matches,
+                                                                );
+                                                            let gc_row: Element<Message> =
+                                                                if gc_show_toggle {
+                                                                    let gc_toggle: Element<Message> = iced::widget::checkbox(gc_checked)
                                                                     .on_toggle({
                                                                         let fp = gc.path.clone();
                                                                         move |_| Message::ToggleCollectionFolder(fp.clone())
                                                                     })
                                                                     .into();
-                                                                let gc_action_slot: Element<Message> = container(gc_toggle)
-                                                                    .align_x(iced::Alignment::Start)
-                                                                    .width(Length::Shrink)
-                                                                    .into();
-                                                                let gc_label_button = button(
+                                                                    let gc_action_slot: Element<
+                                                                        Message,
+                                                                    > = container(gc_toggle)
+                                                                        .align_x(
+                                                                            iced::Alignment::Start,
+                                                                        )
+                                                                        .width(Length::Shrink)
+                                                                        .into();
+                                                                    let gc_label_button = button(
                                                                     text(format!("{} {}", gc_icon, gc.name))
                                                                         .size(11)
                                                                         .color(gc_color)
@@ -2356,68 +2500,76 @@ impl App {
                                                                         snap: true,
                                                                     },
                                                                 });
-                                                                row![
-                                                                    Space::new().width(20),
-                                                                    gc_action_slot,
-                                                                    gc_label_button,
-                                                                ]
-                                                                .spacing(3)
-                                                                .align_y(iced::Alignment::Center)
-                                                                .into()
-                                                            } else {
-                                                                let gc_label_button = button(
-                                                                    text(format!("{} {}", gc_icon, gc.name))
-                                                                        .size(11)
-                                                                        .color(gc_color)
-                                                                        .wrapping(iced::advanced::text::Wrapping::None),
-                                                                )
-                                                                .on_press(gc_msg)
-                                                                .padding([1, 4])
-                                                                .width(Length::Fill)
-                                                                .style(move |_t, status| match status {
-                                                                    button::Status::Hovered => button::Style {
-                                                                        background: Some(iced::Background::Color(
-                                                                            iced::Color::from_rgba(1.0, 1.0, 1.0, 0.07),
-                                                                        )),
-                                                                        text_color: c_gc.text,
-                                                                        border: iced::Border::default(),
-                                                                        shadow: iced::Shadow::default(),
-                                                                        snap: true,
-                                                                    },
-                                                                    _ => button::Style {
-                                                                        background: None,
-                                                                        text_color: c_gc.text_soft,
-                                                                        border: iced::Border::default(),
-                                                                        shadow: iced::Shadow::default(),
-                                                                        snap: true,
-                                                                    },
-                                                                });
-                                                                if treat_preview_as_collection {
                                                                     row![
                                                                         Space::new().width(20),
-                                                                        Space::new().width(16),
+                                                                        gc_action_slot,
                                                                         gc_label_button,
                                                                     ]
                                                                     .spacing(3)
-                                                                    .align_y(iced::Alignment::Center)
+                                                                    .align_y(
+                                                                        iced::Alignment::Center,
+                                                                    )
                                                                     .into()
                                                                 } else {
-                                                                    row![
-                                                                        Space::new().width(20),
-                                                                        gc_label_button,
-                                                                    ]
-                                                                    .spacing(3)
-                                                                    .align_y(iced::Alignment::Center)
-                                                                    .into()
-                                                                }
-                                                            };
+                                                                    let gc_label_button = button(
+                                                                    text(format!("{} {}", gc_icon, gc.name))
+                                                                        .size(11)
+                                                                        .color(gc_color)
+                                                                        .wrapping(iced::advanced::text::Wrapping::None),
+                                                                )
+                                                                .on_press(gc_msg)
+                                                                .padding([1, 4])
+                                                                .width(Length::Fill)
+                                                                .style(move |_t, status| match status {
+                                                                    button::Status::Hovered => button::Style {
+                                                                        background: Some(iced::Background::Color(
+                                                                            iced::Color::from_rgba(1.0, 1.0, 1.0, 0.07),
+                                                                        )),
+                                                                        text_color: c_gc.text,
+                                                                        border: iced::Border::default(),
+                                                                        shadow: iced::Shadow::default(),
+                                                                        snap: true,
+                                                                    },
+                                                                    _ => button::Style {
+                                                                        background: None,
+                                                                        text_color: c_gc.text_soft,
+                                                                        border: iced::Border::default(),
+                                                                        shadow: iced::Shadow::default(),
+                                                                        snap: true,
+                                                                    },
+                                                                });
+                                                                    if treat_preview_as_collection {
+                                                                        row![
+                                                                            Space::new().width(20),
+                                                                            Space::new().width(16),
+                                                                            gc_label_button,
+                                                                        ]
+                                                                        .spacing(3)
+                                                                        .align_y(
+                                                                            iced::Alignment::Center,
+                                                                        )
+                                                                        .into()
+                                                                    } else {
+                                                                        row![
+                                                                            Space::new().width(20),
+                                                                            gc_label_button,
+                                                                        ]
+                                                                        .spacing(3)
+                                                                        .align_y(
+                                                                            iced::Alignment::Center,
+                                                                        )
+                                                                        .into()
+                                                                    }
+                                                                };
                                                             file_rows.push(gc_row);
                                                         }
                                                     } else {
                                                         file_rows.push(
                                                             row![
                                                                 Space::new().width(38),
-                                                                text("Loading\u{2026}").size(11).color(colors.muted),
+                                                                text("Loading\u{2026}")
+                                                                    .size(11)
+                                                                    .color(colors.muted),
                                                             ]
                                                             .into(),
                                                         );
@@ -3110,9 +3262,13 @@ impl App {
                             "addon" => "\u{1f4c1}",
                             _ => "\u{1f4c4}",
                         };
-                        container(text(format!("{} {}", icon, path)).size(12).color(colors.warn))
-                            .padding([2, 6])
-                            .into()
+                        container(
+                            text(format!("{} {}", icon, path))
+                                .size(12)
+                                .color(colors.warn),
+                        )
+                        .padding([2, 6])
+                        .into()
                     })
                     .collect();
 
@@ -3127,7 +3283,10 @@ impl App {
                 .style(move |_t| container::Style {
                     background: Some(iced::Background::Color(iced::Color { a: 0.5, ..c.card })),
                     border: iced::Border {
-                        color: iced::Color { a: 0.15, ..c.border },
+                        color: iced::Color {
+                            a: 0.15,
+                            ..c.border
+                        },
                         width: 1.0,
                         radius: 6.0.into(),
                     },
@@ -3389,10 +3548,12 @@ impl App {
                     ]
                     .spacing(4)
                     .into(),
-                    _ => text(settings::auto_launch_description(auto_launch_exe.as_deref()))
-                        .size(12)
-                        .color(colors.muted)
-                        .into(),
+                    _ => text(settings::auto_launch_description(
+                        auto_launch_exe.as_deref(),
+                    ))
+                    .size(12)
+                    .color(colors.muted)
+                    .into(),
                 };
 
                 column![
@@ -3546,6 +3707,9 @@ impl App {
                 colors,
             ),
             Dialog::AvWarning { url, mode } => av_false_positive_warning(url, mode, colors),
+            Dialog::ModsWarning { do_not_show_again } => {
+                mods_warning::view(*do_not_show_again, colors)
+            }
             Dialog::AddonConflict {
                 url,
                 mode,
@@ -3594,7 +3758,9 @@ impl App {
                     .join("/");
                 let mut rows: Vec<Element<Message>> = vec![
                     row![
-                        text("Multiple addon folders detected").size(15).color(colors.title),
+                        text("Multiple addon folders detected")
+                            .size(15)
+                            .color(colors.title),
                         Space::new().width(Length::Fill),
                         close_button(c),
                     ]
@@ -3607,7 +3773,9 @@ impl App {
                     .size(12)
                     .color(colors.text_soft)
                     .into(),
-                    rule::horizontal(1).style(move |_t| theme::update_line_style(c)).into(),
+                    rule::horizontal(1)
+                        .style(move |_t| theme::update_line_style(c))
+                        .into(),
                 ];
 
                 // Show addon folder list (up to 8, then "… and N more")
@@ -3632,7 +3800,11 @@ impl App {
                     );
                 }
 
-                rows.push(rule::horizontal(1).style(move |_t| theme::update_line_style(c)).into());
+                rows.push(
+                    rule::horizontal(1)
+                        .style(move |_t| theme::update_line_style(c))
+                        .into(),
+                );
 
                 rows.push(
                     column![
@@ -3674,7 +3846,11 @@ impl App {
                     .into()
             }
 
-            Dialog::SelectMainAddon { url, options, suggested } => {
+            Dialog::SelectMainAddon {
+                url,
+                options,
+                suggested,
+            } => {
                 let c = colors;
                 let domain = url
                     .trim_start_matches("https://")
@@ -3729,28 +3905,24 @@ impl App {
                     }
 
                     scroll_rows.push(
-                        button(
-                            row(row_items)
-                                .spacing(10)
-                                .align_y(iced::Alignment::Center)
-                        )
-                        .on_press(Message::SetAddRepoPrimaryAddon(name_cb))
-                        .width(Length::Fill)
-                        .padding([10, 14])
-                        .style(move |_t, s| match s {
-                            button::Status::Hovered => theme::tab_button_hovered_style(c),
-                            _ => theme::tab_button_style(c),
-                        })
-                        .into()
+                        button(row(row_items).spacing(10).align_y(iced::Alignment::Center))
+                            .on_press(Message::SetAddRepoPrimaryAddon(name_cb))
+                            .width(Length::Fill)
+                            .padding([10, 14])
+                            .style(move |_t, s| match s {
+                                button::Status::Hovered => theme::tab_button_hovered_style(c),
+                                _ => theme::tab_button_style(c),
+                            })
+                            .into(),
                     );
                 }
 
                 rows.push(
                     scrollable(column(scroll_rows).spacing(6))
                         .height(Length::Shrink)
-                        .into()
+                        .into(),
                 );
-                
+
                 rows.push(
                     row![
                         Space::new().width(Length::Fill),
@@ -3762,27 +3934,27 @@ impl App {
                                 let is_hovered = matches!(status, button::Status::Hovered);
                                 let alpha_text = if is_hovered { 0.8 } else { 0.5 };
                                 let alpha_border = if is_hovered { 0.4 } else { 0.2 };
-                                
+
                                 button::Style {
-                                     background: None,
-                                     text_color: Color { a: alpha_text, ..c },
-                                     border: iced::Border {
-                                         color: Color { a: alpha_border, ..c },
-                                         width: 1.0,
-                                         radius: 4.0.into(),
-                                     },
-                                     shadow: iced::Shadow::default(),
-                                     snap: true,
+                                    background: None,
+                                    text_color: Color { a: alpha_text, ..c },
+                                    border: iced::Border {
+                                        color: Color {
+                                            a: alpha_border,
+                                            ..c
+                                        },
+                                        width: 1.0,
+                                        radius: 4.0.into(),
+                                    },
+                                    shadow: iced::Shadow::default(),
+                                    snap: true,
                                 }
                             }),
                     ]
-                    .into()
+                    .into(),
                 );
 
-                column(rows)
-                    .spacing(10)
-                    .width(Length::Fixed(440.0))
-                    .into()
+                column(rows).spacing(10).width(Length::Fixed(440.0)).into()
             }
         }
     }

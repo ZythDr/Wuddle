@@ -97,6 +97,7 @@ impl Default for DxvkConfig {
 #[derive(Debug, Clone)]
 pub enum Dialog {
     AddRepo { url: String, mode: String, is_addons: bool, advanced: bool },
+    ModsWarning { do_not_show_again: bool },
     RemoveRepo { id: i64, name: String, remove_files: bool, files: Vec<(String, String)> },
     RemoveCollectionAddon {
         repo_id: i64,
