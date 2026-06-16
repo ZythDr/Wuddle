@@ -347,17 +347,29 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         .collect::<Vec<_>>();
                     selected.sort_by_key(|name| name.to_ascii_lowercase());
 
-                    app.add_repo_probe
-                        .as_ref()
-                        .filter(|probe| probe.addon_names.len() > 1 && treat_as_collection)
-                        .map(|_| selected.clone())
-                        .or_else(|| {
-                            if !selected.is_empty() {
-                                Some(std::mem::take(&mut selected))
+                    if let Some(probe) = app.add_repo_probe.as_ref() {
+                        if probe.addon_names.len() > 1 && treat_as_collection {
+                            Some(selected.clone())
+                        } else if !selected.is_empty() {
+                            Some(std::mem::take(&mut selected))
+                        } else {
+                            let root_options = service::root_probe_addon_names(probe);
+                            if root_options.len() > 1 {
+                                service::suggested_addon_for_expansion(
+                                    &root_options,
+                                    app.expansion_hint(),
+                                )
+                                .or_else(|| root_options.first().cloned())
+                                .map(|name| vec![name])
                             } else {
                                 hinted.map(|name| vec![name])
                             }
-                        })
+                        }
+                    } else if !selected.is_empty() {
+                        Some(std::mem::take(&mut selected))
+                    } else {
+                        hinted.map(|name| vec![name])
+                    }
                 } else {
                     None
                 };
@@ -407,13 +419,25 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         app.updating_repo_ids.insert(id);
 
                         // Collect all addon names that this repo will install.
-                        let addon_names = if app.add_repo_selected_addons.is_empty() {
+                        let addon_names = if !app.add_repo_selected_addons.is_empty() {
+                            app.add_repo_selected_addons.iter().cloned().collect()
+                        } else if app.add_repo_collection_choice == Some(true) {
                             app.add_repo_probe
                                 .as_ref()
                                 .map(|p| p.addon_names.clone())
                                 .unwrap_or_default()
                         } else {
-                            app.add_repo_selected_addons.iter().cloned().collect()
+                            app.add_repo_probe
+                                .as_ref()
+                                .map(|p| {
+                                    let root_names = service::root_probe_addon_names(p);
+                                    if root_names.is_empty() {
+                                        p.addon_names.clone()
+                                    } else {
+                                        root_names
+                                    }
+                                })
+                                .unwrap_or_default()
                         };
 
                         app.log(LogLevel::Info, "Checking for conflicts\u{2026}");
@@ -709,19 +733,26 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             && app.add_repo_manage_repo_id.is_none()
                             && matches!(app.dialog, Some(Dialog::AddRepo { .. }))
                         {
-                            let all_root = probe.addon_entries.iter().all(|e| e.source_path.is_empty() || e.source_path == ".");
-                            if all_root {
-                                let hint = app.expansion_hint();
-                                let suggested = hint.and_then(|h| {
-                                    probe.addon_names.iter().find(|name| name.to_lowercase().contains(h)).cloned()
-                                });
-
+                            let root_options = service::root_probe_addon_names(probe);
+                            if root_options.len() > 1 {
+                                let suggested = service::suggested_addon_for_expansion(
+                                    &root_options,
+                                    app.expansion_hint(),
+                                );
+                                if app.add_repo_selected_addons.is_empty() {
+                                    let default_selection = suggested
+                                        .clone()
+                                        .or_else(|| root_options.first().cloned());
+                                    if let Some(name) = default_selection {
+                                        app.add_repo_selected_addons.insert(name);
+                                    }
+                                }
                                 app.dialog = Some(Dialog::SelectMainAddon { 
                                     url: url.clone(), 
-                                    options: probe.addon_names.clone(),
+                                    options: root_options,
                                     suggested
                                 });
-                            } else {
+                            } else if root_options.is_empty() {
                                 app.dialog = Some(Dialog::CollectionChoice { 
                                     url: url.clone(), 
                                     addon_names: probe.addon_names.clone() 
@@ -741,26 +772,30 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::SetAddRepoCollectionMode(is_collection) => {
+            let from_primary_toc_choice = matches!(app.dialog, Some(Dialog::SelectMainAddon { .. }));
             app.add_repo_collection_choice = Some(is_collection);
             if is_collection {
                 if let Some(probe) = app.add_repo_probe.as_ref() {
-                    if app.add_repo_selected_addons.is_empty() {
+                    if app.add_repo_selected_addons.is_empty() || from_primary_toc_choice {
                         app.add_repo_selected_addons = probe.addon_names.iter().cloned().collect();
                     }
                 }
             } else if app.add_repo_selected_addons.len() != 1 {
                 app.add_repo_selected_addons.clear();
             }
-            // If we came from the CollectionChoice popup, restore the AddRepo dialog.
-            if matches!(app.dialog, Some(Dialog::CollectionChoice { .. })) {
-                if let Some(Dialog::CollectionChoice { url, .. }) = app.dialog.take() {
-                    app.dialog = Some(Dialog::AddRepo {
-                        url,
-                        mode: "addon_git".to_string(),
-                        is_addons: true,
-                        advanced: false,
-                    });
-                }
+            // If we came from a choice popup, restore the AddRepo dialog.
+            let restore_url = match app.dialog.as_ref() {
+                Some(Dialog::CollectionChoice { url, .. })
+                | Some(Dialog::SelectMainAddon { url, .. }) => Some(url.clone()),
+                _ => None,
+            };
+            if let Some(url) = restore_url {
+                app.dialog = Some(Dialog::AddRepo {
+                    url,
+                    mode: "addon_git".to_string(),
+                    is_addons: true,
+                    advanced: false,
+                });
             }
             Some(Task::none())
         }
@@ -769,13 +804,17 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if !name.is_empty() {
                 app.add_repo_selected_addons.insert(name);
             }
-            if let Some(Dialog::SelectMainAddon { url, .. }) = app.dialog.take() {
+            if let Some(Dialog::SelectMainAddon { url, .. }) = app.dialog.as_ref() {
+                let url = url.clone();
                 app.dialog = Some(Dialog::AddRepo {
                     url,
                     mode: "addon_git".to_string(),
                     is_addons: true,
                     advanced: false,
                 });
+            }
+            if matches!(app.dialog, Some(Dialog::AddRepo { .. })) {
+                return Some(delayed_add_repo_url_refocus_task());
             }
             Some(Task::none())
         }

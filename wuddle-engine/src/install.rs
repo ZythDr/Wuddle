@@ -686,10 +686,16 @@ pub fn detect_addons_in_git_tree(root: &Path) -> Result<Vec<(PathBuf, String)>> 
     for name in addon_folder_names_from_git_tree(&repo, &head, "", true) {
         candidates.push((root.to_path_buf(), name));
     }
+    if !candidates.is_empty() {
+        candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        candidates.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+        return Ok(candidates);
+    }
 
     scan_git_addon_dirs(&repo, root, &head, "", 1, &mut candidates)?;
 
     candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    candidates.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
     Ok(candidates)
 }
 
@@ -767,6 +773,13 @@ fn resolve_addon_names_from_stems(
     dir_name: &str,
     is_root: bool,
 ) -> Vec<String> {
+    if is_root {
+        let mut out = stems;
+        out.sort();
+        out.dedup();
+        return out;
+    }
+
     let normalized: Vec<String> = stems.iter().map(|s| normalize_toc_stem(s)).collect();
 
     // GAM strict rule: for subfolders, matches folder name (or normalized folder name).
@@ -787,19 +800,7 @@ fn resolve_addon_names_from_stems(
         .all(|name| name.to_ascii_lowercase() == first_norm);
 
     if all_same_norm {
-        // In root mode, if all TOCs normalize to the same name, return all original stems
-        // so the user can pick the exact casing/suffix they want.
-        if is_root {
-            let mut out = stems;
-            out.sort();
-            out.dedup();
-            return out;
-        }
         return vec![normalized.into_iter().next().unwrap()];
-    }
-
-    if is_root {
-        return vec![];
     }
 
     // Fallback for subfolders if no direct match but multiple TOCs agree on a name.
@@ -1075,8 +1076,10 @@ pub fn install_raw_file(
 #[cfg(test)]
 mod tests {
     use super::{
-        install_from_archive, normalize_toc_stem, safe_archive_path, InstallOptions,
+        detect_addons_in_tree, install_from_archive, normalize_toc_stem, safe_archive_path,
+        InstallOptions,
     };
+    use git2::Repository;
     use std::{fs, io::Write};
 
     #[test]
@@ -1093,6 +1096,36 @@ mod tests {
         assert_eq!(normalize_toc_stem("nampower"), "nampower");
         assert_eq!(normalize_toc_stem("VanillaHelpers"), "VanillaHelpers");
         assert_eq!(normalize_toc_stem("Addon-Tooling"), "Addon-Tooling");
+        assert_eq!(normalize_toc_stem("Questie-335"), "Questie-335");
+    }
+
+    #[test]
+    fn git_tree_detection_prefers_root_tocs_over_embedded_libraries() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("Questie.toc"), b"## Interface: 30300\n").unwrap();
+        fs::write(tmp.path().join("Questie-335.toc"), b"## Interface: 30300\n").unwrap();
+        let lib = tmp.path().join("Libs").join("HereBeDragons");
+        fs::create_dir_all(&lib).unwrap();
+        fs::write(lib.join("HereBeDragons.toc"), b"## Interface: 30300\n").unwrap();
+
+        let repo = Repository::init(tmp.path()).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Wuddle Test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
+
+        let detected = detect_addons_in_tree(tmp.path());
+        assert_eq!(
+            detected
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Questie", "Questie-335"]
+        );
+        assert!(detected.iter().all(|(src, _)| src == tmp.path()));
     }
 
     #[test]

@@ -30,7 +30,18 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.3.0
+### What's New in v3.3.1
+
+#### Improvements
+- **Main TOC Selection** — Addon repos with multiple root `.toc` files now let you choose which TOC defines the installed addon folder.
+
+#### Bug Fixes
+- **Bundled Addon Libraries** — Fixed single-addon repos with bundled library TOCs, such as Questie, being treated like collections or falling back to the wrong root TOC.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.3.0
 
 #### New Features
 - **7z Release Support** — Mods can now install from `.7z` release archives in addition to `.zip` archives and direct `.dll` assets.
@@ -42,9 +53,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 #### Bug Fixes
 - **Add Dialog Focus** — Fixed Repo URL fields losing focus while previews load or resolve.
 - **Forked Addon Installs** — Fixed addon-git forks with non-master default branches installing from the wrong branch.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.2.7
 

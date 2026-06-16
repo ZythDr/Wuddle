@@ -2,6 +2,14 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.3.1
+
+### Improvements
+- **Main TOC Selection** — Addon repos with multiple root `.toc` files now let you choose which TOC defines the installed addon folder.
+
+### Bug Fixes
+- **Bundled Addon Libraries** — Fixed single-addon repos with bundled library TOCs, such as Questie, being treated like collections or falling back to the wrong root TOC.
+
 ## v3.3.0
 
 ### New Features

@@ -1513,19 +1513,22 @@ impl App {
                         .into();
                     }
 
-                    // Single Addon mode with multiple TOCs: show pick list for Primary TOC
-                    let mut options = probe.addon_names.clone();
-                    options.sort();
+                    // Single Addon mode with multiple root TOCs: show pick list for Primary TOC.
+                    // Nested library/module TOCs stay bundled inside the root addon folder.
+                    let options = service::root_probe_addon_names(probe);
+                    if options.len() <= 1 {
+                        return Space::new().height(0).into();
+                    }
 
                     let current_selection = if self.add_repo_selected_addons.len() == 1 {
                         self.add_repo_selected_addons.iter().next().cloned()
                     } else {
-                        // Default to the first alphabetical one (matching engine fallback)
-                        options.first().cloned()
+                        service::suggested_addon_for_expansion(&options, self.expansion_hint())
+                            .or_else(|| options.first().cloned())
                     };
 
                     row![
-                        text("Main Addon:").size(12).color(colors.text),
+                        text("Main TOC:").size(12).color(colors.text),
                         pick_list(options, current_selection, Message::SetAddRepoPrimaryAddon)
                             .text_size(11)
                             .padding([4, 8]),

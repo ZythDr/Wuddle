@@ -34,6 +34,43 @@ pub enum CollectionSelectionError {
     Other(String),
 }
 
+pub fn root_probe_addon_names(probe: &wuddle_engine::AddonProbeResult) -> Vec<String> {
+    let mut names = probe
+        .addon_entries
+        .iter()
+        .filter(|entry| {
+            let source = entry.source_path.trim().trim_matches('/');
+            source.is_empty() || source == "."
+        })
+        .map(|entry| entry.addon_name.clone())
+        .collect::<Vec<_>>();
+    names.sort_by_key(|name| name.to_ascii_lowercase());
+    names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    names
+}
+
+pub fn suggested_addon_for_expansion(
+    options: &[String],
+    expansion_hint: Option<&str>,
+) -> Option<String> {
+    let hint = expansion_hint?;
+    let aliases: &[&str] = match hint {
+        "vanilla" => &["vanilla", "classic", "era", "112", "1.12"],
+        "tbc" => &["tbc", "bcc", "burning", "243", "2.4"],
+        "wotlk" => &["wotlk", "wrath", "335", "3.3.5"],
+        "cata" => &["cata", "cataclysm", "403", "4.0", "434", "4.3"],
+        _ => &[],
+    };
+
+    options
+        .iter()
+        .find(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.contains(hint) || aliases.iter().any(|alias| lower.contains(alias))
+        })
+        .cloned()
+}
+
 fn addon_name_from_manifest_path(path: &str) -> Option<String> {
     Path::new(path)
         .file_name()

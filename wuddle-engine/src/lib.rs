@@ -243,6 +243,10 @@ fn normalize_collection_entry_key(name: &str) -> String {
     key
 }
 
+fn addon_git_name_matches_selection(addon_name: &str, selected_keys: &HashSet<String>) -> bool {
+    selected_keys.contains(&normalize_collection_entry_key(addon_name))
+}
+
 fn addon_git_selection_matches(
     worktree_dir: &Path,
     src: &Path,
@@ -250,7 +254,7 @@ fn addon_git_selection_matches(
     selected_paths: &HashSet<String>,
     selected_keys: &HashSet<String>,
 ) -> bool {
-    if selected_keys.contains(&normalize_collection_entry_key(addon_name)) {
+    if addon_git_name_matches_selection(addon_name, selected_keys) {
         return true;
     }
 
@@ -526,7 +530,22 @@ impl Engine {
             }
         }
 
-        detected.sort_by_key(|(src, name)| (src.components().count(), name.clone()));
+        let selected_paths: HashSet<String> = selected_addons
+            .iter()
+            .map(|name| name.trim().trim_matches('/').to_ascii_lowercase())
+            .collect();
+        let selected_keys: HashSet<String> = selected_addons
+            .iter()
+            .map(|name| normalize_collection_entry_key(name))
+            .collect();
+
+        detected.sort_by_key(|(src, name)| {
+            (
+                !addon_git_name_matches_selection(name, &selected_keys),
+                src.components().count(),
+                name.clone(),
+            )
+        });
 
         let mut chosen = Vec::<(PathBuf, String)>::new();
         let mut seen_names = HashSet::<String>::new();
@@ -538,14 +557,6 @@ impl Engine {
         }
 
         if !selected_addons.is_empty() {
-            let selected_paths: HashSet<String> = selected_addons
-                .iter()
-                .map(|name| name.trim().trim_matches('/').to_ascii_lowercase())
-                .collect();
-            let selected_keys: HashSet<String> = selected_addons
-                .iter()
-                .map(|name| normalize_collection_entry_key(name))
-                .collect();
             chosen.retain(|(src, addon_name)| {
                 addon_git_selection_matches(
                     &worktree_dir,
@@ -3525,13 +3536,27 @@ impl Engine {
                 }
             }
 
-            detected.sort_by_key(|(src, name)| (src.components().count(), name.clone()));
+            let selected_addons = selected_addons_from_json(repo.selected_addons_json.as_deref());
+            let selected_paths: HashSet<String> = selected_addons
+                .iter()
+                .map(|name| name.trim().trim_matches('/').to_ascii_lowercase())
+                .collect();
+            let selected_keys: HashSet<String> = selected_addons
+                .iter()
+                .map(|name| normalize_collection_entry_key(name))
+                .collect();
+
+            detected.sort_by_key(|(src, name)| {
+                (
+                    !addon_git_name_matches_selection(name, &selected_keys),
+                    src.components().count(),
+                    name.clone(),
+                )
+            });
 
             let mut chosen = Vec::<(PathBuf, String)>::new();
             let mut seen_names = HashSet::<String>::new();
             let mut seen_paths = HashSet::<PathBuf>::new();
-            
-            let selected_addons = selected_addons_from_json(repo.selected_addons_json.as_deref());
 
             for (src, addon_name) in detected {
                 let key = addon_name.to_lowercase();
@@ -3546,14 +3571,6 @@ impl Engine {
                 }
             }
             if !selected_addons.is_empty() {
-                let selected_paths: HashSet<String> = selected_addons
-                    .iter()
-                    .map(|name| name.trim().trim_matches('/').to_ascii_lowercase())
-                    .collect();
-                let selected_keys: HashSet<String> = selected_addons
-                    .iter()
-                    .map(|name| normalize_collection_entry_key(name))
-                    .collect();
                 chosen.retain(|(src, addon_name)| {
                     addon_git_selection_matches(
                         &worktree_dir,
