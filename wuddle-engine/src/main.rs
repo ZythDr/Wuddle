@@ -36,7 +36,7 @@ enum Cmd {
     Update {
         #[arg(long)]
         wow_dir: PathBuf,
-        /// Only used for Raw mode (or Auto fallback when asset isn't zip/dll)
+        /// Only used for Raw mode (or Auto fallback when asset isn't archive/dll)
         #[arg(long)]
         raw_dest: Option<PathBuf>,
         #[arg(long, default_value_t = false)]

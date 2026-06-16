@@ -30,7 +30,23 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.2.7
+### What's New in v3.3.0
+
+#### New Features
+- **7z Release Support** — Mods can now install from `.7z` release archives in addition to `.zip` archives and direct `.dll` assets.
+
+#### Improvements
+- **Add Dialog URL Flow** — Add New Mod/Add New Addon URLs now resolve automatically after typing stops briefly, while Enter still resolves immediately.
+- **Addon-Git Branch Display** — Branch selectors now show the branch that was actually installed when using a repository's default branch.
+
+#### Bug Fixes
+- **Add Dialog Focus** — Fixed Repo URL fields losing focus while previews load or resolve.
+- **Forked Addon Installs** — Fixed addon-git forks with non-master default branches installing from the wrong branch.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.2.7
 
 #### New Features
 - **Mods Safety Warning** — Added a per-profile warning when opening the Mods tab, with a "do not show again" option for each profile.
@@ -45,9 +61,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 #### Bug Fixes
 - **Profile Isolation** — Fixed cross-profile addon leakage caused by old shared database fallback behavior.
 - **Overlapping Addon Folder Names** — Fixed cases where different repos installing to the same folder name could make the wrong tracked project appear.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.2.6
 

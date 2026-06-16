@@ -3,7 +3,8 @@ use git2::{Repository, Tree};
 use std::{
     collections::HashMap,
     fs, io,
-    path::{Path, PathBuf},
+    io::Read,
+    path::{Component, Path, PathBuf},
     process::Command,
 };
 
@@ -53,15 +54,21 @@ pub struct InstallRecord {
     pub kind: &'static str, // "dll" | "addon" | "raw"
 }
 
-/// Install from a downloaded ZIP into the WoW directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveKind {
+    Zip,
+    SevenZip,
+}
+
+/// Install from a downloaded archive into the WoW directory.
 ///
 /// Modes:
 /// - addon: copy addon folders into Interface/AddOns
 /// - dll: copy *.dll into WoW root
 /// - mixed: both
-/// - raw: currently unused for zip
-pub fn install_from_zip(
-    zip_path: &Path,
+/// - raw: currently unused for archives
+pub fn install_from_archive(
+    archive_path: &Path,
     extract_dir: &Path,
     wow_dir: &Path,
     mode: &str,
@@ -75,7 +82,7 @@ pub fn install_from_zip(
     fs::create_dir_all(wow_dir.join("Interface").join("AddOns"))
         .context("create Interface/AddOns")?;
 
-    unzip(zip_path, extract_dir).context("unzip")?;
+    extract_archive(archive_path, extract_dir).context("extract archive")?;
 
     let mut records = Vec::new();
 
@@ -145,6 +152,19 @@ pub fn install_from_zip(
     Ok(records)
 }
 
+/// Backwards-compatible wrapper for callers that still name the ZIP-specific API.
+#[allow(dead_code)]
+pub fn install_from_zip(
+    zip_path: &Path,
+    extract_dir: &Path,
+    wow_dir: &Path,
+    mode: &str,
+    opts: InstallOptions,
+    comment: &str,
+) -> Result<Vec<InstallRecord>> {
+    install_from_archive(zip_path, extract_dir, wow_dir, mode, opts, comment)
+}
+
 fn find_first_file_by_name(root: &Path, want: &str) -> Option<PathBuf> {
     let mut matches = Vec::<PathBuf>::new();
     walk_dir(root, &mut |p| {
@@ -164,13 +184,40 @@ fn find_first_file_by_name(root: &Path, want: &str) -> Option<PathBuf> {
     matches.into_iter().next()
 }
 
-/// Unzip ZIP file into destination directory.
-fn unzip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
+fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     if dest_dir.exists() {
         fs::remove_dir_all(dest_dir).with_context(|| format!("cleanup {:?}", dest_dir))?;
     }
     fs::create_dir_all(dest_dir).with_context(|| format!("mkdir {:?}", dest_dir))?;
 
+    match detect_archive_kind(archive_path)? {
+        ArchiveKind::Zip => unzip(archive_path, dest_dir),
+        ArchiveKind::SevenZip => unseven(archive_path, dest_dir),
+    }
+}
+
+fn detect_archive_kind(archive_path: &Path) -> Result<ArchiveKind> {
+    let mut file =
+        fs::File::open(archive_path).with_context(|| format!("open archive {:?}", archive_path))?;
+    let mut head = [0u8; 6];
+    let n = file.read(&mut head)?;
+    let slice = &head[..n];
+
+    if slice.starts_with(b"PK\x03\x04")
+        || slice.starts_with(b"PK\x05\x06")
+        || slice.starts_with(b"PK\x07\x08")
+    {
+        return Ok(ArchiveKind::Zip);
+    }
+    if slice.starts_with(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]) {
+        return Ok(ArchiveKind::SevenZip);
+    }
+
+    anyhow::bail!("unsupported archive signature: {:?}", archive_path)
+}
+
+/// Unzip ZIP file into destination directory.
+fn unzip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
     let file = fs::File::open(zip_path).with_context(|| format!("open zip {:?}", zip_path))?;
     let mut archive = zip::ZipArchive::new(file).context("read zip")?;
 
@@ -194,6 +241,59 @@ fn unzip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn unseven(seven_path: &Path, dest_dir: &Path) -> Result<()> {
+    let mut rejected = Vec::<String>::new();
+
+    sevenz_rust::decompress_file_with_extract_fn(seven_path, dest_dir, |entry, reader, dest| {
+        if entry.name().trim().is_empty() && entry.is_directory() {
+            return Ok(false);
+        }
+        if safe_archive_path(entry.name()).is_none() {
+            rejected.push(entry.name().to_string());
+            return Ok(false);
+        }
+        sevenz_rust::default_entry_extract_fn(entry, reader, dest)
+    })
+    .with_context(|| format!("read 7z {:?}", seven_path))?;
+
+    if !rejected.is_empty() {
+        anyhow::bail!(
+            "7z archive contains unsafe path(s): {}",
+            rejected.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
+fn safe_archive_path(name: &str) -> Option<PathBuf> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.contains('\\') || is_windows_drive_path(trimmed) {
+        return None;
+    }
+
+    let path = Path::new(trimmed);
+    let mut safe = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => safe.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    if safe.as_os_str().is_empty() {
+        None
+    } else {
+        Some(safe)
+    }
+}
+
+fn is_windows_drive_path(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
 }
 
 fn copy_file(src: &Path, dst: &Path) -> Result<()> {
@@ -974,7 +1074,10 @@ pub fn install_raw_file(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_toc_stem;
+    use super::{
+        install_from_archive, normalize_toc_stem, safe_archive_path, InstallOptions,
+    };
+    use std::{fs, io::Write};
 
     #[test]
     fn normalize_toc_suffixes_common_cases() {
@@ -990,5 +1093,108 @@ mod tests {
         assert_eq!(normalize_toc_stem("nampower"), "nampower");
         assert_eq!(normalize_toc_stem("VanillaHelpers"), "VanillaHelpers");
         assert_eq!(normalize_toc_stem("Addon-Tooling"), "Addon-Tooling");
+    }
+
+    #[test]
+    fn safe_archive_path_rejects_traversal_and_absolute_paths() {
+        assert!(safe_archive_path("folder/file.dll").is_some());
+        assert!(safe_archive_path("../evil.dll").is_none());
+        assert!(safe_archive_path("/tmp/evil.dll").is_none());
+        assert!(safe_archive_path("C:/evil.dll").is_none());
+        assert!(safe_archive_path("C:\\evil.dll").is_none());
+        assert!(safe_archive_path("").is_none());
+    }
+
+    #[test]
+    fn install_from_7z_installs_dll_and_updates_dlls_txt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let wow = tmp.path().join("wow");
+        let extract = tmp.path().join("extract");
+        let archive = tmp.path().join("dll_mod.7z");
+
+        fs::create_dir_all(src.join("nested")).unwrap();
+        fs::write(src.join("nested").join("Example.dll"), b"MZ fake dll").unwrap();
+        sevenz_rust::compress_to_path(&src, &archive).unwrap();
+
+        let records = install_from_archive(
+            &archive,
+            &extract,
+            &wow,
+            "dll",
+            InstallOptions::default(),
+            "example/mod v1 - managed by Wuddle",
+        )
+        .unwrap();
+
+        assert!(wow.join("Example.dll").exists());
+        assert!(fs::read_to_string(wow.join("dlls.txt"))
+            .unwrap()
+            .contains("Example.dll"));
+        assert_eq!(records.iter().filter(|r| r.kind == "dll").count(), 1);
+    }
+
+    #[test]
+    fn install_from_7z_installs_addon_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let addon = src.join("MyAddon");
+        let wow = tmp.path().join("wow");
+        let extract = tmp.path().join("extract");
+        let archive = tmp.path().join("addon_mod.7z");
+
+        fs::create_dir_all(&addon).unwrap();
+        fs::write(addon.join("MyAddon.toc"), b"## Interface: 11200\n").unwrap();
+        fs::write(addon.join("core.lua"), b"print('ok')\n").unwrap();
+        sevenz_rust::compress_to_path(&src, &archive).unwrap();
+
+        let records = install_from_archive(
+            &archive,
+            &extract,
+            &wow,
+            "addon",
+            InstallOptions::default(),
+            "example/addon v1 - managed by Wuddle",
+        )
+        .unwrap();
+
+        assert!(wow
+            .join("Interface")
+            .join("AddOns")
+            .join("MyAddon")
+            .join("MyAddon.toc")
+            .exists());
+        assert_eq!(records.iter().filter(|r| r.kind == "addon").count(), 1);
+    }
+
+    #[test]
+    fn install_from_mislabeled_7z_zip_bytes_installs_dll() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let extract = tmp.path().join("extract");
+        let archive = tmp.path().join("Release.7z");
+
+        let file = fs::File::create(&archive).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file(
+            "nested/Example.dll",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"MZ fake dll").unwrap();
+        zip.finish().unwrap();
+
+        let records = install_from_archive(
+            &archive,
+            &extract,
+            &wow,
+            "dll",
+            InstallOptions::default(),
+            "example/mod v1 - managed by Wuddle",
+        )
+        .unwrap();
+
+        assert!(wow.join("Example.dll").exists());
+        assert_eq!(records.iter().filter(|r| r.kind == "dll").count(), 1);
     }
 }

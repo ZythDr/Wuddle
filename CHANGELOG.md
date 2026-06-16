@@ -2,6 +2,19 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.3.0
+
+### New Features
+- **7z Release Support** — Mods can now install from `.7z` release archives in addition to `.zip` archives and direct `.dll` assets.
+
+### Improvements
+- **Add Dialog URL Flow** — Add New Mod/Add New Addon URLs now resolve automatically after typing stops briefly, while Enter still resolves immediately.
+- **Addon-Git Branch Display** — Branch selectors now show the branch that was actually installed when using a repository's default branch.
+
+### Bug Fixes
+- **Add Dialog Focus** — Fixed Repo URL fields losing focus while previews load or resolve.
+- **Forked Addon Installs** — Fixed addon-git forks with non-master default branches installing from the wrong branch.
+
 ## v3.2.7
 
 ### New Features

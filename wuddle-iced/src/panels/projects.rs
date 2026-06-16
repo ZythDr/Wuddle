@@ -1199,7 +1199,8 @@ fn addon_collection_parent_row<'a>(
     let current_branch = repo
         .git_branch
         .clone()
-        .unwrap_or_else(|| "master".to_string());
+        .or_else(|| repo.installed_branch.clone())
+        .unwrap_or_else(|| "default".to_string());
     let branch_options = app.branches.get(&repo.id).cloned().unwrap_or_default();
     let branch_display: Element<Message> = container(
         pick_list(
@@ -1207,7 +1208,7 @@ fn addon_collection_parent_row<'a>(
             Some(current_branch),
             move |branch: String| Message::SetRepoBranch(rid, branch),
         )
-        .placeholder("master")
+        .placeholder("default")
         .text_size(12)
         .width(Length::Fill),
     )
@@ -1374,7 +1375,8 @@ fn addon_row<'a>(
     let current_branch = repo
         .git_branch
         .clone()
-        .unwrap_or_else(|| "master".to_string());
+        .or_else(|| repo.installed_branch.clone())
+        .unwrap_or_else(|| "default".to_string());
     let update_ignored = app.ignored_update_ids.contains(&repo.id);
     let is_infrequent = app.infrequent_repo_ids.contains(&repo.id);
     let name_col = addon_name_cell(
@@ -1420,7 +1422,7 @@ fn addon_row<'a>(
                 Some(current_branch),
                 move |branch: String| Message::SetRepoBranch(rid, branch),
             )
-            .placeholder("master")
+            .placeholder("default")
             .text_size(12)
             .width(Length::Fill),
         )

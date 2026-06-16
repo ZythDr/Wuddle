@@ -421,8 +421,6 @@ impl Engine {
         {
             return Ok(existing.id);
         }
-        let is_addon_git = matches!(&mode, InstallMode::AddonGit);
-
         let repo = Repo {
             id: 0,
             url: det.canonical_url.clone(),
@@ -432,11 +430,7 @@ impl Engine {
             name: det.name.clone(),
             mode,
             enabled: true,
-            git_branch: if is_addon_git {
-                Some("master".to_string())
-            } else {
-                None
-            },
+            git_branch: None,
             asset_regex,
             last_version: None,
             etag: None,
@@ -572,10 +566,7 @@ impl Engine {
         wow_dir: &Path,
         preferred_branch: Option<&str>,
     ) -> Result<AddonProbeResult> {
-        let preferred_branch_inner = preferred_branch
-            .map(str::trim)
-            .filter(|b| !b.is_empty())
-            .unwrap_or("master");
+        let preferred_branch_inner = preferred_branch.map(str::trim).filter(|b| !b.is_empty());
 
         // Try API probe first for supported forges (extremely fast, avoids full clone)
         if let Ok(repo) = forge::detect_repo(url) {
@@ -621,7 +612,7 @@ impl Engine {
                             addon_names: addon_names.clone(),
                             addon_entries: addon_entries.clone(),
                             conflicts: self.check_conflicts_for_addons(&addon_names, wow_dir)?,
-                            resolved_branch: preferred_branch_inner.to_string(),
+                            resolved_branch: preferred_branch_inner.unwrap_or("default").to_string(),
                         });
                     }
                 }
@@ -629,7 +620,7 @@ impl Engine {
         }
 
         let probe_dir = tempfile::tempdir().context("create addon probe dir")?;
-        let synced = git_sync::sync_repo(url, probe_dir.path(), Some(preferred_branch_inner))
+        let synced = git_sync::sync_repo(url, probe_dir.path(), preferred_branch_inner)
             .with_context(|| format!("git sync {}", url))?;
 
         let mut detected = install::detect_addons_in_tree(probe_dir.path());
@@ -1840,9 +1831,8 @@ impl Engine {
             .git_branch
             .as_deref()
             .map(str::trim)
-            .filter(|b| !b.is_empty())
-            .unwrap_or("master");
-        let remote = match git_sync::remote_head_for_branch(&r.url, Some(preferred_branch)) {
+            .filter(|b| !b.is_empty());
+        let remote = match git_sync::remote_head_for_branch(&r.url, preferred_branch) {
             Ok(v) => v,
             Err(e) => {
                 let mut p = Self::blank_plan(r);
@@ -1923,15 +1913,14 @@ impl Engine {
             .as_deref()
             .map(str::trim)
             .filter(|b| !b.is_empty())
-            .unwrap_or("master")
-            .to_string();
+            .map(|b| b.to_string());
 
         let url = r.url.clone();
         let preferred_for_task = preferred_branch.clone();
         let remote = tokio::time::timeout(
             REMOTE_CHECK_TIMEOUT,
             tokio::task::spawn_blocking(move || {
-                git_sync::remote_head_for_branch(&url, Some(preferred_for_task.as_str()))
+                git_sync::remote_head_for_branch(&url, preferred_for_task.as_deref())
             }),
         )
         .await;
@@ -2189,14 +2178,19 @@ impl Engine {
         };
 
         // Collect ALL .dll assets for repos that publish individual DLL files (e.g. WeirdUtils).
-        // Applies to Dll mode always, and to Auto/Mixed when no zip asset is present (a zip
-        // would bundle all the DLLs itself, so we only need the zip in that case).
-        let has_zip_asset = target_rel
+        // Applies to Dll mode always, and to Auto/Mixed when no archive asset is present
+        // (an archive would bundle all the DLLs itself, so we only need the archive in that case).
+        let has_archive_asset = target_rel
             .assets
             .iter()
-            .any(|a| a.name.to_lowercase().ends_with(".zip") && Self::is_asset_allowed(a, &mode));
+            .any(|a| {
+                Self::asset_extension(&a.name)
+                    .map(|ext| Self::is_archive_extension(&ext))
+                    .unwrap_or(false)
+                    && Self::is_asset_allowed(a, &mode)
+            });
         let collect_all_dlls = matches!(mode, InstallMode::Dll)
-            || (!has_zip_asset && matches!(mode, InstallMode::Auto | InstallMode::Mixed));
+            || (!has_archive_asset && matches!(mode, InstallMode::Auto | InstallMode::Mixed));
         let all_dll_assets: Vec<ReleaseAsset> = if collect_all_dlls {
             target_rel
                 .assets
@@ -2500,37 +2494,41 @@ impl Engine {
 
         if let Some(rx) = asset_regex {
             let re = regex::Regex::new(rx)?;
-            if let Some(a) = assets
-                .iter()
-                .find(|a| re.is_match(&a.name) && is_allowed(a))
-            {
-                return Ok(a.clone());
+            let mut matched_any = false;
+            for a in assets.iter().filter(|a| re.is_match(&a.name)) {
+                matched_any = true;
+                if is_allowed(a) {
+                    return Ok(a.clone());
+                }
+            }
+            if matched_any {
+                anyhow::bail!(
+                    "Release asset matched regex but is not safe/compatible for mode {} in {}.",
+                    mode.as_str(),
+                    rel.tag
+                );
             }
         }
 
-        let prefer_zip = matches!(
+        let prefer_archive = matches!(
             mode,
             InstallMode::Addon | InstallMode::Mixed | InstallMode::Auto
         );
 
-        if prefer_zip {
+        if prefer_archive {
             let has_vanillafixes_assets = assets
                 .iter()
                 .any(|a| a.name.to_ascii_lowercase().starts_with("vanillafixes"));
 
             if has_vanillafixes_assets {
-                if let Some(a) = assets.iter().find(|a| {
-                    let lower = a.name.to_ascii_lowercase();
-                    lower.ends_with(".zip") && !lower.contains("-dxvk") && is_allowed(a)
+                if let Some(a) = Self::find_archive_asset(assets, is_allowed, |lower| {
+                    !lower.contains("-dxvk")
                 }) {
                     return Ok(a.clone());
                 }
             }
 
-            if let Some(a) = assets
-                .iter()
-                .find(|a| a.name.to_lowercase().ends_with(".zip") && is_allowed(a))
-            {
+            if let Some(a) = Self::find_archive_asset(assets, is_allowed, |_| true) {
                 return Ok(a.clone());
             }
         }
@@ -2540,6 +2538,10 @@ impl Engine {
                 .iter()
                 .find(|a| a.name.to_lowercase().ends_with(".dll") && is_allowed(a))
             {
+                return Ok(a.clone());
+            }
+
+            if let Some(a) = Self::find_archive_asset(assets, is_allowed, |_| true) {
                 return Ok(a.clone());
             }
         }
@@ -2553,6 +2555,22 @@ impl Engine {
             mode.as_str(),
             rel.tag
         )
+    }
+
+    fn find_archive_asset<F>(
+        assets: &[ReleaseAsset],
+        is_allowed: impl Fn(&ReleaseAsset) -> bool + Copy,
+        extra_filter: F,
+    ) -> Option<&ReleaseAsset>
+    where
+        F: Fn(&str) -> bool + Copy,
+    {
+        [".zip", ".7z"].iter().find_map(|suffix| {
+            assets.iter().find(|a| {
+                let lower = a.name.to_ascii_lowercase();
+                lower.ends_with(suffix) && extra_filter(&lower) && is_allowed(a)
+            })
+        })
     }
 
     fn asset_extension(name: &str) -> Option<String> {
@@ -2605,13 +2623,17 @@ impl Engine {
             return false;
         }
         match mode {
-            InstallMode::Addon | InstallMode::Mixed => ext == "zip",
+            InstallMode::Addon | InstallMode::Mixed => Self::is_archive_extension(&ext),
             InstallMode::AddonGit => false,
-            InstallMode::Dll => ext == "dll" || ext == "zip",
-            InstallMode::Auto => ext == "dll" || ext == "zip",
+            InstallMode::Dll => ext == "dll" || Self::is_archive_extension(&ext),
+            InstallMode::Auto => ext == "dll" || Self::is_archive_extension(&ext),
             InstallMode::Raw => true,
             InstallMode::Manual => false,
         }
+    }
+
+    fn is_archive_extension(ext: &str) -> bool {
+        matches!(ext, "zip" | "7z")
     }
 
     fn host_matches_or_subdomain(host: &str, trusted: &str) -> bool {
@@ -2661,6 +2683,14 @@ impl Engine {
             || head.starts_with(b"PK\x07\x08")
     }
 
+    fn looks_like_7z_bytes(head: &[u8]) -> bool {
+        head.starts_with(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C])
+    }
+
+    fn looks_like_supported_archive_bytes(head: &[u8]) -> bool {
+        Self::looks_like_zip_bytes(head) || Self::looks_like_7z_bytes(head)
+    }
+
     fn looks_like_dll_bytes(head: &[u8]) -> bool {
         head.starts_with(b"MZ")
     }
@@ -2683,18 +2713,20 @@ impl Engine {
         }
 
         let lower = plan.asset_name.to_ascii_lowercase();
-        if !(lower.ends_with(".zip") || lower.ends_with(".dll")) {
+        if !(lower.ends_with(".zip") || lower.ends_with(".7z") || lower.ends_with(".dll")) {
             return Ok(());
         }
 
         let mut f = fs::File::open(path)?;
-        let mut head = [0u8; 4];
+        let mut head = [0u8; 6];
         let n = f.read(&mut head)?;
         let slice = &head[..n];
 
-        if lower.ends_with(".zip") && !Self::looks_like_zip_bytes(slice) {
+        if (lower.ends_with(".zip") || lower.ends_with(".7z"))
+            && !Self::looks_like_supported_archive_bytes(slice)
+        {
             anyhow::bail!(
-                "Downloaded ZIP asset failed signature check: {}",
+                "Downloaded archive asset failed signature check: {}",
                 plan.asset_name
             );
         }
@@ -2774,9 +2806,15 @@ impl Engine {
         Ok(())
     }
 
-    fn looks_like_zip(path: &Path, name: &str) -> bool {
-        let lower = name.to_lowercase();
-        lower.ends_with(".zip") || path.extension().map(|e| e == "zip").unwrap_or(false)
+    fn looks_like_archive(path: &Path, name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        lower.ends_with(".zip")
+            || lower.ends_with(".7z")
+            || path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| Self::is_archive_extension(&e.to_ascii_lowercase()))
+                .unwrap_or(false)
     }
 
     fn persist_installs(
@@ -3207,10 +3245,9 @@ impl Engine {
         }
         let normalized = git_branch
             .map(|b| b.trim().to_string())
-            .filter(|b| !b.is_empty())
-            .unwrap_or_else(|| "master".to_string());
+            .filter(|b| !b.is_empty());
         self.db()
-            .set_repo_git_branch(repo_id, Some(normalized.as_str()))?;
+            .set_repo_git_branch(repo_id, normalized.as_deref())?;
         Ok(())
     }
 
@@ -3448,9 +3485,8 @@ impl Engine {
                 .git_branch
                 .as_deref()
                 .map(str::trim)
-                .filter(|b| !b.is_empty())
-                .unwrap_or("master");
-            let synced = git_sync::sync_repo(&plan.url, &worktree_dir, Some(preferred_branch))
+                .filter(|b| !b.is_empty());
+            let synced = git_sync::sync_repo(&plan.url, &worktree_dir, preferred_branch)
                 .with_context(|| format!("git sync {}", plan.url))?;
 
             // Detect addon folders inside the cloned repo.
@@ -3743,9 +3779,9 @@ impl Engine {
             plan.owner, plan.name, plan.latest
         );
 
-        let mut records = if Self::looks_like_zip(&asset_path, &plan.asset_name) {
-            let extract_dir = release_dir.join("unzip");
-            install::install_from_zip(
+        let mut records = if Self::looks_like_archive(&asset_path, &plan.asset_name) {
+            let extract_dir = release_dir.join("extract");
+            install::install_from_archive(
                 &asset_path,
                 &extract_dir,
                 wow_dir,
@@ -3765,7 +3801,7 @@ impl Engine {
                 )?]
             } else if matches!(plan.mode, InstallMode::Raw | InstallMode::Auto) {
                 let dest = raw_dest.ok_or_else(|| {
-                    anyhow::anyhow!("raw_dest is required for raw/auto non-zip assets")
+                    anyhow::anyhow!("raw_dest is required for raw/auto non-archive assets")
                 })?;
                 vec![install::install_raw_file(
                     &asset_path,
@@ -3775,7 +3811,7 @@ impl Engine {
                     &comment,
                 )?]
             } else {
-                anyhow::bail!("Asset is not zip/dll; use raw mode (or auto with raw_dest).")
+                anyhow::bail!("Asset is not archive/dll; use raw mode (or auto with raw_dest).")
             }
         };
 
@@ -3992,7 +4028,56 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    use super::Engine;
+    use super::{Engine, InstallMode, LatestRelease, ReleaseAsset, UpdatePlan};
+    use std::fs;
+
+    fn asset(name: &str) -> ReleaseAsset {
+        ReleaseAsset {
+            id: Some(name.to_string()),
+            name: name.to_string(),
+            download_url: format!("https://example.com/{name}"),
+            size: None,
+            content_type: None,
+            sha256: None,
+        }
+    }
+
+    fn release(assets: Vec<ReleaseAsset>) -> LatestRelease {
+        LatestRelease {
+            tag: "v1.0.0".to_string(),
+            name: None,
+            assets,
+            published_at: None,
+        }
+    }
+
+    fn plan_for_asset(asset_name: &str, size: Option<u64>) -> UpdatePlan {
+        UpdatePlan {
+            repo_id: 1,
+            forge: "github".to_string(),
+            host: "github.com".to_string(),
+            owner: "owner".to_string(),
+            name: "repo".to_string(),
+            url: "https://github.com/owner/repo".to_string(),
+            mode: InstallMode::Auto,
+            current: None,
+            latest: "v1.0.0".to_string(),
+            asset_id: asset_name.to_string(),
+            asset_name: asset_name.to_string(),
+            asset_url: format!("https://github.com/owner/repo/releases/download/v1.0.0/{asset_name}"),
+            asset_size: size,
+            asset_sha256: None,
+            repair_needed: false,
+            externally_modified: false,
+            not_modified: false,
+            applied: false,
+            error: None,
+            extra_assets: Vec::new(),
+            previous_dll_count: 0,
+            new_dll_count: 0,
+            is_manual: false,
+        }
+    }
 
     // ── version_from_asset_name ──────────────────────────────────────────────
 
@@ -4057,6 +4142,102 @@ mod tests {
     #[test]
     fn version_empty_string() {
         assert_eq!(Engine::version_from_asset_name(""), None);
+    }
+
+    // ── release asset filtering / picking ───────────────────────────────────
+
+    #[test]
+    fn asset_filter_accepts_7z_archives_for_mod_modes() {
+        let seven = asset("mod.7z");
+        assert!(Engine::is_asset_allowed(&seven, &InstallMode::Auto));
+        assert!(Engine::is_asset_allowed(&seven, &InstallMode::Addon));
+        assert!(Engine::is_asset_allowed(&seven, &InstallMode::Dll));
+        assert!(Engine::is_asset_allowed(&seven, &InstallMode::Mixed));
+
+        assert!(!Engine::is_asset_allowed(&asset("mod.rar"), &InstallMode::Auto));
+        assert!(!Engine::is_asset_allowed(&asset("mod.exe"), &InstallMode::Auto));
+    }
+
+    #[test]
+    fn auto_prefers_zip_then_7z_then_dll() {
+        let rel = release(vec![asset("mod.dll"), asset("mod.7z"), asset("mod.zip")]);
+        assert_eq!(
+            Engine::pick_asset(&rel, InstallMode::Auto, None).unwrap().name,
+            "mod.zip"
+        );
+
+        let rel = release(vec![asset("mod.dll"), asset("mod.7z")]);
+        assert_eq!(
+            Engine::pick_asset(&rel, InstallMode::Auto, None).unwrap().name,
+            "mod.7z"
+        );
+    }
+
+    #[test]
+    fn dll_prefers_direct_dll_then_zip_then_7z() {
+        let rel = release(vec![asset("mod.7z"), asset("mod.zip"), asset("mod.dll")]);
+        assert_eq!(
+            Engine::pick_asset(&rel, InstallMode::Dll, None).unwrap().name,
+            "mod.dll"
+        );
+
+        let rel = release(vec![asset("mod.7z"), asset("mod.zip")]);
+        assert_eq!(
+            Engine::pick_asset(&rel, InstallMode::Dll, None).unwrap().name,
+            "mod.zip"
+        );
+
+        let rel = release(vec![asset("mod.7z")]);
+        assert_eq!(
+            Engine::pick_asset(&rel, InstallMode::Dll, None).unwrap().name,
+            "mod.7z"
+        );
+    }
+
+    #[test]
+    fn asset_regex_can_select_allowed_7z_but_not_rar() {
+        let rel = release(vec![asset("mod.rar"), asset("mod.7z")]);
+        assert_eq!(
+            Engine::pick_asset(&rel, InstallMode::Auto, Some(r"\.7z$"))
+                .unwrap()
+                .name,
+            "mod.7z"
+        );
+        assert!(Engine::pick_asset(&rel, InstallMode::Auto, Some(r"\.rar$")).is_err());
+    }
+
+    // ── downloaded asset validation ─────────────────────────────────────────
+
+    #[test]
+    fn validate_downloaded_7z_signature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("mod.7z");
+        let bytes = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x00];
+        fs::write(&path, bytes).unwrap();
+
+        let plan = plan_for_asset("mod.7z", Some(bytes.len() as u64));
+        Engine::validate_downloaded_asset(&path, &plan).unwrap();
+
+        fs::write(&path, b"PK\x03\x04").unwrap();
+        let plan = plan_for_asset("mod.7z", Some(4));
+        Engine::validate_downloaded_asset(&path, &plan).unwrap();
+
+        fs::write(&path, b"not 7z").unwrap();
+        let plan = plan_for_asset("mod.7z", Some(6));
+        assert!(Engine::validate_downloaded_asset(&path, &plan).is_err());
+    }
+
+    #[test]
+    fn validate_existing_zip_and_dll_signatures() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let zip_path = tmp.path().join("mod.zip");
+        fs::write(&zip_path, b"PK\x03\x04").unwrap();
+        Engine::validate_downloaded_asset(&zip_path, &plan_for_asset("mod.zip", Some(4))).unwrap();
+
+        let dll_path = tmp.path().join("mod.dll");
+        fs::write(&dll_path, b"MZ").unwrap();
+        Engine::validate_downloaded_asset(&dll_path, &plan_for_asset("mod.dll", Some(2))).unwrap();
     }
 
     // ── parse_github_reset_epoch ─────────────────────────────────────────────

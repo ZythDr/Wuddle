@@ -109,10 +109,6 @@ impl Db {
 
             self.conn
                 .execute("UPDATE repos SET enabled=1 WHERE enabled IS NULL", [])?;
-            self.conn.execute(
-                "UPDATE repos SET git_branch='master' WHERE mode='addon_git' AND (git_branch IS NULL OR TRIM(git_branch)='')",
-                [],
-            )?;
 
             self.conn.execute_batch("PRAGMA user_version = 1")?;
         }

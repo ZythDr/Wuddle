@@ -216,6 +216,8 @@ pub enum Message {
     // Add-repo preview
     QuickInstallPreset(String),
     SetAddRepoUrl(String),
+    DebouncedResolveAddRepoUrl { generation: u64, url: String },
+    RefocusAddRepoUrl,
     ResolveAddRepoUrl,
     FetchRepoPreview(String),
     FetchRepoPreviewResult(String, Result<service::RepoPreviewInfo, String>),

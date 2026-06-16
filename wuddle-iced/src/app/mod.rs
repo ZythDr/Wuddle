@@ -122,6 +122,7 @@ pub struct App {
     // Add-repo dialog preview
     pub add_repo_preview: Option<service::RepoPreviewInfo>,
     pub add_repo_preview_loading: bool,
+    pub add_repo_url_debounce_generation: u64,
     pub add_repo_probe: Option<wuddle_engine::AddonProbeResult>,
     pub add_repo_probe_loading: bool,
     pub add_repo_collection_choice: Option<bool>,
@@ -290,6 +291,7 @@ impl App {
             spinner_tick: 0,
             add_repo_preview: None,
             add_repo_preview_loading: false,
+            add_repo_url_debounce_generation: 0,
             add_repo_probe: None,
             add_repo_probe_loading: false,
             add_repo_collection_choice: None,
@@ -352,6 +354,7 @@ impl App {
     }
 
     pub fn reset_add_repo_state(&mut self) {
+        self.add_repo_url_debounce_generation = self.add_repo_url_debounce_generation.wrapping_add(1);
         self.add_repo_preview = None;
         self.add_repo_preview_loading = false;
         self.add_repo_probe = None;

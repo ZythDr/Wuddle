@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 pub enum InstallMode {
     /// Automatically infer what to install from the downloaded asset:
     /// - If it's a .dll => copy into WoW root
-    /// - If it's a .zip => extract, then:
+    /// - If it's a .zip or .7z => extract, then:
     ///   - copy any *.dll into WoW root
     ///   - copy any addon folder(s) into Interface/AddOns/, renaming folder to match the .toc stem exactly
     Auto,
@@ -15,7 +15,7 @@ pub enum InstallMode {
     AddonGit,
     Dll,
     Mixed,
-    Raw, // downloads asset to a chosen folder (no unzip)
+    Raw, // downloads asset to a chosen folder (no extraction)
     Manual,
 }
 

@@ -5,7 +5,7 @@ use crate::service;
 use crate::components::presets::{WEIRD_UTILS_DESCRIPTIONS, WEIRD_UTILS_DLLS, is_av_false_positive};
 use wuddle_engine;
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const INFREQUENT_CHECK_INTERVAL_SECS: i64 = 4 * 3600;
 
@@ -734,6 +734,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.add_repo_probe = None;
                     app.log(LogLevel::Error, &format!("Addon probe failed: {:#}", e));
                 }
+            }
+            if matches!(app.dialog, Some(Dialog::AddRepo { .. })) {
+                return Some(delayed_add_repo_url_refocus_task());
             }
             Some(Task::none())
         }
@@ -1676,11 +1679,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     }
 
                     if prefetch_tasks.is_empty() {
-                        return Some(Task::none());
+                        return Some(delayed_add_repo_url_refocus_task());
                     }
-                    return Some(Task::batch(prefetch_tasks));
+                    let mut tasks = Vec::with_capacity(prefetch_tasks.len() + 1);
+                    tasks.push(delayed_add_repo_url_refocus_task());
+                    tasks.extend(prefetch_tasks);
+                    return Some(Task::batch(tasks));
                 }
-                Err(_) => app.add_repo_preview = None,
+                Err(_) => {
+                    app.add_repo_preview = None;
+                    if matches!(app.dialog, Some(Dialog::AddRepo { .. })) {
+                        return Some(delayed_add_repo_url_refocus_task());
+                    }
+                }
             }
             Some(Task::none())
         }
@@ -1712,6 +1723,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 let mut sorted = entries;
                 sorted.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
                 app.add_repo_dir_contents.insert(dir_path, sorted);
+            }
+            if matches!(app.dialog, Some(Dialog::AddRepo { .. })) {
+                return Some(delayed_add_repo_url_refocus_task());
             }
             Some(Task::none())
         }
@@ -1810,6 +1824,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if let Some(Dialog::AddRepo { url: ref mut old_url, .. }) = app.dialog {
                 *old_url = url.clone();
             }
+            app.add_repo_url_debounce_generation = app.add_repo_url_debounce_generation.wrapping_add(1);
+            let debounce_generation = app.add_repo_url_debounce_generation;
+            let mut tasks = vec![iced::widget::operation::focus(iced::widget::Id::new(
+                "add_repo_url",
+            ))];
             app.add_repo_preview = None;
             app.add_repo_preview_loading = false;
             app.add_repo_release_notes = None;
@@ -1825,9 +1844,51 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if app.add_repo_manage_repo_id.is_none() {
                 app.add_repo_selected_addons.clear();
             }
+            let trimmed = url.trim().to_string();
+            if service::parse_forge_url(&trimmed).is_some() {
+                tasks.push(Task::perform(
+                    async move {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        Message::DebouncedResolveAddRepoUrl {
+                            generation: debounce_generation,
+                            url: trimmed,
+                        }
+                    },
+                    |msg| msg,
+                ));
+            }
+            Some(Task::batch(tasks))
+        }
+        Message::DebouncedResolveAddRepoUrl { generation, url } => {
+            if generation != app.add_repo_url_debounce_generation {
+                return Some(Task::none());
+            }
+            if let Some(Dialog::AddRepo { url: current_url, .. }) = app.dialog.as_ref() {
+                if service::normalize_repo_input_url(current_url)
+                    != service::normalize_repo_input_url(&url)
+                {
+                    return Some(Task::none());
+                }
+                if app.add_repo_preview.as_ref().is_some_and(|preview| {
+                    service::normalize_repo_input_url(&preview.forge_url)
+                        == service::normalize_repo_input_url(&url)
+                }) {
+                    return Some(Task::none());
+                }
+                return Some(Task::done(Message::ResolveAddRepoUrl));
+            }
+            Some(Task::none())
+        }
+        Message::RefocusAddRepoUrl => {
+            if matches!(app.dialog, Some(Dialog::AddRepo { .. })) {
+                return Some(iced::widget::operation::focus(iced::widget::Id::new(
+                    "add_repo_url",
+                )));
+            }
             Some(Task::none())
         }
         Message::ResolveAddRepoUrl => {
+            app.add_repo_url_debounce_generation = app.add_repo_url_debounce_generation.wrapping_add(1);
             let (url, is_addons) = if let Some(Dialog::AddRepo {
                 ref url,
                 is_addons,
@@ -1922,6 +1983,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
 
 pub fn refresh_repos_task(app: &App) -> Task<Message> {
     refresh_repos_task_inner(app, false)
+}
+
+fn delayed_add_repo_url_refocus_task() -> Task<Message> {
+    Task::perform(
+        async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        },
+        |_| Message::RefocusAddRepoUrl,
+    )
 }
 
 pub fn refresh_repos_task_inner(app: &App, fix_casing: bool) -> Task<Message> {

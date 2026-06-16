@@ -121,6 +121,7 @@ pub struct RepoRow {
     pub enabled: bool,
     pub last_version: Option<String>,
     pub git_branch: Option<String>,
+    pub installed_branch: Option<String>,
     /// DLL files managed by this repo: (filename, is_enabled_in_dlls_txt, installed_version).
     /// Empty for non-DLL repos. More than one entry means this is a multi-DLL mod.
     pub installed_dlls: Vec<(String, bool, Option<String>)>,
@@ -163,6 +164,11 @@ impl From<Repo> for RepoRow {
             enabled: r.enabled,
             last_version: r.last_version,
             git_branch: r.git_branch,
+            installed_branch: r
+                .installed_asset_name
+                .as_deref()
+                .and_then(|url| url.strip_prefix("git:"))
+                .map(|branch| branch.to_string()),
             installed_dlls: Vec::new(),
             installed_addons: Vec::new(),
             selected_addons: parse_selected_addons(r.selected_addons_json.as_deref()),
@@ -1099,7 +1105,7 @@ pub async fn update_all(
             let mut log: Vec<String> = Vec::new();
 
             if repo.mode.as_str() == "addon_git" {
-                let branch = repo.git_branch.as_deref().unwrap_or("master");
+                let branch = repo.git_branch.as_deref().unwrap_or("default branch");
                 log.push(format!("{}/{}: syncing branch '{}'.", owner, name, branch));
             } else {
                 log.push(format!("{}/{}: checking release assets.", owner, name));
