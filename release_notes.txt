@@ -1,7 +1,8 @@
-## Wuddle v3.2.4
+## Wuddle v3.4.0
 
 ### New Features
-- **Up-To-Date Status Tooltips** — The "Up to date" status badge now features an informative hover tooltip displaying the latest version (or commit ID) alongside the exact local installation timestamp.
+- **Direct Archive Links** — You can now add addons from direct HTTPS `.zip` or `.7z` download links, even when there is no repo to track for updates.
+- **Release Asset Picker** — GitHub release pages with multiple compatible archives now ask which one you want to install.
 
 ### Improvements
-- **Streamlined Conflict Resolution UI** — The file tree preview in the "Addon Conflict" dialog has been significantly cleaned up to exclusively display directories and filter out hidden system files/folders (such as `.git` and `.editorconfig`).
+- **Release Tag Installs** — Links to a specific GitHub release tag now stay on that release instead of drifting to the latest one later.

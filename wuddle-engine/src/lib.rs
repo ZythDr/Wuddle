@@ -19,12 +19,14 @@ use std::process::Command;
 use url::Url;
 
 mod db;
+mod direct;
 mod forge;
 mod install;
 mod model;
 mod util;
 
 pub use db::Db;
+pub use direct::is_direct_archive_url;
 pub use install::InstallOptions;
 pub use model::{InstallMode, LatestRelease, ReleaseAsset, Repo};
 
@@ -297,6 +299,40 @@ fn addon_git_selection_matches(
     false
 }
 
+fn release_tag_from_url(url: &str) -> Option<String> {
+    let parsed = Url::parse(url.trim()).ok()?;
+    let segs = parsed
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+
+    for (index, segment) in segs.iter().enumerate() {
+        if !segment.eq_ignore_ascii_case("releases") {
+            continue;
+        }
+
+        if segs
+            .get(index + 1)
+            .map(|segment| segment.eq_ignore_ascii_case("tag"))
+            .unwrap_or(false)
+        {
+            return segs
+                .get(index + 2)
+                .map(|tag| urlencoding::decode(tag).map(|t| t.into_owned()).unwrap_or_else(|_| (*tag).to_string()))
+                .filter(|tag| !tag.trim().is_empty());
+        }
+
+        if index > 0 && segs.get(index - 1) == Some(&"-") {
+            return segs
+                .get(index + 1)
+                .map(|tag| urlencoding::decode(tag).map(|t| t.into_owned()).unwrap_or_else(|_| (*tag).to_string()))
+                .filter(|tag| !tag.trim().is_empty());
+        }
+    }
+
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct AddonProbeOwner {
     pub repo_id: i64,
@@ -419,10 +455,22 @@ impl Engine {
         selected_addons: Option<Vec<String>>,
     ) -> Result<i64> {
         let det = detect_repo(url)?;
+        let pinned_version = release_tag_from_url(url);
+        let selected_addons_json =
+            normalize_selected_addons(selected_addons.as_deref().unwrap_or(&[]));
         if let Ok(Some(existing)) = self
             .db()
             .find_repo_by_identity(&det.host, &det.owner, &det.name)
         {
+            if asset_regex.is_some() || pinned_version.is_some() {
+                self.db().set_repo_release_source(
+                    existing.id,
+                    &mode,
+                    asset_regex.as_deref(),
+                    pinned_version.as_deref(),
+                    selected_addons_json.as_deref(),
+                )?;
+            }
             return Ok(existing.id);
         }
         let repo = Repo {
@@ -445,8 +493,50 @@ impl Engine {
             installed_at_unix: None,
             published_at_unix: None,
             merge_installs: false,
+            pinned_version,
+            selected_addons_json,
+        };
+
+        self.db().add_repo(&repo)
+    }
+
+    pub fn add_direct_archive_url(&self, url: &str) -> Result<i64> {
+        let direct = direct::parse_archive_url(url)?;
+        let mut name = direct.display_name.clone();
+
+        if let Ok(Some(existing)) =
+            self.db()
+                .find_repo_by_identity(&direct.host, &direct.host, &name)
+        {
+            if existing.url.eq_ignore_ascii_case(&direct.url) {
+                return Ok(existing.id);
+            }
+            let suffix = direct.url_hash.get(..8).unwrap_or(&direct.url_hash);
+            name = format!("{}-{}", direct.display_name, suffix);
+        }
+
+        let repo = Repo {
+            id: 0,
+            url: direct.url,
+            forge: "direct".to_string(),
+            host: direct.host.clone(),
+            owner: direct.host,
+            name,
+            mode: InstallMode::Addon,
+            enabled: true,
+            git_branch: None,
+            asset_regex: None,
+            last_version: None,
+            etag: None,
+            installed_asset_id: None,
+            installed_asset_name: None,
+            installed_asset_size: None,
+            installed_asset_url: None,
+            installed_at_unix: None,
+            published_at_unix: None,
+            merge_installs: false,
             pinned_version: None,
-            selected_addons_json: normalize_selected_addons(selected_addons.as_deref().unwrap_or(&[])),
+            selected_addons_json: None,
         };
 
         self.db().add_repo(&repo)
@@ -2012,6 +2102,50 @@ impl Engine {
         })
     }
 
+    fn build_direct_archive_plan_for_repo(
+        &self,
+        r: &Repo,
+        wow_dir: Option<&Path>,
+        force_download: bool,
+    ) -> Result<UpdatePlan> {
+        let direct = direct::parse_archive_url(&r.url)?;
+        let asset_id = direct.url_hash.clone();
+        let installed_matches =
+            Self::installed_matches(r, "direct", &asset_id, &direct.asset_name, None);
+        let missing_targets = self.has_missing_targets(r.id, wow_dir)?;
+        let needs_download = force_download || !installed_matches || missing_targets;
+
+        Ok(UpdatePlan {
+            repo_id: r.id,
+            forge: r.forge.clone(),
+            host: r.host.clone(),
+            owner: r.owner.clone(),
+            name: r.name.clone(),
+            url: r.url.clone(),
+            mode: r.mode.clone(),
+            current: Self::normalized_current_version(r),
+            latest: "direct".to_string(),
+            asset_id,
+            asset_name: direct.asset_name,
+            asset_url: if needs_download {
+                r.url.clone()
+            } else {
+                String::new()
+            },
+            asset_size: None,
+            asset_sha256: None,
+            repair_needed: missing_targets && installed_matches && !force_download,
+            externally_modified: false,
+            not_modified: !needs_download,
+            applied: false,
+            error: None,
+            extra_assets: Vec::new(),
+            previous_dll_count: 0,
+            new_dll_count: 0,
+            is_manual: true,
+        })
+    }
+
     async fn build_update_plan_for_repo(
         &self,
         r: &Repo,
@@ -2040,6 +2174,10 @@ impl Engine {
             p.is_manual = true;
             p.not_modified = true;
             return Ok(p);
+        }
+
+        if r.forge.eq_ignore_ascii_case("direct") {
+            return self.build_direct_archive_plan_for_repo(r, wow_dir, false);
         }
 
         if matches!(r.mode, InstallMode::AddonGit) {
@@ -3984,6 +4122,13 @@ impl Engine {
     ) -> Result<UpdatePlan> {
         let r = self.db().get_repo(repo_id)?;
 
+        if r.forge.eq_ignore_ascii_case("direct") {
+            let mut plan = self.build_direct_archive_plan_for_repo(&r, Some(wow_dir), true)?;
+            self.apply_one(&plan, wow_dir, raw_dest, opts).await?;
+            plan.applied = true;
+            return Ok(plan);
+        }
+
         if matches!(r.mode, InstallMode::AddonGit) {
             let mut plan = self.build_git_addon_plan_for_repo(&r, Some(wow_dir))?;
             if let Some(err) = plan.error.clone() {
@@ -4279,5 +4424,19 @@ mod tests {
     fn reset_epoch_no_match() {
         assert_eq!(Engine::parse_github_reset_epoch("no epoch here"), None);
         assert_eq!(Engine::parse_github_reset_epoch(""), None);
+    }
+
+    #[test]
+    fn release_tag_extracted_from_release_url() {
+        assert_eq!(
+            super::release_tag_from_url(
+                "https://github.com/noname08662/ElvUI_Extras/releases/tag/1.11"
+            ),
+            Some("1.11".to_string())
+        );
+        assert_eq!(
+            super::release_tag_from_url("https://github.com/noname08662/ElvUI_Extras/releases"),
+            None
+        );
     }
 }

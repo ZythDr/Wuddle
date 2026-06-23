@@ -58,7 +58,11 @@ async fn main() -> Result<()> {
             asset_regex,
         } => {
             let mode = InstallMode::from_str(&mode).ok_or_else(|| anyhow::anyhow!("bad mode"))?;
-                let id = engine.add_repo(&url, mode, asset_regex, None)?;
+            let id = if wuddle_engine::is_direct_archive_url(&url) {
+                engine.add_direct_archive_url(&url)?
+            } else {
+                engine.add_repo(&url, mode, asset_regex, None)?
+            };
             println!("Added repo id={id}");
         }
         Cmd::List => {

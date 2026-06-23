@@ -128,6 +128,8 @@ pub struct App {
     pub add_repo_collection_choice: Option<bool>,
     pub add_repo_existing_addons: HashSet<String>,
     pub add_repo_selected_addons: HashSet<String>,
+    pub add_repo_release_asset_options: Vec<service::ReleaseAssetOption>,
+    pub add_repo_selected_release_asset: Option<String>,
     pub add_repo_manage_repo_id: Option<i64>,
     pub add_repo_expanded_dirs: HashSet<String>,
     /// Lazily-loaded directory contents, keyed by dir path.
@@ -297,6 +299,8 @@ impl App {
             add_repo_collection_choice: None,
             add_repo_existing_addons: HashSet::new(),
             add_repo_selected_addons: HashSet::new(),
+            add_repo_release_asset_options: Vec::new(),
+            add_repo_selected_release_asset: None,
             add_repo_manage_repo_id: None,
             add_repo_expanded_dirs: HashSet::new(),
             add_repo_dir_contents: HashMap::new(),
@@ -362,6 +366,8 @@ impl App {
         self.add_repo_collection_choice = None;
         self.add_repo_existing_addons.clear();
         self.add_repo_selected_addons.clear();
+        self.add_repo_release_asset_options.clear();
+        self.add_repo_selected_release_asset = None;
         self.add_repo_manage_repo_id = None;
         self.add_repo_release_notes = None;
         self.add_repo_show_releases = false;
@@ -1191,6 +1197,7 @@ impl App {
                     Dialog::AvWarning { .. }
                     | Dialog::ModsWarning { .. }
                     | Dialog::CollectionChoice { .. }
+                    | Dialog::SelectReleaseAsset { .. }
                     | Dialog::RemoveCollectionAddon { .. } => (650u32, 24),
                     Dialog::AddonConflict { .. } => (920u32, 24),
                     Dialog::CollectionAddonConflict { .. } => (920u32, 24),
@@ -1535,6 +1542,40 @@ impl App {
                         tip(
                             text("\u{1f6c8}").size(14).color(colors.muted),
                             "Multiple .toc files found at the root.\nSelect which one should define the addon folder name.",
+                            iced::widget::tooltip::Position::Bottom,
+                            colors,
+                        )
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center)
+                    .into()
+                };
+
+                let build_release_asset_section = || -> Element<Message> {
+                    if self.add_repo_release_asset_options.len() <= 1 {
+                        return Space::new().height(0).into();
+                    }
+
+                    let mut options = self
+                        .add_repo_release_asset_options
+                        .iter()
+                        .map(|asset| asset.name.clone())
+                        .collect::<Vec<_>>();
+                    options.sort_by_key(|name| name.to_ascii_lowercase());
+
+                    let current_selection = self
+                        .add_repo_selected_release_asset
+                        .clone()
+                        .or_else(|| options.first().cloned());
+
+                    row![
+                        text("Release asset:").size(12).color(colors.text),
+                        pick_list(options, current_selection, Message::SetAddRepoReleaseAsset)
+                            .text_size(11)
+                            .padding([4, 8]),
+                        tip(
+                            text("\u{1f6c8}").size(14).color(colors.muted),
+                            "This release publishes multiple compatible archives.\nChoose which one Wuddle should install and track.",
                             iced::widget::tooltip::Position::Bottom,
                             colors,
                         )
@@ -2980,6 +3021,7 @@ impl App {
                             text(url_label).size(12).color(colors.text),
                             url_row,
                             build_collection_section(),
+                            build_release_asset_section(),
                             Space::new().height(4),
                             content_label,
                             // Scrollable content fills remaining space
@@ -3062,6 +3104,7 @@ impl App {
                         text(url_label).size(12).color(colors.text),
                         url_row,
                         build_collection_section(),
+                        build_release_asset_section(),
                         body_section,
                         rule::horizontal(1).style(move |_t| theme::update_line_style(c)),
                         footer,
@@ -3961,6 +4004,62 @@ impl App {
                 );
 
                 column(rows).spacing(10).width(Length::Fixed(440.0)).into()
+            }
+
+            Dialog::SelectReleaseAsset { url, options } => {
+                let c = colors;
+                let domain = url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .splitn(4, '/')
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join("/");
+
+                let mut sorted_options = options.clone();
+                sorted_options.sort_by_key(|n| n.to_ascii_lowercase());
+
+                let mut scroll_rows = Vec::new();
+                for name in sorted_options {
+                    let name_cb = name.clone();
+                    scroll_rows.push(
+                        button(
+                            row![
+                                text("\u{1f4e6}").size(14).color(colors.muted),
+                                text(name).size(13).color(colors.text),
+                            ]
+                            .spacing(10)
+                            .align_y(iced::Alignment::Center),
+                        )
+                        .on_press(Message::SetAddRepoReleaseAsset(name_cb))
+                        .width(Length::Fill)
+                        .padding([10, 14])
+                        .style(move |_t, s| match s {
+                            button::Status::Hovered => theme::tab_button_hovered_style(c),
+                            _ => theme::tab_button_style(c),
+                        })
+                        .into(),
+                    );
+                }
+
+                column![
+                    row![
+                        text("Release Asset Selection").size(15).color(colors.title),
+                        Space::new().width(Length::Fill),
+                        close_button(c),
+                    ]
+                    .align_y(iced::Alignment::Center),
+                    text(format!(
+                        "\"{}\" publishes multiple compatible archives. Which one should Wuddle install?",
+                        domain
+                    ))
+                    .size(12)
+                    .color(colors.text_soft),
+                    scrollable(column(scroll_rows).spacing(6)).height(Length::Shrink),
+                ]
+                .spacing(10)
+                .width(Length::Fixed(520.0))
+                .into()
             }
         }
     }

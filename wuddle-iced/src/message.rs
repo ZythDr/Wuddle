@@ -143,6 +143,9 @@ pub enum Message {
     },
     SaveCollectionSelectionResult(Result<String, service::CollectionSelectionError>),
     SetAddRepoPrimaryAddon(String),
+    FetchReleaseAssetOptions(String),
+    FetchReleaseAssetOptionsResult(String, Result<Vec<service::ReleaseAssetOption>, String>),
+    SetAddRepoReleaseAsset(String),
     RemoveCollectionAddonPrompt {
         repo_id: i64,
         addon_name: String,

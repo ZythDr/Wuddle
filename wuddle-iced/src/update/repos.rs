@@ -319,8 +319,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 }
 
                 let url = url.clone();
-                let mode = mode.clone();
+                let mut mode = mode.clone();
                 let mut explicit_collection_mode = false;
+                let selected_release_asset = app.add_repo_selected_release_asset.clone();
+                let asset_regex = selected_release_asset
+                    .as_deref()
+                    .map(service::exact_asset_regex);
+                if mode == "addon_git" && selected_release_asset.is_some() {
+                    mode = "addon".to_string();
+                }
                 let selected_addons = if mode == "addon_git" {
                     let hinted = service::selected_addon_hint_from_url(&url);
                     let treat_as_collection = app.add_repo_manage_repo_id.is_some()
@@ -402,7 +409,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 app.dialog = None;
                 app.log(LogLevel::Info, &format!("Adding repo: {}", url));
                 return Some(Task::perform(
-                    service::add_repo(db, url, mode, selected_addons),
+                    service::add_repo(db, url, mode, asset_regex, selected_addons),
                     Message::AddRepoResult,
                 ));
             }
@@ -615,7 +622,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.reset_add_repo_state();
             app.log(LogLevel::Info, &format!("Adding repo (override): {}", url));
             Some(Task::perform(
-                service::add_repo(db, url, mode, None),
+                service::add_repo(db, url, mode, None, None),
                 Message::AddRepoResult,
             ))
         }
@@ -1734,6 +1741,62 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
+        Message::FetchReleaseAssetOptions(url) => {
+            let db = app.db_path.clone();
+            let options_url = url.clone();
+            Some(Task::perform(
+                service::fetch_latest_release_archive_options(db, url),
+                move |result| Message::FetchReleaseAssetOptionsResult(options_url, result),
+            ))
+        }
+        Message::FetchReleaseAssetOptionsResult(url, result) => {
+            let Some(Dialog::AddRepo { url: current_url, .. }) = app.dialog.as_ref() else {
+                return Some(Task::none());
+            };
+            if service::normalize_repo_input_url(current_url) != service::normalize_repo_input_url(&url) {
+                return Some(Task::none());
+            }
+
+            match result {
+                Ok(options) => {
+                    app.add_repo_release_asset_options = options.clone();
+                    if options.len() == 1 {
+                        app.add_repo_selected_release_asset =
+                            options.first().map(|asset| asset.name.clone());
+                    } else if options.len() > 1 && app.add_repo_selected_release_asset.is_none() {
+                        app.dialog = Some(Dialog::SelectReleaseAsset {
+                            url,
+                            options: options.into_iter().map(|asset| asset.name).collect(),
+                        });
+                    }
+                }
+                Err(e) => {
+                    app.add_repo_release_asset_options.clear();
+                    app.add_repo_selected_release_asset = None;
+                    app.log(
+                        LogLevel::Error,
+                        &format!("Failed to fetch release assets: {}", e),
+                    );
+                }
+            }
+            Some(Task::none())
+        }
+        Message::SetAddRepoReleaseAsset(name) => {
+            if !name.is_empty() {
+                app.add_repo_selected_release_asset = Some(name);
+            }
+            if let Some(Dialog::SelectReleaseAsset { url, .. }) = app.dialog.as_ref() {
+                let url = url.clone();
+                app.dialog = Some(Dialog::AddRepo {
+                    url,
+                    mode: "addon".to_string(),
+                    is_addons: true,
+                    advanced: false,
+                });
+                return Some(delayed_add_repo_url_refocus_task());
+            }
+            Some(Task::none())
+        }
         Message::ToggleAddRepoDir(path) => {
             if app.add_repo_expanded_dirs.contains(&path) {
                 app.add_repo_expanded_dirs.remove(&path);
@@ -1855,7 +1918,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.add_repo_dir_contents.clear();
             app.log(LogLevel::Info, &format!("Adding repo: {}", url));
             return Some(Task::perform(
-                service::add_repo(db, url, mode, None),
+                service::add_repo(db, url, mode, None, None),
                 Message::AddRepoResult,
             ));
         }
@@ -1875,6 +1938,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.add_repo_file_preview = None;
             app.add_repo_expanded_dirs.clear();
             app.add_repo_dir_contents.clear();
+            app.add_repo_release_asset_options.clear();
+            app.add_repo_selected_release_asset = None;
             app.add_repo_probe = None;
             app.add_repo_probe_loading = false;
             if app.add_repo_manage_repo_id.is_none() {
@@ -1884,7 +1949,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 app.add_repo_selected_addons.clear();
             }
             let trimmed = url.trim().to_string();
-            if service::parse_forge_url(&trimmed).is_some() {
+            if service::parse_forge_url(&trimmed).is_some()
+                && !service::is_direct_archive_url(&trimmed)
+            {
                 tasks.push(Task::perform(
                     async move {
                         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1928,20 +1995,40 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::ResolveAddRepoUrl => {
             app.add_repo_url_debounce_generation = app.add_repo_url_debounce_generation.wrapping_add(1);
-            let (url, is_addons) = if let Some(Dialog::AddRepo {
+            let (url, is_addons, mode) = if let Some(Dialog::AddRepo {
                 ref url,
+                ref mode,
                 is_addons,
                 ..
             }) = app.dialog
             {
-                (url.trim().to_string(), is_addons)
+                (url.trim().to_string(), is_addons, mode.clone())
             } else {
-                (String::new(), false)
+                (String::new(), false, String::new())
             };
             if !url.is_empty() {
+                if service::is_direct_archive_url(&url) {
+                    if let Some(Dialog::AddRepo { ref mut mode, .. }) = app.dialog {
+                        *mode = "addon".to_string();
+                    }
+                    return Some(delayed_add_repo_url_refocus_task());
+                }
+
+                let is_release_addon_url = is_addons && service::is_release_url(&url);
+                if is_release_addon_url {
+                    if let Some(Dialog::AddRepo { ref mut mode, .. }) = app.dialog {
+                        if mode == "addon_git" {
+                            *mode = "addon".to_string();
+                        }
+                    }
+                }
+
                 let mut tasks = vec![Task::done(Message::FetchRepoPreview(url.clone()))];
-                // Always probe for addon structure — wow_dir is not required for folder detection.
-                if is_addons {
+                if is_release_addon_url || (is_addons && mode != "addon_git") {
+                    tasks.push(Task::done(Message::FetchReleaseAssetOptions(url.clone())));
+                }
+                // Always probe git addon structure — wow_dir is not required for folder detection.
+                if is_addons && !is_release_addon_url && mode == "addon_git" {
                     tasks.push(Task::done(Message::FetchCollectionProbe(url)));
                 }
                 return Some(Task::batch(tasks));

@@ -163,4 +163,9 @@ pub enum Dialog {
         options: Vec<String>,
         suggested: Option<String>,
     },
+    /// Shown when a release publishes multiple compatible archive assets.
+    SelectReleaseAsset {
+        url: String,
+        options: Vec<String>,
+    },
 }

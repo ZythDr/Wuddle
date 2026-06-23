@@ -2,6 +2,15 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.4.0
+
+### New Features
+- **Direct Archive Links** — You can now add addons from direct HTTPS `.zip` or `.7z` download links, even when there is no repo to track for updates.
+- **Release Asset Picker** — GitHub release pages with multiple compatible archives now ask which one you want to install.
+
+### Improvements
+- **Release Tag Installs** — Links to a specific GitHub release tag now stay on that release instead of drifting to the latest one later.
+
 ## v3.3.1
 
 ### Improvements

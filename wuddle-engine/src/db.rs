@@ -597,6 +597,38 @@ impl Db {
         Ok(())
     }
 
+    pub fn set_repo_release_source(
+        &self,
+        id: i64,
+        mode: &InstallMode,
+        asset_regex: Option<&str>,
+        pinned_version: Option<&str>,
+        selected_addons_json: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE repos
+            SET
+              mode=?1,
+              git_branch=NULL,
+              asset_regex=?2,
+              pinned_version=?3,
+              selected_addons_json=?4,
+              etag=NULL,
+              enabled=1
+            WHERE id=?5
+            "#,
+            params![
+                mode.as_str(),
+                asset_regex,
+                pinned_version,
+                selected_addons_json,
+                id
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn set_installed_asset_state(
         &self,
         id: i64,

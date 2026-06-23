@@ -30,16 +30,25 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.3.1
+### What's New in v3.4.0
+
+#### New Features
+- **Direct Archive Links** — Add addons from direct HTTPS `.zip` or `.7z` download links, even when there is no repo to track for updates.
+- **Release Asset Picker** — GitHub release pages with multiple compatible archives now ask which one you want to install.
+
+#### Improvements
+- **Release Tag Installs** — Links to a specific GitHub release tag now stay on that release instead of drifting to the latest one later.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.3.1
 
 #### Improvements
 - **Main TOC Selection** — Addon repos with multiple root `.toc` files now let you choose which TOC defines the installed addon folder.
 
 #### Bug Fixes
 - **Bundled Addon Libraries** — Fixed single-addon repos with bundled library TOCs, such as Questie, being treated like collections or falling back to the wrong root TOC.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.3.0
 

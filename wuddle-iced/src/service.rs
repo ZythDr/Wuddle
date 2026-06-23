@@ -34,6 +34,55 @@ pub enum CollectionSelectionError {
     Other(String),
 }
 
+#[derive(Debug, Clone)]
+pub struct ReleaseAssetOption {
+    pub name: String,
+    pub tag: String,
+    pub size: Option<u64>,
+}
+
+pub fn is_release_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("/releases")
+}
+
+pub fn is_direct_archive_url(url: &str) -> bool {
+    wuddle_engine::is_direct_archive_url(url)
+}
+
+fn is_archive_asset_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".zip") || lower.ends_with(".7z")
+}
+
+fn release_tag_from_url(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let marker = "/releases/tag/";
+    let idx = trimmed.to_ascii_lowercase().find(marker)?;
+    let tag = &trimmed[idx + marker.len()..];
+    tag.split('/')
+        .next()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(|tag| tag.to_string())
+}
+
+pub fn exact_asset_regex(asset_name: &str) -> String {
+    let mut out = String::from("^");
+    for ch in asset_name.chars() {
+        match ch {
+            '.' | '+' | '*' | '?' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
+            | '\\' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.push('$');
+    out
+}
+
 pub fn root_probe_addon_names(probe: &wuddle_engine::AddonProbeResult) -> Vec<String> {
     let mut names = probe
         .addon_entries
@@ -868,12 +917,16 @@ pub async fn add_repo(
     db_path: Option<PathBuf>,
     url: String,
     mode: String,
+    asset_regex: Option<String>,
     selected_addons: Option<Vec<String>>,
 ) -> Result<i64, String> {
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let install_mode = InstallMode::from_str(&mode).unwrap_or(InstallMode::Auto);
-        eng.add_repo(&url, install_mode, None, selected_addons)
+        if wuddle_engine::is_direct_archive_url(&url) {
+            return eng.add_direct_archive_url(&url).map_err(|e| e.to_string());
+        }
+        eng.add_repo(&url, install_mode, asset_regex, selected_addons)
             .map_err(|e| e.to_string())
     })
     .await
@@ -1356,6 +1409,44 @@ pub async fn list_repo_versions(
                 name: r.name,
             })
             .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn fetch_latest_release_archive_options(
+    db_path: Option<PathBuf>,
+    repo_url: String,
+) -> Result<Vec<ReleaseAssetOption>, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        let releases = tokio::runtime::Handle::current()
+            .block_on(eng.list_releases(&repo_url))
+            .map_err(|e| e.to_string())?;
+        let tag_hint = release_tag_from_url(&repo_url);
+        let release = if let Some(tag) = tag_hint {
+            releases
+                .into_iter()
+                .find(|release| release.tag == tag)
+                .ok_or_else(|| format!("Release tag not found: {}", tag))?
+        } else {
+            let Some(latest) = releases.into_iter().next() else {
+                return Ok(Vec::new());
+            };
+            latest
+        };
+        let mut options = release
+            .assets
+            .into_iter()
+            .filter(|asset| is_archive_asset_name(&asset.name))
+            .map(|asset| ReleaseAssetOption {
+                name: asset.name,
+                tag: release.tag.clone(),
+                size: asset.size,
+            })
+            .collect::<Vec<_>>();
+        options.sort_by_key(|asset| asset.name.to_ascii_lowercase());
+        Ok(options)
     })
     .await
     .map_err(|e| e.to_string())?
