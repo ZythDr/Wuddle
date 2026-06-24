@@ -30,7 +30,20 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.4.0
+### What's New in v3.5.0
+
+#### New Features
+- **Local Archive Installs** — Add addons from local `.zip` or `.7z` files through the Add New Addon dialog.
+- **Archive Drag-and-Drop** — Supported desktops can install addon archives by dropping them directly onto Wuddle. (does *not* work on wayland)
+
+#### Improvements
+- **GAM Compatibility** — Rescan now better recognizes regular GitAddonsManager installs.
+- **Rescan Visibility** — Rescan now logs what it is working on when a scan takes longer than expected.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.4.0
 
 #### New Features
 - **Direct Archive Links** — Add addons from direct HTTPS `.zip` or `.7z` download links, even when there is no repo to track for updates.
@@ -38,9 +51,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 
 #### Improvements
 - **Release Tag Installs** — Links to a specific GitHub release tag now stay on that release instead of drifting to the latest one later.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.3.1
 

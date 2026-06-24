@@ -20,8 +20,14 @@ pub fn is_direct_archive_url(url: &str) -> bool {
 pub fn parse_archive_url(url: &str) -> Result<DirectArchive> {
     let trimmed = url.trim();
     let parsed = Url::parse(trimmed).context("Direct archive URL must be an absolute URL")?;
+    if parsed.scheme() == "file" {
+        let path = parsed
+            .to_file_path()
+            .map_err(|_| anyhow::anyhow!("Local archive URL path is invalid"))?;
+        return parse_local_archive_path(&path);
+    }
     if parsed.scheme() != "https" {
-        anyhow::bail!("Direct archive URLs must use HTTPS");
+        anyhow::bail!("Direct archive URLs must use HTTPS or file://");
     }
 
     let host = parsed
@@ -63,7 +69,42 @@ pub fn parse_archive_url(url: &str) -> Result<DirectArchive> {
     })
 }
 
-fn is_supported_archive_name(name: &str) -> bool {
+pub fn parse_local_archive_path(path: &Path) -> Result<DirectArchive> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("Local archive file not found: {:?}", path))?;
+    if !canonical.is_file() {
+        anyhow::bail!("Local archive path is not a file: {:?}", canonical);
+    }
+
+    let asset_name = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Local archive filename is invalid"))?
+        .to_string();
+
+    if !is_supported_archive_name(&asset_name) {
+        anyhow::bail!("Local archive must be a .zip or .7z file");
+    }
+
+    let url = Url::from_file_path(&canonical)
+        .map_err(|_| anyhow::anyhow!("Could not convert local archive path to file URL"))?
+        .to_string();
+    let display_name = archive_stem(&asset_name).unwrap_or(&asset_name).to_string();
+    let url_hash = util::sha256_hex(&url);
+
+    Ok(DirectArchive {
+        url,
+        host: "local".to_string(),
+        asset_name,
+        display_name,
+        url_hash,
+    })
+}
+
+pub fn is_supported_archive_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.ends_with(".zip") || lower.ends_with(".7z")
 }

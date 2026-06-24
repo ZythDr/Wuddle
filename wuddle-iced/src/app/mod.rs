@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::components::drop_overlay;
 use crate::components::helpers::*;
 use crate::components::markdown::ImageViewer;
 use crate::components::presets::build_quick_add_presets;
@@ -84,9 +85,13 @@ pub struct App {
     pub checking_updates: bool,
     pub updating_all: bool,
     pub updating_repo_ids: HashSet<i64>,
+    pub current_rescan_snapshot: Option<String>,
+    pub current_rescan_started_at: Option<Instant>,
+    pub last_rescan_warning_secs: Option<u64>,
     pub current_update_check_snapshot: Option<String>,
     pub current_update_check_started_at: Option<Instant>,
     pub last_update_check_warning_secs: Option<u64>,
+    pub local_archive_hover_path: Option<PathBuf>,
     pub busy_started_at: Option<Instant>,
     pub busy_state_snapshot: Option<String>,
 
@@ -269,9 +274,13 @@ impl App {
             checking_updates: false,
             updating_all: false,
             updating_repo_ids: HashSet::new(),
+            current_rescan_snapshot: None,
+            current_rescan_started_at: None,
+            last_rescan_warning_secs: None,
             current_update_check_snapshot: None,
             current_update_check_started_at: None,
             last_update_check_warning_secs: None,
+            local_archive_hover_path: None,
             busy_started_at: None,
             busy_state_snapshot: None,
             tweak_values: TweakValues::default(),
@@ -626,6 +635,13 @@ impl App {
             );
         }
 
+        if self.loading {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(400))
+                    .map(|_| Message::PollRescanProgress),
+            );
+        }
+
         subs.push(
             iced::time::every(std::time::Duration::from_secs(60)).map(|_| Message::GithubRateTick),
         );
@@ -646,6 +662,15 @@ impl App {
             |event, _status, _window| match event {
                 iced::Event::Window(iced::window::Event::CloseRequested) => {
                     Some(Message::RequestExit)
+                }
+                iced::Event::Window(iced::window::Event::FileHovered(path)) => {
+                    Some(Message::LocalArchiveHovered(path))
+                }
+                iced::Event::Window(iced::window::Event::FilesHoveredLeft) => {
+                    Some(Message::LocalArchiveHoverLeft)
+                }
+                iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                    Some(Message::LocalArchiveDropped(path))
                 }
                 _ => None,
             },
@@ -951,18 +976,37 @@ impl App {
             Message::RequestExit => {
                 self.save_settings();
 
+                let busy = self.busy_summary();
+                if let Some(summary) = busy.clone() {
+                    self.log(
+                        LogLevel::Info,
+                        &format!("Close requested while busy: {}.", summary),
+                    );
+                }
+
                 #[cfg(target_os = "windows")]
-                {
-                    let busy = self.busy_summary();
+                std::thread::spawn(move || {
+                    if let Some(summary) = busy {
+                        eprintln!(
+                            "[Wuddle] Forced shutdown on close request while busy: {}",
+                            summary
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    std::process::exit(0);
+                });
+
+                #[cfg(not(target_os = "windows"))]
+                if busy.is_some() {
                     std::thread::spawn(move || {
                         if let Some(summary) = busy {
                             eprintln!(
-                                "[Wuddle] Forced shutdown on close request while busy: {}",
+                                "[Wuddle] Aborting on close request while busy: {}",
                                 summary
                             );
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(150));
-                        std::process::exit(0);
+                        std::thread::sleep(std::time::Duration::from_millis(750));
+                        std::process::abort();
                     });
                 }
 
@@ -1257,7 +1301,13 @@ impl App {
             Space::new().width(0).height(0).into()
         };
 
-        let base: Element<Message> = stack![main_content, overlay]
+        let drop_overlay: Element<Message> = if self.local_archive_hover_path.is_some() {
+            drop_overlay::view(colors)
+        } else {
+            Space::new().width(0).height(0).into()
+        };
+
+        let base: Element<Message> = stack![main_content, overlay, drop_overlay]
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
@@ -1400,7 +1450,7 @@ impl App {
                 let subtitle = if manage_mode {
                     "Choose which addon folders from this repository should stay installed."
                 } else if is_addons {
-                    "Paste a Git repository URL below. Wuddle will automatically download and install the addon for you."
+                    "Paste a Git repository URL below, or choose a local .zip/.7z archive."
                 } else {
                     "Quick-add from the mods listed, or add your own Git repo URL below."
                 };
@@ -1707,6 +1757,21 @@ impl App {
                     }
                     if let Some(rn) = release_notes {
                         footer_row.push(rn);
+                    }
+                    if is_addons && !manage_mode {
+                        let archive_btn = button(text("Choose archive...").size(12))
+                            .on_press(Message::PickLocalAddonArchive)
+                            .padding([6, 10])
+                            .style(move |_t, s| match s {
+                                button::Status::Hovered => theme::tab_button_hovered_style(c),
+                                _ => theme::tab_button_style(c),
+                            });
+                        footer_row.push(tip(
+                            archive_btn,
+                            "Install a local .zip or .7z addon archive",
+                            iced::widget::tooltip::Position::Top,
+                            colors,
+                        ));
                     }
                     footer_row.push(advanced_section);
                     footer_row.push(Space::new().width(Length::Fill).into());

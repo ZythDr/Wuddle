@@ -629,6 +629,35 @@ impl Db {
         Ok(())
     }
 
+    pub fn mark_repo_manual(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE repos
+            SET
+              url='',
+              forge='manual',
+              host='',
+              owner='',
+              mode='manual',
+              git_branch=NULL,
+              asset_regex=NULL,
+              last_version='Manual',
+              etag=NULL,
+              installed_asset_id=NULL,
+              installed_asset_name=NULL,
+              installed_asset_size=NULL,
+              installed_asset_url=NULL,
+              installed_at_unix=NULL,
+              published_at_unix=NULL,
+              pinned_version=NULL,
+              selected_addons_json=NULL
+            WHERE id=?1
+            "#,
+            params![id],
+        )?;
+        Ok(())
+    }
+
     pub fn set_installed_asset_state(
         &self,
         id: i64,

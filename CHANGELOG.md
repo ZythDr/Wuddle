@@ -2,6 +2,21 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.5.0
+
+### New Features
+- **Local Archive Installs** — Addons can now be installed from local `.zip` or `.7z` files through the Add New Addon dialog.
+- **Archive Drag-and-Drop** — Supported desktops can install addon archives by dropping them directly onto Wuddle. (does *not* work on wayland)
+
+### Improvements
+- **Manual Archive Tracking** — Local archive installs are tracked for removal, but treated as manual installs since they have no update source.
+- **GAM Compatibility** — Rescan now better recognizes regular GitAddonsManager installs without turning them into duplicate manual entries.
+- **Rescan Visibility** — Rescan now reports the phase and folder it is working on, making stuck scans easier to diagnose.
+
+### Bug Fixes
+- **Rescan Reliability** — Fixed cases where rescan could get stuck while importing manual folders or repairing broken installs.
+- **Busy Close Handling** — Closing Wuddle while it is still working *should* now log the active task and exit more reliably.
+
 ## v3.4.0
 
 ### New Features

@@ -67,7 +67,13 @@ pub enum Message {
 
     // Operations (Phase 3)
     CheckUpdates,
+    PollRescanProgress,
     PollUpdateCheckProgress,
+    LocalArchiveHovered(PathBuf),
+    LocalArchiveHoverLeft,
+    PickLocalAddonArchive,
+    LocalArchivePicked(Option<PathBuf>),
+    LocalArchiveDropped(PathBuf),
     CheckUpdatesResult(Result<Vec<PlanRow>, String>),
     UpdateCheckRateLimitResult(CheckStats, Option<service::GitHubRateInfo>),
     GithubRateInfoResult(Option<service::GitHubRateInfo>),

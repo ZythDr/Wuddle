@@ -1,17 +1,50 @@
 //! Thin async wrappers around wuddle-engine.
 //! Every function opens a fresh Engine (it's Send+!Sync due to rusqlite).
 
+use crate::types::LogLevel;
+use iced;
+use pelite::{FileMap, PeFile};
+use reqwest::Client;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use pelite::{FileMap, PeFile};
 use wuddle_engine::{CheckMode, Engine, InstallMode, InstallOptions, Repo, UpdatePlan};
-use reqwest::Client;
-use serde::Deserialize;
-use iced;
-use crate::types::LogLevel;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RescanProgress {
+    pub stage: String,
+    pub detail: String,
+}
+
+fn rescan_progress_slot() -> &'static Mutex<Option<RescanProgress>> {
+    static SLOT: OnceLock<Mutex<Option<RescanProgress>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_rescan_progress(stage: impl Into<String>, detail: impl Into<String>) {
+    if let Ok(mut guard) = rescan_progress_slot().lock() {
+        *guard = Some(RescanProgress {
+            stage: stage.into(),
+            detail: detail.into(),
+        });
+    }
+}
+
+pub fn clear_rescan_progress() {
+    if let Ok(mut guard) = rescan_progress_slot().lock() {
+        *guard = None;
+    }
+}
+
+pub fn latest_rescan_progress() -> Option<RescanProgress> {
+    rescan_progress_slot()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
 
 #[derive(Debug, Clone)]
 pub struct CollectionConflictOwnerGroup {
@@ -50,6 +83,16 @@ pub fn is_direct_archive_url(url: &str) -> bool {
     wuddle_engine::is_direct_archive_url(url)
 }
 
+pub fn is_local_archive_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.ends_with(".zip") || lower.ends_with(".7z")
+        })
+        .unwrap_or(false)
+}
+
 fn is_archive_asset_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.ends_with(".zip") || lower.ends_with(".7z")
@@ -71,8 +114,7 @@ pub fn exact_asset_regex(asset_name: &str) -> String {
     let mut out = String::from("^");
     for ch in asset_name.chars() {
         match ch {
-            '.' | '+' | '*' | '?' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
-            | '\\' => {
+            '.' | '+' | '*' | '?' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\' => {
                 out.push('\\');
                 out.push(ch);
             }
@@ -171,10 +213,18 @@ fn build_collection_conflict_owner_groups(
 
     let mut out = groups.into_values().collect::<Vec<_>>();
     for group in &mut out {
-        group.addon_names.sort_by_key(|name| name.to_ascii_lowercase());
-        group.addon_names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-        group.conflicting_addons.sort_by_key(|name| name.to_ascii_lowercase());
-        group.conflicting_addons.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        group
+            .addon_names
+            .sort_by_key(|name| name.to_ascii_lowercase());
+        group
+            .addon_names
+            .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        group
+            .conflicting_addons
+            .sort_by_key(|name| name.to_ascii_lowercase());
+        group
+            .conflicting_addons
+            .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
     }
 
     if !untracked_locals.is_empty() {
@@ -190,7 +240,6 @@ fn build_collection_conflict_owner_groups(
 
     Ok(out)
 }
-
 
 // ---------------------------------------------------------------------------
 // Row types for the UI (Clone-friendly, owned data)
@@ -318,7 +367,8 @@ pub enum CheckUpdatesStreamEvent {
     Finished(Result<Vec<PlanRow>, String>),
 }
 
-static UPDATE_CHECK_PROGRESS: OnceLock<Mutex<Option<wuddle_engine::UpdateCheckProgress>>> = OnceLock::new();
+static UPDATE_CHECK_PROGRESS: OnceLock<Mutex<Option<wuddle_engine::UpdateCheckProgress>>> =
+    OnceLock::new();
 
 fn update_check_progress_slot() -> &'static Mutex<Option<wuddle_engine::UpdateCheckProgress>> {
     UPDATE_CHECK_PROGRESS.get_or_init(|| Mutex::new(None))
@@ -352,12 +402,18 @@ fn resolve_tweak_target_executable(
     wow_dir: &Path,
     auto_launch_exe: Option<&str>,
 ) -> Result<PathBuf, String> {
-    if let Some(exe_name) = auto_launch_exe.map(str::trim).filter(|name| !name.is_empty()) {
+    if let Some(exe_name) = auto_launch_exe
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
         let explicit = wow_dir.join(exe_name);
         if explicit.is_file() {
             return Ok(explicit);
         }
-        return Err(format!("{} not found in the specified directory.", exe_name));
+        return Err(format!(
+            "{} not found in the specified directory.",
+            exe_name
+        ));
     }
 
     first_existing_game_executable(wow_dir)
@@ -375,12 +431,7 @@ fn parse_version_tuple(raw: &str) -> Option<(u16, u16, u16, u16)> {
         return None;
     }
 
-    Some((
-        parts[0],
-        parts[1],
-        parts[2],
-        *parts.get(3).unwrap_or(&0),
-    ))
+    Some((parts[0], parts[1], parts[2], *parts.get(3).unwrap_or(&0)))
 }
 
 pub async fn detect_tweak_client(
@@ -392,8 +443,12 @@ pub async fn detect_tweak_client(
         let exe_path = resolve_tweak_target_executable(wow_path, auto_launch_exe.as_deref())?;
         let file_map = FileMap::open(&exe_path)
             .map_err(|e| format!("Failed to open {}: {e}", exe_path.display()))?;
-        let pe = PeFile::from_bytes(&file_map)
-            .map_err(|e| format!("Failed to parse {} as a Windows executable: {e}", exe_path.display()))?;
+        let pe = PeFile::from_bytes(&file_map).map_err(|e| {
+            format!(
+                "Failed to parse {} as a Windows executable: {e}",
+                exe_path.display()
+            )
+        })?;
 
         let mut file_description = None;
         let mut file_version = None;
@@ -563,10 +618,7 @@ fn fix_repo_casing_from_forges(eng: &Engine) {
     for repo in &needs_fix {
         let (new_owner, new_name) = match repo.forge.as_str() {
             "github" => {
-                let api_url = format!(
-                    "https://api.github.com/repos/{}/{}",
-                    repo.owner, repo.name
-                );
+                let api_url = format!("https://api.github.com/repos/{}/{}", repo.owner, repo.name);
                 let mut req = client
                     .get(&api_url)
                     .header("User-Agent", &ua)
@@ -581,10 +633,7 @@ fn fix_repo_casing_from_forges(eng: &Engine) {
                                 .as_str()
                                 .unwrap_or(&repo.owner)
                                 .to_string();
-                            let name = json["name"]
-                                .as_str()
-                                .unwrap_or(&repo.name)
-                                .to_string();
+                            let name = json["name"].as_str().unwrap_or(&repo.name).to_string();
                             (owner, name)
                         } else {
                             continue;
@@ -606,10 +655,7 @@ fn fix_repo_casing_from_forges(eng: &Engine) {
                                 .as_str()
                                 .unwrap_or(&repo.owner)
                                 .to_string();
-                            let name = json["name"]
-                                .as_str()
-                                .unwrap_or(&repo.name)
-                                .to_string();
+                            let name = json["name"].as_str().unwrap_or(&repo.name).to_string();
                             (owner, name)
                         } else {
                             continue;
@@ -619,16 +665,13 @@ fn fix_repo_casing_from_forges(eng: &Engine) {
                 }
             }
             "gitlab" => {
-                let encoded =
-                    format!("{}/{}", repo.owner, repo.name).replace('/', "%2F");
-                let api_url =
-                    format!("https://{}/api/v4/projects/{}", repo.host, encoded);
+                let encoded = format!("{}/{}", repo.owner, repo.name).replace('/', "%2F");
+                let api_url = format!("https://{}/api/v4/projects/{}", repo.host, encoded);
                 let req = client.get(&api_url).header("User-Agent", &ua);
                 match req.send() {
                     Ok(resp) if resp.status().is_success() => {
                         if let Ok(json) = resp.json::<serde_json::Value>() {
-                            if let Some(full_path) = json["path_with_namespace"].as_str()
-                            {
+                            if let Some(full_path) = json["path_with_namespace"].as_str() {
                                 let parts: Vec<&str> = full_path.rsplitn(2, '/').collect();
                                 if parts.len() == 2 {
                                     (parts[1].to_string(), parts[0].to_string())
@@ -662,37 +705,55 @@ pub async fn list_repos(
     wow_dir: Option<String>,
     fix_casing: bool,
 ) -> Result<RepoLoadResult, String> {
+    clear_rescan_progress();
+    set_rescan_progress("Repository load", "Resolving WoW directory...");
+
     // No wow_dir means no WoW installation configured — return empty list
     let dir = match wow_dir.as_deref() {
         Some(d) if !d.trim().is_empty() => d,
         _ => {
+            clear_rescan_progress();
             return Ok(RepoLoadResult {
                 rows: Vec::new(),
                 logs: Vec::new(),
-            })
+            });
         }
     };
     let wow_path_buf = PathBuf::from(dir);
     let db_existed_before_open = db_path.as_ref().map(|p| p.exists()).unwrap_or(true);
+    set_rescan_progress("Repository load", "Opening profile database...");
     let eng = open_engine(db_path.as_deref())?;
     let mut logs = Vec::new();
 
-    if !db_existed_before_open {
+    set_rescan_progress("Repository load", "Checking tracked repositories...");
+    let repo_count = eng.db().list_repos().map_err(|e| e.to_string())?.len();
+    if !db_existed_before_open || repo_count == 0 {
+        set_rescan_progress("Repository load", "Importing existing addon folders...");
         let imported = eng
-            .import_existing_addons(&wow_path_buf)
+            .import_existing_addons_with_progress(&wow_path_buf, |detail| {
+                set_rescan_progress("Repository import", detail);
+            })
             .map_err(|e| e.to_string())?;
-        logs.push(RepoLoadLog {
-            level: LogLevel::Info,
-            text: format!(
-                "Initialized profile database and imported {} existing addon repo(s).",
-                imported
-            ),
-        });
+        if !db_existed_before_open || imported > 0 {
+            let text = if !db_existed_before_open {
+                format!(
+                    "Initialized profile database and imported {} existing addon repo(s).",
+                    imported
+                )
+            } else {
+                format!("Imported {} existing addon repo(s).", imported)
+            };
+            logs.push(RepoLoadLog {
+                level: LogLevel::Info,
+                text,
+            });
+        }
     }
 
     // Cheap tracked-link verification runs on normal refresh/load.
     // Full repair/reconciliation stays behind explicit Rescan only.
     if !fix_casing {
+        set_rescan_progress("Repository load", "Verifying tracked addon links...");
         let eng_clone = eng.clone();
         let verify_path = wow_path_buf.clone();
         let repaired = tokio::task::spawn_blocking(move || {
@@ -715,6 +776,7 @@ pub async fn list_repos(
     // Perform authoritative repairs only if explicitly requested via Rescan.
     // This handles casing, symlinks, and missing files/repos.
     if fix_casing {
+        set_rescan_progress("Rescan", "Repairing broken installations...");
         logs.push(RepoLoadLog {
             level: LogLevel::Info,
             text: "Rescan: repairing broken installations...".to_string(),
@@ -744,6 +806,7 @@ pub async fn list_repos(
         let wow_path = wow_path_buf.as_path();
         let mut logs = Vec::new();
 
+        set_rescan_progress("Repository load", "Cleaning casing collisions...");
         let started = Instant::now();
         let cleaned = eng.cleanup_casing_collisions(wow_path).unwrap_or(0);
         logs.push(RepoLoadLog {
@@ -762,6 +825,7 @@ pub async fn list_repos(
         // This keeps the standard launch and refresh cycles fast and prevents
         // deleted repos from being automatically re-imported.
         if fix_casing || eng.db().needs_casing_fix() {
+            set_rescan_progress("Rescan", "Pruning missing repositories...");
             let started = Instant::now();
             // Prune repos whose files no longer exist on disk
             let pruned = eng.prune_missing_repos(wow_path).unwrap_or(0);
@@ -774,9 +838,14 @@ pub async fn list_repos(
                 ),
             });
 
+            set_rescan_progress("Rescan", "Importing newly discovered addon repos...");
             let started = Instant::now();
             // Auto-import newly discovered addon git repos
-            let imported = eng.import_existing_addons(wow_path).unwrap_or(0);
+            let imported = eng
+                .import_existing_addons_with_progress(wow_path, |detail| {
+                    set_rescan_progress("Rescan import", detail);
+                })
+                .unwrap_or(0);
             logs.push(RepoLoadLog {
                 level: LogLevel::Info,
                 text: format!(
@@ -786,6 +855,7 @@ pub async fn list_repos(
                 ),
             });
 
+            set_rescan_progress("Rescan", "Removing duplicate addon repo records...");
             let started = Instant::now();
             // Remove duplicate tracking entries
             let deduped = eng.dedup_addon_repos_by_folder(wow_path).unwrap_or(0);
@@ -812,9 +882,11 @@ pub async fn list_repos(
                 }
             });
         }
+        set_rescan_progress("Repository load", "Reading repository records...");
         let repos = eng.db().list_repos().map_err(|e| e.to_string())?;
 
         // Read dlls.txt once to determine per-DLL enabled state.
+        set_rescan_progress("Repository load", "Reading installed DLL state...");
         let dlls_txt = std::fs::read_to_string(wow_path.join("dlls.txt")).unwrap_or_default();
         let enabled_dlls: std::collections::HashSet<String> = dlls_txt
             .lines()
@@ -822,6 +894,7 @@ pub async fn list_repos(
             .map(|l| l.trim().to_lowercase())
             .collect();
 
+        set_rescan_progress("Repository load", "Building repository rows...");
         let mut rows: Vec<RepoRow> = Vec::with_capacity(repos.len());
         for repo in repos {
             let mut row = RepoRow::from(repo);
@@ -831,7 +904,9 @@ pub async fn list_repos(
                 .filter(|e| e.kind == "dll")
                 .filter_map(|e| {
                     let fname = std::path::Path::new(&e.path)
-                        .file_name()?.to_str()?.to_string();
+                        .file_name()?
+                        .to_str()?
+                        .to_string();
                     let is_enabled = enabled_dlls.contains(&fname.to_lowercase());
                     Some((fname, is_enabled, e.version.clone()))
                 })
@@ -858,6 +933,7 @@ pub async fn list_repos(
     .map_err(|e| e.to_string())??;
 
     logs.append(&mut background_logs.logs);
+    set_rescan_progress("Repository load", "Finished loading repositories.");
     Ok(RepoLoadResult {
         rows: background_logs.rows,
         logs,
@@ -898,7 +974,7 @@ pub async fn check_updates_skip(
                     &skip_repo_ids,
                     progress_tx,
                 )
-                    .await
+                .await
             })
             .map_err(|e| e.to_string())?;
         let _ = progress_forwarder.join();
@@ -933,6 +1009,18 @@ pub async fn add_repo(
     .map_err(|e| e.to_string())?
 }
 
+pub async fn add_local_archive_file(
+    db_path: Option<PathBuf>,
+    path: PathBuf,
+) -> Result<i64, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.add_local_archive_file(&path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 pub async fn update_collection_selection(
     db_path: Option<PathBuf>,
     repo_id: i64,
@@ -941,8 +1029,7 @@ pub async fn update_collection_selection(
     opts: InstallOptions,
 ) -> Result<String, CollectionSelectionError> {
     tokio::task::spawn_blocking(move || {
-        let eng = open_engine(db_path.as_deref())
-            .map_err(CollectionSelectionError::Other)?;
+        let eng = open_engine(db_path.as_deref()).map_err(CollectionSelectionError::Other)?;
         let repo = eng
             .db()
             .get_repo(repo_id)
@@ -979,7 +1066,10 @@ pub async fn update_collection_selection(
             .enable_all()
             .build()
             .map_err(|e| CollectionSelectionError::Other(e.to_string()))?
-            .block_on(async { eng.reinstall_repo(repo_id, Path::new(&wow_dir), None, opts).await });
+            .block_on(async {
+                eng.reinstall_repo(repo_id, Path::new(&wow_dir), None, opts)
+                    .await
+            });
 
         let plan = match reinstall_result {
             Ok(plan) => plan,
@@ -996,7 +1086,10 @@ pub async fn update_collection_selection(
             }
         };
 
-        Ok(format!("Updated collection selection for {}/{}.", plan.owner, plan.name))
+        Ok(format!(
+            "Updated collection selection for {}/{}.",
+            plan.owner, plan.name
+        ))
     })
     .await
     .map_err(|e| CollectionSelectionError::Other(e.to_string()))?
@@ -1019,7 +1112,8 @@ pub async fn probe_conflicts(
             .build()
             .map_err(|e| e.to_string())?
             .block_on(async {
-                eng.probe_addon_repo_conflicts(&normalized_url, Path::new(&wow_dir), None).await
+                eng.probe_addon_repo_conflicts(&normalized_url, Path::new(&wow_dir), None)
+                    .await
             })
             .map_err(|e| e.to_string())
     })
@@ -1050,7 +1144,7 @@ pub async fn check_pre_install_conflicts(
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let repo = eng.db().get_repo(repo_id).map_err(|e| e.to_string())?;
-        
+
         let names_to_check = if addon_names.is_empty() {
             vec![repo.name.clone()]
         } else {
@@ -1064,8 +1158,7 @@ pub async fn check_pre_install_conflicts(
         let existing_repos = if conflicts.is_empty() {
             Vec::new()
         } else {
-            build_collection_conflict_owner_groups(&eng, &conflicts)
-                .unwrap_or_else(|_| Vec::new())
+            build_collection_conflict_owner_groups(&eng, &conflicts).unwrap_or_else(|_| Vec::new())
         };
 
         Ok(PreInstallConflictInfo {
@@ -1110,10 +1203,7 @@ pub async fn set_repo_enabled(
             let installs = eng.db().list_installs(id).unwrap_or_default();
             let wow_path = Path::new(&wow_dir);
             for entry in installs.iter().filter(|e| e.kind == "dll") {
-                if let Some(fname) = Path::new(&entry.path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                {
+                if let Some(fname) = Path::new(&entry.path).file_name().and_then(|n| n.to_str()) {
                     let _ = eng.set_dll_enabled(fname, enabled, wow_path);
                 }
             }
@@ -1211,17 +1301,34 @@ pub async fn update_all(
                 Err(e) => {
                     let err = e.to_string();
                     log.push(format!("{}/{}: error — {}", owner, name, err));
-                    Ok(UpdateOneResult { repo_id: id, owner, name, plan: None, log_lines: log, error: Some(err) })
+                    Ok(UpdateOneResult {
+                        repo_id: id,
+                        owner,
+                        name,
+                        plan: None,
+                        log_lines: log,
+                        error: Some(err),
+                    })
                 }
                 Ok(None) => {
                     log.push(format!("{}/{}: already up to date.", owner, name));
-                    Ok(UpdateOneResult { repo_id: id, owner, name, plan: None, log_lines: log, error: None })
+                    Ok(UpdateOneResult {
+                        repo_id: id,
+                        owner,
+                        name,
+                        plan: None,
+                        log_lines: log,
+                        error: None,
+                    })
                 }
                 Ok(Some(plan)) => {
                     if plan.mode.as_str() == "addon_git" {
                         log.push(format!("{}/{}: repository synced.", plan.owner, plan.name));
                     } else if !plan.asset_name.is_empty() {
-                        log.push(format!("{}/{}: installed '{}'.", plan.owner, plan.name, plan.asset_name));
+                        log.push(format!(
+                            "{}/{}: installed '{}'.",
+                            plan.owner, plan.name, plan.asset_name
+                        ));
                     }
                     log.push(format!("{}/{}: update complete.", plan.owner, plan.name));
                     Ok(UpdateOneResult {
@@ -1314,7 +1421,10 @@ pub async fn reinstall_repo(
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?
-            .block_on(async { eng.reinstall_repo(id, Path::new(&wow_dir), None, opts).await })
+            .block_on(async {
+                eng.reinstall_repo(id, Path::new(&wow_dir), None, opts)
+                    .await
+            })
             .map_err(|e| e.to_string())?;
         Ok(PlanRow::from(plan))
     })
@@ -1347,8 +1457,13 @@ pub async fn set_repo_branch(
 ) -> Result<i64, String> {
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
-        let branch_opt = if branch.is_empty() { None } else { Some(branch) };
-        eng.set_repo_git_branch(repo_id, branch_opt).map_err(|e| e.to_string())?;
+        let branch_opt = if branch.is_empty() {
+            None
+        } else {
+            Some(branch)
+        };
+        eng.set_repo_git_branch(repo_id, branch_opt)
+            .map_err(|e| e.to_string())?;
         Ok(repo_id)
     })
     .await
@@ -1459,10 +1574,7 @@ pub async fn open_repo_folder(
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
-        let repo = eng
-            .db()
-            .get_repo(repo_id)
-            .map_err(|e| e.to_string())?;
+        let repo = eng.db().get_repo(repo_id).map_err(|e| e.to_string())?;
 
         let installs = eng.db().list_installs(repo_id).map_err(|e| e.to_string())?;
 
@@ -1557,7 +1669,7 @@ pub async fn open_addon_folder(
 
 #[derive(Debug, Clone)]
 pub struct LaunchConfig {
-    pub method: String,        // "auto", "lutris", "wine", "custom"
+    pub method: String, // "auto", "lutris", "wine", "custom"
     pub auto_launch_exe: Option<String>,
     pub lutris_target: String, // e.g. "lutris:rungameid/2"
     pub wine_command: String,  // e.g. "wine"
@@ -1574,8 +1686,13 @@ fn first_existing_file(dir: &Path, names: &[&str]) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-fn resolve_launch_target(wow_path: &Path, auto_launch_exe: Option<&str>) -> Result<PathBuf, String> {
-    let override_name = auto_launch_exe.map(str::trim).filter(|name| !name.is_empty());
+fn resolve_launch_target(
+    wow_path: &Path,
+    auto_launch_exe: Option<&str>,
+) -> Result<PathBuf, String> {
+    let override_name = auto_launch_exe
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
 
     if let Some(exe_name) = override_name {
         if let Some(target) = first_existing_file(wow_path, &[exe_name]) {
@@ -1585,18 +1702,16 @@ fn resolve_launch_target(wow_path: &Path, auto_launch_exe: Option<&str>) -> Resu
 
     first_existing_file(wow_path, &["VanillaFixes.exe", "vanillafixes.exe"])
         .or_else(|| first_existing_file(wow_path, &["Wow.exe", "wow.exe", "WoW.exe"]))
-        .ok_or_else(|| {
-            match override_name {
-                Some(exe_name) => format!(
-                    "No launcher found in {} (checked {}, VanillaFixes.exe, and Wow.exe).",
-                    wow_path.display(),
-                    exe_name
-                ),
-                None => format!(
-                    "No launcher found in {} (expected VanillaFixes.exe or Wow.exe).",
-                    wow_path.display()
-                ),
-            }
+        .ok_or_else(|| match override_name {
+            Some(exe_name) => format!(
+                "No launcher found in {} (checked {}, VanillaFixes.exe, and Wow.exe).",
+                wow_path.display(),
+                exe_name
+            ),
+            None => format!(
+                "No launcher found in {} (expected VanillaFixes.exe or Wow.exe).",
+                wow_path.display()
+            ),
         })
 }
 
@@ -1622,10 +1737,19 @@ fn spawn_launch_command(program: &str, args: &[String], cwd: &Path) -> Result<()
 #[cfg(all(unix, not(target_os = "macos")))]
 fn clean_env_for_child(cmd: &mut Command) {
     const BLOCKLIST: &[&str] = &[
-        "APPDIR", "APPIMAGE", "ARGV0", "OWD",
-        "LD_LIBRARY_PATH", "LD_PRELOAD",
-        "GIO_MODULE_DIR", "GST_PLUGIN_PATH", "GST_PLUGIN_SYSTEM_PATH",
-        "QT_PLUGIN_PATH", "PYTHONPATH", "PYTHONHOME", "GDK_BACKEND",
+        "APPDIR",
+        "APPIMAGE",
+        "ARGV0",
+        "OWD",
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "GIO_MODULE_DIR",
+        "GST_PLUGIN_PATH",
+        "GST_PLUGIN_SYSTEM_PATH",
+        "QT_PLUGIN_PATH",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "GDK_BACKEND",
     ];
     for key in BLOCKLIST {
         cmd.env_remove(key);
@@ -1640,7 +1764,10 @@ fn clean_env_for_child(cmd: &mut Command) {
         cmd.env("PATH", clean_path);
     }
     if let Ok(dirs) = std::env::var("XDG_DATA_DIRS") {
-        let clean: Vec<&str> = dirs.split(':').filter(|p| !p.contains("/tmp/.mount_")).collect();
+        let clean: Vec<&str> = dirs
+            .split(':')
+            .filter(|p| !p.contains("/tmp/.mount_"))
+            .collect();
         if !clean.is_empty() {
             cmd.env("XDG_DATA_DIRS", clean.join(":"));
         } else {
@@ -1653,7 +1780,10 @@ pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, S
     tokio::task::spawn_blocking(move || {
         let wow_path = PathBuf::from(wow_dir.trim());
         if !wow_path.is_dir() {
-            return Err(format!("WoW path is not a directory: {}", wow_path.display()));
+            return Err(format!(
+                "WoW path is not a directory: {}",
+                wow_path.display()
+            ));
         }
 
         // Optionally clear WDB cache before launch
@@ -1666,17 +1796,24 @@ pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, S
 
         let target = resolve_launch_target(&wow_path, cfg.auto_launch_exe.as_deref())?;
         let target_str = target.to_string_lossy().to_string();
-        let target_name = target.file_name()
+        let target_name = target
+            .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "game".to_string());
 
         let method = cfg.method.trim().to_ascii_lowercase();
 
         if method == "lutris" {
-            let command = if cfg.custom_command.trim().is_empty() { "lutris" } else { cfg.custom_command.trim() };
+            let command = if cfg.custom_command.trim().is_empty() {
+                "lutris"
+            } else {
+                cfg.custom_command.trim()
+            };
             let target_arg = cfg.lutris_target.trim();
             if target_arg.is_empty() {
-                return Err("Lutris launch target is empty (expected e.g. lutris:rungameid/2).".to_string());
+                return Err(
+                    "Lutris launch target is empty (expected e.g. lutris:rungameid/2).".to_string(),
+                );
             }
             let mut args = vec![target_arg.to_string()];
             args.extend(parse_arg_string(&cfg.custom_args));
@@ -1685,7 +1822,11 @@ pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, S
         }
 
         if method == "wine" {
-            let command = if cfg.wine_command.trim().is_empty() { "wine" } else { cfg.wine_command.trim() };
+            let command = if cfg.wine_command.trim().is_empty() {
+                "wine"
+            } else {
+                cfg.wine_command.trim()
+            };
             let mut args = parse_arg_string(&cfg.wine_args);
             args.push(target_str);
             spawn_launch_command(command, &args, &wow_path)?;
@@ -1746,7 +1887,9 @@ where
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || { let _ = tx.send(f()); });
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
     match rx.recv_timeout(Duration::from_millis(KEYCHAIN_TIMEOUT_MS)) {
         Ok(result) => result,
         Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
@@ -1787,8 +1930,8 @@ fn read_stored_token() -> Result<Option<String>, String> {
         return read_file_token();
     }
     keychain_call_with_timeout("reading token", || {
-        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-            .map_err(|e| e.to_string())?;
+        let entry =
+            keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())?;
         match entry.get_password() {
             Ok(token) => {
                 let token = token.trim().to_string();
@@ -1930,21 +2073,43 @@ pub fn parse_forge_url(url: &str) -> Option<ForgeInfo> {
         let parts: Vec<&str> = r.splitn(3, '/').collect();
         if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
             let repo = parts[1].trim_end_matches(".git").to_string();
-            return Some(ForgeInfo { owner: parts[0].to_string(), repo, forge: "github", host: "github.com".into(), scheme: scheme.into() });
+            return Some(ForgeInfo {
+                owner: parts[0].to_string(),
+                repo,
+                forge: "github",
+                host: "github.com".into(),
+                scheme: scheme.into(),
+            });
         }
     } else if let Some(r) = rest.strip_prefix("gitlab.com/") {
         let parts: Vec<&str> = r.splitn(3, '/').collect();
         if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
             let repo = parts[1].trim_end_matches(".git").to_string();
-            return Some(ForgeInfo { owner: parts[0].to_string(), repo, forge: "gitlab", host: "gitlab.com".into(), scheme: scheme.into() });
+            return Some(ForgeInfo {
+                owner: parts[0].to_string(),
+                repo,
+                forge: "gitlab",
+                host: "gitlab.com".into(),
+                scheme: scheme.into(),
+            });
         }
     } else {
         let parts: Vec<&str> = rest.splitn(4, '/').collect();
         if parts.len() >= 3 && !parts[1].is_empty() && !parts[2].is_empty() {
             let host = parts[0];
-            if host.contains("gitea") || host.contains("forgejo") || host.contains("codeberg") || host.contains("gitea") {
+            if host.contains("gitea")
+                || host.contains("forgejo")
+                || host.contains("codeberg")
+                || host.contains("gitea")
+            {
                 let repo = parts[2].trim_end_matches(".git").to_string();
-                return Some(ForgeInfo { owner: parts[1].to_string(), repo, forge: "gitea", host: host.into(), scheme: scheme.into() });
+                return Some(ForgeInfo {
+                    owner: parts[1].to_string(),
+                    repo,
+                    forge: "gitea",
+                    host: host.into(),
+                    scheme: scheme.into(),
+                });
             }
         }
     }
@@ -2024,7 +2189,8 @@ pub fn convert_html_images_to_markdown(markdown: &str) -> String {
             Some(tag_offset) => {
                 result.push_str(&markdown[pos..pos + tag_offset]);
                 let tag_start = pos + tag_offset;
-                let tag_end = markdown[tag_start..].find('>')
+                let tag_end = markdown[tag_start..]
+                    .find('>')
                     .map(|e| tag_start + e + 1)
                     .unwrap_or(markdown.len());
                 let tag_slice = &markdown[tag_start..tag_end];
@@ -2041,8 +2207,12 @@ pub fn convert_html_images_to_markdown(markdown: &str) -> String {
         }
     }
     // Strip <p>, </p>, <br>, <br/>, <br /> tags that GitHub wraps around images
-    let result = result.replace("<p>", "").replace("</p>", "").replace("<br>", "\n")
-        .replace("<br/>", "\n").replace("<br />", "\n");
+    let result = result
+        .replace("<p>", "")
+        .replace("</p>", "")
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n");
     result
 }
 
@@ -2057,7 +2227,9 @@ fn extract_attr<'a>(tag: &'a str, attr_name: &str) -> Option<String> {
         Some(inner[..end].trim().to_string())
     } else {
         // Unquoted attribute value — take until space or >
-        let end = after.find(|c: char| c.is_whitespace() || c == '>').unwrap_or(after.len());
+        let end = after
+            .find(|c: char| c.is_whitespace() || c == '>')
+            .unwrap_or(after.len());
         Some(after[..end].trim().to_string())
     }
 }
@@ -2095,7 +2267,9 @@ async fn fetch_images(
         resolve_github_user_attachments(client, raw_base_url, image_urls).await;
 
     for url in image_urls.iter().take(12) {
-        if total_bytes > 20_000_000 { break; }
+        if total_bytes > 20_000_000 {
+            break;
+        }
 
         let abs_url = resolve_image_url(url, raw_base_url);
 
@@ -2105,35 +2279,34 @@ async fn fetch_images(
             .cloned()
             .unwrap_or_else(|| abs_url.clone());
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            async {
-                let mut req = client.get(&fetch_url);
-                // Non-signed private-user-images URLs may need a GitHub token.
-                if fetch_url.contains("private-user-images.githubusercontent.com")
-                    && !fetch_url.contains("?jwt=")
-                {
-                    if let Some(token) = wuddle_engine::github_token() {
-                        req = req.bearer_auth(token);
-                    }
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut req = client.get(&fetch_url);
+            // Non-signed private-user-images URLs may need a GitHub token.
+            if fetch_url.contains("private-user-images.githubusercontent.com")
+                && !fetch_url.contains("?jwt=")
+            {
+                if let Some(token) = wuddle_engine::github_token() {
+                    req = req.bearer_auth(token);
                 }
-                let resp = req.send().await?;
-                let ct = resp.headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("(none)")
-                    .to_string();
-                if !resp.status().is_success() {
-                    return Err(reqwest::Error::from(resp.error_for_status().unwrap_err()));
-                }
-                if !ct.starts_with("image/") {
-                    return Ok((Default::default(), false));
-                }
-                let is_gif = ct == "image/gif"
-                    || fetch_url.split('?').next().unwrap_or("").ends_with(".gif");
-                resp.bytes().await.map(|b| (b, is_gif))
-            },
-        ).await;
+            }
+            let resp = req.send().await?;
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("(none)")
+                .to_string();
+            if !resp.status().is_success() {
+                return Err(reqwest::Error::from(resp.error_for_status().unwrap_err()));
+            }
+            if !ct.starts_with("image/") {
+                return Ok((Default::default(), false));
+            }
+            let is_gif =
+                ct == "image/gif" || fetch_url.split('?').next().unwrap_or("").ends_with(".gif");
+            resp.bytes().await.map(|b| (b, is_gif))
+        })
+        .await;
 
         if let Ok(Ok((bytes, is_gif))) = result {
             if !bytes.is_empty() && bytes.len() <= 5_000_000 {
@@ -2189,7 +2362,9 @@ async fn resolve_github_user_attachments(
         .collect();
 
     let mut result: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    if attachment_pairs.is_empty() { return result; }
+    if attachment_pairs.is_empty() {
+        return result;
+    }
 
     // Derive owner/repo from raw_base_url:
     //   "https://raw.githubusercontent.com/{owner}/{repo}/..."
@@ -2212,7 +2387,9 @@ async fn resolve_github_user_attachments(
         Ok(Err(_)) => return result,
         Err(_) => return result,
     };
-    if !resp.status().is_success() { return result; }
+    if !resp.status().is_success() {
+        return result;
+    }
     let html = resp.text().await.unwrap_or_default();
 
     // Scan all private-user-images URLs in the HTML and match each one by UUID.
@@ -2245,7 +2422,10 @@ async fn resolve_github_user_attachments(
 
 /// Fetch raw text content of a file from a repo's raw base URL.
 /// Returns (filename/path, content).
-pub async fn fetch_raw_file(raw_base_url: String, path: String) -> Result<(String, String), String> {
+pub async fn fetch_raw_file(
+    raw_base_url: String,
+    path: String,
+) -> Result<(String, String), String> {
     let base = raw_base_url.trim_end_matches('/');
     let url = format!("{}/{}", base, path.trim_start_matches('/'));
     let client = Client::builder()
@@ -2266,46 +2446,82 @@ pub async fn fetch_raw_file(raw_base_url: String, path: String) -> Result<(Strin
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct ContentEntry { name: String, #[serde(rename = "type")] kind: String }
+struct ContentEntry {
+    name: String,
+    #[serde(rename = "type")]
+    kind: String,
+}
 
-async fn fetch_files(client: &Client, forge: &str, host: &str, owner: &str, repo: &str, scheme: &str) -> Vec<RepoFileEntry> {
+async fn fetch_files(
+    client: &Client,
+    forge: &str,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    scheme: &str,
+) -> Vec<RepoFileEntry> {
     match forge {
         "github" => {
             let url = format!("https://api.github.com/repos/{}/{}/contents/", owner, repo);
-            let mut req = client.get(&url).header("Accept", "application/vnd.github+json");
-            if let Some(token) = wuddle_engine::github_token() { req = req.bearer_auth(token); }
+            let mut req = client
+                .get(&url)
+                .header("Accept", "application/vnd.github+json");
+            if let Some(token) = wuddle_engine::github_token() {
+                req = req.bearer_auth(token);
+            }
             match req.send().await {
-                Ok(r) if r.status().is_success() => {
-                    r.json::<Vec<ContentEntry>>().await.unwrap_or_default()
-                        .into_iter()
-                        .map(|e| RepoFileEntry { is_dir: e.kind == "dir", path: e.name.clone(), name: e.name })
-                        .collect()
-                }
+                Ok(r) if r.status().is_success() => r
+                    .json::<Vec<ContentEntry>>()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|e| RepoFileEntry {
+                        is_dir: e.kind == "dir",
+                        path: e.name.clone(),
+                        name: e.name,
+                    })
+                    .collect(),
                 _ => Vec::new(),
             }
         }
         "gitlab" => {
             let encoded = format!("{}/{}", owner, repo).replace('/', "%2F");
-            let url = format!("https://gitlab.com/api/v4/projects/{}/repository/tree?per_page=50", encoded);
+            let url = format!(
+                "https://gitlab.com/api/v4/projects/{}/repository/tree?per_page=50",
+                encoded
+            );
             match client.get(&url).send().await {
-                Ok(r) if r.status().is_success() => {
-                    r.json::<Vec<ContentEntry>>().await.unwrap_or_default()
-                        .into_iter()
-                        .map(|e| RepoFileEntry { is_dir: e.kind == "tree", path: e.name.clone(), name: e.name })
-                        .collect()
-                }
+                Ok(r) if r.status().is_success() => r
+                    .json::<Vec<ContentEntry>>()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|e| RepoFileEntry {
+                        is_dir: e.kind == "tree",
+                        path: e.name.clone(),
+                        name: e.name,
+                    })
+                    .collect(),
                 _ => Vec::new(),
             }
         }
         _ => {
-            let url = format!("{}://{}/api/v1/repos/{}/{}/contents/", scheme, host, owner, repo);
+            let url = format!(
+                "{}://{}/api/v1/repos/{}/{}/contents/",
+                scheme, host, owner, repo
+            );
             match client.get(&url).send().await {
-                Ok(r) if r.status().is_success() => {
-                    r.json::<Vec<ContentEntry>>().await.unwrap_or_default()
-                        .into_iter()
-                        .map(|e| RepoFileEntry { is_dir: e.kind == "dir", path: e.name.clone(), name: e.name })
-                        .collect()
-                }
+                Ok(r) if r.status().is_success() => r
+                    .json::<Vec<ContentEntry>>()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|e| RepoFileEntry {
+                        is_dir: e.kind == "dir",
+                        path: e.name.clone(),
+                        name: e.name,
+                    })
+                    .collect(),
                 _ => Vec::new(),
             }
         }
@@ -2318,8 +2534,7 @@ pub async fn fetch_dir_contents(
     forge_url: String,
     dir_path: String,
 ) -> Result<(String, Vec<RepoFileEntry>), String> {
-    let fi = parse_forge_url(&forge_url)
-        .ok_or_else(|| "Could not parse repo URL".to_string())?;
+    let fi = parse_forge_url(&forge_url).ok_or_else(|| "Could not parse repo URL".to_string())?;
     let client = Client::builder()
         .user_agent("wuddle-iced")
         .timeout(Duration::from_secs(15))
@@ -2332,19 +2547,24 @@ pub async fn fetch_dir_contents(
                 "https://api.github.com/repos/{}/{}/contents/{}",
                 fi.owner, fi.repo, dir_path
             );
-            let mut req = client.get(&url).header("Accept", "application/vnd.github+json");
-            if let Some(token) = wuddle_engine::github_token() { req = req.bearer_auth(token); }
+            let mut req = client
+                .get(&url)
+                .header("Accept", "application/vnd.github+json");
+            if let Some(token) = wuddle_engine::github_token() {
+                req = req.bearer_auth(token);
+            }
             match req.send().await {
-                Ok(r) if r.status().is_success() => {
-                    r.json::<Vec<ContentEntry>>().await.unwrap_or_default()
-                        .into_iter()
-                        .map(|e| RepoFileEntry {
-                            is_dir: e.kind == "dir",
-                            path: format!("{}/{}", dir_path, e.name),
-                            name: e.name,
-                        })
-                        .collect()
-                }
+                Ok(r) if r.status().is_success() => r
+                    .json::<Vec<ContentEntry>>()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|e| RepoFileEntry {
+                        is_dir: e.kind == "dir",
+                        path: format!("{}/{}", dir_path, e.name),
+                        name: e.name,
+                    })
+                    .collect(),
                 _ => Vec::new(),
             }
         }
@@ -2355,16 +2575,17 @@ pub async fn fetch_dir_contents(
                 encoded, dir_path
             );
             match client.get(&url).send().await {
-                Ok(r) if r.status().is_success() => {
-                    r.json::<Vec<ContentEntry>>().await.unwrap_or_default()
-                        .into_iter()
-                        .map(|e| RepoFileEntry {
-                            is_dir: e.kind == "tree",
-                            path: format!("{}/{}", dir_path, e.name),
-                            name: e.name,
-                        })
-                        .collect()
-                }
+                Ok(r) if r.status().is_success() => r
+                    .json::<Vec<ContentEntry>>()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|e| RepoFileEntry {
+                        is_dir: e.kind == "tree",
+                        path: format!("{}/{}", dir_path, e.name),
+                        name: e.name,
+                    })
+                    .collect(),
                 _ => Vec::new(),
             }
         }
@@ -2374,16 +2595,17 @@ pub async fn fetch_dir_contents(
                 fi.scheme, fi.host, fi.owner, fi.repo, dir_path
             );
             match client.get(&url).send().await {
-                Ok(r) if r.status().is_success() => {
-                    r.json::<Vec<ContentEntry>>().await.unwrap_or_default()
-                        .into_iter()
-                        .map(|e| RepoFileEntry {
-                            is_dir: e.kind == "dir",
-                            path: format!("{}/{}", dir_path, e.name),
-                            name: e.name,
-                        })
-                        .collect()
-                }
+                Ok(r) if r.status().is_success() => r
+                    .json::<Vec<ContentEntry>>()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|e| RepoFileEntry {
+                        is_dir: e.kind == "dir",
+                        path: format!("{}/{}", dir_path, e.name),
+                        name: e.name,
+                    })
+                    .collect(),
                 _ => Vec::new(),
             }
         }
@@ -2396,8 +2618,7 @@ pub async fn fetch_dir_contents(
 // ---------------------------------------------------------------------------
 
 pub async fn fetch_repo_preview(url: String) -> Result<RepoPreviewInfo, String> {
-    let fi = parse_forge_url(&url)
-        .ok_or_else(|| "Could not parse repo URL".to_string())?;
+    let fi = parse_forge_url(&url).ok_or_else(|| "Could not parse repo URL".to_string())?;
 
     let client = Client::builder()
         .user_agent("wuddle-iced")
@@ -2426,18 +2647,37 @@ struct GhRepoInfo {
     license: Option<GhLicense>,
 }
 #[derive(Debug, Deserialize)]
-struct GhLicense { spdx_id: Option<String> }
+struct GhLicense {
+    spdx_id: Option<String>,
+}
 
-async fn fetch_github_preview(client: &Client, owner: &str, repo: &str) -> Result<RepoPreviewInfo, String> {
+async fn fetch_github_preview(
+    client: &Client,
+    owner: &str,
+    repo: &str,
+) -> Result<RepoPreviewInfo, String> {
     let info_url = format!("https://api.github.com/repos/{}/{}", owner, repo);
-    let mut req = client.get(&info_url).header("Accept", "application/vnd.github+json");
-    if let Some(token) = wuddle_engine::github_token() { req = req.bearer_auth(token); }
-    let info: GhRepoInfo = req.send().await.map_err(|e| e.to_string())?
-        .json().await.map_err(|e| e.to_string())?;
+    let mut req = client
+        .get(&info_url)
+        .header("Accept", "application/vnd.github+json");
+    if let Some(token) = wuddle_engine::github_token() {
+        req = req.bearer_auth(token);
+    }
+    let info: GhRepoInfo = req
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
 
     let readme_url = format!("https://api.github.com/repos/{}/{}/readme", owner, repo);
-    let mut readme_req = client.get(&readme_url).header("Accept", "application/vnd.github.raw+json");
-    if let Some(token) = wuddle_engine::github_token() { readme_req = readme_req.bearer_auth(token); }
+    let mut readme_req = client
+        .get(&readme_url)
+        .header("Accept", "application/vnd.github.raw+json");
+    if let Some(token) = wuddle_engine::github_token() {
+        readme_req = readme_req.bearer_auth(token);
+    }
     let readme_text = match readme_req.send().await {
         Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
         _ => String::new(),
@@ -2454,7 +2694,11 @@ async fn fetch_github_preview(client: &Client, owner: &str, repo: &str) -> Resul
     let files = fetch_files(client, "github", "github.com", owner, repo, "https").await;
 
     let license = info.license.and_then(|l| l.spdx_id).unwrap_or_default();
-    let license = if license == "NOASSERTION" || license.is_empty() { String::new() } else { license };
+    let license = if license == "NOASSERTION" || license.is_empty() {
+        String::new()
+    } else {
+        license
+    };
 
     Ok(RepoPreviewInfo {
         name: info.name.unwrap_or_else(|| repo.to_string()),
@@ -2488,11 +2732,21 @@ struct GlProject {
     forks_count: Option<u64>,
 }
 
-async fn fetch_gitlab_preview(client: &Client, owner: &str, repo: &str) -> Result<RepoPreviewInfo, String> {
+async fn fetch_gitlab_preview(
+    client: &Client,
+    owner: &str,
+    repo: &str,
+) -> Result<RepoPreviewInfo, String> {
     let encoded = format!("{}/{}", owner, repo).replace('/', "%2F");
     let url = format!("https://gitlab.com/api/v4/projects/{}", encoded);
-    let info: GlProject = client.get(&url).send().await.map_err(|e| e.to_string())?
-        .json().await.map_err(|e| e.to_string())?;
+    let info: GlProject = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
 
     let readme_url = format!("https://gitlab.com/{}/{}/raw/HEAD/README.md", owner, repo);
     let readme_text = match client.get(&readme_url).send().await {
@@ -2542,19 +2796,37 @@ struct GiteaRepo {
     default_branch: Option<String>,
 }
 
-async fn fetch_gitea_preview(client: &Client, host: &str, scheme: &str, owner: &str, repo: &str) -> Result<RepoPreviewInfo, String> {
+async fn fetch_gitea_preview(
+    client: &Client,
+    host: &str,
+    scheme: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<RepoPreviewInfo, String> {
     let api_url = format!("{}://{}/api/v1/repos/{}/{}", scheme, host, owner, repo);
-    let info: GiteaRepo = client.get(&api_url).send().await.map_err(|e| e.to_string())?
-        .json().await.map_err(|e| e.to_string())?;
+    let info: GiteaRepo = client
+        .get(&api_url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
 
     let branch = info.default_branch.as_deref().unwrap_or("master");
-    let readme_url = format!("{}://{}/{}/{}/raw/branch/{}/README.md", scheme, host, owner, repo, branch);
+    let readme_url = format!(
+        "{}://{}/{}/{}/raw/branch/{}/README.md",
+        scheme, host, owner, repo, branch
+    );
     let readme_text = match client.get(&readme_url).send().await {
         Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
         _ => String::new(),
     };
 
-    let raw_base = format!("{}://{}/{}/{}/raw/branch/{}/", scheme, host, owner, repo, branch);
+    let raw_base = format!(
+        "{}://{}/{}/{}/raw/branch/{}/",
+        scheme, host, owner, repo, branch
+    );
     let readme_md = convert_html_images_to_markdown(&readme_text);
     let md_content = iced::widget::markdown::Content::parse(&readme_md);
     let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
@@ -2595,15 +2867,22 @@ pub async fn fetch_dll_description(dll_name: String) -> Result<(String, String),
         .build()
         .map_err(|e| e.to_string())?;
 
-    let readme = client.get(url).send().await
+    let readme = client
+        .get(url)
+        .send()
+        .await
         .map_err(|e| format!("Network error: {}", e))?
-        .text().await
+        .text()
+        .await
         .map_err(|e| format!("Read error: {}", e))?;
 
     if let Some(desc) = extract_dll_info_from_readme(&readme, &dll_name) {
         Ok((dll_name, desc))
     } else {
-        Err(format!("No documentation found for '{}' in WeirdUtils README.", dll_name))
+        Err(format!(
+            "No documentation found for '{}' in WeirdUtils README.",
+            dll_name
+        ))
     }
 }
 
@@ -2614,9 +2893,9 @@ fn extract_dll_info_from_readme(readme: &str, target_dll: &str) -> Option<String
 
     for segment in segments {
         let lower = segment.to_lowercase();
-        if lower.contains(&format!("**dll:** `{}`", target_dll.to_lowercase())) || 
-           lower.contains(&format!("**dll:** `{}`", target_base)) {
-            
+        if lower.contains(&format!("**dll:** `{}`", target_dll.to_lowercase()))
+            || lower.contains(&format!("**dll:** `{}`", target_base))
+        {
             let lines: Vec<&str> = segment.lines().collect();
             let mut start_idx = 0;
             let mut end_idx = lines.len();
@@ -2697,8 +2976,7 @@ pub struct ReleaseItem {
 }
 
 pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, String> {
-    let fi = parse_forge_url(&forge_url)
-        .ok_or_else(|| "Could not parse forge URL".to_string())?;
+    let fi = parse_forge_url(&forge_url).ok_or_else(|| "Could not parse forge URL".to_string())?;
 
     let client = Client::builder()
         .user_agent("wuddle-iced")
@@ -2720,27 +2998,40 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
                 "https://api.github.com/repos/{}/{}/releases?per_page=20",
                 fi.owner, fi.repo
             );
-            let mut req = client.get(&url).header("Accept", "application/vnd.github+json");
-            if let Some(token) = wuddle_engine::github_token() { req = req.bearer_auth(token); }
-            let releases: Vec<GhRelease> = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                req.send(),
-            ).await
-            .map_err(|_| "Timed out fetching releases".to_string())?
-            .map_err(|e| e.to_string())?
-            .json().await.map_err(|e| e.to_string())?;
-            Ok(releases.into_iter().map(|r| {
-                let body = r.body.unwrap_or_default();
-                let items = iced::widget::markdown::Content::parse(&body).items().to_vec();
-                ReleaseItem {
-                    tag_name: r.tag_name.clone(),
-                    name: r.name.filter(|s| !s.is_empty()).unwrap_or_else(|| r.tag_name),
-                    published_at: r.published_at.unwrap_or_default(),
-                    body,
-                    items,
-                    prerelease: r.prerelease,
-                }
-            }).collect())
+            let mut req = client
+                .get(&url)
+                .header("Accept", "application/vnd.github+json");
+            if let Some(token) = wuddle_engine::github_token() {
+                req = req.bearer_auth(token);
+            }
+            let releases: Vec<GhRelease> =
+                tokio::time::timeout(std::time::Duration::from_secs(15), req.send())
+                    .await
+                    .map_err(|_| "Timed out fetching releases".to_string())?
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .await
+                    .map_err(|e| e.to_string())?;
+            Ok(releases
+                .into_iter()
+                .map(|r| {
+                    let body = r.body.unwrap_or_default();
+                    let items = iced::widget::markdown::Content::parse(&body)
+                        .items()
+                        .to_vec();
+                    ReleaseItem {
+                        tag_name: r.tag_name.clone(),
+                        name: r
+                            .name
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| r.tag_name),
+                        published_at: r.published_at.unwrap_or_default(),
+                        body,
+                        items,
+                        prerelease: r.prerelease,
+                    }
+                })
+                .collect())
         }
         "gitlab" => {
             #[derive(Deserialize)]
@@ -2752,25 +3043,34 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
             }
             let encoded = format!("{}/{}", fi.owner, fi.repo).replace('/', "%2F");
             let url = format!("https://gitlab.com/api/v4/projects/{}/releases", encoded);
-            let releases: Vec<GlRelease> = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                client.get(&url).send(),
-            ).await
-            .map_err(|_| "Timed out fetching releases".to_string())?
-            .map_err(|e| e.to_string())?
-            .json().await.map_err(|e| e.to_string())?;
-            Ok(releases.into_iter().map(|r| {
-                let body = r.description.unwrap_or_default();
-                let items = iced::widget::markdown::Content::parse(&body).items().to_vec();
-                ReleaseItem {
-                    tag_name: r.tag_name.clone(),
-                    name: r.name.filter(|s| !s.is_empty()).unwrap_or_else(|| r.tag_name),
-                    published_at: r.released_at.unwrap_or_default(),
-                    body,
-                    items,
-                    prerelease: false,
-                }
-            }).collect())
+            let releases: Vec<GlRelease> =
+                tokio::time::timeout(std::time::Duration::from_secs(15), client.get(&url).send())
+                    .await
+                    .map_err(|_| "Timed out fetching releases".to_string())?
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .await
+                    .map_err(|e| e.to_string())?;
+            Ok(releases
+                .into_iter()
+                .map(|r| {
+                    let body = r.description.unwrap_or_default();
+                    let items = iced::widget::markdown::Content::parse(&body)
+                        .items()
+                        .to_vec();
+                    ReleaseItem {
+                        tag_name: r.tag_name.clone(),
+                        name: r
+                            .name
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| r.tag_name),
+                        published_at: r.released_at.unwrap_or_default(),
+                        body,
+                        items,
+                        prerelease: false,
+                    }
+                })
+                .collect())
         }
         _ => {
             // Gitea / Forgejo / Codeberg
@@ -2786,25 +3086,34 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
                 "{}://{}/api/v1/repos/{}/{}/releases?limit=20",
                 fi.scheme, fi.host, fi.owner, fi.repo
             );
-            let releases: Vec<GiteaRelease> = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                client.get(&url).send(),
-            ).await
-            .map_err(|_| "Timed out fetching releases".to_string())?
-            .map_err(|e| e.to_string())?
-            .json().await.map_err(|e| e.to_string())?;
-            Ok(releases.into_iter().map(|r| {
-                let body = r.body.unwrap_or_default();
-                let items = iced::widget::markdown::Content::parse(&body).items().to_vec();
-                ReleaseItem {
-                    tag_name: r.tag_name.clone(),
-                    name: r.name.filter(|s| !s.is_empty()).unwrap_or_else(|| r.tag_name),
-                    published_at: r.published_at.unwrap_or_default(),
-                    body,
-                    items,
-                    prerelease: r.prerelease,
-                }
-            }).collect())
+            let releases: Vec<GiteaRelease> =
+                tokio::time::timeout(std::time::Duration::from_secs(15), client.get(&url).send())
+                    .await
+                    .map_err(|_| "Timed out fetching releases".to_string())?
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .await
+                    .map_err(|e| e.to_string())?;
+            Ok(releases
+                .into_iter()
+                .map(|r| {
+                    let body = r.body.unwrap_or_default();
+                    let items = iced::widget::markdown::Content::parse(&body)
+                        .items()
+                        .to_vec();
+                    ReleaseItem {
+                        tag_name: r.tag_name.clone(),
+                        name: r
+                            .name
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| r.tag_name),
+                        published_at: r.published_at.unwrap_or_default(),
+                        body,
+                        items,
+                        prerelease: r.prerelease,
+                    }
+                })
+                .collect())
         }
     }
 }
@@ -2813,8 +3122,10 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
 // Self-update: fetch latest GitHub release tag
 // ---------------------------------------------------------------------------
 
-const WUDDLE_RELEASE_API_LATEST: &str = "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
-const WUDDLE_RELEASE_API_ALL: &str = "https://api.github.com/repos/ZythDr/Wuddle/releases?per_page=5";
+const WUDDLE_RELEASE_API_LATEST: &str =
+    "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
+const WUDDLE_RELEASE_API_ALL: &str =
+    "https://api.github.com/repos/ZythDr/Wuddle/releases?per_page=5";
 const CHANGELOG_URL: &str = "https://raw.githubusercontent.com/ZythDr/Wuddle/main/CHANGELOG.md";
 const CHANGELOG_EMBEDDED: &str = include_str!("../../CHANGELOG.md");
 
@@ -2826,9 +3137,7 @@ pub async fn fetch_changelog() -> Result<String, String> {
         .map_err(|e| e.to_string())?;
 
     match client.get(CHANGELOG_URL).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            resp.text().await.map_err(|e| e.to_string())
-        }
+        Ok(resp) if resp.status().is_success() => resp.text().await.map_err(|e| e.to_string()),
         _ => Ok(CHANGELOG_EMBEDDED.to_string()),
     }
 }
@@ -2875,10 +3184,8 @@ fn normalize_tag(raw: &str) -> String {
 /// pre-release suffix (alpha, beta, rc, etc.).
 fn parse_version_parts(raw: &str) -> (Vec<u64>, bool) {
     let tag = normalize_tag(raw);
-    let is_prerelease = tag.contains("alpha")
-        || tag.contains("beta")
-        || tag.contains("rc")
-        || tag.contains("dev");
+    let is_prerelease =
+        tag.contains("alpha") || tag.contains("beta") || tag.contains("rc") || tag.contains("dev");
     let nums: Vec<u64> = tag
         .split(|c: char| !c.is_ascii_digit())
         .filter(|s| !s.is_empty())
@@ -2886,7 +3193,11 @@ fn parse_version_parts(raw: &str) -> (Vec<u64>, bool) {
         .collect();
     // For pre-release tags, only keep the first 3 segments (major.minor.patch)
     // so that e.g. "3.0.0-beta.8" compares as [3,0,0] pre-release, not [3,0,0,8].
-    let core = if is_prerelease { nums.into_iter().take(3).collect() } else { nums };
+    let core = if is_prerelease {
+        nums.into_iter().take(3).collect()
+    } else {
+        nums
+    };
     (core, is_prerelease)
 }
 
@@ -2897,17 +3208,27 @@ fn is_version_newer(latest: &str, current: &str) -> bool {
     for i in 0..max {
         let av = *a.get(i).unwrap_or(&0);
         let bv = *b.get(i).unwrap_or(&0);
-        if av > bv { return true; }
-        if av < bv { return false; }
+        if av > bv {
+            return true;
+        }
+        if av < bv {
+            return false;
+        }
     }
     // Same numeric core: a stable release is newer than a pre-release.
     // e.g. 3.0.0 is newer than 3.0.0-beta.8
-    if !a_pre && b_pre { return true; }
+    if !a_pre && b_pre {
+        return true;
+    }
     false
 }
 
 async fn fetch_release_full(beta_channel: bool) -> Result<GhReleaseFull, String> {
-    let url = if beta_channel { WUDDLE_RELEASE_API_ALL } else { WUDDLE_RELEASE_API_LATEST };
+    let url = if beta_channel {
+        WUDDLE_RELEASE_API_ALL
+    } else {
+        WUDDLE_RELEASE_API_LATEST
+    };
     let client = Client::builder()
         .user_agent(concat!("wuddle/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(20))
@@ -2916,7 +3237,10 @@ async fn fetch_release_full(beta_channel: bool) -> Result<GhReleaseFull, String>
 
     let resp = tokio::time::timeout(
         Duration::from_secs(25),
-        client.get(url).header("Accept", "application/vnd.github+json").send(),
+        client
+            .get(url)
+            .header("Accept", "application/vnd.github+json")
+            .send(),
     )
     .await
     .map_err(|_| "Timed out fetching release".to_string())?
@@ -2928,7 +3252,10 @@ async fn fetch_release_full(beta_channel: bool) -> Result<GhReleaseFull, String>
 
     if beta_channel {
         let releases: Vec<GhReleaseFull> = resp.json().await.map_err(|e| e.to_string())?;
-        releases.into_iter().next().ok_or_else(|| "No releases found".to_string())
+        releases
+            .into_iter()
+            .next()
+            .ok_or_else(|| "No releases found".to_string())
     } else {
         resp.json().await.map_err(|e| e.to_string())
     }
@@ -2951,7 +3278,10 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
     if !resp.status().is_success() {
         return Err(format!("download HTTP {}", resp.status()));
     }
-    resp.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| e.to_string())
 }
 
 /// Check whether self-update is supported and whether an update is available.
@@ -2961,13 +3291,15 @@ pub async fn check_self_update_full(beta_channel: bool) -> Result<SelfUpdateStat
 
     let release = match fetch_release_full(beta_channel).await {
         Ok(r) => r,
-        Err(e) => return Ok(SelfUpdateStatus {
-            supported,
-            update_available: false,
-            assets_pending: false,
-            latest_version: None,
-            message: format!("Version check failed: {}", e),
-        }),
+        Err(e) => {
+            return Ok(SelfUpdateStatus {
+                supported,
+                update_available: false,
+                assets_pending: false,
+                latest_version: None,
+                message: format!("Version check failed: {}", e),
+            })
+        }
     };
 
     let latest = normalize_tag(&release.tag_name);
@@ -2975,9 +3307,15 @@ pub async fn check_self_update_full(beta_channel: bool) -> Result<SelfUpdateStat
     let has_asset = newer && pick_platform_asset(&release).is_some();
 
     let message = if !supported {
-        format!("v{} — self-update not supported for this install type", latest)
+        format!(
+            "v{} — self-update not supported for this install type",
+            latest
+        )
     } else if newer && !has_asset {
-        format!("v{} available but assets still building — try again shortly", latest)
+        format!(
+            "v{} available but assets still building — try again shortly",
+            latest
+        )
     } else if newer {
         format!("Update available: v{}", latest)
     } else {
@@ -2990,18 +3328,28 @@ pub async fn check_self_update_full(beta_channel: bool) -> Result<SelfUpdateStat
         supported,
         update_available: has_asset && supported,
         assets_pending,
-        latest_version: if latest.is_empty() { None } else { Some(latest) },
+        latest_version: if latest.is_empty() {
+            None
+        } else {
+            Some(latest)
+        },
         message,
     })
 }
 
 fn is_self_update_supported() -> bool {
     #[cfg(target_os = "linux")]
-    { return is_appimage().is_some(); }
+    {
+        return is_appimage().is_some();
+    }
     #[cfg(target_os = "windows")]
-    { return detect_launcher_root().map(|r| r.1).unwrap_or(false); }
+    {
+        return detect_launcher_root().map(|r| r.1).unwrap_or(false);
+    }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    { return false; }
+    {
+        return false;
+    }
 }
 
 fn pick_platform_asset(release: &GhReleaseFull) -> Option<&GhReleaseAsset> {
@@ -3020,7 +3368,9 @@ fn pick_platform_asset(release: &GhReleaseFull) -> Option<&GhReleaseAsset> {
         })
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    { None }
+    {
+        None
+    }
 }
 
 /// Download and apply the latest release. Returns a status message.
@@ -3045,14 +3395,16 @@ pub async fn apply_self_update(beta_channel: bool) -> Result<String, String> {
 
     // Apply in a blocking task (filesystem I/O)
     let latest_clone = latest.clone();
-    tokio::task::spawn_blocking(move || {
-        apply_downloaded_update(&bytes, &asset_name, &latest_clone)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || apply_downloaded_update(&bytes, &asset_name, &latest_clone))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
-fn apply_downloaded_update(bytes: &[u8], _asset_name: &str, latest: &str) -> Result<String, String> {
+fn apply_downloaded_update(
+    bytes: &[u8],
+    _asset_name: &str,
+    latest: &str,
+) -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
         let appimage_path = is_appimage()
@@ -3079,8 +3431,7 @@ fn apply_downloaded_update(bytes: &[u8], _asset_name: &str, latest: &str) -> Res
             .unwrap_or(0);
         let tmp_path = appimage_path.with_extension(format!("tmp-{}", stamp));
 
-        std::fs::write(&tmp_path, bytes)
-            .map_err(|e| format!("Failed to write temp file: {e}"))?;
+        std::fs::write(&tmp_path, bytes).map_err(|e| format!("Failed to write temp file: {e}"))?;
 
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))
@@ -3094,16 +3445,16 @@ fn apply_downloaded_update(bytes: &[u8], _asset_name: &str, latest: &str) -> Res
 
     #[cfg(target_os = "windows")]
     {
-        let (root, launcher_layout) = detect_launcher_root()
-            .map_err(|e| format!("Cannot detect install layout: {e}"))?;
+        let (root, launcher_layout) =
+            detect_launcher_root().map_err(|e| format!("Cannot detect install layout: {e}"))?;
         if !launcher_layout {
             return Err("Launcher layout not detected. Install the latest portable package once to enable in-app updates.".to_string());
         }
 
         // Extract Wuddle-bin.exe from the zip into versions/<tag>/
         let cursor = std::io::Cursor::new(bytes);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .map_err(|e| format!("Failed to open zip: {e}"))?;
+        let mut archive =
+            zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to open zip: {e}"))?;
 
         let sanitized = sanitize_version_name(latest);
         let version_dir = root.join("versions").join(&sanitized);
@@ -3112,7 +3463,9 @@ fn apply_downloaded_update(bytes: &[u8], _asset_name: &str, latest: &str) -> Res
         let mut found_runtime = false;
         for i in 0..archive.len() {
             let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
-            if file.is_dir() { continue; }
+            if file.is_dir() {
+                continue;
+            }
             let name = file.name().replace('\\', "/");
             let lower = name.to_ascii_lowercase();
             if lower.ends_with("/wuddle-bin.exe") || lower == "wuddle-bin.exe" {
@@ -3129,8 +3482,11 @@ fn apply_downloaded_update(bytes: &[u8], _asset_name: &str, latest: &str) -> Res
 
         // Update current.json
         let current_json = serde_json::json!({ "current": format!("v{}", sanitized) });
-        std::fs::write(root.join("current.json"), current_json.to_string().as_bytes())
-            .map_err(|e| format!("Failed to write current.json: {e}"))?;
+        std::fs::write(
+            root.join("current.json"),
+            current_json.to_string().as_bytes(),
+        )
+        .map_err(|e| format!("Failed to write current.json: {e}"))?;
 
         Ok(format!("Staged v{}. Restart to apply.", latest))
     }
@@ -3146,8 +3502,8 @@ fn apply_downloaded_update(bytes: &[u8], _asset_name: &str, latest: &str) -> Res
 pub fn restart_app() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let appimage_path = is_appimage()
-            .ok_or_else(|| "Not running as AppImage; cannot restart.".to_string())?;
+        let appimage_path =
+            is_appimage().ok_or_else(|| "Not running as AppImage; cannot restart.".to_string())?;
         Command::new(&appimage_path)
             .spawn()
             .map_err(|e| format!("Failed to relaunch: {e}"))?;
@@ -3160,8 +3516,8 @@ pub fn restart_app() -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        let (root, _) = detect_launcher_root()
-            .map_err(|e| format!("Cannot detect launcher: {e}"))?;
+        let (root, _) =
+            detect_launcher_root().map_err(|e| format!("Cannot detect launcher: {e}"))?;
         let launcher = root.join("Wuddle.exe");
         if !launcher.is_file() {
             return Err(format!("Launcher not found at {}", launcher.display()));
@@ -3187,7 +3543,11 @@ pub fn restart_app() -> Result<(), String> {
 fn is_appimage() -> Option<PathBuf> {
     let path = std::env::var("APPIMAGE").ok()?;
     let p = PathBuf::from(path);
-    if p.is_file() { Some(p) } else { None }
+    if p.is_file() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -3225,9 +3585,15 @@ pub struct GitHubRateInfo {
 
 pub async fn fetch_github_rate_limit() -> Option<GitHubRateInfo> {
     #[derive(Deserialize)]
-    struct RateLimitResponse { rate: RateCore }
+    struct RateLimitResponse {
+        rate: RateCore,
+    }
     #[derive(Deserialize)]
-    struct RateCore { limit: u32, remaining: u32, reset: i64 }
+    struct RateCore {
+        limit: u32,
+        remaining: u32,
+        reset: i64,
+    }
 
     let mut req = reqwest::Client::new()
         .get("https://api.github.com/rate_limit")
@@ -3254,5 +3620,9 @@ fn sanitize_version_name(raw: &str) -> String {
             out.push(ch);
         }
     }
-    if out.is_empty() { "latest".to_string() } else { out }
+    if out.is_empty() {
+        "latest".to_string()
+    } else {
+        out
+    }
 }

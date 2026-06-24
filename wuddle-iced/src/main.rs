@@ -26,6 +26,8 @@ use settings::{detect_auto_scale, AUTO_UI_SCALE};
 use theme::{FRIZ, NOTO, LIFECRAFT};
 
 fn main() -> iced::Result {
+    prefer_x11_for_file_drops_if_requested();
+
     // Detect monitor resolution before iced starts
     let auto_scale = detect_auto_scale();
     AUTO_UI_SCALE.set(auto_scale).ok();
@@ -58,3 +60,19 @@ fn main() -> iced::Result {
         .scale_factor(|app| app.ui_scale)
         .run()
 }
+
+#[cfg(target_os = "linux")]
+fn prefer_x11_for_file_drops_if_requested() {
+    // Winit 0.30 receives file drop events on X11, but not through its Wayland
+    // backend. Keep native Wayland by default; this opt-in is for users who
+    // prefer drag-and-drop over native Wayland.
+    if std::env::var_os("DISPLAY").is_some()
+        && std::env::var_os("WUDDLE_USE_X11_FOR_DND").is_some()
+    {
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::remove_var("WAYLAND_SOCKET");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn prefer_x11_for_file_drops_if_requested() {}

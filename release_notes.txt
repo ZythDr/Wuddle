@@ -1,8 +1,14 @@
-## Wuddle v3.4.0
+## Wuddle v3.5.0
 
 ### New Features
-- **Direct Archive Links** — You can now add addons from direct HTTPS `.zip` or `.7z` download links, even when there is no repo to track for updates.
-- **Release Asset Picker** — GitHub release pages with multiple compatible archives now ask which one you want to install.
+- **Local Archive Installs** — Addons can now be installed from local `.zip` or `.7z` files through the Add New Addon dialog.
+- **Archive Drag-and-Drop** — Supported desktops can install addon archives by dropping them directly onto Wuddle. (does *not* work on Wayland)
 
 ### Improvements
-- **Release Tag Installs** — Links to a specific GitHub release tag now stay on that release instead of drifting to the latest one later.
+- **Manual Archive Tracking** — Local archive installs are tracked for removal, but treated as manual installs since they have no update source.
+- **GAM Compatibility** — Rescan now better recognizes regular GitAddonsManager installs without turning them into duplicate manual entries.
+- **Rescan Visibility** — Rescan now reports the phase and folder it is working on, making stuck scans easier to diagnose.
+
+### Bug Fixes
+- **Rescan Reliability** — Fixed cases where rescan could get stuck while importing manual folders or repairing broken installs.
+- **Busy Close Handling** — Closing Wuddle while it is still working should now log the active task and exit more reliably.

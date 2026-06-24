@@ -53,11 +53,46 @@ pub fn parse_addon_conflict_error(err: &str) -> Vec<String> {
     names
 }
 
+fn install_local_archive(app: &mut App, path: std::path::PathBuf) -> Option<Task<Message>> {
+    if !service::is_local_archive_path(&path) {
+        app.log(
+            LogLevel::Error,
+            &format!("Selected file is not a supported archive: {:?}", path),
+        );
+        app.show_toast("Choose a .zip or .7z addon archive.", ToastKind::Warn);
+        return Some(Task::none());
+    }
+    if app.wow_dir.is_empty() {
+        app.log(
+            LogLevel::Error,
+            "Set a WoW directory before installing an addon archive.",
+        );
+        app.show_toast(
+            "Set a WoW directory before installing an addon archive.",
+            ToastKind::Warn,
+        );
+        return Some(Task::none());
+    }
+
+    let db = app.db_path.clone();
+    app.dialog = None;
+    app.reset_add_repo_state();
+    app.log(LogLevel::Info, &format!("Adding local archive: {:?}", path));
+    Some(Task::perform(
+        service::add_local_archive_file(db, path),
+        Message::AddRepoResult,
+    ))
+}
+
 
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
         Message::ReposLoaded(result) => {
             app.loading = false;
+            service::clear_rescan_progress();
+            app.current_rescan_snapshot = None;
+            app.current_rescan_started_at = None;
+            app.last_rescan_warning_secs = None;
             match result {
                 Ok(load_result) => {
                     for entry in &load_result.logs {
@@ -100,6 +135,40 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.log(LogLevel::Error, &format!("Failed to load repos: {}", e));
                 }
             }
+            Some(Task::none())
+        }
+        Message::PollRescanProgress => {
+            let progress = service::latest_rescan_progress();
+            let snapshot = progress.as_ref().map(|p| format!("{}|{}", p.stage, p.detail));
+
+            if snapshot != app.current_rescan_snapshot {
+                app.current_rescan_snapshot = snapshot;
+                app.current_rescan_started_at = Some(std::time::Instant::now());
+                app.last_rescan_warning_secs = None;
+                if let Some(progress) = progress {
+                    app.log(
+                        LogLevel::Info,
+                        &format!("{}: {}", progress.stage, progress.detail),
+                    );
+                }
+            } else if let Some(progress) = progress {
+                if let Some(started_at) = app.current_rescan_started_at {
+                    let elapsed = started_at.elapsed().as_secs();
+                    let should_warn = elapsed >= 10
+                        && app.last_rescan_warning_secs.map_or(true, |last| elapsed >= last + 10);
+                    if should_warn {
+                        app.last_rescan_warning_secs = Some(elapsed);
+                        app.log(
+                            LogLevel::Error,
+                            &format!(
+                                "Still working on {} after {}s: {}",
+                                progress.stage, elapsed, progress.detail
+                            ),
+                        );
+                    }
+                }
+            }
+
             Some(Task::none())
         }
         Message::PlansLoaded(result) => {
@@ -414,6 +483,39 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 ));
             }
             Some(Task::none())
+        }
+        Message::LocalArchiveHovered(path) => {
+            app.local_archive_hover_path = if service::is_local_archive_path(&path) {
+                Some(path)
+            } else {
+                None
+            };
+            Some(Task::none())
+        }
+        Message::LocalArchiveHoverLeft => {
+            app.local_archive_hover_path = None;
+            Some(Task::none())
+        }
+        Message::PickLocalAddonArchive => Some(Task::perform(
+            async {
+                rfd::AsyncFileDialog::new()
+                    .add_filter("Addon archives", &["zip", "7z"])
+                    .set_title("Select addon archive")
+                    .pick_file()
+                    .await
+                    .map(|handle| handle.path().to_path_buf())
+            },
+            Message::LocalArchivePicked,
+        )),
+        Message::LocalArchivePicked(path) => {
+            let Some(path) = path else {
+                return Some(Task::none());
+            };
+            install_local_archive(app, path)
+        }
+        Message::LocalArchiveDropped(path) => {
+            app.local_archive_hover_path = None;
+            install_local_archive(app, path)
         }
         Message::AddRepoResult(result) => {
             match result {

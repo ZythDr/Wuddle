@@ -9,7 +9,7 @@ use std::{
     path::{Component, Path, PathBuf},
     pin::Pin,
     sync::{LazyLock, Mutex, OnceLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(windows)]
@@ -37,6 +37,9 @@ use crate::forge::ForgeKind;
 
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+const IMPORT_FOLDER_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
+const IMPORT_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[cfg(windows)]
 fn is_reparse_dir(meta: &fs::Metadata) -> bool {
@@ -502,6 +505,15 @@ impl Engine {
 
     pub fn add_direct_archive_url(&self, url: &str) -> Result<i64> {
         let direct = direct::parse_archive_url(url)?;
+        self.add_direct_archive(direct)
+    }
+
+    pub fn add_local_archive_file(&self, path: &Path) -> Result<i64> {
+        let direct = direct::parse_local_archive_path(path)?;
+        self.add_direct_archive(direct)
+    }
+
+    fn add_direct_archive(&self, direct: direct::DirectArchive) -> Result<i64> {
         let mut name = direct.display_name.clone();
 
         if let Ok(Some(existing)) =
@@ -1360,11 +1372,24 @@ impl Engine {
     }
 
     pub fn import_existing_addons(&self, wow_dir: &Path) -> Result<usize> {
+        self.import_existing_addons_with_progress(wow_dir, |_| {})
+    }
+
+    pub fn import_existing_addons_with_progress<F>(
+        &self,
+        wow_dir: &Path,
+        mut progress: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(String),
+    {
         let addons_root = wow_dir.join("Interface").join("AddOns");
         if !addons_root.is_dir() {
             return Ok(0);
         }
 
+        let import_started = Instant::now();
+        progress("reading tracked addon records".to_string());
         let existing = self.db().list_repos()?;
         // Map lowercase repo key -> Repo ID and Repo Name for existence check
         let mut known_repos: HashMap<String, (i64, String)> = existing
@@ -1385,11 +1410,13 @@ impl Engine {
 
         let mut imported = 0usize;
 
+        progress(format!("reading AddOns folder {:?}", addons_root));
         let read_dir = match fs::read_dir(&addons_root) {
             Ok(v) => v,
             Err(_) => return Ok(0),
         };
 
+        let mut addon_dirs = Vec::<(PathBuf, String)>::new();
         for entry in read_dir.flatten() {
             let root = entry.path();
             if !root.is_dir() {
@@ -1405,65 +1432,113 @@ impl Engine {
                 continue;
             }
 
-            // Skip if this specific folder is already a tracked install target
+            addon_dirs.push((root, folder_name));
+        }
+        addon_dirs.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+
+        // Git worktrees must claim ownership before manual folders are imported.
+        // GAM stores multi-addon repos as "{repo}.repo" plus sibling addon
+        // folders, so a one-pass importer can otherwise classify those siblings
+        // as unrelated manual addons depending on directory iteration order.
+        for (root, folder_name) in &addon_dirs {
+            if import_started.elapsed() >= IMPORT_TOTAL_TIMEOUT {
+                progress(format!(
+                    "aborting import after {}s total budget",
+                    IMPORT_TOTAL_TIMEOUT.as_secs()
+                ));
+                return Ok(imported);
+            }
             let manifest = Self::to_manifest_path(&root, wow_dir).to_lowercase();
             if claimed_paths.contains(&manifest) {
                 continue;
             }
 
-            // 1. Try Git Import
-            if Self::has_local_git_marker(&root) {
+            if Self::has_local_git_marker(root) {
+                progress(format!("checking git folder {}", folder_name));
                 if let Ok(repo) = Repository::open(&root) {
                     if let Some(remote_raw) = Self::local_repo_remote_url(&repo) {
                         if let Some(remote_url) = Self::normalize_git_remote_url(&remote_raw) {
                             if let Ok(det) = detect_repo(&remote_url) {
                                 let key =
                                     Self::repo_key(&det.host, &det.owner, &det.name).to_lowercase();
-                                if !known_repos.contains_key(&key) {
-                                    let detected_addons = install::detect_addons_in_tree(&root);
-                                    if !detected_addons.is_empty() {
-                                        let branch = Self::local_repo_branch(&repo)
-                                            .unwrap_or_else(|| "master".to_string());
-                                        let short_oid = Self::local_repo_short_oid(&repo);
-                                        let full_oid = Self::local_repo_oid(&repo);
-
-                                        let mut tracked = Repo {
-                                            id: 0,
-                                            url: det.canonical_url.clone(),
-                                            forge: det.forge_str.to_string(),
-                                            host: det.host.clone(),
-                                            owner: det.owner.clone(),
-                                            name: det.name.clone(),
-                                            mode: InstallMode::AddonGit,
-                                            enabled: true,
-                                            git_branch: Some(branch),
-                                            asset_regex: None,
-                                            last_version: short_oid,
-                                            etag: full_oid,
-                                            installed_asset_id: None,
-                                            installed_asset_name: None,
-                                            installed_asset_size: None,
-                                            installed_asset_url: None,
-                                            installed_at_unix: None,
-                                            published_at_unix: None,
-                                            merge_installs: false,
-                                            pinned_version: None,
-                                            selected_addons_json: None,
-                                        };
-
-                                        if let Ok(id) = self.db().add_repo(&tracked) {
-                                            tracked.id = id;
-                                            known_repos.insert(key, (id, tracked.name));
-                                            imported += 1;
-                                            for (_src, name) in detected_addons {
-                                                let p = addons_root.join(&name);
-                                                let m = Self::to_manifest_path(&p, wow_dir);
-                                                let _ =
-                                                    self.db().add_install(id, &m, "addon", None);
-                                                claimed_paths.insert(m.to_lowercase());
-                                            }
-                                        }
+                                if let Some((repo_id, _)) = known_repos.get(&key) {
+                                    let has_tracked_addons = self
+                                        .db()
+                                        .list_installs(*repo_id)
+                                        .map(|installs| {
+                                            installs.iter().any(|entry| entry.kind == "addon")
+                                        })
+                                        .unwrap_or(false);
+                                    if has_tracked_addons {
                                         continue;
+                                    }
+                                }
+
+                                progress(format!("scanning addon tree in {}", folder_name));
+                                let (detected_addons, timed_out) =
+                                    install::detect_addons_in_tree_with_time_limit(
+                                        root,
+                                        IMPORT_FOLDER_SCAN_TIMEOUT,
+                                    );
+                                if timed_out {
+                                    progress(format!(
+                                        "skipping {} after {}s import scan budget",
+                                        folder_name,
+                                        IMPORT_FOLDER_SCAN_TIMEOUT.as_secs()
+                                    ));
+                                    continue;
+                                }
+                                if detected_addons.is_empty() {
+                                    continue;
+                                }
+
+                                let mut repo_id = known_repos.get(&key).map(|(id, _)| *id);
+                                if repo_id.is_none() {
+                                    let branch = Self::local_repo_branch(&repo)
+                                        .unwrap_or_else(|| "master".to_string());
+                                    let short_oid = Self::local_repo_short_oid(&repo);
+                                    let full_oid = Self::local_repo_oid(&repo);
+
+                                    let mut tracked = Repo {
+                                        id: 0,
+                                        url: det.canonical_url.clone(),
+                                        forge: det.forge_str.to_string(),
+                                        host: det.host.clone(),
+                                        owner: det.owner.clone(),
+                                        name: det.name.clone(),
+                                        mode: InstallMode::AddonGit,
+                                        enabled: true,
+                                        git_branch: Some(branch),
+                                        asset_regex: None,
+                                        last_version: short_oid,
+                                        etag: full_oid,
+                                        installed_asset_id: None,
+                                        installed_asset_name: None,
+                                        installed_asset_size: None,
+                                        installed_asset_url: None,
+                                        installed_at_unix: None,
+                                        published_at_unix: None,
+                                        merge_installs: false,
+                                        pinned_version: None,
+                                        selected_addons_json: None,
+                                    };
+
+                                    let add_repo_result = { self.db().add_repo(&tracked) };
+                                    if let Ok(id) = add_repo_result {
+                                        tracked.id = id;
+                                        known_repos.insert(key, (id, tracked.name));
+                                        imported += 1;
+                                        repo_id = Some(id);
+                                    }
+                                }
+
+                                for (src, name) in detected_addons {
+                                    let sibling = addons_root.join(&name);
+                                    let install_path = if sibling.exists() { sibling } else { src };
+                                    let m = Self::to_manifest_path(&install_path, wow_dir);
+                                    claimed_paths.insert(m.to_lowercase());
+                                    if let Some(id) = repo_id {
+                                        let _ = self.db().add_install(id, &m, "addon", None);
                                     }
                                 }
                             }
@@ -1471,8 +1546,27 @@ impl Engine {
                     }
                 }
             }
+        }
+
+        for (root, folder_name) in addon_dirs {
+            if import_started.elapsed() >= IMPORT_TOTAL_TIMEOUT {
+                progress(format!(
+                    "aborting import after {}s total budget",
+                    IMPORT_TOTAL_TIMEOUT.as_secs()
+                ));
+                return Ok(imported);
+            }
+            let manifest = Self::to_manifest_path(&root, wow_dir).to_lowercase();
+            if claimed_paths.contains(&manifest) {
+                continue;
+            }
+
+            if Self::has_local_git_marker(&root) {
+                continue;
+            }
 
             // 2. Try Manual Import (if not already handled by Git)
+            progress(format!("checking manual folder {}", folder_name));
             let detected_addons = if let Some(name) = install::detect_single_addon_folder(&root) {
                 vec![(root.clone(), name)]
             } else {
@@ -1513,7 +1607,8 @@ impl Engine {
                     selected_addons_json: None,
                 };
 
-                if let Ok(id) = self.db().add_repo(&tracked) {
+                let add_repo_result = { self.db().add_repo(&tracked) };
+                if let Ok(id) = add_repo_result {
                     imported += 1;
                     for (_src, name) in detected_addons {
                         let p = addons_root.join(&name);
@@ -2794,6 +2889,18 @@ impl Engine {
 
     fn validate_asset_url(plan: &UpdatePlan) -> Result<()> {
         let parsed = Url::parse(&plan.asset_url)?;
+        if parsed.scheme() == "file"
+            && plan.forge.eq_ignore_ascii_case("direct")
+            && plan.host.eq_ignore_ascii_case("local")
+        {
+            let path = parsed
+                .to_file_path()
+                .map_err(|_| anyhow::anyhow!("Local asset URL path is invalid"))?;
+            if path.is_file() {
+                return Ok(());
+            }
+            anyhow::bail!("Local asset file not found: {:?}", path);
+        }
         if parsed.scheme() != "https" {
             anyhow::bail!("Blocked non-HTTPS asset URL: {}", plan.asset_url);
         }
@@ -2932,6 +3039,23 @@ impl Engine {
             .join(Self::sanitize_for_fs(&plan.asset_id));
         std::fs::create_dir_all(&dir)?;
         Ok(dir)
+    }
+
+    fn local_file_asset_path(plan: &UpdatePlan) -> Result<Option<PathBuf>> {
+        let parsed = Url::parse(&plan.asset_url)?;
+        if parsed.scheme() != "file" {
+            return Ok(None);
+        }
+        if !plan.forge.eq_ignore_ascii_case("direct") || !plan.host.eq_ignore_ascii_case("local") {
+            anyhow::bail!("Blocked local asset URL for non-local repo: {}", plan.asset_url);
+        }
+        let path = parsed
+            .to_file_path()
+            .map_err(|_| anyhow::anyhow!("Local asset URL path is invalid"))?;
+        if !path.is_file() {
+            anyhow::bail!("Local asset file not found: {:?}", path);
+        }
+        Ok(Some(path))
     }
 
     async fn download_asset_to(&self, plan: &UpdatePlan, dest: &Path) -> Result<()> {
@@ -3910,22 +4034,28 @@ impl Engine {
             .and_then(|s| s.to_str())
             .unwrap_or("asset.bin")
             .to_string();
-        let asset_path = release_dir.join(asset_name_fs);
-
         Self::validate_asset_url(plan)?;
-
-        let mut should_download = match (asset_path.metadata().ok(), plan.asset_size) {
-            (Some(meta), Some(expected)) => meta.len() != expected,
-            (Some(_), None) => false,
-            (None, _) => true,
+        let local_asset_path = Self::local_file_asset_path(plan)?;
+        let is_local_asset = local_asset_path.is_some();
+        let asset_path = if let Some(path) = local_asset_path {
+            path
+        } else {
+            let asset_path = release_dir.join(asset_name_fs);
+            let mut should_download = match (asset_path.metadata().ok(), plan.asset_size) {
+                (Some(meta), Some(expected)) => meta.len() != expected,
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            if !should_download && plan.asset_sha256.is_some() {
+                should_download =
+                    Self::verify_asset_digest(&asset_path, plan.asset_sha256.as_deref()).is_err();
+            }
+            if should_download {
+                self.download_asset_to(plan, &asset_path).await?;
+            }
+            asset_path
         };
-        if !should_download && plan.asset_sha256.is_some() {
-            should_download =
-                Self::verify_asset_digest(&asset_path, plan.asset_sha256.as_deref()).is_err();
-        }
-        if should_download {
-            self.download_asset_to(plan, &asset_path).await?;
-        }
+        let extract_dir = release_dir.join("extract");
         Self::validate_downloaded_asset(&asset_path, plan)?;
         Self::verify_asset_digest(&asset_path, plan.asset_sha256.as_deref())?;
 
@@ -3935,7 +4065,6 @@ impl Engine {
         );
 
         let mut records = if Self::looks_like_archive(&asset_path, &plan.asset_name) {
-            let extract_dir = release_dir.join("extract");
             install::install_from_archive(
                 &asset_path,
                 &extract_dir,
@@ -4042,6 +4171,9 @@ impl Engine {
             Some(&plan.asset_url),
             Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64),
         )?;
+        if is_local_asset {
+            self.db().mark_repo_manual(plan.repo_id)?;
+        }
 
         self.prune_release_cache(plan, opts.cache_keep_versions, Some(wow_dir));
 
@@ -4190,7 +4322,8 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    use super::{Engine, InstallMode, LatestRelease, ReleaseAsset, UpdatePlan};
+    use super::{Engine, InstallMode, InstallOptions, LatestRelease, ReleaseAsset, UpdatePlan};
+    use git2::Repository;
     use std::fs;
 
     fn asset(name: &str) -> ReleaseAsset {
@@ -4239,6 +4372,129 @@ mod tests {
             new_dll_count: 0,
             is_manual: false,
         }
+    }
+
+    #[test]
+    fn import_existing_addons_claims_gam_repo_siblings_before_manual_import() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let repo_dir = addons.join("MyAddon.repo");
+        let main_in_repo = repo_dir.join("MyAddon");
+        let config_in_repo = repo_dir.join("MyAddon_Config");
+
+        fs::create_dir_all(&main_in_repo).unwrap();
+        fs::create_dir_all(&config_in_repo).unwrap();
+        fs::write(main_in_repo.join("MyAddon.toc"), b"## Interface: 30300\n").unwrap();
+        fs::write(config_in_repo.join("MyAddon_Config.toc"), b"## Interface: 30300\n").unwrap();
+
+        fs::create_dir_all(addons.join("MyAddon")).unwrap();
+        fs::create_dir_all(addons.join("MyAddon_Config")).unwrap();
+        fs::write(addons.join("MyAddon").join("MyAddon.toc"), b"## Interface: 30300\n").unwrap();
+        fs::write(
+            addons.join("MyAddon_Config").join("MyAddon_Config.toc"),
+            b"## Interface: 30300\n",
+        )
+        .unwrap();
+
+        let repo = Repository::init(&repo_dir).unwrap();
+        repo.remote("origin", "https://github.com/TestOwner/MyAddon.git")
+            .unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Wuddle Test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        assert_eq!(engine.import_existing_addons(&wow).unwrap(), 1);
+
+        let repos = engine.db().list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].forge, "github");
+        assert_eq!(repos[0].name, "MyAddon");
+
+        let installs = engine.db().list_installs(repos[0].id).unwrap();
+        let paths = installs.iter().map(|i| i.path.as_str()).collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                "Interface/AddOns/MyAddon",
+                "Interface/AddOns/MyAddon_Config"
+            ]
+        );
+    }
+
+    #[test]
+    fn import_existing_addons_imports_plain_manual_addon_without_db_relock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addon = wow.join("Interface").join("AddOns").join("!BugGrabber");
+        fs::create_dir_all(&addon).unwrap();
+        fs::write(addon.join("!BugGrabber.toc"), b"## Interface: 30300\n").unwrap();
+        fs::write(addon.join("BugGrabber.lua"), b"-- test\n").unwrap();
+
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        assert_eq!(engine.import_existing_addons(&wow).unwrap(), 1);
+
+        let repos = engine.db().list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].forge, "manual");
+        assert_eq!(repos[0].name, "!BugGrabber");
+
+        let installs = engine.db().list_installs(repos[0].id).unwrap();
+        assert_eq!(installs.len(), 1);
+        assert_eq!(installs[0].path, "Interface/AddOns/!BugGrabber");
+        assert_eq!(installs[0].kind, "addon");
+    }
+
+    #[test]
+    fn dropped_local_archive_installs_then_becomes_manual() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let addon = src.join("DropAddon");
+        let wow = tmp.path().join("wow");
+        let archive = tmp.path().join("DropAddon.7z");
+
+        fs::create_dir_all(&addon).unwrap();
+        fs::write(addon.join("DropAddon.toc"), b"## Interface: 30300\n").unwrap();
+        fs::write(addon.join("DropAddon.lua"), b"-- test\n").unwrap();
+        sevenz_rust::compress_to_path(&src, &archive).unwrap();
+
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let repo_id = engine.add_local_archive_file(&archive).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(async {
+                engine
+                    .reinstall_repo(repo_id, &wow, None, InstallOptions::default())
+                    .await
+            })
+            .unwrap();
+
+        let repo = engine.db().get_repo(repo_id).unwrap();
+        assert_eq!(repo.forge, "manual");
+        assert_eq!(repo.mode, InstallMode::Manual);
+        assert!(repo.url.is_empty());
+        assert_eq!(repo.last_version.as_deref(), Some("Manual"));
+
+        let installs = engine.db().list_installs(repo_id).unwrap();
+        assert_eq!(installs.len(), 1);
+        assert_eq!(installs[0].path, "Interface/AddOns/DropAddon");
+        assert!(wow
+            .join("Interface")
+            .join("AddOns")
+            .join("DropAddon")
+            .join("DropAddon.toc")
+            .exists());
     }
 
     // ── version_from_asset_name ──────────────────────────────────────────────

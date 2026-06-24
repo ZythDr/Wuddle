@@ -6,6 +6,7 @@ use std::{
     io::Read,
     path::{Component, Path, PathBuf},
     process::Command,
+    time::{Duration, Instant},
 };
 
 #[cfg(windows)]
@@ -603,6 +604,13 @@ fn detect_dlls(root: &Path) -> Vec<PathBuf> {
 const MAX_ADDON_SCAN_DEPTH: usize = 5;
 
 fn detect_addons(root: &Path) -> Vec<(PathBuf, String)> {
+    detect_addons_with_deadline(root, None).0
+}
+
+fn detect_addons_with_deadline(
+    root: &Path,
+    deadline: Option<Instant>,
+) -> (Vec<(PathBuf, String)>, bool) {
     let mut candidates: Vec<(PathBuf, String)> = Vec::new();
 
     // 1. Check if the root itself is an addon
@@ -610,14 +618,14 @@ fn detect_addons(root: &Path) -> Vec<(PathBuf, String)> {
         candidates.push((root.to_path_buf(), folder_name));
     }
     if !candidates.is_empty() {
-        return candidates;
+        return (candidates, false);
     }
 
-    scan_addon_dirs(root, root, 1, &mut candidates);
+    let timed_out = scan_addon_dirs(root, root, 1, &mut candidates, deadline);
 
     candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     candidates.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
-    candidates
+    (candidates, timed_out)
 }
 
 fn scan_addon_dirs(
@@ -625,16 +633,23 @@ fn scan_addon_dirs(
     scan_root: &Path,
     depth: usize,
     candidates: &mut Vec<(PathBuf, String)>,
-) {
+    deadline: Option<Instant>,
+) -> bool {
     if depth > MAX_ADDON_SCAN_DEPTH {
-        return;
+        return false;
+    }
+    if deadline.map(|d| Instant::now() >= d).unwrap_or(false) {
+        return true;
     }
 
     let Ok(rd) = fs::read_dir(dir) else {
-        return;
+        return false;
     };
 
     for entry in rd.flatten() {
+        if deadline.map(|d| Instant::now() >= d).unwrap_or(false) {
+            return true;
+        }
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -656,8 +671,11 @@ fn scan_addon_dirs(
             continue;
         }
 
-        scan_addon_dirs(&path, scan_root, depth + 1, candidates);
+        if scan_addon_dirs(&path, scan_root, depth + 1, candidates, deadline) {
+            return true;
+        }
     }
+    false
 }
 
 pub fn detect_addons_in_tree(root: &Path) -> Vec<(PathBuf, String)> {
@@ -669,6 +687,17 @@ pub fn detect_addons_in_tree(root: &Path) -> Vec<(PathBuf, String)> {
     detect_addons(root)
 }
 
+pub fn detect_addons_in_tree_with_time_limit(
+    root: &Path,
+    limit: Duration,
+) -> (Vec<(PathBuf, String)>, bool) {
+    let deadline = Some(Instant::now() + limit);
+    match detect_addons_in_git_tree_with_deadline(root, deadline) {
+        Ok((list, timed_out)) if !list.is_empty() || timed_out => (list, timed_out),
+        _ => detect_addons_with_deadline(root, deadline),
+    }
+}
+
 pub fn detect_single_addon_folder(dir: &Path) -> Option<String> {
     addon_folder_names_from_toc(dir, dir).into_iter().next()
 }
@@ -678,6 +707,13 @@ pub fn detect_addon_folders_in_dir(dir: &Path) -> Vec<String> {
 }
 
 pub fn detect_addons_in_git_tree(root: &Path) -> Result<Vec<(PathBuf, String)>> {
+    detect_addons_in_git_tree_with_deadline(root, None).map(|(list, _)| list)
+}
+
+fn detect_addons_in_git_tree_with_deadline(
+    root: &Path,
+    deadline: Option<Instant>,
+) -> Result<(Vec<(PathBuf, String)>, bool)> {
     let repo = Repository::open(root).context("open git repo for tree scan")?;
     let head = repo.head()?.peel_to_tree()?;
     let mut candidates = Vec::new();
@@ -689,14 +725,14 @@ pub fn detect_addons_in_git_tree(root: &Path) -> Result<Vec<(PathBuf, String)>> 
     if !candidates.is_empty() {
         candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
         candidates.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
-        return Ok(candidates);
+        return Ok((candidates, false));
     }
 
-    scan_git_addon_dirs(&repo, root, &head, "", 1, &mut candidates)?;
+    let timed_out = scan_git_addon_dirs(&repo, root, &head, "", 1, &mut candidates, deadline)?;
 
     candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     candidates.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
-    Ok(candidates)
+    Ok((candidates, timed_out))
 }
 
 fn scan_git_addon_dirs(
@@ -706,12 +742,19 @@ fn scan_git_addon_dirs(
     rel_path: &str,
     depth: usize,
     candidates: &mut Vec<(PathBuf, String)>,
-) -> Result<()> {
+    deadline: Option<Instant>,
+) -> Result<bool> {
     if depth > MAX_ADDON_SCAN_DEPTH {
-        return Ok(());
+        return Ok(false);
+    }
+    if deadline.map(|d| Instant::now() >= d).unwrap_or(false) {
+        return Ok(true);
     }
 
     for entry in tree.iter() {
+        if deadline.map(|d| Instant::now() >= d).unwrap_or(false) {
+            return Ok(true);
+        }
         if entry.kind() != Some(git2::ObjectType::Tree) {
             continue;
         }
@@ -736,10 +779,12 @@ fn scan_git_addon_dirs(
             continue;
         }
 
-        scan_git_addon_dirs(repo, root, &subtree, &child_rel, depth + 1, candidates)?;
+        if scan_git_addon_dirs(repo, root, &subtree, &child_rel, depth + 1, candidates, deadline)? {
+            return Ok(true);
+        }
     }
 
-    Ok(())
+    Ok(false)
 }
 
 fn addon_folder_names_from_git_tree(
