@@ -2,6 +2,30 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.6.0
+
+### New Features
+- **Client-Aware Quick Add** — Quick Add now shows compatible presets for Vanilla 1.12.1, TBC 2.4.3, or WotLK 3.3.5 profiles.
+- **WotLK Performance Presets** — Added Awesome WotLK and wow-optimize to the WotLK Quick Add list.
+- **Awesome WotLK Patching** — Wuddle can now back up `wow.exe` as `original_wow.exe` and patch it automatically. The patch action is available from the mod’s menu.
+- **wow-optimize Configuration** — Added a Configure button for launching wow-optimize’s GUI.
+- **Collection Selection Tools** — Add New and Manage Collection dialogs now include Select all and Clear all controls.
+
+### Improvements
+- **Safer Mod Warnings** — Security notices now use clearer, client-neutral wording and include an **Open on Forge** button so you can inspect a mod’s repository first.
+- **WotLK DLL Controls** — Disabling a DLL-based mod on non-Vanilla clients now renames its DLL to `.disabled` instead of relying on `dlls.txt`.
+- **Collection Browser Polish** — The addon list is roomier, long names show their full text on hover, and the selection toolbar is easier to use.
+- **Stable Release Notes View** — The Add New dialog keeps its preview area and buttons in place even when a repository has no release notes.
+- **Compact Navigation** — Removed update counts from the Mods and Addons tabs and tightened their width for better large-scale UI support.
+- **Easier Dialog Dismissal** — Routine dialogs such as Add New and profile settings can now be closed by clicking outside them. Warning and confirmation dialogs remain protected.
+- **GitHub Token Feedback** — Wuddle now confirms that a saved token can be read back and shows a clear secure-storage error instead of silently falling back to anonymous GitHub access.
+- **Updated Quick Add Sources** — Refreshed the Nampower and PerfBoost repository links.
+
+### Bug Fixes
+- **Version Downgrades** — Selecting an older version now installs that selected version correctly and updates the Installed column.
+- **WotLK Mod Filtering** — Vanilla-only Quick Add entries no longer appear for TBC or WotLK clients.
+- **Awesome WotLK Backup Handling** — Existing `original_wow.exe` backups are preserved instead of being overwritten.
+
 ## v3.5.0
 
 ### New Features

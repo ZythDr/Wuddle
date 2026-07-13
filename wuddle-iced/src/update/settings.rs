@@ -146,11 +146,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::SaveGithubTokenResult(result) => {
             match result {
                 Ok(_) => {
+                    app.github_token_storage_error = None;
                     app.log(LogLevel::Info, "GitHub token saved successfully.");
-                    app.show_toast("GitHub token saved.", ToastKind::Info);
+                    app.show_toast("GitHub token saved and activated.", ToastKind::Info);
                     app.github_token_input.clear();
                 }
                 Err(e) => {
+                    app.github_token_storage_error = Some(e.clone());
                     app.log(LogLevel::Error, &format!("Token save error: {}", e));
                     app.show_toast(format!("Failed to save token: {}", e), ToastKind::Error);
                 }
@@ -164,10 +166,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::ForgetGithubTokenResult(result) => {
             match result {
                 Ok(_) => {
-                    app.log(LogLevel::Info, "GitHub token removed from database.");
+                    app.github_token_storage_error = None;
+                    app.log(LogLevel::Info, "GitHub token removed from secure storage.");
                     app.show_toast("GitHub token cleared.", ToastKind::Info);
                 }
                 Err(e) => {
+                    app.github_token_storage_error = Some(e.clone());
                     app.log(LogLevel::Error, &format!("Clear token failed: {}", e));
                     app.show_toast(format!("Clear token failed: {}", e), ToastKind::Error);
                 }

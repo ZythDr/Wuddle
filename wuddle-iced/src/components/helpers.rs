@@ -166,6 +166,12 @@ pub fn inline_context_menu<'a>(
     if crate::panels::projects::is_dxvk_repo(&repo.name) {
         items.push(ctx_menu_item("\u{2699} Configure DXVK\u{2026}", Message::OpenDxvkConfig, c));
     }
+    if crate::panels::projects::is_wow_optimize_repo(&repo.name) {
+        items.push(ctx_menu_item("⚙ Configure wow-optimize", Message::LaunchWowOptimize, c));
+    }
+    if crate::panels::projects::is_awesome_wotlk_repo(&repo.name) {
+        items.push(ctx_menu_item("Patch WoW.exe\u{2026}", Message::PromptAwesomeWotlkPatch, c));
+    }
     if is_mod_val {
         let label = if enabled { "Disable" } else { "Enable" };
         items.push(ctx_menu_item(label, Message::ToggleRepoEnabled(rid, !enabled), c));
@@ -308,6 +314,72 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
 pub struct SpinnerCanvas {
     pub tick: usize,
     pub color: iced::Color,
+}
+
+/// A single-line label that gently scrolls only while it is hovered and the
+/// estimated text width exceeds the available space. Used by the collection
+/// tree, where folder names are frequently longer than the narrow sidebar.
+pub struct HoverMarqueeCanvas {
+    pub content: String,
+    pub tick: usize,
+    pub color: iced::Color,
+    pub font_size: f32,
+}
+
+impl<Message> canvas::Program<Message> for HoverMarqueeCanvas {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: iced::Rectangle,
+        cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        // This deliberately errs on the conservative side. It avoids motion for
+        // ordinary labels, while ensuring visibly truncated collection names get
+        // a readable hover treatment without relying on a renderer-specific
+        // text-measurement API.
+        let estimated_width = self.content.chars().count() as f32 * self.font_size * 0.56;
+        let overflow = (estimated_width - bounds.width).max(0.0);
+        let offset = if overflow > 0.0 && cursor.is_over(bounds) {
+            // 480ms initial pause, then scroll to each end with a brief pause.
+            let start_delay = 6usize;
+            let edge_pause = 10usize;
+            let speed = 1.2f32;
+            let travel_ticks = (overflow / speed).ceil() as usize;
+            let cycle = edge_pause * 2 + travel_ticks * 2;
+            let step = self.tick.saturating_sub(start_delay) % cycle.max(1);
+            if step < edge_pause {
+                0.0
+            } else if step < edge_pause + travel_ticks {
+                -((step - edge_pause) as f32 * speed).min(overflow)
+            } else if step < edge_pause * 2 + travel_ticks {
+                -overflow
+            } else {
+                -overflow
+                    + ((step - edge_pause * 2 - travel_ticks) as f32 * speed).min(overflow)
+            }
+        } else {
+            0.0
+        };
+
+        frame.with_clip(iced::Rectangle::with_size(bounds.size()), |frame| {
+            frame.fill_text(canvas::Text {
+                content: self.content.clone(),
+                position: iced::Point::new(offset, bounds.height / 2.0),
+                max_width: f32::INFINITY,
+                color: self.color,
+                size: iced::Pixels(self.font_size),
+                align_y: iced::alignment::Vertical::Center,
+                ..canvas::Text::default()
+            });
+        });
+
+        vec![frame.into_geometry()]
+    }
 }
 
 impl<Message> canvas::Program<Message> for SpinnerCanvas {

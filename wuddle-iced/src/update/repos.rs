@@ -640,7 +640,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Ok(msg) => {
                     app.log(LogLevel::Info, &msg);
                     app.show_toast(msg, ToastKind::Info);
-                    return Some(refresh_repos_task(app));
+                    let db = app.db_path.clone();
+                    let prompt_task = Task::perform(
+                        service::is_awesome_wotlk_repo(db, repo_id),
+                        Message::PromptAwesomeWotlkPatchIfInstalled,
+                    );
+                    return Some(Task::batch(vec![refresh_repos_task(app), prompt_task]));
                 }
                 Err(ref e) if e.contains("ADDON_CONFLICT:") => {
                     // Fallback: the engine caught conflicts that the pre-check missed.
@@ -906,6 +911,23 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     advanced: false,
                 });
             }
+            Some(Task::none())
+        }
+        Message::SetCollectionSelection(selected_addons) => {
+            let selected_count = selected_addons.len();
+            app.add_repo_selected_addons = selected_addons.into_iter().collect();
+            app.log(
+                LogLevel::Info,
+                &format!("Collection selection set to {} addon(s).", selected_count),
+            );
+            app.show_toast(
+                if selected_count == 0 {
+                    "Deselected all collection addons.".to_string()
+                } else {
+                    format!("Selected all {} collection addons.", selected_count)
+                },
+                ToastKind::Info,
+            );
             Some(Task::none())
         }
         Message::SetAddRepoPrimaryAddon(name) => {
@@ -1435,6 +1457,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::SetPinnedVersion(id, version) => {
+            // Reflect the user's selection immediately. The database write is
+            // asynchronous, so without this the picker can redraw with its old
+            // value and look as though the choice was ignored.
+            if let Some(repo) = app.repos.iter_mut().find(|repo| repo.id == id) {
+                repo.pinned_version = version.clone();
+            }
             let db = app.db_path.clone();
             let v_str = version.clone().unwrap_or_else(|| "none".to_string());
             app.log(LogLevel::Info, &format!("Pinning version to '{}' for repo id={}...", v_str, id));
@@ -1445,11 +1473,18 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::SetPinnedVersionResult(Ok(_id)) => {
             app.log(LogLevel::Info, "Version pin updated. Re-checking updates...");
-            Some(check_updates_task(app))
+            // A version choice must always be evaluated, even when this repo
+            // would normally be skipped by the low-frequency API check.
+            Some(Task::batch(vec![
+                refresh_repos_task(app),
+                check_updates_for_version_change_task(app),
+            ]))
         }
         Message::SetPinnedVersionResult(Err(e)) => {
             app.log(LogLevel::Error, &format!("Set version failed: {}", e));
-            Some(Task::none())
+            // Restore the persisted selection if the optimistic update above
+            // could not be saved.
+            Some(refresh_repos_task(app))
         }
         Message::DllCountWarningChoice { repo_id, merge } => {
             app.dialog = None;
@@ -1538,8 +1573,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::ToggleRepoEnabled(id, enabled) => {
             let db = app.db_path.clone();
             let wow = app.wow_dir.clone();
+            let use_dlls_txt = app.quick_add_client_family() == service::ClientFamily::Vanilla;
             Some(Task::perform(
-                service::set_repo_enabled(db, id, enabled, wow),
+                service::set_repo_enabled(db, id, enabled, wow, use_dlls_txt),
                 Message::ToggleRepoEnabledResult,
             ))
         }
@@ -1561,8 +1597,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::ToggleDllEnabled(_repo_id, dll_name, enabled) => {
             let db = app.db_path.clone();
             let wow = app.wow_dir.clone();
+            let use_dlls_txt = app.quick_add_client_family() == service::ClientFamily::Vanilla;
             Some(Task::perform(
-                service::set_dll_enabled(db, wow, dll_name, enabled),
+                service::set_dll_enabled(db, wow, dll_name, enabled, use_dlls_txt),
                 Message::ToggleDllEnabledResult,
             ))
         }
@@ -2253,6 +2290,22 @@ pub fn check_updates_task(app: &mut App) -> Task<Message> {
 
     Task::perform(
         service::check_updates_skip(db, wow, wuddle_engine::CheckMode::Force, skip),
+        Message::CheckUpdatesResult,
+    )
+}
+
+/// Re-check all repositories after a user explicitly selects a release.
+/// This intentionally bypasses the infrequent-repository skip list: the chosen
+/// release determines whether that row needs an install right now.
+fn check_updates_for_version_change_task(app: &App) -> Task<Message> {
+    let db = app.db_path.clone();
+    let wow = if app.wow_dir.is_empty() {
+        None
+    } else {
+        Some(app.wow_dir.clone())
+    };
+    Task::perform(
+        service::check_updates_skip(db, wow, wuddle_engine::CheckMode::Force, HashSet::new()),
         Message::CheckUpdatesResult,
     )
 }

@@ -1,5 +1,6 @@
 use iced::widget::{
-    button, canvas, checkbox, column, container, pick_list, row, rule, scrollable, stack, text,
+    button, canvas, checkbox, column, container, mouse_area, pick_list, row, rule, scrollable,
+    stack, text,
     Space,
 };
 use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
@@ -43,6 +44,9 @@ pub struct App {
 
     // GitHub auth
     pub github_token_input: String,
+    /// A credential-store error from startup or the last token operation.
+    /// Tokens themselves are never kept here or shown in the UI.
+    pub github_token_storage_error: Option<String>,
 
     // Tweaks
     pub tweaks: TweakState,
@@ -123,6 +127,9 @@ pub struct App {
 
     // Spinner animation tick (0..36, one full rotation = 36 ticks @ 80ms each)
     pub spinner_tick: usize,
+    /// Hover-only animation state for clipped collection names in the Add New sidebar.
+    pub collection_marquee_hovered: bool,
+    pub collection_marquee_tick: usize,
 
     // Add-repo dialog preview
     pub add_repo_preview: Option<service::RepoPreviewInfo>,
@@ -187,23 +194,19 @@ pub struct App {
 
 impl App {
     pub fn expansion_hint(&self) -> Option<&'static str> {
-        let info = self.tweak_client_info.as_ref()?;
-        let version = info
-            .file_version
-            .as_ref()
-            .or(info.product_version.as_ref())?;
-
-        if version.starts_with("1.") {
-            Some("vanilla")
-        } else if version.starts_with("2.") {
-            Some("tbc")
-        } else if version.starts_with("3.") {
-            Some("wotlk")
-        } else if version.starts_with("4.") {
-            Some("cata")
-        } else {
-            None
+        match self.quick_add_client_family() {
+            service::ClientFamily::Vanilla => Some("vanilla"),
+            service::ClientFamily::Tbc => Some("tbc"),
+            service::ClientFamily::Wotlk => Some("wotlk"),
+            service::ClientFamily::Unsupported | service::ClientFamily::Unknown => None,
         }
+    }
+
+    pub fn quick_add_client_family(&self) -> service::ClientFamily {
+        self.tweak_client_info
+            .as_ref()
+            .map(|info| info.quick_add_family)
+            .unwrap_or(service::ClientFamily::Unknown)
     }
 
     pub fn new() -> (Self, Task<Message>) {
@@ -211,7 +214,10 @@ impl App {
         let mut theme_colors = theme.colors();
         let opt_friz_font = false; // Default
         theme_colors.body_font = if opt_friz_font { FRIZ } else { NOTO };
-        let app = Self {
+        // Do this before the first API work. Errors are retained for Options
+        // instead of being silently treated as an anonymous session.
+        let github_token_storage_error = service::sync_github_token().err();
+        let mut app = Self {
             active_tab: Tab::default(),
             theme_colors,
             wuddle_theme: theme,
@@ -226,6 +232,7 @@ impl App {
             opt_clock12: false,
             opt_friz_font: false,
             github_token_input: String::new(),
+            github_token_storage_error,
             tweaks: TweakState::default(),
             log_lines: {
                 let mut lines = vec![LogLine {
@@ -300,6 +307,8 @@ impl App {
             infrequent_repo_ids: std::collections::HashSet::new(),
             profiles: vec![settings::ProfileConfig::default()],
             spinner_tick: 0,
+            collection_marquee_hovered: false,
+            collection_marquee_tick: 0,
             add_repo_preview: None,
             add_repo_preview_loading: false,
             add_repo_url_debounce_generation: 0,
@@ -341,8 +350,9 @@ impl App {
             markdown_gif_cache: HashMap::new(),
         };
 
-        // Sync GitHub token from keychain/env at startup
-        service::sync_github_token();
+        if let Some(error) = app.github_token_storage_error.clone() {
+            app.log(LogLevel::Error, &error);
+        }
 
         // Load settings synchronously (fast, local JSON), then kick off async repo load
         let settings_task =
@@ -383,6 +393,8 @@ impl App {
         self.add_repo_file_preview = None;
         self.add_repo_expanded_dirs.clear();
         self.add_repo_dir_contents.clear();
+        self.collection_marquee_hovered = false;
+        self.collection_marquee_tick = 0;
     }
 
     pub fn show_toast_with_action(
@@ -621,7 +633,7 @@ impl App {
             );
         }
 
-        if self.is_busy() || !self.toasts.is_empty() {
+        if self.is_busy() || !self.toasts.is_empty() || self.collection_marquee_hovered {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(80))
                     .map(|_| Message::SpinnerTick),
@@ -691,12 +703,13 @@ impl App {
         }
     }
 
-    /// Tab label with live update counts (matches Tauri behavior)
+    /// Compact top-bar labels. Update counts remain available on the Home and
+    /// project views, where they do not compete with profile controls.
     pub fn tab_label(&self, tab: Tab) -> String {
         match tab {
             Tab::Home => "Home".into(),
-            Tab::Mods => format!("Mods ({})", self.mod_update_count()),
-            Tab::Addons => format!("Addons ({})", self.addon_update_count()),
+            Tab::Mods => "Mods".into(),
+            Tab::Addons => "Addons".into(),
             Tab::Tweaks => "Tweaks".into(),
             _ => tab.icon_label().into(),
         }
@@ -899,6 +912,12 @@ impl App {
                     self.readme_editor_content.perform(action);
                 }
             }
+            Message::SetCollectionMarqueeHover(hovered) => {
+                self.collection_marquee_hovered = hovered;
+                if hovered {
+                    self.collection_marquee_tick = 0;
+                }
+            }
 
             // Dialogs
             Message::OpenDialog(d) => {
@@ -1077,6 +1096,16 @@ impl App {
                 });
                 self.log(LogLevel::Info, "Opened DXVK Configurator.");
             }
+            Message::PromptAwesomeWotlkPatch => {
+                self.open_menu = None;
+                self.dialog = Some(Dialog::AwesomeWotlkPatchWarning);
+            }
+            Message::PromptAwesomeWotlkPatchIfInstalled(is_awesome_wotlk) => {
+                if is_awesome_wotlk {
+                    self.open_menu = None;
+                    self.dialog = Some(Dialog::AwesomeWotlkPatchWarning);
+                }
+            }
             Message::SetDxvkField(field) => {
                 if let Some(Dialog::DxvkConfig { ref mut config, .. }) = self.dialog {
                     match field {
@@ -1238,7 +1267,8 @@ impl App {
                     Dialog::AddRepo { .. } => (1400u32, 16),
                     Dialog::InstanceSettings { .. } => (600u32, 24),
                     Dialog::Changelog { .. } => (720u32, 24),
-                    Dialog::AvWarning { .. }
+                    Dialog::AvWarning { .. } => (720u32, 24),
+                    Dialog::AwesomeWotlkPatchWarning
                     | Dialog::ModsWarning { .. }
                     | Dialog::CollectionChoice { .. }
                     | Dialog::SelectReleaseAsset { .. }
@@ -1273,21 +1303,38 @@ impl App {
                 }
             };
 
-            let scrim = iced::widget::mouse_area(
-                container(Space::new())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .style(|_theme| theme::scrim_style()),
-            )
-            .on_press(Message::CloseDialog);
+            // Browsing/configuration dialogs may be abandoned by clicking the
+            // backdrop. Confirmation and warning dialogs deliberately remain
+            // modal, so an accidental background click cannot dismiss them.
+            let dismiss_on_backdrop = matches!(
+                dialog,
+                Dialog::AddRepo { .. }
+                    | Dialog::Changelog { .. }
+                    | Dialog::DxvkConfig { .. }
+                    | Dialog::InstanceSettings { .. }
+                    | Dialog::CollectionChoice { .. }
+                    | Dialog::SelectMainAddon { .. }
+                    | Dialog::SelectReleaseAsset { .. }
+            );
+            let scrim_base = container(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_theme| theme::scrim_style());
+            let scrim: Element<Message> = if dismiss_on_backdrop {
+                iced::widget::mouse_area(scrim_base)
+                    .on_press(Message::CloseDialog)
+                    .into()
+            } else {
+                scrim_base.into()
+            };
 
             // 40px margin on all sides \u{2248} 90% of a typical window
-            let centered_dialog = iced::widget::opaque(
-                container(dialog_box)
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill)
-                    .padding(40),
-            );
+            // Only the dialog itself is opaque. The surrounding padded area is
+            // left to the scrim so routine dialogs can close on a backdrop click.
+            let centered_dialog = container(iced::widget::opaque(dialog_box))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .padding(40);
 
             // Use opaque() to make the entire overlay absorb ALL mouse events,
             // preventing any interaction with main_content while the dialog is open.
@@ -1462,7 +1509,7 @@ impl App {
                 let placeholder = if is_addons {
                     "(e.g. https://github.com/pepopo978/BigWigs)"
                 } else {
-                    "(e.g. https://gitea.com/avitasia/nampower)"
+                    "(e.g. https://gitea.com/jilinge2/nampower)"
                 };
 
                 // --- URL input with inline clear (\u{2715}) button ---
@@ -2156,36 +2203,122 @@ impl App {
                                     .style(move |_t| theme::update_line_style(c_divider))
                                     .into(),
                             );
-                            let files_label: Element<Message> = if detected_collection_addons
-                                .is_empty()
+                            let mut collection_entries = self
+                                .add_repo_probe
+                                .as_ref()
+                                .filter(|probe| treat_preview_as_collection && probe.addon_names.len() > 1)
+                                .map(|probe| probe.addon_names.clone())
+                                .unwrap_or_default();
+                            if collection_entries.is_empty() && treat_preview_as_collection {
+                                collection_entries.extend(
+                                    preview
+                                        .files
+                                        .iter()
+                                        .filter(|entry| entry.is_dir)
+                                        .map(|entry| entry.path.clone()),
+                                );
+                            }
+                            collection_entries.sort_by_key(|name| name.to_ascii_lowercase());
+                            collection_entries
+                                .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+
+                            let all_collection_entries_selected = !collection_entries.is_empty()
+                                && collection_entries.iter().all(|entry| {
+                                    let entry_path = entry.trim().trim_matches('/');
+                                    let entry_key = service::normalize_collection_entry_key(entry);
+                                    self.add_repo_selected_addons.iter().any(|selected| {
+                                        selected
+                                            .trim()
+                                            .trim_matches('/')
+                                            .eq_ignore_ascii_case(entry_path)
+                                            || service::normalize_collection_entry_key(selected)
+                                                == entry_key
+                                    })
+                                });
+
+                            let files_label: Element<Message> = if treat_preview_as_collection
+                                || manage_mode
                             {
-                                if manage_mode {
+                                let selected_count = self.add_repo_selected_addons.len();
+                                let select_entries = collection_entries.clone();
+                                let select_label = if all_collection_entries_selected {
+                                    "All selected"
+                                } else {
+                                    "Select all"
+                                };
+                                let c_select = c;
+                                let c_clear = c;
+                                column![
                                     row![
                                         text("Files").size(12).color(colors.muted),
                                         Space::new().width(Length::Fill),
-                                        text(
-                                            "Use the checkbox to keep or remove collection folders"
-                                        )
-                                        .size(11)
-                                        .color(colors.link),
+                                        text(format!("{} selected", selected_count))
+                                            .size(11)
+                                            .color(colors.text_soft),
                                     ]
-                                    .align_y(iced::Alignment::Center)
-                                    .into()
-                                } else {
-                                    text("Files").size(12).color(colors.muted).into()
-                                }
-                            } else {
-                                row![
-                                    text("Files").size(12).color(colors.muted),
-                                    Space::new().width(Length::Fill),
-                                    text("Use the checkbox to keep or remove collection folders")
-                                        .size(11)
-                                        .color(colors.link),
+                                    .align_y(iced::Alignment::Center),
+                                    row![
+                                        button(
+                                            container(text(select_label).size(13))
+                                                .width(Length::Fill)
+                                                .align_x(iced::Alignment::Center),
+                                        )
+                                            .on_press(Message::SetCollectionSelection(select_entries))
+                                            .padding([6, 8])
+                                            .width(Length::Fill)
+                                            .style(move |_t, status| match status {
+                                                button::Status::Hovered => theme::tab_button_hovered_style(c_select),
+                                                _ => theme::tab_button_style(c_select),
+                                            }),
+                                        button(
+                                            container(text("Clear all").size(13))
+                                                .width(Length::Fill)
+                                                .align_x(iced::Alignment::Center),
+                                        )
+                                            .on_press(Message::SetCollectionSelection(Vec::new()))
+                                            .padding([6, 8])
+                                            .width(Length::Fill)
+                                            .style(move |_t, status| match status {
+                                                button::Status::Hovered => theme::tab_button_hovered_style(c_clear),
+                                                _ => theme::tab_button_style(c_clear),
+                                            }),
+                                    ]
+                                    .spacing(6)
+                                    .align_y(iced::Alignment::Center),
                                 ]
-                                .align_y(iced::Alignment::Center)
+                                .spacing(4)
                                 .into()
+                            } else {
+                                text("Files").size(12).color(colors.muted).into()
                             };
                             sidebar_col.push(files_label);
+
+                            let collection_file_label =
+                                |label: String, full_name: String, color: Color| -> Element<Message> {
+                                    // Do not animate ordinary labels. Overflowed names get both a
+                                    // calm marquee and a full-name tooltip for immediate access.
+                                    let may_overflow = label.chars().count() > 24;
+                                    let label_canvas = canvas(HoverMarqueeCanvas {
+                                        content: label,
+                                        tick: self.collection_marquee_tick,
+                                        color,
+                                        font_size: 13.0,
+                                    })
+                                    .width(Length::Fill)
+                                    .height(22);
+                                    if may_overflow {
+                                        tip(
+                                            mouse_area(label_canvas)
+                                                .on_enter(Message::SetCollectionMarqueeHover(true))
+                                                .on_exit(Message::SetCollectionMarqueeHover(false)),
+                                            &full_name,
+                                            iced::widget::tooltip::Position::Top,
+                                            c,
+                                        )
+                                    } else {
+                                        label_canvas.into()
+                                    }
+                                };
 
                             let mut sorted_files = preview.files.clone();
                             sorted_files.sort_by(|a, b| {
@@ -2275,13 +2408,14 @@ impl App {
                                                 .width(Length::Shrink)
                                                 .into();
                                         let folder_label_button = button(
-                                            text(format!("{} {}", folder_icon, f.name))
-                                                .size(12)
-                                                .color(colors.text)
-                                                .wrapping(iced::advanced::text::Wrapping::None),
+                                            collection_file_label(
+                                                format!("{} {}", folder_icon, f.name),
+                                                f.name.clone(),
+                                                colors.text,
+                                            ),
                                         )
                                         .on_press(Message::ToggleAddRepoDir(path.clone()))
-                                        .padding([2, 4])
+                                        .padding([3, 4])
                                         .width(Length::Fill)
                                         .style(move |_t, status| match status {
                                             button::Status::Hovered => button::Style {
@@ -2307,13 +2441,14 @@ impl App {
                                             .into()
                                     } else {
                                         let folder_label_button = button(
-                                            text(format!("{} {}", folder_icon, f.name))
-                                                .size(12)
-                                                .color(colors.text)
-                                                .wrapping(iced::advanced::text::Wrapping::None),
+                                            collection_file_label(
+                                                format!("{} {}", folder_icon, f.name),
+                                                f.name.clone(),
+                                                colors.text,
+                                            ),
                                         )
                                         .on_press(Message::ToggleAddRepoDir(path.clone()))
-                                        .padding([2, 4])
+                                        .padding([3, 4])
                                         .width(Length::Fill)
                                         .style(move |_t, status| match status {
                                             button::Status::Hovered => button::Style {
@@ -2422,18 +2557,17 @@ impl App {
                                                             .width(Length::Shrink)
                                                             .into();
                                                     let child_label_button = button(
-                                                        text(format!(
-                                                            "{} {}",
-                                                            child_icon, child.name
-                                                        ))
-                                                        .size(11)
-                                                        .color(child_color)
-                                                        .wrapping(
-                                                            iced::advanced::text::Wrapping::None,
+                                                        collection_file_label(
+                                                            format!(
+                                                                "{} {}",
+                                                                child_icon, child.name
+                                                            ),
+                                                            child.name.clone(),
+                                                            child_color,
                                                         ),
                                                     )
                                                     .on_press(child_msg)
-                                                    .padding([1, 4])
+                                                    .padding([3, 4])
                                                     .width(Length::Fill)
                                                     .style(move |_t, status| match status {
                                                         button::Status::Hovered => button::Style {
@@ -2467,18 +2601,17 @@ impl App {
                                                     .into()
                                                 } else {
                                                     let child_label_button = button(
-                                                        text(format!(
-                                                            "{} {}",
-                                                            child_icon, child.name
-                                                        ))
-                                                        .size(11)
-                                                        .color(child_color)
-                                                        .wrapping(
-                                                            iced::advanced::text::Wrapping::None,
+                                                        collection_file_label(
+                                                            format!(
+                                                                "{} {}",
+                                                                child_icon, child.name
+                                                            ),
+                                                            child.name.clone(),
+                                                            child_color,
                                                         ),
                                                     )
                                                     .on_press(child_msg)
-                                                    .padding([1, 4])
+                                                    .padding([3, 4])
                                                     .width(Length::Fill)
                                                     .style(move |_t, status| match status {
                                                         button::Status::Hovered => button::Style {
@@ -2586,13 +2719,14 @@ impl App {
                                                                         .width(Length::Shrink)
                                                                         .into();
                                                                     let gc_label_button = button(
-                                                                    text(format!("{} {}", gc_icon, gc.name))
-                                                                        .size(11)
-                                                                        .color(gc_color)
-                                                                        .wrapping(iced::advanced::text::Wrapping::None),
+                                                                    collection_file_label(
+                                                                        format!("{} {}", gc_icon, gc.name),
+                                                                        gc.name.clone(),
+                                                                        gc_color,
+                                                                    ),
                                                                 )
                                                                 .on_press(gc_msg)
-                                                                .padding([1, 4])
+                                                                .padding([3, 4])
                                                                 .width(Length::Fill)
                                                                 .style(move |_t, status| match status {
                                                                     button::Status::Hovered => button::Style {
@@ -2624,13 +2758,14 @@ impl App {
                                                                     .into()
                                                                 } else {
                                                                     let gc_label_button = button(
-                                                                    text(format!("{} {}", gc_icon, gc.name))
-                                                                        .size(11)
-                                                                        .color(gc_color)
-                                                                        .wrapping(iced::advanced::text::Wrapping::None),
+                                                                    collection_file_label(
+                                                                        format!("{} {}", gc_icon, gc.name),
+                                                                        gc.name.clone(),
+                                                                        gc_color,
+                                                                    ),
                                                                 )
                                                                 .on_press(gc_msg)
-                                                                .padding([1, 4])
+                                                                .padding([3, 4])
                                                                 .width(Length::Fill)
                                                                 .style(move |_t, status| match status {
                                                                     button::Status::Hovered => button::Style {
@@ -2703,13 +2838,14 @@ impl App {
                                 } else {
                                     file_rows.push(
                                         button(
-                                            text(format!("\u{1f4c4} {}", f.name))
-                                                .size(12)
-                                                .color(colors.text_soft)
-                                                .wrapping(iced::advanced::text::Wrapping::None),
+                                            collection_file_label(
+                                                format!("\u{1f4c4} {}", f.name),
+                                                f.name.clone(),
+                                                colors.text_soft,
+                                            ),
                                         )
                                         .on_press(Message::PreviewRepoFile(path))
-                                        .padding([2, 4])
+                                        .padding([3, 4])
                                         .style(move |_t, status| match status {
                                             button::Status::Hovered => button::Style {
                                                 background: Some(iced::Background::Color(
@@ -2736,7 +2872,7 @@ impl App {
                             // Files fill remaining sidebar height
                             sidebar_col.push(
                                 iced::widget::scrollable(
-                                    column(file_rows).spacing(1).width(Length::Fill),
+                                    column(file_rows).spacing(3).width(Length::Fill),
                                 )
                                 .width(Length::Fill)
                                 .height(Length::Fill)
@@ -2861,8 +2997,27 @@ impl App {
                         // Show release notes or loading indicator
                         if let Some(ref releases) = self.add_repo_release_notes {
                             if releases.is_empty() {
-                                container(text("No releases found.").size(13).color(colors.muted))
-                                    .padding([8, 0])
+                                container(
+                                    container(text("No releases found.").size(13).color(colors.muted))
+                                        .width(Length::Fill)
+                                        .height(Length::Fill)
+                                        .align_x(iced::Alignment::Center)
+                                        .align_y(iced::Alignment::Center),
+                                )
+                                    .width(Length::Fill)
+                                    .height(Length::Fill)
+                                    .padding(8)
+                                    .style(move |_t| container::Style {
+                                        background: Some(iced::Background::Color(
+                                            iced::Color::from_rgba(0.0, 0.0, 0.0, 0.38),
+                                        )),
+                                        border: iced::Border {
+                                            color: c_form.border,
+                                            width: 1.0,
+                                            radius: iced::border::Radius::from(0),
+                                        },
+                                        ..Default::default()
+                                    })
                                     .into()
                             } else {
                                 let c_rl = c_form;
@@ -3130,8 +3285,11 @@ impl App {
                         .padding([12, 0])
                         .into()
                     } else if !is_addons && url.trim().is_empty() {
-                        // Quick Add preset list (mods tab only, when no URL entered)
-                        build_quick_add_presets(&self.repos, colors)
+                        build_quick_add_presets(
+                            &self.repos,
+                            self.quick_add_client_family(),
+                            colors,
+                        )
                     } else {
                         Space::new().height(0).into()
                     };
@@ -3141,7 +3299,13 @@ impl App {
                             let section_label: Element<Message> = if is_addons {
                                 Space::new().height(0).into()
                             } else {
-                                text("Quick Add").size(12).color(colors.muted).into()
+                                text(format!(
+                                    "Quick Add · {}",
+                                    self.quick_add_client_family().label()
+                                ))
+                                .size(12)
+                                .color(colors.muted)
+                                .into()
                             };
                             column![
                                 section_label,
@@ -3820,6 +3984,68 @@ impl App {
                 &self.dxvk_preview_content,
                 colors,
             ),
+            Dialog::AwesomeWotlkPatchWarning => {
+                let forge_url = "https://github.com/noname08662/awesome_wotlk".to_string();
+                let forge_button = tip(
+                    button(
+                        row![
+                            text("Open on").size(14).color(c.text),
+                            iced::widget::svg(forge_svg_handle(
+                                "github",
+                                "https://github.com/noname08662/awesome_wotlk",
+                            ))
+                            .width(15)
+                            .height(15)
+                            .style(move |_t, _s| iced::widget::svg::Style {
+                                color: Some(c.text),
+                            }),
+                        ]
+                        .spacing(5)
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .on_press(Message::OpenUrl(forge_url))
+                    .padding([8, 12])
+                    .style(move |_t, status| match status {
+                        button::Status::Hovered => theme::tab_button_hovered_style(c),
+                        _ => theme::tab_button_style(c),
+                    }),
+                    "Open Awesome WotLK's repository in your browser",
+                    iced::widget::tooltip::Position::Top,
+                    colors,
+                );
+                column![
+                row![
+                    text("Patch WoW.exe with Awesome WotLK?").size(18).color(colors.title),
+                    Space::new().width(Length::Fill),
+                    close_button(c),
+                ]
+                .align_y(iced::Alignment::Center),
+                text("Awesome WotLK's patch tool permanently modifies the selected WoW.exe. Make sure the game is closed before continuing.")
+                    .size(13)
+                    .color(colors.text),
+                text("If you proceed, Wuddle will create original_wow.exe from your current WoW.exe only when that backup does not already exist. It will then run AwesomeWotlkPatch.exe with WoW.exe as its target.")
+                    .size(12)
+                    .color(colors.warn),
+                row![
+                    forge_button,
+                    Space::new().width(Length::Fill),
+                    button(text("Cancel").size(13))
+                        .on_press(Message::CloseDialog)
+                        .padding([6, 14])
+                        .style(move |_theme, status| match status {
+                            button::Status::Hovered => theme::tab_button_hovered_style(c),
+                            _ => theme::tab_button_style(c),
+                        }),
+                    button(text("Back up and patch").size(13))
+                        .on_press(Message::RunAwesomeWotlkPatch)
+                        .padding([6, 14])
+                        .style(move |_theme, _status| theme::tab_button_active_style(c)),
+                ]
+                .spacing(8),
+                ]
+                .spacing(14)
+                .into()
+            },
             Dialog::AvWarning { url, mode } => av_false_positive_warning(url, mode, colors),
             Dialog::ModsWarning { do_not_show_again } => {
                 mods_warning::view(*do_not_show_again, colors)
@@ -4317,7 +4543,9 @@ impl App {
             .width(if is_icon || is_unicode_icon {
                 Length::Fixed(32.0)
             } else {
-                Length::Fixed(114.0)
+                // Compact labels prevent the centered tab strip from crowding
+                // the profile selector and action buttons at larger UI scales.
+                Length::Fixed(96.0)
             });
 
         let styled_btn: Element<Message> = if is_active {

@@ -7,12 +7,12 @@ on:
 
 jobs:
   # ------------------------------------------------------------------
-  # Guard: only proceed if the tag commit is reachable from
-  # main. This keeps the Iced workflow from firing on
-  # stable Tauri tags (which live on main).
+  # Guard: build tags from main, plus prerelease tags from beta. This keeps
+  # the Iced workflow separate from stable Tauri tags while allowing testers
+  # to receive packaged beta updates.
   # ------------------------------------------------------------------
   guard:
-    name: Check tag is on main
+    name: Check release tag branch
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
@@ -24,15 +24,27 @@ jobs:
       - id: check
         run: |
           set -euo pipefail
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main || true
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main \
+            +refs/heads/beta:refs/remotes/origin/beta || true
           TAG_SHA="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
+          ON_MAIN=false
+          ON_BETA_PRERELEASE=false
           if git show-ref --verify --quiet refs/remotes/origin/main && \
              git merge-base --is-ancestor "${TAG_SHA}" origin/main; then
+            ON_MAIN=true
+          fi
+          if [[ "${GITHUB_REF_NAME}" == *-* ]] && \
+             git show-ref --verify --quiet refs/remotes/origin/beta && \
+             git merge-base --is-ancestor "${TAG_SHA}" origin/beta; then
+            ON_BETA_PRERELEASE=true
+          fi
+          if [[ "${ON_MAIN}" == true || "${ON_BETA_PRERELEASE}" == true ]]; then
             echo "should_build=true" >> "${GITHUB_OUTPUT}"
-            echo "Tag ${GITHUB_REF_NAME} is on main — building Iced release."
+            echo "Tag ${GITHUB_REF_NAME} is on a release branch — building Iced release."
           else
             echo "should_build=false" >> "${GITHUB_OUTPUT}"
-            echo "Tag ${GITHUB_REF_NAME} is not on main — skipping Iced build."
+            echo "Tag ${GITHUB_REF_NAME} is not on main or beta prerelease — skipping Iced build."
           fi
 
   # ------------------------------------------------------------------
@@ -252,7 +264,8 @@ jobs:
       - name: Extract changelog section
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          python3 - "${VERSION}" << 'PYEOF' > dist/RELEASE_BODY.md
+          CHANGELOG_VERSION="${VERSION%%-*}"
+          python3 - "${CHANGELOG_VERSION}" << 'PYEOF' > dist/RELEASE_BODY.md
           import sys, re
           version = sys.argv[1]
           with open('CHANGELOG.md') as f:
@@ -268,7 +281,7 @@ jobs:
       - name: Publish pre-release
         uses: softprops/action-gh-release@v2
         with:
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: false
           body_path: dist/RELEASE_BODY.md
           files: |

@@ -107,6 +107,7 @@ pub enum Dialog {
     },
     Changelog { title: String, items: Vec<iced::widget::markdown::Item>, loading: bool },
     DxvkConfig { config: DxvkConfig, show_preview: bool },
+    AwesomeWotlkPatchWarning,
     DllCountWarning {
         repo_id: i64,
         repo_name: String,

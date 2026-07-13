@@ -267,7 +267,10 @@ fn standard_app_dir() -> Result<PathBuf, String> {
         .join("wuddle"))
 }
 
-fn portable_mode_enabled() -> bool {
+/// Whether Wuddle should keep its data beside the executable instead of in the
+/// platform application-data directory. This is shared with credential storage
+/// so settings, databases, and the portable token file always use one mode.
+pub fn portable_mode_enabled() -> bool {
     let env_enabled = std::env::var("WUDDLE_PORTABLE")
         .ok()
         .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))

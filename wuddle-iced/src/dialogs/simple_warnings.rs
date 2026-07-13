@@ -6,7 +6,7 @@ use iced::widget::{button, column, container, row, scrollable, text, Space};
 use iced::{Element, Length};
 use iced::{Background, Border, Color};
 use crate::{Message, theme};
-use crate::components::helpers::close_button;
+use crate::components::helpers::{close_button, forge_svg_handle, tip};
 use theme::ThemeColors;
 
 fn action_banner_style(colors: ThemeColors, background: Color) -> iced::widget::container::Style {
@@ -112,6 +112,40 @@ pub fn av_false_positive_warning<'a>(
     colors: ThemeColors,
 ) -> Element<'a, Message> {
     let c = colors;
+    let forge = crate::service::parse_forge_url(url)
+        .map(|info| info.forge)
+        .unwrap_or("gitea");
+    let forge_url = url.to_string();
+    let forge_icon = forge_svg_handle(forge, url);
+    let forge_button = tip(
+        button(
+            row![
+                text("Open on").size(14).color(c.text),
+                iced::widget::svg(forge_icon)
+                    .width(15)
+                    .height(15)
+                    .style(move |_t, _s| iced::widget::svg::Style {
+                        color: Some(c.text),
+                    }),
+            ]
+            .spacing(5)
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press(Message::OpenUrl(forge_url))
+        .padding([8, 12])
+        .style(move |_t, status| match status {
+            button::Status::Hovered => theme::tab_button_hovered_style(c),
+            _ => theme::tab_button_style(c),
+        }),
+        "Open this mod's repository in your browser",
+        iced::widget::tooltip::Position::Top,
+        colors,
+    );
+    let source_notice = if url.contains("github.com/suprepupre/wow-optimize") {
+        "Wuddle is not affiliated with wow-optimize or its author, and does not endorse, audit, or accept responsibility for the mod's behavior. Only continue if you trust its repository author."
+    } else {
+        "Only proceed if you trust the repository author and understand the mod's behavior."
+    };
     column![
         row![
             text("Anti-Virus Warning").size(18).color(colors.title),
@@ -124,20 +158,19 @@ pub fn av_false_positive_warning<'a>(
             .color(colors.text),
         Space::new().height(Length::Fixed(10.0)),
         container(
-            scrollable(
-                column![
-                    text("Wuddle has detected that this mod contains files that may be flagged by anti-virus software as 'False Positives'. This is common for WoW modifications like SuperWoW that patch game memory.").size(14).color(colors.text),
-                    Space::new().height(Length::Fixed(8.0)),
-                    text("While we have checked this source, you should only proceed if you trust the repository author.").size(14).color(colors.text_soft),
-                ]
-            )
-            .height(Length::Fixed(100.0))
+            column![
+                text("Various client mods can unavoidably trigger anti-virus heuristics (for example, SuperWoW). This does not mean you will see a warning, but it is likely.").size(14).color(colors.text),
+                Space::new().height(Length::Fixed(8.0)),
+                text(source_notice).size(14).color(colors.warn),
+            ]
+            .spacing(2)
         )
         .padding(15)
         .width(Length::Fill)
         .style(move |_theme| theme::card_style(c)),
         Space::new().height(Length::Fixed(15.0)),
         row![
+            forge_button,
             Space::new().width(Length::Fill),
             button(text("Cancel").size(14))
                 .on_press(Message::CloseDialog)

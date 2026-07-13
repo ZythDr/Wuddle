@@ -258,7 +258,9 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     );
 
     // --- GitHub Authentication section ---
-    let (token_status, token_status_color) = if wuddle_engine::github_token().is_some() {
+    let (token_status, token_status_color) = if app.github_token_storage_error.is_some() {
+        ("Saved token unavailable", colors.bad)
+    } else if wuddle_engine::github_token().is_some() {
         ("Token active (authenticated)", colors.good)
     } else if app.github_token_input.is_empty() {
         ("No token set", colors.muted)
@@ -299,8 +301,13 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 {
                     let c2 = c;
                     let show_clear = !app.github_token_input.is_empty();
+                    let placeholder = if wuddle_engine::github_token().is_some() {
+                        "Saved securely — enter a replacement"
+                    } else {
+                        "ghp_..."
+                    };
                     stack![
-                        text_input("ghp_...", &app.github_token_input)
+                        text_input(placeholder, &app.github_token_input)
                             .on_input(Message::SetGithubTokenInput)
                             .width(Length::Fill)
                             .padding(iced::Padding { top: 8.0, right: if show_clear { 28.0 } else { 12.0 }, bottom: 8.0, left: 12.0 }),
@@ -362,6 +369,14 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
             .spacing(8)
             .align_y(iced::Alignment::Center),
             text(token_status).size(12).color(token_status_color),
+            {
+                let error_detail: Element<Message> = if let Some(error) = app.github_token_storage_error.as_deref() {
+                    text(error).size(12).color(colors.bad).into()
+                } else {
+                    Space::new().height(0).into()
+                };
+                error_detail
+            },
         ]
         .spacing(8),
         c,

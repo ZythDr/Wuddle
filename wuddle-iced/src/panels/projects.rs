@@ -1510,6 +1510,7 @@ fn name_cell_with_expand<'a>(
     let dll_count = repo.installed_dlls.len();
 
     let show_dxvk_badge = is_dxvk_repo(&repo.name);
+    let show_wow_optimize_badge = is_wow_optimize_repo(&repo.name);
 
     let title_row: Element<Message> = if is_multi_dll {
         let chevron_bytes: &[u8] = match is_expanded {
@@ -1588,12 +1589,28 @@ fn name_cell_with_expand<'a>(
                     .into(),
             );
         }
+        if show_wow_optimize_badge {
+            let c2 = c;
+            title_items.push(Space::new().width(6).into());
+            title_items.push(
+                button(text("⚙ Configure").size(10).color(c2.link))
+                    .on_press(Message::LaunchWowOptimize)
+                    .padding([2, 6])
+                    .style(move |_t, status| dxvk_badge_style(status, c2))
+                    .into(),
+            );
+        }
         row(title_items).align_y(iced::Alignment::Center).into()
-    } else if show_dxvk_badge {
-        // Non-multi-DLL DXVK repo: show the configure badge next to the title
+    } else if show_dxvk_badge || show_wow_optimize_badge {
+        // Non-multi-DLL mod: show its companion action next to the title.
         let c2 = c;
-        let dxvk_badge = button(text("\u{2699} DXVK conf").size(10).color(c2.link))
-            .on_press(Message::OpenDxvkConfig)
+        let (label, message, color) = if show_dxvk_badge {
+            ("\u{2699} DXVK conf", Message::OpenDxvkConfig, c2.link)
+        } else {
+            ("⚙ Configure", Message::LaunchWowOptimize, c2.link)
+        };
+        let dxvk_badge = button(text(label).size(10).color(color))
+            .on_press(message)
             .padding([2, 6])
             .style(move |_t, status| dxvk_badge_style(status, c2));
         row![title_btn, Space::new().width(8), dxvk_badge]
@@ -1941,6 +1958,14 @@ fn sort_header_button<'a>(label: &str, key: SortKey, colors: ThemeColors) -> Ele
 /// Used to show the DXVK badge button and context-menu item.
 pub fn is_dxvk_repo(name: &str) -> bool {
     name.to_lowercase().contains("dxvk")
+}
+
+pub fn is_wow_optimize_repo(name: &str) -> bool {
+    name.eq_ignore_ascii_case("wow-optimize") || name.eq_ignore_ascii_case("wow_optimize")
+}
+
+pub fn is_awesome_wotlk_repo(name: &str) -> bool {
+    name.eq_ignore_ascii_case("awesome_wotlk") || name.eq_ignore_ascii_case("awesome wotlk")
 }
 
 /// Button style for the ⚙ DXVK conf badge, shared across multi-DLL and single-DLL rows.

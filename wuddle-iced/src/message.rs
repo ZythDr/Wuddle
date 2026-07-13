@@ -140,6 +140,7 @@ pub enum Message {
     FetchCollectionProbe(String),
     FetchCollectionProbeResult(String, Result<wuddle_engine::AddonProbeResult, String>),
     SetAddRepoCollectionMode(bool),
+    SetCollectionSelection(Vec<String>),
     ToggleCollectionFolder(String),
     ToggleCollectionAddon(String),
     SaveCollectionSelection,
@@ -246,6 +247,7 @@ pub enum Message {
 
     // Spinner animation
     SpinnerTick,
+    SetCollectionMarqueeHover(bool),
 
     // Selectable log view
     LogEditorAction(iced::widget::text_editor::Action),
@@ -256,6 +258,12 @@ pub enum Message {
 
     // DXVK config dialog
     OpenDxvkConfig,
+    LaunchWowOptimize,
+    LaunchWowOptimizeResult(Result<String, String>),
+    PromptAwesomeWotlkPatch,
+    PromptAwesomeWotlkPatchIfInstalled(bool),
+    RunAwesomeWotlkPatch,
+    RunAwesomeWotlkPatchResult(Result<String, String>),
     SetDxvkField(DxvkField),
     SaveDxvkConfig,
     DxvkConfigSaved(Result<(), String>),

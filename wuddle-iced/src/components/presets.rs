@@ -8,7 +8,7 @@ use iced::widget::{button, column, container, row, text, Space};
 use iced::{Element, Length};
 
 use crate::Message;
-use crate::service::RepoRow;
+use crate::service::{ClientFamily, RepoRow};
 use crate::theme::{self, ThemeColors};
 use crate::components::helpers::{badge_tag, tip};
 
@@ -26,7 +26,16 @@ pub struct Preset {
     pub companion_links: &'static [(&'static str, &'static str)],
     pub expanded_notes: &'static [&'static str],
     pub is_addon: bool,
+    pub supported_clients: &'static [ClientFamily],
 }
+
+const VANILLA: &[ClientFamily] = &[ClientFamily::Vanilla];
+const LEGACY_DXVK: &[ClientFamily] = &[
+    ClientFamily::Vanilla,
+    ClientFamily::Tbc,
+    ClientFamily::Wotlk,
+];
+const WOTLK: &[ClientFamily] = &[ClientFamily::Wotlk];
 
 pub const WEIRD_UTILS_DLLS: [&str; 11] = [
     "weirdutils.dll", "worldmarkers.dll", "pngscreenshots.dll", "transmogfix.dll", "customassets.dll", 
@@ -64,6 +73,7 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
             companion_links: &[],
             expanded_notes: &[],
             is_addon: false,
+            supported_clients: VANILLA,
         },
         Preset {
             name: "Interact",
@@ -75,6 +85,7 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
             companion_links: &[],
             expanded_notes: &[],
             is_addon: false,
+            supported_clients: VANILLA,
         },
         Preset {
             name: "UnitXP_SP3",
@@ -86,17 +97,19 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
             companion_links: &[],
             expanded_notes: &[],
             is_addon: true,
+            supported_clients: VANILLA,
         },
         Preset {
             name: "nampower",
-            url: "https://gitea.com/avitasia/nampower",
+            url: "https://gitea.com/jilinge2/nampower",
             description: "Addresses a 1.12 client casting limitation where follow-up casts wait on round-trip completion feedback. The result is reduced cast downtime and better effective DPS, especially on higher-latency connections.",
             categories: &["API"],
             recommended: true,
             warning: None,
-            companion_links: &[("nampowersettings", "https://gitea.com/avitasia/nampowersettings")],
+            companion_links: &[("NampowerSettings", "https://gitea.com/jilinge2/NampowerSettings")],
             expanded_notes: &[],
             is_addon: false,
+            supported_clients: VANILLA,
         },
         Preset {
             name: "SuperWoW",
@@ -115,6 +128,7 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
                 "SuperAPI_Castlib adds default-style nameplate castbars. If you're using pfUI/shaguplates, you do not need this module.",
             ],
             is_addon: false,
+            supported_clients: VANILLA,
         },
         Preset {
             name: "DXVK (GPLAsync fork)",
@@ -126,17 +140,43 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
             companion_links: &[],
             expanded_notes: &[],
             is_addon: false,
+            supported_clients: LEGACY_DXVK,
+        },
+        Preset {
+            name: "wow-optimize",
+            url: "https://github.com/suprepupre/wow-optimize",
+            description: "Engine-level performance optimization for standard WoW 3.3.5a clients. Wuddle installs the proxy DLLs and the bundled launcher; use the launcher badge in the Mods list to configure features, profiles, and launch WoW.",
+            categories: &["Performance"],
+            recommended: false,
+            warning: Some("wow-optimize uses DLL injection and may trigger antivirus alerts on Windows."),
+            companion_links: &[],
+            expanded_notes: &[],
+            is_addon: false,
+            supported_clients: WOTLK,
+        },
+        Preset {
+            name: "Awesome WotLK",
+            url: "https://github.com/noname08662/awesome_wotlk",
+            description: "A WoW 3.3.5a improvements library with rendering, API, and quality-of-life enhancements. After installation, run its patch tool once from Wuddle to patch the selected WoW.exe.",
+            categories: &["QoL", "API"],
+            recommended: false,
+            warning: Some("Awesome WotLK permanently patches WoW.exe. Wuddle will always ask for confirmation before launching its patch tool."),
+            companion_links: &[],
+            expanded_notes: &[],
+            is_addon: false,
+            supported_clients: WOTLK,
         },
         Preset {
             name: "perf_boost",
-            url: "https://gitea.com/avitasia/perf_boost",
+            url: "https://gitea.com/jilinge2/perf_boost",
             description: "Performance-focused DLL for WoW 1.12.1 intended to improve FPS in crowded areas and raids. Uses advanced render-distance controls.",
             categories: &["Performance"],
             recommended: false,
             warning: None,
-            companion_links: &[("PerfBoostSettings", "https://gitea.com/avitasia/PerfBoostSettings")],
+            companion_links: &[("PerfBoostSettings", "https://gitea.com/jilinge2/PerfBoostSettings")],
             expanded_notes: &[],
             is_addon: false,
+            supported_clients: VANILLA,
         },
         Preset {
             name: "VanillaHelpers",
@@ -148,6 +188,7 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
             companion_links: &[],
             expanded_notes: &[],
             is_addon: false,
+            supported_clients: VANILLA,
         },
         Preset {
             name: "WeirdUtils",
@@ -159,6 +200,7 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
             companion_links: &[],
             expanded_notes: &[],
             is_addon: false,
+            supported_clients: VANILLA,
         },
     ]
 }
@@ -176,11 +218,23 @@ pub fn is_av_false_positive(url: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Build the Quick Add preset card list (shown when URL input is empty in mods dialog).
-pub fn build_quick_add_presets<'a>(repos: &[RepoRow], colors: ThemeColors) -> Element<'a, Message> {
+pub fn build_quick_add_presets<'a>(
+    repos: &[RepoRow],
+    family: ClientFamily,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
     let c = colors;
 
     let presets = create_quick_add_presets();
-    let cards: Vec<Element<Message>> = presets.iter().map(|preset| {
+    let cards: Vec<Element<Message>> = presets
+        .iter()
+        // DXVK is the sole shared fallback. Wuddle installs its existing D3D9
+        // setup; D3D11 support for modern WoW clients remains intentionally out
+        // of scope until it has a dedicated installer path.
+        .filter(|preset| {
+            preset.name.starts_with("DXVK") || preset.supported_clients.contains(&family)
+        })
+        .map(|preset| {
         let already_installed = repos.iter().any(|r| {
             r.url.trim_end_matches('/').eq_ignore_ascii_case(preset.url.trim_end_matches('/'))
         });
@@ -339,7 +393,8 @@ pub fn build_quick_add_presets<'a>(repos: &[RepoRow], colors: ThemeColors) -> El
             .padding([10, 14])
             .style(move |_t| theme::card_style(c))
             .into()
-    }).collect();
+        })
+        .collect();
 
     column(cards).spacing(6).width(Length::Fill).into()
 }

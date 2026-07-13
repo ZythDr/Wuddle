@@ -359,6 +359,83 @@ pub struct ClientVersionInfo {
     pub file_version: Option<String>,
     pub product_version: Option<String>,
     pub supports_legacy_1121_tweaks: bool,
+    pub quick_add_family: ClientFamily,
+}
+
+/// Legacy WoW client families Wuddle can safely target with curated Quick Add mods.
+/// Modern WoW Classic clients deliberately do not match their superficially similar
+/// major version numbers because their engine and API are not compatible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClientFamily {
+    Vanilla,
+    Tbc,
+    Wotlk,
+    Unsupported,
+    #[default]
+    Unknown,
+}
+
+impl ClientFamily {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Vanilla => "Vanilla 1.12.1 or earlier",
+            Self::Tbc => "The Burning Crusade 2.0–2.4.3",
+            Self::Wotlk => "Wrath of the Lich King 3.0–3.3.5",
+            Self::Unsupported => "an unsupported or modern WoW client",
+            Self::Unknown => "an unknown WoW client",
+        }
+    }
+}
+
+fn classify_legacy_client(version: Option<(u16, u16, u16, u16)>) -> ClientFamily {
+    let Some((major, minor, patch, _build)) = version else {
+        return ClientFamily::Unknown;
+    };
+
+    match major {
+        1 if minor < 12 || (minor == 12 && patch <= 1) => ClientFamily::Vanilla,
+        2 if minor < 4 || (minor == 4 && patch <= 3) => ClientFamily::Tbc,
+        3 if minor < 3 || (minor == 3 && patch <= 5) => ClientFamily::Wotlk,
+        _ => ClientFamily::Unsupported,
+    }
+}
+
+#[cfg(test)]
+mod client_family_tests {
+    use super::{classify_legacy_client, ClientFamily};
+
+    #[test]
+    fn classifies_only_supported_legacy_client_ranges() {
+        assert_eq!(
+            classify_legacy_client(Some((1, 12, 1, 5875))),
+            ClientFamily::Vanilla
+        );
+        assert_eq!(
+            classify_legacy_client(Some((2, 4, 3, 8606))),
+            ClientFamily::Tbc
+        );
+        assert_eq!(
+            classify_legacy_client(Some((3, 3, 5, 12340))),
+            ClientFamily::Wotlk
+        );
+    }
+
+    #[test]
+    fn excludes_classic_and_newer_clients_with_similar_major_versions() {
+        assert_eq!(
+            classify_legacy_client(Some((1, 13, 0, 0))),
+            ClientFamily::Unsupported
+        );
+        assert_eq!(
+            classify_legacy_client(Some((2, 4, 4, 0))),
+            ClientFamily::Unsupported
+        );
+        assert_eq!(
+            classify_legacy_client(Some((3, 4, 0, 0))),
+            ClientFamily::Unsupported
+        );
+        assert_eq!(classify_legacy_client(None), ClientFamily::Unknown);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -514,6 +591,7 @@ pub async fn detect_tweak_client(
             file_version,
             product_version,
             supports_legacy_1121_tweaks,
+            quick_add_family: classify_legacy_client(version_tuple),
         })
     })
     .await
@@ -885,9 +963,12 @@ pub async fn list_repos(
         set_rescan_progress("Repository load", "Reading repository records...");
         let repos = eng.db().list_repos().map_err(|e| e.to_string())?;
 
-        // Read dlls.txt once to determine per-DLL enabled state.
+        // Legacy Vanilla launchers use dlls.txt. Later clients load proxy DLLs
+        // directly, so their disabled state is represented by a .disabled suffix.
         set_rescan_progress("Repository load", "Reading installed DLL state...");
-        let dlls_txt = std::fs::read_to_string(wow_path.join("dlls.txt")).unwrap_or_default();
+        let dlls_txt_path = wow_path.join("dlls.txt");
+        let uses_dlls_txt = dlls_txt_path.is_file();
+        let dlls_txt = std::fs::read_to_string(&dlls_txt_path).unwrap_or_default();
         let enabled_dlls: std::collections::HashSet<String> = dlls_txt
             .lines()
             .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
@@ -907,7 +988,13 @@ pub async fn list_repos(
                         .file_name()?
                         .to_str()?
                         .to_string();
-                    let is_enabled = enabled_dlls.contains(&fname.to_lowercase());
+                    let is_enabled = if wow_path.join(format!("{fname}.disabled")).is_file() {
+                        false
+                    } else if uses_dlls_txt {
+                        enabled_dlls.contains(&fname.to_lowercase())
+                    } else {
+                        wow_path.join(&fname).is_file()
+                    };
                     Some((fname, is_enabled, e.version.clone()))
                 })
                 .collect();
@@ -1193,25 +1280,36 @@ pub async fn set_repo_enabled(
     id: i64,
     enabled: bool,
     wow_dir: String,
+    use_dlls_txt: bool,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
-        eng.set_repo_enabled(id, enabled, None)
+        let wow_path = (!wow_dir.trim().is_empty()).then(|| Path::new(&wow_dir));
+        eng.set_repo_enabled(id, enabled, wow_path, use_dlls_txt)
             .map_err(|e| e.to_string())?;
-        // Also toggle all DLLs for this repo so dlls.txt stays in sync.
-        if !wow_dir.is_empty() {
-            let installs = eng.db().list_installs(id).unwrap_or_default();
-            let wow_path = Path::new(&wow_dir);
-            for entry in installs.iter().filter(|e| e.kind == "dll") {
-                if let Some(fname) = Path::new(&entry.path).file_name().and_then(|n| n.to_str()) {
-                    let _ = eng.set_dll_enabled(fname, enabled, wow_path);
-                }
-            }
-        }
         Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+pub async fn is_awesome_wotlk_repo(
+    db_path: Option<PathBuf>,
+    repo_id: i64,
+) -> bool {
+    tokio::task::spawn_blocking(move || {
+        let Ok(engine) = open_engine(db_path.as_deref()) else {
+            return false;
+        };
+        let Ok(repo) = engine.db().get_repo(repo_id) else {
+            return false;
+        };
+        repo.url
+            .eq_ignore_ascii_case("https://github.com/noname08662/awesome_wotlk")
+            || repo.name.eq_ignore_ascii_case("awesome_wotlk")
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Returns all installed files for a repo as (path_relative_to_wow_root, kind) pairs.
@@ -1233,10 +1331,11 @@ pub async fn set_dll_enabled(
     wow_dir: String,
     dll_name: String,
     enabled: bool,
+    use_dlls_txt: bool,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
-        eng.set_dll_enabled(&dll_name, enabled, Path::new(&wow_dir))
+        eng.set_dll_enabled(&dll_name, enabled, Path::new(&wow_dir), use_dlls_txt)
             .map_err(|e| e.to_string())?;
         Ok(())
     })
@@ -1873,6 +1972,149 @@ pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, S
     .map_err(|e| e.to_string())?
 }
 
+/// Launch a companion executable installed in the WoW root. On Linux this uses
+/// the profile's Wine command because these tools are Windows executables.
+pub async fn launch_wow_root_tool(
+    wow_dir: String,
+    cfg: LaunchConfig,
+    candidates: Vec<String>,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let wow_path = PathBuf::from(wow_dir.trim());
+        if !wow_path.is_dir() {
+            return Err(format!("WoW path is not a directory: {}", wow_path.display()));
+        }
+        let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+        let tool = first_existing_file(&wow_path, &candidate_refs).ok_or_else(|| {
+            format!(
+                "Required tool was not found in {} (checked {}). Reinstall the mod first.",
+                wow_path.display(),
+                candidates.join(", ")
+            )
+        })?;
+        let tool_name = tool
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("tool")
+            .to_string();
+
+        #[cfg(windows)]
+        {
+            let mut command = Command::new(&tool);
+            command.current_dir(&wow_path);
+            command
+                .spawn()
+                .map_err(|e| format!("Failed to launch {}: {}", tool_name, e))?;
+        }
+        #[cfg(not(windows))]
+        {
+            let command = if cfg.wine_command.trim().is_empty() {
+                "wine"
+            } else {
+                cfg.wine_command.trim()
+            };
+            let mut args = parse_arg_string(&cfg.wine_args);
+            args.push(tool.to_string_lossy().to_string());
+            spawn_launch_command(command, &args, &wow_path)?;
+        }
+
+        Ok(format!("Launched {}.", tool_name))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Back up the selected WoW.exe once, then run Awesome WotLK's patcher with that
+/// executable as its target (the equivalent of dragging WoW.exe onto the tool).
+pub async fn patch_wow_with_awesome_wotlk(
+    wow_dir: String,
+    cfg: LaunchConfig,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let wow_path = PathBuf::from(wow_dir.trim());
+        if !wow_path.is_dir() {
+            return Err(format!("WoW path is not a directory: {}", wow_path.display()));
+        }
+
+        let wow_exe = first_existing_game_executable(&wow_path)
+            .ok_or_else(|| format!("WoW.exe was not found in {}.", wow_path.display()))?;
+        let backup = wow_path.join("original_wow.exe");
+        let backup_created = if backup.exists() || backup.is_symlink() {
+            false
+        } else {
+            std::fs::copy(&wow_exe, &backup).map_err(|e| {
+                format!(
+                    "Failed to create {} from {}: {}",
+                    backup.display(),
+                    wow_exe.display(),
+                    e
+                )
+            })?;
+            true
+        };
+
+        let patcher = first_existing_file(
+            &wow_path,
+            &["AwesomeWotlkPatch.exe", "AwesomeWotLKPatcher.exe"],
+        )
+        .ok_or_else(|| {
+            "Awesome WotLK patch tool was not found in the WoW directory. Reinstall the mod first."
+                .to_string()
+        })?;
+
+        #[cfg(windows)]
+        let status = Command::new(&patcher)
+            .arg(&wow_exe)
+            .current_dir(&wow_path)
+            .status()
+            .map_err(|e| format!("Failed to run {}: {}", patcher.display(), e))?;
+
+        #[cfg(not(windows))]
+        let status = {
+            let command = if cfg.wine_command.trim().is_empty() {
+                "wine"
+            } else {
+                cfg.wine_command.trim()
+            };
+            let mut command_process = Command::new(command);
+            command_process
+                .args(parse_arg_string(&cfg.wine_args))
+                .arg(&patcher)
+                .arg(&wow_exe)
+                .current_dir(&wow_path);
+            #[cfg(all(unix, not(target_os = "macos")))]
+            clean_env_for_child(&mut command_process);
+            command_process
+                .status()
+                .map_err(|e| format!("Failed to run {}: {}", patcher.display(), e))?
+        };
+
+        if !status.success() {
+            return Err(format!(
+                "Awesome WotLK patch tool exited with status {}. Your {} backup is retained.",
+                status,
+                backup.display()
+            ));
+        }
+
+        Ok(if backup_created {
+            format!(
+                "Created {} and patched {} with Awesome WotLK.",
+                backup.display(),
+                wow_exe.display()
+            )
+        } else {
+            format!(
+                "Patched {} with Awesome WotLK; existing {} was preserved.",
+                wow_exe.display(),
+                backup.display()
+            )
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---------------------------------------------------------------------------
 // GitHub token management
 // ---------------------------------------------------------------------------
@@ -1918,15 +2160,8 @@ fn read_file_token() -> Result<Option<String>, String> {
     }
 }
 
-fn is_portable() -> bool {
-    std::env::var("WUDDLE_PORTABLE")
-        .ok()
-        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
-}
-
 fn read_stored_token() -> Result<Option<String>, String> {
-    if is_portable() {
+    if crate::settings::portable_mode_enabled() {
         return read_file_token();
     }
     keychain_call_with_timeout("reading token", || {
@@ -1943,20 +2178,61 @@ fn read_stored_token() -> Result<Option<String>, String> {
     })
 }
 
-pub fn sync_github_token() {
-    // Try keychain/file first, then env
-    if let Ok(Some(token)) = read_stored_token() {
-        wuddle_engine::set_github_token(Some(token));
-        return;
-    }
-    // Check env variables
-    if let Some(token) = std::env::var("WUDDLE_GITHUB_TOKEN")
+fn environment_github_token() -> Option<String> {
+    std::env::var("WUDDLE_GITHUB_TOKEN")
         .ok()
         .or_else(|| std::env::var("GITHUB_TOKEN").ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-    {
-        wuddle_engine::set_github_token(Some(token));
+}
+
+/// Load a persisted token, falling back to an environment variable. Returning
+/// an error is important: callers must not silently report anonymous API
+/// access as an authenticated saved-token session when the system credential
+/// store could not be read.
+pub fn sync_github_token() -> Result<(), String> {
+    match read_stored_token() {
+        Ok(Some(token)) => {
+            wuddle_engine::set_github_token(Some(token));
+            Ok(())
+        }
+        Ok(None) => {
+            wuddle_engine::set_github_token(environment_github_token());
+            Ok(())
+        }
+        Err(error) => {
+            // An environment token still permits authenticated use, but retain
+            // the read failure so Options can explain why the saved credential
+            // was not available.
+            wuddle_engine::set_github_token(environment_github_token());
+            Err(format!("Could not read the saved GitHub token: {error}"))
+        }
+    }
+}
+
+fn verify_stored_token(expected: &str, stored: Option<String>) -> Result<(), String> {
+    match stored {
+        Some(token) if token == expected => Ok(()),
+        Some(_) => Err(
+            "The saved GitHub token did not match when read back. It was not activated."
+                .to_string(),
+        ),
+        None => Err(
+            "GitHub token storage returned no token after saving. It was not activated."
+                .to_string(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod github_token_tests {
+    use super::verify_stored_token;
+
+    #[test]
+    fn token_readback_requires_an_exact_match() {
+        assert!(verify_stored_token("secret", Some("secret".to_string())).is_ok());
+        assert!(verify_stored_token("secret", Some("different".to_string())).is_err());
+        assert!(verify_stored_token("secret", None).is_err());
     }
 }
 
@@ -1966,21 +2242,29 @@ pub async fn save_github_token(token: String) -> Result<(), String> {
         if token.is_empty() {
             return Err("Token is empty.".to_string());
         }
-        if is_portable() {
+        if crate::settings::portable_mode_enabled() {
             let path = token_file_path()?;
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
             std::fs::write(&path, &token).map_err(|e| e.to_string())?;
         } else {
+            let token_to_store = token.clone();
             keychain_call_with_timeout("saving token", move || {
                 let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
                     .map_err(|e| e.to_string())?;
-                entry.set_password(&token).map_err(|e| e.to_string())
+                entry
+                    .set_password(&token_to_store)
+                    .map_err(|e| e.to_string())
             })?;
         }
-        // Update engine's in-memory token
-        sync_github_token();
+
+        // A successful write alone is not enough: some credential-store
+        // backends can accept a write yet fail on the next process/read. Only
+        // report success once Wuddle can read the exact credential back.
+        let stored = read_stored_token()?;
+        verify_stored_token(&token, stored)?;
+        wuddle_engine::set_github_token(Some(token));
         Ok(())
     })
     .await
@@ -1989,7 +2273,7 @@ pub async fn save_github_token(token: String) -> Result<(), String> {
 
 pub async fn clear_github_token() -> Result<(), String> {
     tokio::task::spawn_blocking(|| {
-        if is_portable() {
+        if crate::settings::portable_mode_enabled() {
             let path = token_file_path()?;
             if path.exists() {
                 std::fs::remove_file(&path).map_err(|e| e.to_string())?;
@@ -2006,8 +2290,7 @@ pub async fn clear_github_token() -> Result<(), String> {
                 Ok(())
             })?;
         }
-        wuddle_engine::set_github_token(None);
-        Ok(())
+        sync_github_token()
     })
     .await
     .map_err(|e| e.to_string())?

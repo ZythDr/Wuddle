@@ -78,6 +78,12 @@ pub struct UpdatePlan {
     pub mode: InstallMode,
 
     pub current: Option<String>,
+    /// The release tag that will be installed when this plan is applied.
+    ///
+    /// This can differ from `latest` when the user has selected an older
+    /// release: `latest` remains the remote latest tag for the update-status
+    /// UI, while this value is used for install tracking and cache paths.
+    pub install_version: String,
     pub latest: String,
 
     pub asset_id: String,
@@ -816,6 +822,7 @@ impl Engine {
             url: r.url.clone(),
             mode: r.mode.clone(),
             current: current.clone(),
+            install_version: current.clone().unwrap_or_else(|| "unknown".to_string()),
             latest: current.unwrap_or_else(|| "unknown".to_string()),
             asset_id: "".to_string(),
             asset_name: "".to_string(),
@@ -2059,6 +2066,7 @@ impl Engine {
             url: r.url.clone(),
             mode: r.mode.clone(),
             current,
+            install_version: remote.short_oid.clone(),
             latest: remote.short_oid.clone(),
             asset_id: remote.oid.clone(),
             asset_name: format!("git:{}", remote.branch),
@@ -2175,6 +2183,7 @@ impl Engine {
             url: r.url.clone(),
             mode: r.mode.clone(),
             current,
+            install_version: remote.short_oid.clone(),
             latest: remote.short_oid.clone(),
             asset_id: remote.oid.clone(),
             asset_name: format!("git:{}", remote.branch),
@@ -2219,6 +2228,7 @@ impl Engine {
             url: r.url.clone(),
             mode: r.mode.clone(),
             current: Self::normalized_current_version(r),
+            install_version: "direct".to_string(),
             latest: "direct".to_string(),
             asset_id,
             asset_name: direct.asset_name,
@@ -2512,6 +2522,7 @@ impl Engine {
             url: r.url.clone(),
             mode,
             current: Self::normalized_current_version(r),
+            install_version: target_tag,
             latest: display_latest,
             asset_id,
             asset_name: asset.name.clone(),
@@ -3035,7 +3046,7 @@ impl Engine {
             .join(Self::sanitize_for_fs(&plan.host))
             .join(Self::sanitize_for_fs(&plan.owner))
             .join(Self::sanitize_for_fs(&plan.name))
-            .join(Self::sanitize_for_fs(&plan.latest))
+            .join(Self::sanitize_for_fs(&plan.install_version))
             .join(Self::sanitize_for_fs(&plan.asset_id));
         std::fs::create_dir_all(&dir)?;
         Ok(dir)
@@ -3478,11 +3489,46 @@ impl Engine {
         Ok(changed)
     }
 
+    /// Legacy Vanilla launchers use dlls.txt. Later clients load proxy DLLs
+    /// directly, so disable those files by adding/removing a .disabled suffix.
+    fn set_dll_files_enabled(wow_dir: &Path, dll_names: &[String], enabled: bool) -> Result<usize> {
+        let mut touched = 0usize;
+        for name in dll_names {
+            let active = wow_dir.join(name);
+            let disabled = wow_dir.join(format!("{name}.disabled"));
+
+            if enabled {
+                if disabled.exists() || disabled.is_symlink() {
+                    if active.exists() || active.is_symlink() {
+                        anyhow::bail!(
+                            "Cannot enable {} because both the active and disabled files exist.",
+                            name
+                        );
+                    }
+                    fs::rename(&disabled, &active)?;
+                    touched += 1;
+                }
+            } else if active.exists() || active.is_symlink() {
+                if disabled.exists() || disabled.is_symlink() {
+                    anyhow::bail!(
+                        "Cannot disable {} because {} already exists.",
+                        name,
+                        disabled.display()
+                    );
+                }
+                fs::rename(&active, &disabled)?;
+                touched += 1;
+            }
+        }
+        Ok(touched)
+    }
+
     pub fn set_repo_enabled(
         &self,
         repo_id: i64,
         enabled: bool,
         wow_dir: Option<&Path>,
+        use_dlls_txt: bool,
     ) -> Result<usize> {
         let mut dll_names = Vec::<String>::new();
         for entry in self.db().list_installs(repo_id)? {
@@ -3496,7 +3542,11 @@ impl Engine {
 
         let mut touched = 0usize;
         if let Some(base) = wow_dir {
-            touched = Self::set_dlls_txt_entries_commented(base, &dll_names, !enabled)?;
+            touched = if use_dlls_txt {
+                Self::set_dlls_txt_entries_commented(base, &dll_names, !enabled)?
+            } else {
+                Self::set_dll_files_enabled(base, &dll_names, enabled)?
+            };
         }
 
         self.db().set_repo_enabled(repo_id, enabled)?;
@@ -3505,9 +3555,19 @@ impl Engine {
 
     /// Toggle a single DLL's enabled state in dlls.txt without touching the whole repo.
     /// Returns `true` if dlls.txt was modified.
-    pub fn set_dll_enabled(&self, dll_name: &str, enabled: bool, wow_dir: &Path) -> Result<bool> {
+    pub fn set_dll_enabled(
+        &self,
+        dll_name: &str,
+        enabled: bool,
+        wow_dir: &Path,
+        use_dlls_txt: bool,
+    ) -> Result<bool> {
         let names = vec![dll_name.to_string()];
-        let touched = Self::set_dlls_txt_entries_commented(wow_dir, &names, !enabled)?;
+        let touched = if use_dlls_txt {
+            Self::set_dlls_txt_entries_commented(wow_dir, &names, !enabled)?
+        } else {
+            Self::set_dll_files_enabled(wow_dir, &names, enabled)?
+        };
         Ok(touched > 0)
     }
 
@@ -3572,7 +3632,14 @@ impl Engine {
             // 1. Remove tracked install folders/files
             for entry in self.db().list_installs(repo_id)? {
                 if let Some(full) = Self::resolve_install_path(&entry.path, wow_dir) {
-                    if Self::remove_any_target(&full)? {
+                    let removed = Self::remove_any_target(&full)?;
+                    let removed_disabled = if !removed && entry.kind == "dll" {
+                        let disabled = PathBuf::from(format!("{}.disabled", full.display()));
+                        Self::remove_any_target(&disabled)?
+                    } else {
+                        false
+                    };
+                    if removed || removed_disabled {
                         removed_paths += 1;
                     }
                 }
@@ -4061,7 +4128,7 @@ impl Engine {
 
         let comment = format!(
             "{}/{} {} - managed by Wuddle",
-            plan.owner, plan.name, plan.latest
+            plan.owner, plan.name, plan.install_version
         );
 
         let mut records = if Self::looks_like_archive(&asset_path, &plan.asset_name) {
@@ -4154,17 +4221,17 @@ impl Engine {
 
         if merge_mode {
             // Merge: keep existing install entries, only add/overwrite new ones.
-            self.persist_installs_merge(plan.repo_id, wow_dir, &records, Some(&plan.latest))?;
+            self.persist_installs_merge(plan.repo_id, wow_dir, &records, Some(&plan.install_version))?;
         } else {
             // Clean: remove previously tracked addon targets that are no longer
             // part of this release (e.g. suffix variants collapsing).
             self.cleanup_stale_addon_installs(plan.repo_id, wow_dir, &records)?;
-            self.persist_installs(plan.repo_id, wow_dir, &records, Some(&plan.latest))?;
+            self.persist_installs(plan.repo_id, wow_dir, &records, Some(&plan.install_version))?;
         }
         self.hash_and_store_installs(plan.repo_id, wow_dir, &records);
         self.db().set_installed_asset_state(
             plan.repo_id,
-            Some(&plan.latest),
+            Some(&plan.install_version),
             Some(&plan.asset_id),
             Some(&plan.asset_name),
             Self::size_u64_to_i64(plan.asset_size),
@@ -4284,6 +4351,29 @@ impl Engine {
         }
 
         let rel = rel_opt.ok_or_else(|| anyhow::anyhow!("No releases found for {}", r.url))?;
+        // Reinstall/Repair must honor the same pinned-release selection as a
+        // normal update check. Previously it always reinstalled `latest`, which
+        // made the version picker appear to succeed while leaving the newer
+        // release installed.
+        let rel = if let Some(ref pin) = r.pinned_version {
+            if rel.tag == *pin {
+                rel
+            } else {
+                forge::list_releases(&self.client, &det)
+                    .await?
+                    .into_iter()
+                    .find(|release| release.tag == *pin)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Pinned release '{}' is no longer available for {}.",
+                            pin,
+                            r.url
+                        )
+                    })?
+            }
+        } else {
+            rel
+        };
         let mode = r.mode.clone();
         let asset = Self::pick_asset(&rel, mode.clone(), r.asset_regex.as_deref())?;
         let latest = Self::effective_latest_label(&rel.tag, &asset.name);
@@ -4297,6 +4387,7 @@ impl Engine {
             url: r.url.clone(),
             mode,
             current: Self::normalized_current_version(&r),
+            install_version: latest.clone(),
             latest,
             asset_id: Self::effective_asset_id(&asset),
             asset_name: asset.name.clone(),
@@ -4356,6 +4447,7 @@ mod tests {
             url: "https://github.com/owner/repo".to_string(),
             mode: InstallMode::Auto,
             current: None,
+            install_version: "v1.0.0".to_string(),
             latest: "v1.0.0".to_string(),
             asset_id: asset_name.to_string(),
             asset_name: asset_name.to_string(),

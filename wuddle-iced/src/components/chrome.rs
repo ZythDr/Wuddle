@@ -198,7 +198,7 @@ pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: ThemeColors) -> Eleme
 
     let btn = button(content)
         .padding([7, 0])
-        .width(if is_icon || is_unicode_icon { Length::Fixed(32.0) } else { Length::Fixed(114.0) })
+        .width(if is_icon || is_unicode_icon { Length::Fixed(32.0) } else { Length::Fixed(96.0) })
         .on_press(Message::SetTab(tab));
 
     let styled_btn: Element<Message> = if is_active {

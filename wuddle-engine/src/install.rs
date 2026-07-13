@@ -150,6 +150,28 @@ pub fn install_from_archive(
         }
     }
 
+    // A few supported client modifications ship a companion executable that must
+    // live beside WoW.exe. Do not copy arbitrary EXEs from release archives; only
+    // preserve the known tools needed to configure or activate those mods.
+    if want_dll {
+        for tool_name in [
+            "wow_optimize_launcher.exe",
+            "wow_loader.exe",
+            "AwesomeWotlkPatch.exe",
+            "AwesomeWotLKPatcher.exe",
+        ] {
+            if let Some(source) = find_first_file_by_name(extract_dir, tool_name) {
+                let destination = wow_root.join(tool_name);
+                install_file_or_symlink(&source, &destination, opts.use_symlinks)?;
+                maybe_set_comment(&destination, comment, opts.set_xattr_comment);
+                records.push(InstallRecord {
+                    path: destination,
+                    kind: "raw",
+                });
+            }
+        }
+    }
+
     Ok(records)
 }
 
