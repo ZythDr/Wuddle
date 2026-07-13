@@ -30,6 +30,12 @@ pub use direct::is_direct_archive_url;
 pub use install::InstallOptions;
 pub use model::{InstallMode, LatestRelease, ReleaseAsset, Repo};
 
+/// Configure the directory used by [`Engine::open_default`]. The native
+/// frontend sets this after selecting its single authoritative storage root.
+pub fn set_default_app_dir(path: PathBuf) -> Result<()> {
+    util::set_app_dir_override(path)
+}
+
 use crate::forge::detect_repo;
 use crate::forge::git_sync;
 use crate::forge::ForgeKind;

@@ -4,10 +4,33 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
+static APP_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+pub(crate) fn set_app_dir_override(path: PathBuf) -> Result<()> {
+    if let Some(existing) = APP_DIR_OVERRIDE.get() {
+        anyhow::ensure!(
+            existing == &path,
+            "engine data directory is already configured as {}",
+            existing.display()
+        );
+        return Ok(());
+    }
+    APP_DIR_OVERRIDE.set(path).map_err(|path| {
+        anyhow::anyhow!(
+            "could not configure engine data directory as {}",
+            path.display()
+        )
+    })
+}
+
 pub fn app_dir() -> Result<PathBuf> {
-    let dir = dirs::data_dir().context("no data_dir")?.join("wuddle");
+    let dir = match APP_DIR_OVERRIDE.get() {
+        Some(path) => path.clone(),
+        None => dirs::data_dir().context("no data_dir")?.join("wuddle"),
+    };
     fs::create_dir_all(&dir).context("create app dir")?;
     Ok(dir)
 }

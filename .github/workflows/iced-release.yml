@@ -228,12 +228,21 @@ jobs:
             Wuddle.exe                          <- launcher (run this)
             versions\$tag\Wuddle-bin.exe        <- Iced v3 binary
             current.json                        <- active version pointer
+            wuddle-data\settings.json           <- settings (created on first run)
+            wuddle-data\wuddle*.sqlite          <- profile databases
 
           Upgrading from Wuddle v2 (Tauri):
             If you already have a v2 portable install, just unzip this into the
             same folder. The launcher will switch to v3 automatically.
 
-          App data: %APPDATA%\wuddle  (shared with Wuddle v2 — no migration needed)
+          Windows storage:
+            Wuddle keeps settings and profile databases in wuddle-data beside
+            Wuddle.exe. On first launch, existing data from %APPDATA%\wuddle is
+            copied here automatically. The AppData copy is kept as a backup.
+
+            If this folder is read-only, set WUDDLE_DATA_DIR to one writable
+            directory before starting Wuddle. GitHub tokens remain protected by
+            Windows Credential Manager and are not stored in wuddle-data.
           "@
           Compress-Archive -Path "dist\*" -DestinationPath "wuddle-$tag-windows-x86_64.zip" -Force
 

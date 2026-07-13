@@ -252,24 +252,18 @@ pub fn auto_launch_description(auto_launch_exe: Option<&str>) -> String {
 
 /// Returns the app data directory, creating it if needed.
 pub fn app_dir() -> Result<PathBuf, String> {
-    let dir = if portable_mode_enabled() {
-        portable_app_dir()?
-    } else {
-        standard_app_dir()?
-    };
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir)
+    crate::storage::app_dir()
 }
 
-fn standard_app_dir() -> Result<PathBuf, String> {
+pub(crate) fn standard_app_dir() -> Result<PathBuf, String> {
     Ok(dirs::data_dir()
         .ok_or_else(|| "no data_dir".to_string())?
         .join("wuddle"))
 }
 
-/// Whether Wuddle should keep its data beside the executable instead of in the
-/// platform application-data directory. This is shared with credential storage
-/// so settings, databases, and the portable token file always use one mode.
+/// Whether non-Windows builds should keep data beside the executable instead
+/// of in the platform application-data directory. Windows is self-contained by
+/// default and keeps credentials separately in Windows Credential Manager.
 pub fn portable_mode_enabled() -> bool {
     let env_enabled = std::env::var("WUDDLE_PORTABLE")
         .ok()
@@ -287,11 +281,11 @@ fn portable_mode_flag_path() -> Result<PathBuf, String> {
     Ok(portable_root_dir()?.join("wuddle-portable.flag"))
 }
 
-fn portable_app_dir() -> Result<PathBuf, String> {
+pub(crate) fn portable_app_dir() -> Result<PathBuf, String> {
     Ok(portable_root_dir()?.join("wuddle-data"))
 }
 
-fn portable_root_dir() -> Result<PathBuf, String> {
+pub(crate) fn portable_root_dir() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe_dir = exe.parent().ok_or_else(|| "no exe parent".to_string())?;
     // AppImage: exe is inside a version dir, go up one more
@@ -343,7 +337,7 @@ pub fn load_settings() -> AppSettings {
 
     // On first launch (settings.json didn't exist yet), import everything
     // from Tauri v2's WebKit localStorage so options carry over seamlessly.
-    if !settings_existed {
+    if !settings_existed && crate::storage::allow_legacy_tauri_import() {
         import_tauri_options(&mut settings);
     }
 
@@ -351,7 +345,7 @@ pub fn load_settings() -> AppSettings {
     // This is primarily for the first launch or migration from Tauri v2.
     // Once migrated, we stop auto-discovering so that deleted profiles stay deleted.
     if let Ok(dir) = app_dir() {
-        if !settings.migrated_from_tauri {
+        if !settings.migrated_from_tauri && crate::storage::allow_legacy_tauri_import() {
             let before = settings.profiles.len();
             discover_orphan_profiles(&mut settings, &dir);
             let discovered = settings.profiles.len() > before;

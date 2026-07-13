@@ -2,6 +2,7 @@
 
 mod anchored_overlay;
 mod monitor;
+mod storage;
 pub mod panels;
 pub mod service;
 pub(crate) mod settings;
@@ -27,6 +28,20 @@ use theme::{FRIZ, NOTO, LIFECRAFT};
 
 fn main() -> iced::Result {
     prefer_x11_for_file_drops_if_requested();
+
+    #[cfg(target_os = "windows")]
+    if let Err(error) = storage::initialize() {
+        eprintln!("Wuddle storage initialization failed: {error}");
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("Wuddle storage error")
+            .set_description(format!(
+                "Wuddle could not initialize its data directory and will not start.\n\n{error}\n\nIf Wuddle is installed in a read-only folder, set WUDDLE_DATA_DIR to a writable directory."
+            ))
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+        return Ok(());
+    }
 
     // Detect monitor resolution before iced starts
     let auto_scale = detect_auto_scale();

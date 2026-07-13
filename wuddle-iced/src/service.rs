@@ -2160,10 +2160,7 @@ fn read_file_token() -> Result<Option<String>, String> {
     }
 }
 
-fn read_stored_token() -> Result<Option<String>, String> {
-    if crate::settings::portable_mode_enabled() {
-        return read_file_token();
-    }
+fn read_keychain_token() -> Result<Option<String>, String> {
     keychain_call_with_timeout("reading token", || {
         let entry =
             keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())?;
@@ -2176,6 +2173,98 @@ fn read_stored_token() -> Result<Option<String>, String> {
             Err(e) => Err(e.to_string()),
         }
     })
+}
+
+fn write_keychain_token(token: &str) -> Result<(), String> {
+    let token = token.to_string();
+    keychain_call_with_timeout("saving token", move || {
+        let entry =
+            keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())?;
+        entry.set_password(&token).map_err(|e| e.to_string())
+    })
+}
+
+fn delete_keychain_token() -> Result<(), String> {
+    keychain_call_with_timeout("clearing token", || {
+        let entry =
+            keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())?;
+        if let Err(e) = entry.delete_credential() {
+            if !matches!(e, keyring::Error::NoEntry) {
+                return Err(e.to_string());
+            }
+        }
+        Ok(())
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[cfg_attr(test, allow(dead_code))]
+fn import_legacy_plaintext_token() -> Result<(), String> {
+    let paths = crate::storage::legacy_plaintext_token_paths()?;
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut tokens = Vec::<String>::new();
+    for path in &paths {
+        let token = std::fs::read_to_string(path)
+            .map_err(|e| format!("Could not read legacy GitHub token {}: {e}", path.display()))?
+            .trim()
+            .to_string();
+        if !token.is_empty() && !tokens.iter().any(|known| known == &token) {
+            tokens.push(token);
+        }
+    }
+    if tokens.len() > 1 {
+        return Err(format!(
+            "Several legacy portable GitHub token files contain different credentials. They were left untouched: {}",
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let Some(token) = tokens.pop() else {
+        return Ok(());
+    };
+
+    match read_keychain_token()? {
+        Some(stored) if stored != token => {
+            return Err(
+                "A legacy portable GitHub token differs from the token already stored in Windows Credential Manager. The plaintext file was left untouched."
+                    .to_string(),
+            );
+        }
+        Some(_) => {}
+        None => write_keychain_token(&token)?,
+    }
+    verify_stored_token(&token, read_keychain_token()?)?;
+
+    for path in paths {
+        std::fs::remove_file(&path).map_err(|e| {
+            format!(
+                "The GitHub token was imported into Windows Credential Manager, but the legacy plaintext copy could not be removed from {}: {e}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn read_stored_token() -> Result<Option<String>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        return read_keychain_token();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    if crate::settings::portable_mode_enabled() {
+        return read_file_token();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    read_keychain_token()
 }
 
 fn environment_github_token() -> Option<String> {
@@ -2191,6 +2280,12 @@ fn environment_github_token() -> Option<String> {
 /// access as an authenticated saved-token session when the system credential
 /// store could not be read.
 pub fn sync_github_token() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    if let Err(error) = import_legacy_plaintext_token() {
+        wuddle_engine::set_github_token(environment_github_token());
+        return Err(format!("Could not migrate the saved GitHub token: {error}"));
+    }
+
     match read_stored_token() {
         Ok(Some(token)) => {
             wuddle_engine::set_github_token(Some(token));
@@ -2242,6 +2337,7 @@ pub async fn save_github_token(token: String) -> Result<(), String> {
         if token.is_empty() {
             return Err("Token is empty.".to_string());
         }
+        #[cfg(not(target_os = "windows"))]
         if crate::settings::portable_mode_enabled() {
             let path = token_file_path()?;
             if let Some(parent) = path.parent() {
@@ -2249,21 +2345,28 @@ pub async fn save_github_token(token: String) -> Result<(), String> {
             }
             std::fs::write(&path, &token).map_err(|e| e.to_string())?;
         } else {
-            let token_to_store = token.clone();
-            keychain_call_with_timeout("saving token", move || {
-                let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-                    .map_err(|e| e.to_string())?;
-                entry
-                    .set_password(&token_to_store)
-                    .map_err(|e| e.to_string())
-            })?;
+            write_keychain_token(&token)?;
         }
+
+        #[cfg(target_os = "windows")]
+        write_keychain_token(&token)?;
 
         // A successful write alone is not enough: some credential-store
         // backends can accept a write yet fail on the next process/read. Only
         // report success once Wuddle can read the exact credential back.
         let stored = read_stored_token()?;
         verify_stored_token(&token, stored)?;
+
+        #[cfg(target_os = "windows")]
+        for path in crate::storage::legacy_plaintext_token_paths()? {
+            std::fs::remove_file(&path).map_err(|e| {
+                format!(
+                    "The new GitHub token was saved securely, but an old plaintext copy could not be removed from {}: {e}",
+                    path.display()
+                )
+            })?;
+        }
+
         wuddle_engine::set_github_token(Some(token));
         Ok(())
     })
@@ -2273,22 +2376,27 @@ pub async fn save_github_token(token: String) -> Result<(), String> {
 
 pub async fn clear_github_token() -> Result<(), String> {
     tokio::task::spawn_blocking(|| {
+        #[cfg(not(target_os = "windows"))]
         if crate::settings::portable_mode_enabled() {
             let path = token_file_path()?;
             if path.exists() {
                 std::fs::remove_file(&path).map_err(|e| e.to_string())?;
             }
         } else {
-            keychain_call_with_timeout("clearing token", || {
-                let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-                    .map_err(|e| e.to_string())?;
-                if let Err(e) = entry.delete_credential() {
-                    if !matches!(e, keyring::Error::NoEntry) {
-                        return Err(e.to_string());
-                    }
-                }
-                Ok(())
-            })?;
+            delete_keychain_token()?;
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            delete_keychain_token()?;
+            for path in crate::storage::legacy_plaintext_token_paths()? {
+                std::fs::remove_file(&path).map_err(|e| {
+                    format!(
+                        "The secure GitHub token was cleared, but an old plaintext copy could not be removed from {}: {e}",
+                        path.display()
+                    )
+                })?;
+            }
         }
         sync_github_token()
     })
