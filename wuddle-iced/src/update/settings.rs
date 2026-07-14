@@ -186,6 +186,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 ref mut wow_dir,
                 ref mut launch_method,
                 ref mut clear_wdb,
+                ref mut auto_login_enabled,
                 ref mut lutris_target,
                 ref mut wine_command,
                 ref mut wine_args,
@@ -199,6 +200,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     InstanceField::WowDir(v) => *wow_dir = v,
                     InstanceField::LaunchMethod(v) => *launch_method = v,
                     InstanceField::ClearWdb(v) => *clear_wdb = v,
+                    InstanceField::AutoLoginEnabled(v) => *auto_login_enabled = v,
                     InstanceField::LutrisTarget(v) => *lutris_target = v,
                     InstanceField::WineCommand(v) => *wine_command = v,
                     InstanceField::WineArgs(v) => *wine_args = v,
@@ -216,6 +218,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 wow_dir,
                 launch_method,
                 clear_wdb,
+                auto_login_enabled,
                 lutris_target,
                 wine_command,
                 wine_args,
@@ -249,6 +252,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     auto_launch_exe,
                     launch_method,
                     clear_wdb,
+                    auto_login_enabled,
                     lutris_target,
                     wine_command,
                     wine_args,
@@ -256,6 +260,32 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     custom_args,
                     working_dir: String::new(),
                     env_text: String::new(),
+                    #[cfg(feature = "auto-login")]
+                    auto_login_accounts: app
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == profile_id)
+                        .map(|profile| profile.auto_login_accounts.clone())
+                        .unwrap_or_default(),
+                    #[cfg(not(feature = "auto-login"))]
+                    auto_login_accounts: app
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == profile_id)
+                        .map(|profile| profile.auto_login_accounts.clone())
+                        .unwrap_or_default(),
+                    #[cfg(feature = "auto-login")]
+                    selected_auto_login_account_id: app
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == profile_id)
+                        .and_then(|profile| profile.selected_auto_login_account_id.clone()),
+                    #[cfg(not(feature = "auto-login"))]
+                    selected_auto_login_account_id: app
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == profile_id)
+                        .and_then(|profile| profile.selected_auto_login_account_id.clone()),
                 };
 
                 if let Some(existing) = app.profiles.iter_mut().find(|p| p.id == profile_id) {
@@ -361,9 +391,27 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 return Some(Task::none());
             }
             let db_path = settings::profile_db_path(&profile_id).unwrap_or_default();
+            #[cfg(feature = "auto-login")]
+            let auto_login_accounts = app
+                .profiles
+                .iter()
+                .find(|profile| profile.id == profile_id)
+                .map(|profile| profile.auto_login_accounts.clone())
+                .unwrap_or_default();
             let pid_clone = profile_id.clone();
             Some(Task::perform(
                 async move {
+                    #[cfg(feature = "auto-login")]
+                    if let Err(error) = crate::auto_login::delete_profile_accounts(
+                        pid_clone.clone(),
+                        auto_login_accounts,
+                    )
+                    .await
+                    {
+                        return (pid_clone, Err(format!(
+                            "Profile removal was stopped because its auto-login credentials could not be removed: {error}"
+                        )));
+                    }
                     let mut err = None;
                     if db_path.exists() {
                         if let Err(e) = std::fs::remove_file(&db_path) {
@@ -374,12 +422,20 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             ));
                         }
                     }
-                    (pid_clone, err)
+                    (pid_clone, Ok(err))
                 },
                 |res| Message::RemoveProfileResult(res.0, res.1),
             ))
         }
-        Message::RemoveProfileResult(pid, err) => {
+        Message::RemoveProfileResult(pid, result) => {
+            let err = match result {
+                Ok(err) => err,
+                Err(error) => {
+                    app.log(LogLevel::Error, &error);
+                    app.show_toast(error, ToastKind::Error);
+                    return Some(Task::none());
+                }
+            };
             app.profiles.retain(|p| p.id != pid);
             app.mods_warning_dismissed_profile_ids.remove(&pid);
             app.ignored_update_ids_by_profile.remove(&pid);
@@ -427,6 +483,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.opt_xattr = s.opt_xattr;
             app.opt_clock12 = s.opt_clock12;
             app.migrated_from_tauri = s.migrated_from_tauri;
+            app.auto_login_warning_acknowledged = s.auto_login_warning_acknowledged;
 
             app.log_wrap = s.log_wrap;
             app.log_autoscroll = s.log_autoscroll;
@@ -457,6 +514,22 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             } else {
                 s.profiles
             };
+            #[cfg(feature = "auto-login")]
+            for profile in &mut app.profiles {
+                let selection_exists =
+                    profile
+                        .selected_auto_login_account_id
+                        .as_ref()
+                        .map_or(true, |selected| {
+                            profile
+                                .auto_login_accounts
+                                .iter()
+                                .any(|account| &account.id == selected)
+                        });
+                if !selection_exists {
+                    profile.selected_auto_login_account_id = None;
+                }
+            }
             if let Some(p) = app.profiles.iter().find(|p| p.id == app.active_profile_id) {
                 app.wow_dir = p.wow_dir.clone();
             } else if let Some(first) = app.profiles.first() {

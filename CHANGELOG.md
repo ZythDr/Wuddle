@@ -10,6 +10,7 @@ All notable changes to Wuddle are documented in this file.
 - **Awesome WotLK Patching** — Wuddle can now back up `wow.exe` as `original_wow.exe` and patch it automatically. The patch action is available from the mod’s menu.
 - **wow-optimize Configuration** — Added a Configure button for launching wow-optimize’s GUI.
 - **Collection Selection Tools** — Add New and Manage Collection dialogs now include Select all and Clear all controls.
+- **WotLK Auto-Login (Requires Awesome WotLK)** — Save multiple Auto-login accounts per instance in Linux Secret Service or Windows Credential Manager (no plaintext credentials are stored within Wuddle's directories). Wuddle can supply Awesome WotLK login arguments for WoW 3.3.5 through Auto, Wine, or Custom launch methods; Lutris remains Manual Login only.
 
 ### Improvements
 - **Safer Mod Warnings** — Security notices now use clearer, client-neutral wording and include an **Open on Forge** button so you can inspect a mod’s repository first.
@@ -21,12 +22,14 @@ All notable changes to Wuddle are documented in this file.
 - **GitHub Token Feedback** — Wuddle now confirms that a saved token can be read back and shows a clear secure-storage error instead of silently falling back to anonymous GitHub access.
 - **Self-Contained Windows Storage** — Windows settings and profile databases now live in `wuddle-data` beside `Wuddle.exe`. Existing AppData is copied over on first launch and kept as a rollback backup.
 - **Updated Quick Add Sources** — Refreshed the Nampower and PerfBoost repository links.
+- **Instance Management Refresh** — Instance cards are now compact, wrap across rows, and highlight the active instance. Instance Settings also has clearer Auto-login controls and account management access.
 
 ### Bug Fixes
 - **Version Downgrades** — Selecting an older version now installs that selected version correctly and updates the Installed column.
 - **WotLK Mod Filtering** — Vanilla-only Quick Add entries no longer appear for TBC or WotLK clients.
 - **Awesome WotLK Backup Handling** — Existing `original_wow.exe` backups are preserved instead of being overwritten.
 - **Windows GitHub Tokens** — Fixed GitHub tokens being written to a temporary in-memory credential store instead of Windows Credential Manager.
+- **Case-Insensitive Auto Launch Targets** — Explicit game executable selections now resolve even when the configured filename capitalization differs from the file on disk.
 
 ## v3.5.0
 

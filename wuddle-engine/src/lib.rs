@@ -25,6 +25,9 @@ mod install;
 mod model;
 mod util;
 
+#[cfg(feature = "auto-login")]
+pub mod auto_login;
+
 pub use db::Db;
 pub use direct::is_direct_archive_url;
 pub use install::InstallOptions;

@@ -1,8 +1,12 @@
 [package]
 name = "wuddle-iced"
-version = "3.6.0-beta.2"
+version = "3.6.0-beta.3"
 description = "Wuddle v3 — native GPU-rendered frontend using Iced"
 edition = "2021"
+
+[features]
+default = ["auto-login"]
+auto-login = ["wuddle-engine/auto-login"]
 
 [[bin]]
 name = "wuddle"

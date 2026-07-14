@@ -1,6 +1,8 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod anchored_overlay;
+#[cfg(feature = "auto-login")]
+mod auto_login;
 mod monitor;
 mod storage;
 pub mod panels;

@@ -135,6 +135,54 @@ pub enum Message {
     LaunchGame,
     LaunchGameResult(Result<String, String>),
 
+    #[cfg(feature = "auto-login")]
+    OpenAutoLoginAccounts,
+    #[cfg(feature = "auto-login")]
+    AddAutoLoginAccount,
+    #[cfg(feature = "auto-login")]
+    EditAutoLoginAccount(wuddle_engine::auto_login::AccountId),
+    #[cfg(feature = "auto-login")]
+    AutoLoginAccountLoaded {
+        profile_id: String,
+        account_id: wuddle_engine::auto_login::AccountId,
+        result: Result<wuddle_engine::auto_login::AccountDetails, String>,
+    },
+    #[cfg(feature = "auto-login")]
+    SetAutoLoginLabel(String),
+    #[cfg(feature = "auto-login")]
+    SetAutoLoginLogin(wuddle_engine::auto_login::SecretText),
+    #[cfg(feature = "auto-login")]
+    SetAutoLoginPassword(wuddle_engine::auto_login::SecretText),
+    #[cfg(feature = "auto-login")]
+    SetAutoLoginRealmlist(wuddle_engine::auto_login::SecretText),
+    #[cfg(feature = "auto-login")]
+    SetAutoLoginRealmName(wuddle_engine::auto_login::SecretText),
+    #[cfg(feature = "auto-login")]
+    ToggleAutoLoginWarningAcknowledged(bool),
+    #[cfg(feature = "auto-login")]
+    SaveAutoLoginAccount,
+    #[cfg(feature = "auto-login")]
+    SaveAutoLoginAccountResult {
+        profile_id: String,
+        account: wuddle_engine::auto_login::AccountRef,
+        is_new: bool,
+        result: Result<(), String>,
+    },
+    #[cfg(feature = "auto-login")]
+    RollbackAutoLoginAccountResult(Result<(), String>),
+    #[cfg(feature = "auto-login")]
+    SelectAutoLoginAccount(Option<wuddle_engine::auto_login::AccountId>),
+    #[cfg(feature = "auto-login")]
+    DeleteAutoLoginAccount(wuddle_engine::auto_login::AccountId),
+    #[cfg(feature = "auto-login")]
+    ConfirmDeleteAutoLoginAccount,
+    #[cfg(feature = "auto-login")]
+    DeleteAutoLoginAccountResult {
+        profile_id: String,
+        account_id: wuddle_engine::auto_login::AccountId,
+        result: Result<(), String>,
+    },
+
     // Collection addon management
     OpenCollectionManager(i64),
     FetchCollectionProbe(String),
@@ -173,7 +221,7 @@ pub enum Message {
     UpdateInstanceField(InstanceField),
     SwitchProfile(String),
     RemoveProfile(String),
-    RemoveProfileResult(String, Option<String>),
+    RemoveProfileResult(String, Result<Option<String>, String>),
     InitializeProfileDbResult(String, Result<usize, String>),
 
     // File dialog

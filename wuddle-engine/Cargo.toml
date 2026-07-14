@@ -3,6 +3,16 @@ name = "wuddle-engine"
 version = "0.1.3"
 edition = "2021"
 
+[features]
+default = []
+auto-login = [
+    "dep:keyring",
+    "dep:secrecy",
+    "dep:thiserror",
+    "dep:uuid",
+    "dep:zeroize",
+]
+
 [lib]
 name = "wuddle_engine"
 path = "src/lib.rs"
@@ -30,6 +40,11 @@ url = "2"
 urlencoding = "2"
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "https"] }
 tempfile = "3"
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "windows-native"], optional = true }
+secrecy = { version = "0.10", optional = true }
+thiserror = { version = "2", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+zeroize = { version = "1", features = ["derive"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 junction = "1"

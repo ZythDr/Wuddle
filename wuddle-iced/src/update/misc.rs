@@ -49,6 +49,13 @@ pub fn launch_game(app: &mut App) -> Task<Message> {
             custom_command: active.custom_command,
             custom_args: active.custom_args,
             clear_wdb: active.clear_wdb,
+            #[cfg(feature = "auto-login")]
+            profile_id: active.id.clone(),
+            #[cfg(feature = "auto-login")]
+            auto_login_account_id: active
+                .auto_login_enabled
+                .then(|| active.selected_auto_login_account_id.clone())
+                .flatten(),
         };
         app.log(LogLevel::Info, &format!(
             "Launching game (method: {})...", cfg.method
@@ -87,6 +94,10 @@ fn launch_root_tool(app: &mut App, candidates: &[&str], result: fn(Result<String
         custom_command: active.custom_command,
         custom_args: active.custom_args,
         clear_wdb: false,
+        #[cfg(feature = "auto-login")]
+        profile_id: active.id.clone(),
+        #[cfg(feature = "auto-login")]
+        auto_login_account_id: None,
     };
     Task::perform(
         service::launch_wow_root_tool(
@@ -157,6 +168,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 custom_command: active.custom_command,
                 custom_args: active.custom_args,
                 clear_wdb: false,
+                #[cfg(feature = "auto-login")]
+                profile_id: active.id.clone(),
+                #[cfg(feature = "auto-login")]
+                auto_login_account_id: None,
             };
             Some(Task::perform(
                 service::patch_wow_with_awesome_wotlk(app.wow_dir.clone(), cfg),

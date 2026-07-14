@@ -1,4 +1,7 @@
-use iced::widget::{button, checkbox, column, container, row, scrollable, stack, text, text_input, tooltip, Space};
+use iced::widget::{
+    button, checkbox, column, container, grid, row, scrollable, stack, text, text_input, tooltip,
+    Space,
+};
 use iced::{Element, Length};
 
 use crate::settings::{self, UiScaleMode};
@@ -29,6 +32,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                         wow_dir: String::new(),
                         launch_method: String::from("auto"),
                         clear_wdb: false,
+                        auto_login_enabled: false,
                         lutris_target: String::new(),
                         wine_command: String::from("wine"),
                         wine_args: String::new(),
@@ -48,64 +52,79 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     ]
     .align_y(iced::Alignment::Center);
 
-    let profile_cards: Vec<Element<Message>> = app.profiles.iter().map(|p| {
-        let c2 = c;
-        let display_path = settings::wow_path_display(&p.wow_dir, p.auto_launch_exe.as_deref());
-        let dir_display = if display_path.is_empty() {
-            "No directory set".to_string()
-        } else {
-            display_path
-        };
-        let is_active = p.id == app.active_profile_id;
-        let active_label = if is_active { " (active)" } else { "" };
+    let profile_cards: Vec<Element<Message>> = app
+        .profiles
+        .iter()
+        .map(|p| {
+            let c2 = c;
+            let is_active = p.id == app.active_profile_id;
 
-        button(
-            column![
-                text(format!("{}{}", p.name, active_label)).size(14).color(colors.text),
-                text(dir_display).size(12).color(colors.muted),
-                text("Click to edit").size(11).color(colors.muted),
-            ]
-            .spacing(4),
-        )
-        .on_press(Message::OpenDialog(Dialog::InstanceSettings {
-            is_new: false,
-            profile_id: p.id.clone(),
-            name: p.name.clone(),
-            wow_dir: settings::wow_path_display(&p.wow_dir, p.auto_launch_exe.as_deref()),
-            launch_method: p.launch_method.clone(),
-            clear_wdb: p.clear_wdb,
-            lutris_target: p.lutris_target.clone(),
-            wine_command: p.wine_command.clone(),
-            wine_args: p.wine_args.clone(),
-            custom_command: p.custom_command.clone(),
-            custom_args: p.custom_args.clone(),
-        }))
-        .padding([10, 12])
-        .width(260)
-        .style(move |_theme, status| {
-            let base = theme::card_style(c2);
-            match status {
-                button::Status::Hovered => button::Style {
-                    background: Some(iced::Background::Color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.06))),
-                    text_color: c2.text,
-                    border: base.border,
-                    shadow: base.shadow,
-                    snap: true,
-                },
-                _ => button::Style {
-                    background: base.background,
-                    text_color: c2.text,
-                    border: base.border,
-                    shadow: base.shadow,
-                    snap: true,
-                },
-            }
+            button(
+                container(text(&p.name).size(14).color(if is_active {
+                    colors.primary_text
+                } else {
+                    colors.text
+                }))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+            )
+            .on_press(Message::OpenDialog(Dialog::InstanceSettings {
+                is_new: false,
+                profile_id: p.id.clone(),
+                name: p.name.clone(),
+                wow_dir: settings::wow_path_display(&p.wow_dir, p.auto_launch_exe.as_deref()),
+                launch_method: p.launch_method.clone(),
+                clear_wdb: p.clear_wdb,
+                auto_login_enabled: p.auto_login_enabled,
+                lutris_target: p.lutris_target.clone(),
+                wine_command: p.wine_command.clone(),
+                wine_args: p.wine_args.clone(),
+                custom_command: p.custom_command.clone(),
+                custom_args: p.custom_args.clone(),
+            }))
+            .padding([0, 12])
+            .width(Length::Fill)
+            .height(40)
+            .style(move |_theme, status| {
+                if is_active {
+                    return theme::tab_button_active_style(c2);
+                }
+
+                let base = theme::card_style(c2);
+                match status {
+                    button::Status::Hovered => button::Style {
+                        background: Some(iced::Background::Color(iced::Color::from_rgba(
+                            1.0, 1.0, 1.0, 0.06,
+                        ))),
+                        text_color: c2.text,
+                        border: base.border,
+                        shadow: base.shadow,
+                        snap: true,
+                    },
+                    _ => button::Style {
+                        background: base.background,
+                        text_color: c2.text,
+                        border: base.border,
+                        shadow: base.shadow,
+                        snap: true,
+                    },
+                }
+            })
+            .into()
         })
-        .into()
-    }).collect();
+        .collect();
 
     let instances_section = settings_card(
-        column![instances_head, row(profile_cards).spacing(12)].spacing(10),
+        column![
+            instances_head,
+            grid::Grid::with_children(profile_cards)
+                .fluid(240)
+                .height(Length::Shrink)
+                .spacing(10),
+        ]
+        .spacing(10),
         c,
     );
 

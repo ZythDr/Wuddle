@@ -124,6 +124,9 @@ pub struct App {
 
     // Profiles/instances
     pub profiles: Vec<settings::ProfileConfig>,
+    #[cfg(feature = "auto-login")]
+    pub auto_login_ui: crate::auto_login::UiState,
+    pub auto_login_warning_acknowledged: bool,
 
     // Spinner animation tick (0..36, one full rotation = 36 ticks @ 80ms each)
     pub spinner_tick: usize,
@@ -306,6 +309,9 @@ impl App {
             last_infrequent_check_unix: 0,
             infrequent_repo_ids: std::collections::HashSet::new(),
             profiles: vec![settings::ProfileConfig::default()],
+            #[cfg(feature = "auto-login")]
+            auto_login_ui: crate::auto_login::UiState::default(),
+            auto_login_warning_acknowledged: false,
             spinner_tick: 0,
             collection_marquee_hovered: false,
             collection_marquee_tick: 0,
@@ -432,6 +438,10 @@ impl App {
     }
 
     pub fn save_settings(&self) {
+        let _ = self.try_save_settings();
+    }
+
+    pub fn try_save_settings(&self) -> Result<(), String> {
         let mut ignored_update_ids_by_profile: std::collections::HashMap<String, Vec<i64>> = self
             .ignored_update_ids_by_profile
             .iter()
@@ -474,8 +484,9 @@ impl App {
             update_channel: self.update_channel,
             ui_scale_mode: self.ui_scale_mode,
             migrated_from_tauri: self.migrated_from_tauri,
+            auto_login_warning_acknowledged: self.auto_login_warning_acknowledged,
         };
-        let _ = settings::save_settings(&s);
+        settings::save_settings(&s)
     }
 
     pub fn theme(&self) -> Theme {
@@ -788,6 +799,10 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        #[cfg(feature = "auto-login")]
+        if let Some(task) = crate::auto_login::update(self, message.clone()) {
+            return self.finish_update(task);
+        }
         if let Some(task) = crate::update::misc::update(self, message.clone()) {
             return self.finish_update(task);
         }
@@ -970,6 +985,10 @@ impl App {
                 } else {
                     self.dialog = None;
                     self.reset_add_repo_state();
+                    #[cfg(feature = "auto-login")]
+                    {
+                        self.auto_login_ui = crate::auto_login::UiState::default();
+                    }
                 }
             }
             Message::ToggleModsWarningDoNotShow(checked) => {
@@ -1266,6 +1285,8 @@ impl App {
                 let (dialog_max_w, dialog_pad) = match dialog {
                     Dialog::AddRepo { .. } => (1400u32, 16),
                     Dialog::InstanceSettings { .. } => (600u32, 24),
+                    #[cfg(feature = "auto-login")]
+                    Dialog::AutoLoginAccounts | Dialog::AutoLoginEditor => (640u32, 24),
                     Dialog::Changelog { .. } => (720u32, 24),
                     Dialog::AvWarning { .. } => (720u32, 24),
                     Dialog::AwesomeWotlkPatchWarning
@@ -1315,7 +1336,16 @@ impl App {
                     | Dialog::CollectionChoice { .. }
                     | Dialog::SelectMainAddon { .. }
                     | Dialog::SelectReleaseAsset { .. }
-            );
+            ) || {
+                #[cfg(feature = "auto-login")]
+                {
+                    matches!(dialog, Dialog::AutoLoginAccounts | Dialog::AutoLoginEditor)
+                }
+                #[cfg(not(feature = "auto-login"))]
+                {
+                    false
+                }
+            };
             let scrim_base = container(Space::new())
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -1478,6 +1508,12 @@ impl App {
     ) -> Element<'a, Message> {
         let c = colors;
         match dialog {
+            #[cfg(feature = "auto-login")]
+            Dialog::AutoLoginAccounts
+            | Dialog::AutoLoginEditor
+            | Dialog::DeleteAutoLoginAccount { .. } => {
+                crate::auto_login::view_dialog(self, dialog, colors)
+            }
             Dialog::AddRepo {
                 url,
                 mode,
@@ -3732,12 +3768,15 @@ impl App {
                 wow_dir,
                 launch_method,
                 clear_wdb,
+                auto_login_enabled,
                 lutris_target,
                 wine_command,
                 wine_args,
                 custom_command,
                 custom_args,
             } => {
+                #[cfg(not(feature = "auto-login"))]
+                let _ = auto_login_enabled;
                 let title_text = if *is_new {
                     "Add Instance"
                 } else {
@@ -3820,7 +3859,7 @@ impl App {
                                 s
                             )))
                             .padding([8, 12]),
-                        text("Tip: use {exe} in args to inject the detected game executable path.")
+                        text("Tip: use {exe} for the game path and {autologin_args} where secure auto-login arguments should be inserted.")
                             .size(11)
                             .color(colors.muted),
                     ]
@@ -3833,6 +3872,84 @@ impl App {
                     .color(colors.muted)
                     .into(),
                 };
+
+                #[cfg(feature = "auto-login")]
+                let auto_login_management: Element<Message> = if *auto_login_enabled {
+                    let c2 = c;
+                    if !*is_new && is_active_profile {
+                        button(text("Manage Auto-Login Accounts…").size(12))
+                            .on_press(Message::OpenAutoLoginAccounts)
+                            .padding([6, 12])
+                            .style(move |_theme, status| match status {
+                                button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                                _ => theme::tab_button_style(c2),
+                            })
+                            .into()
+                    } else {
+                        let unavailable_message = if *is_new {
+                            "Save this instance before adding auto-login accounts."
+                        } else {
+                            "Switch to this instance before managing its auto-login accounts."
+                        };
+                        let disabled_button = button(
+                            text("Manage Auto-Login Accounts…")
+                                .size(12)
+                                .color(Color::from_rgba(
+                                    colors.muted.r,
+                                    colors.muted.g,
+                                    colors.muted.b,
+                                    0.55,
+                                )),
+                        )
+                        .padding([6, 12])
+                        .style(move |_theme, _status| button::Style {
+                            background: Some(iced::Background::Color(Color::from_rgba(
+                                c2.tab_idle_bottom.r,
+                                c2.tab_idle_bottom.g,
+                                c2.tab_idle_bottom.b,
+                                0.35,
+                            ))),
+                            text_color: Color::from_rgba(c2.muted.r, c2.muted.g, c2.muted.b, 0.55),
+                            border: iced::Border {
+                                color: Color::from_rgba(c2.border.r, c2.border.g, c2.border.b, 0.4),
+                                width: 1.0,
+                                radius: 0.0.into(),
+                            },
+                            shadow: iced::Shadow::default(),
+                            snap: true,
+                        });
+                        tip(
+                            disabled_button,
+                            unavailable_message,
+                            iced::widget::tooltip::Position::Top,
+                            colors,
+                        )
+                    }
+                } else {
+                    Space::new().height(0).into()
+                };
+                #[cfg(not(feature = "auto-login"))]
+                let auto_login_management: Element<Message> = Space::new().height(0).into();
+
+                #[cfg(feature = "auto-login")]
+                let auto_login_toggle: Element<Message> = tip(
+                    iced::widget::checkbox(*auto_login_enabled)
+                        .label("Auto-login")
+                        .on_toggle(|b| Message::UpdateInstanceField(InstanceField::AutoLoginEnabled(b))),
+                    "Auto-login currently works only with WoW 3.3.5 installations using Awesome WotLK.",
+                    iced::widget::tooltip::Position::Top,
+                    colors,
+                );
+                #[cfg(not(feature = "auto-login"))]
+                let auto_login_toggle: Element<Message> = Space::new().height(0).into();
+
+                let clear_wdb_toggle = container(
+                    iced::widget::checkbox(*clear_wdb)
+                        .label("Auto-clear WDB cache on launch")
+                        .on_toggle(|b| Message::UpdateInstanceField(InstanceField::ClearWdb(b))),
+                )
+                .height(32)
+                .center_y(32);
 
                 column![
                     row![
@@ -3893,9 +4010,14 @@ impl App {
                     text("Tip: choose a folder for default Auto behavior, or choose a renamed game executable to make Auto prefer that file.")
                         .size(11)
                         .color(colors.muted),
-                    iced::widget::checkbox(*clear_wdb)
-                        .label("Auto-clear WDB cache on launch")
-                        .on_toggle(|b| Message::UpdateInstanceField(InstanceField::ClearWdb(b))),
+                    clear_wdb_toggle,
+                    row![
+                        auto_login_toggle,
+                        Space::new().width(Length::Fill),
+                        auto_login_management,
+                    ]
+                    .height(32)
+                    .align_y(iced::Alignment::Center),
                     text("Launch method").size(13).color(colors.text),
                     row(method_buttons).spacing(4),
                     launch_fields,
@@ -4663,7 +4785,16 @@ impl App {
                 button::Status::Hovered => theme::play_button_hovered_style(c),
                 _ => theme::play_button_style(c),
             });
-        let bar = row![hint, Space::new().width(Length::Fill), play_btn,]
+        #[cfg(feature = "auto-login")]
+        let account_picker = crate::auto_login::account_picker(self, colors);
+        #[cfg(not(feature = "auto-login"))]
+        let account_picker: Element<Message> = Space::new().width(0).into();
+        let bar = row![
+            hint,
+            Space::new().width(Length::Fill),
+            account_picker,
+            play_btn,
+        ]
             .spacing(12)
             .padding([10, 12])
             .align_y(iced::Alignment::Center);

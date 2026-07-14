@@ -121,11 +121,21 @@ pub enum Dialog {
         wow_dir: String,
         launch_method: String,  // "auto", "lutris", "wine", "custom"
         clear_wdb: bool,
+        auto_login_enabled: bool,
         lutris_target: String,
         wine_command: String,
         wine_args: String,
         custom_command: String,
         custom_args: String,
+    },
+    #[cfg(feature = "auto-login")]
+    AutoLoginAccounts,
+    #[cfg(feature = "auto-login")]
+    AutoLoginEditor,
+    #[cfg(feature = "auto-login")]
+    DeleteAutoLoginAccount {
+        account_id: wuddle_engine::auto_login::AccountId,
+        label: String,
     },
     AvWarning { url: String, mode: String },
     AddonConflict {

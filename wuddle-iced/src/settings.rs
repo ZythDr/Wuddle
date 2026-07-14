@@ -87,6 +87,7 @@ pub struct ProfileConfig {
     pub auto_launch_exe: Option<String>,
     pub launch_method: String,
     pub clear_wdb: bool,
+    pub auto_login_enabled: bool,
     pub lutris_target: String,
     pub wine_command: String,
     pub wine_args: String,
@@ -94,6 +95,14 @@ pub struct ProfileConfig {
     pub custom_args: String,
     pub working_dir: String,
     pub env_text: String,
+    #[cfg(feature = "auto-login")]
+    pub auto_login_accounts: Vec<wuddle_engine::auto_login::AccountRef>,
+    #[cfg(not(feature = "auto-login"))]
+    pub auto_login_accounts: Vec<serde_json::Value>,
+    #[cfg(feature = "auto-login")]
+    pub selected_auto_login_account_id: Option<wuddle_engine::auto_login::AccountId>,
+    #[cfg(not(feature = "auto-login"))]
+    pub selected_auto_login_account_id: Option<serde_json::Value>,
 }
 
 impl Default for ProfileConfig {
@@ -105,6 +114,7 @@ impl Default for ProfileConfig {
             auto_launch_exe: None,
             launch_method: String::from("auto"),
             clear_wdb: false,
+            auto_login_enabled: false,
             lutris_target: String::new(),
             wine_command: String::from("wine"),
             wine_args: String::new(),
@@ -112,6 +122,14 @@ impl Default for ProfileConfig {
             custom_args: String::new(),
             working_dir: String::new(),
             env_text: String::new(),
+            #[cfg(feature = "auto-login")]
+            auto_login_accounts: Vec::new(),
+            #[cfg(not(feature = "auto-login"))]
+            auto_login_accounts: Vec::new(),
+            #[cfg(feature = "auto-login")]
+            selected_auto_login_account_id: None,
+            #[cfg(not(feature = "auto-login"))]
+            selected_auto_login_account_id: None,
         }
     }
 }
@@ -138,6 +156,7 @@ pub struct AppSettings {
     pub update_channel: UpdateChannel,
     pub ui_scale_mode: UiScaleMode,
     pub migrated_from_tauri: bool,
+    pub auto_login_warning_acknowledged: bool,
 }
 
 impl Default for AppSettings {
@@ -162,6 +181,7 @@ impl Default for AppSettings {
             update_channel: UpdateChannel::Beta,
             ui_scale_mode: UiScaleMode::Auto,
             migrated_from_tauri: false,
+            auto_login_warning_acknowledged: false,
         }
     }
 }
@@ -538,6 +558,7 @@ fn read_tauri_localstorage_profiles() -> Vec<ProfileConfig> {
                     .get("clearWdb")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
+                auto_login_enabled: false,
                 lutris_target: launch
                     .get("lutrisTarget")
                     .and_then(|v| v.as_str())
@@ -573,6 +594,14 @@ fn read_tauri_localstorage_profiles() -> Vec<ProfileConfig> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
+                #[cfg(feature = "auto-login")]
+                auto_login_accounts: Vec::new(),
+                #[cfg(not(feature = "auto-login"))]
+                auto_login_accounts: Vec::new(),
+                #[cfg(feature = "auto-login")]
+                selected_auto_login_account_id: None,
+                #[cfg(not(feature = "auto-login"))]
+                selected_auto_login_account_id: None,
             })
         })
         .collect()
@@ -736,5 +765,47 @@ pub fn resolve_ui_scale(mode: UiScaleMode) -> f32 {
     match mode {
         UiScaleMode::Auto => *AUTO_UI_SCALE.get().unwrap_or(&1.0),
         other => other.factor(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_settings_default_to_manual_login() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.auto_login_warning_acknowledged);
+        assert!(!settings.profiles[0].auto_login_enabled);
+        assert!(settings.profiles[0].auto_login_accounts.is_empty());
+        assert!(settings.profiles[0]
+            .selected_auto_login_account_id
+            .is_none());
+    }
+
+    #[test]
+    fn auto_login_metadata_round_trips_without_credentials() {
+        let raw = r#"{
+            "auto_login_warning_acknowledged": true,
+            "profiles": [{
+                "id": "default",
+                "name": "Default",
+                "auto_login_enabled": true,
+                "auto_login_accounts": [{
+                    "id": "de305d54-75b4-431b-adb2-eb6b9e546014",
+                    "label": "Main"
+                }],
+                "selected_auto_login_account_id": "de305d54-75b4-431b-adb2-eb6b9e546014"
+            }]
+        }"#;
+        let settings: AppSettings = serde_json::from_str(raw).unwrap();
+        assert!(settings.profiles[0].auto_login_enabled);
+        let encoded = serde_json::to_string(&settings).unwrap();
+        assert!(encoded.contains("\"auto_login_enabled\":true"));
+        assert!(encoded.contains("Main"));
+        assert!(encoded.contains("de305d54-75b4-431b-adb2-eb6b9e546014"));
+        assert!(!encoded.contains("password"));
+        assert!(!encoded.contains("realmlist"));
+        assert!(!encoded.contains("realm_name"));
     }
 }

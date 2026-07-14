@@ -1776,13 +1776,34 @@ pub struct LaunchConfig {
     pub custom_command: String,
     pub custom_args: String,
     pub clear_wdb: bool,
+    #[cfg(feature = "auto-login")]
+    pub profile_id: String,
+    #[cfg(feature = "auto-login")]
+    pub auto_login_account_id: Option<wuddle_engine::auto_login::AccountId>,
 }
 
 fn first_existing_file(dir: &Path, names: &[&str]) -> Option<PathBuf> {
-    names
+    // Preserve an exact spelling when present, then tolerate filesystem/case
+    // differences in filenames selected by older settings or file pickers.
+    if let Some(candidate) = names
         .iter()
         .map(|name| dir.join(name))
         .find(|candidate| candidate.is_file())
+    {
+        return Some(candidate);
+    }
+
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            let filename = entry.file_name();
+            let filename = filename.to_string_lossy();
+            names
+                .iter()
+                .any(|name| filename.eq_ignore_ascii_case(name))
+                .then_some(entry.path())
+        })
 }
 
 fn resolve_launch_target(
@@ -1820,7 +1841,12 @@ fn parse_arg_string(raw: &str) -> Vec<String> {
 
 fn spawn_launch_command(program: &str, args: &[String], cwd: &Path) -> Result<(), String> {
     let mut cmd = Command::new(program);
-    cmd.args(args).current_dir(cwd);
+    cmd.args(args);
+    spawn_command(cmd, program, cwd)
+}
+
+fn spawn_command(mut cmd: Command, program: &str, cwd: &Path) -> Result<(), String> {
+    cmd.current_dir(cwd);
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         clean_env_for_child(&mut cmd);
@@ -1879,10 +1905,7 @@ pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, S
     tokio::task::spawn_blocking(move || {
         let wow_path = PathBuf::from(wow_dir.trim());
         if !wow_path.is_dir() {
-            return Err(format!(
-                "WoW path is not a directory: {}",
-                wow_path.display()
-            ));
+            return Err(format!("WoW path is not a directory: {}", wow_path.display()));
         }
 
         // Optionally clear WDB cache before launch
@@ -1901,6 +1924,23 @@ pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, S
             .unwrap_or_else(|| "game".to_string());
 
         let method = cfg.method.trim().to_ascii_lowercase();
+
+        #[cfg(feature = "auto-login")]
+        let prepared_auto_login = if let Some(account_id) = cfg.auto_login_account_id.as_ref() {
+            if method == "lutris" {
+                return Err(
+                    "Secure auto-login is not supported by Lutris launches because Lutris has no transient argument override. Choose Manual Login or use Wuddle's Wine launch method."
+                        .to_string(),
+                );
+            }
+            Some(
+                wuddle_engine::auto_login::AutoLoginService::system()
+                    .prepare_arguments(&cfg.profile_id, account_id)
+                    .map_err(|error| format!("Could not prepare secure auto-login: {error}"))?,
+            )
+        } else {
+            None
+        };
 
         if method == "lutris" {
             let command = if cfg.custom_command.trim().is_empty() {
@@ -1926,9 +1966,14 @@ pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, S
             } else {
                 cfg.wine_command.trim()
             };
-            let mut args = parse_arg_string(&cfg.wine_args);
-            args.push(target_str);
-            spawn_launch_command(command, &args, &wow_path)?;
+            let args = parse_arg_string(&cfg.wine_args);
+            let mut launch = Command::new(command);
+            launch.args(&args).arg(&target_str);
+            #[cfg(feature = "auto-login")]
+            if let Some(prepared) = prepared_auto_login.as_ref() {
+                prepared.append_to_command(&mut launch);
+            }
+            spawn_command(launch, command, &wow_path)?;
             return Ok(format!("Launched {} via {}.", target_name, command));
         }
 
@@ -1951,12 +1996,29 @@ pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, S
             if !inserted_exe {
                 args.push(target_str);
             }
-            spawn_launch_command(command, &args, &wow_path)?;
+            let mut launch = Command::new(command);
+            #[cfg(feature = "auto-login")]
+            match prepared_auto_login.as_ref() {
+                Some(prepared) => prepared
+                    .append_custom_command(&mut launch, &args)
+                    .map_err(|error| error.to_string())?,
+                None => wuddle_engine::auto_login::append_manual_custom_arguments(
+                    &mut launch,
+                    &args,
+                ),
+            }
+            #[cfg(not(feature = "auto-login"))]
+            launch.args(&args);
+            spawn_command(launch, command, &wow_path)?;
             return Ok(format!("Launched {} via custom command.", target_name));
         }
 
         // "auto" or fallback: launch executable directly
         let mut cmd = Command::new(&target);
+        #[cfg(feature = "auto-login")]
+        if let Some(prepared) = prepared_auto_login.as_ref() {
+            prepared.append_to_command(&mut cmd);
+        }
         cmd.current_dir(&wow_path);
         #[cfg(all(unix, not(target_os = "macos")))]
         {
@@ -2033,7 +2095,10 @@ pub async fn patch_wow_with_awesome_wotlk(
     tokio::task::spawn_blocking(move || {
         let wow_path = PathBuf::from(wow_dir.trim());
         if !wow_path.is_dir() {
-            return Err(format!("WoW path is not a directory: {}", wow_path.display()));
+            return Err(format!(
+                "WoW path is not a directory: {}",
+                wow_path.display()
+            ));
         }
 
         let wow_exe = first_existing_game_executable(&wow_path)
@@ -2328,6 +2393,33 @@ mod github_token_tests {
         assert!(verify_stored_token("secret", Some("secret".to_string())).is_ok());
         assert!(verify_stored_token("secret", Some("different".to_string())).is_err());
         assert!(verify_stored_token("secret", None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod launch_target_tests {
+    use super::resolve_launch_target;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn explicit_launch_target_matching_is_case_insensitive() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "wuddle-launch-target-case-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let expected = dir.join("wow.exe");
+        fs::write(&expected, []).unwrap();
+
+        let target = resolve_launch_target(&dir, Some("WoW.ExE")).unwrap();
+        assert_eq!(target, expected);
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
 

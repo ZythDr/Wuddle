@@ -4823,6 +4823,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "secrecy"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "secret-service"
 version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5798,6 +5807,7 @@ version = "1.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a68d3c8f01c0cfa54a75291d83601161799e4a89a39e0929f4b0354d88757a37"
 dependencies = [
+ "getrandom 0.4.2",
  "js-sys",
  "serde_core",
  "wasm-bindgen",
@@ -7095,24 +7105,29 @@ dependencies = [
  "git2",
  "hex",
  "junction",
+ "keyring",
  "regex",
  "reqwest",
  "rusqlite",
+ "secrecy",
  "serde",
  "serde_json",
  "sevenz-rust",
  "sha2",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "url",
  "urlencoding",
+ "uuid",
+ "zeroize",
  "zip",
 ]
 
 [[package]]
 name = "wuddle-iced"
-version = "3.6.0-beta.2"
+version = "3.6.0-beta.3"
 dependencies = [
  "arboard",
  "async-stream",
