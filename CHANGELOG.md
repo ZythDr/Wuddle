@@ -2,6 +2,11 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.6.1
+
+### Bug Fixes
+- **Beta In-App Updates** — Pre-release version numbers now compare correctly, so each newer beta can be installed through Wuddle without a manual download. This hotfix is published as `v3.6.1-beta.1` so existing `v3.6.0-beta.2` installations can receive it.
+
 ## v3.6.0
 
 ### New Features

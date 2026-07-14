@@ -3663,47 +3663,119 @@ fn normalize_tag(raw: &str) -> String {
     raw.trim().trim_start_matches(['v', 'V']).trim().to_string()
 }
 
-/// Split a version string into its numeric core and whether it has a
-/// pre-release suffix (alpha, beta, rc, etc.).
-fn parse_version_parts(raw: &str) -> (Vec<u64>, bool) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreReleaseIdentifier {
+    Numeric(u64),
+    Text(String),
+}
+
+/// Parse the SemVer parts needed by the updater. Build metadata is deliberately
+/// ignored, while the individual pre-release identifiers remain significant:
+/// `3.6.0-beta.3` must sort after `3.6.0-beta.2`.
+fn parse_version_parts(raw: &str) -> (Vec<u64>, Option<Vec<PreReleaseIdentifier>>) {
     let tag = normalize_tag(raw);
-    let is_prerelease =
-        tag.contains("alpha") || tag.contains("beta") || tag.contains("rc") || tag.contains("dev");
-    let nums: Vec<u64> = tag
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse::<u64>().ok())
+    let without_build = tag.split_once('+').map_or(tag.as_str(), |(version, _)| version);
+    let (core_raw, pre_raw) = without_build
+        .split_once('-')
+        .map_or((without_build, None), |(core, pre)| (core, Some(pre)));
+    let core = core_raw
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0))
         .collect();
-    // For pre-release tags, only keep the first 3 segments (major.minor.patch)
-    // so that e.g. "3.0.0-beta.8" compares as [3,0,0] pre-release, not [3,0,0,8].
-    let core = if is_prerelease {
-        nums.into_iter().take(3).collect()
-    } else {
-        nums
-    };
-    (core, is_prerelease)
+    let prerelease = pre_raw.map(|pre| {
+        pre.split('.')
+            .filter(|part| !part.is_empty())
+            .map(|part| match part.parse::<u64>() {
+                Ok(number) => PreReleaseIdentifier::Numeric(number),
+                Err(_) => PreReleaseIdentifier::Text(part.to_ascii_lowercase()),
+            })
+            .collect()
+    });
+    (core, prerelease)
+}
+
+fn compare_pre_release_identifier(
+    left: &PreReleaseIdentifier,
+    right: &PreReleaseIdentifier,
+) -> std::cmp::Ordering {
+    use PreReleaseIdentifier::{Numeric, Text};
+
+    match (left, right) {
+        (Numeric(a), Numeric(b)) => a.cmp(b),
+        // SemVer specifies that numeric identifiers have lower precedence than
+        // non-numeric identifiers.
+        (Numeric(_), Text(_)) => std::cmp::Ordering::Less,
+        (Text(_), Numeric(_)) => std::cmp::Ordering::Greater,
+        (Text(a), Text(b)) => a.cmp(b),
+    }
 }
 
 fn is_version_newer(latest: &str, current: &str) -> bool {
-    let (a, a_pre) = parse_version_parts(latest);
-    let (b, b_pre) = parse_version_parts(current);
-    let max = a.len().max(b.len());
+    let (latest_core, latest_pre) = parse_version_parts(latest);
+    let (current_core, current_pre) = parse_version_parts(current);
+    let max = latest_core.len().max(current_core.len());
     for i in 0..max {
-        let av = *a.get(i).unwrap_or(&0);
-        let bv = *b.get(i).unwrap_or(&0);
-        if av > bv {
-            return true;
-        }
-        if av < bv {
-            return false;
+        let latest_part = *latest_core.get(i).unwrap_or(&0);
+        let current_part = *current_core.get(i).unwrap_or(&0);
+        match latest_part.cmp(&current_part) {
+            std::cmp::Ordering::Greater => return true,
+            std::cmp::Ordering::Less => return false,
+            std::cmp::Ordering::Equal => {}
         }
     }
-    // Same numeric core: a stable release is newer than a pre-release.
-    // e.g. 3.0.0 is newer than 3.0.0-beta.8
-    if !a_pre && b_pre {
-        return true;
+
+    match (latest_pre, current_pre) {
+        // A final release is newer than a pre-release with the same core.
+        (None, Some(_)) => true,
+        (Some(_), None) | (None, None) => false,
+        (Some(latest_pre), Some(current_pre)) => {
+            let max = latest_pre.len().max(current_pre.len());
+            for i in 0..max {
+                match (latest_pre.get(i), current_pre.get(i)) {
+                    // A longer matching pre-release identifier list has higher
+                    // precedence, e.g. `beta.1.1` > `beta.1`.
+                    (Some(_), None) => return true,
+                    (None, Some(_)) => return false,
+                    (Some(latest_identifier), Some(current_identifier)) => {
+                        match compare_pre_release_identifier(latest_identifier, current_identifier) {
+                            std::cmp::Ordering::Greater => return true,
+                            std::cmp::Ordering::Less => return false,
+                            std::cmp::Ordering::Equal => {}
+                        }
+                    }
+                    (None, None) => break,
+                }
+            }
+            false
+        }
     }
-    false
+}
+
+#[cfg(test)]
+mod self_update_version_tests {
+    use super::is_version_newer;
+
+    #[test]
+    fn beta_sequence_is_compared() {
+        assert!(is_version_newer("3.6.0-beta.3", "3.6.0-beta.2"));
+        assert!(!is_version_newer("3.6.0-beta.2", "3.6.0-beta.3"));
+    }
+
+    #[test]
+    fn prerelease_and_stable_precedence_is_respected() {
+        assert!(is_version_newer("3.6.0", "3.6.0-beta.3"));
+        assert!(!is_version_newer("3.6.0-beta.3", "3.6.0"));
+        assert!(is_version_newer("3.6.0-rc.1", "3.6.0-beta.3"));
+    }
+
+    #[test]
+    fn build_metadata_does_not_affect_precedence() {
+        assert!(!is_version_newer(
+            "3.6.0-beta.3+linux.x86_64",
+            "3.6.0-beta.3"
+        ));
+        assert!(is_version_newer("3.6.1-beta.1", "3.6.0-beta.2"));
+    }
 }
 
 async fn fetch_release_full(beta_channel: bool) -> Result<GhReleaseFull, String> {
