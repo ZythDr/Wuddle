@@ -102,7 +102,22 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
         tip(
             {
                 let c2 = c;
-                let log_text_copy = build_log_text(app);
+                button(text("Export Diagnostics").size(13))
+                    .on_press(Message::ExportDiagnostics)
+                    .padding([6, 12])
+                    .style(move |_theme, status| match status {
+                        button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                        _ => theme::tab_button_style(c2),
+                    })
+            },
+            "Save privacy-sanitized rolling logs and system details for a GitHub issue",
+            tooltip::Position::Bottom,
+            colors,
+        ),
+        tip(
+            {
+                let c2 = c;
+                let log_text_copy = crate::diagnostics::sanitize_text(&build_log_text(app));
                 button(text("Copy Log").size(13))
                     .on_press(Message::CopyToClipboard(log_text_copy))
                     .padding([6, 12])
@@ -111,7 +126,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                         _ => theme::tab_button_style(c2),
                     })
             },
-            "Copy all log output to clipboard",
+            "Copy privacy-sanitized log output to clipboard",
             tooltip::Position::Bottom,
             colors,
         ),
@@ -132,6 +147,14 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
         checkbox(app.log_autoscroll)
             .label("Auto-scroll")
             .on_toggle(Message::ToggleLogAutoScroll),
+        tip(
+            checkbox(app.verbose_diagnostics)
+                .label("Verbose diagnostics")
+                .on_toggle(Message::ToggleVerboseDiagnostics),
+            "Record detailed internal operations for troubleshooting. Credentials, tokens, command arguments, account details, raw settings, and database contents are never logged.",
+            tooltip::Position::Bottom,
+            colors,
+        ),
         {
             let c2 = c;
             let show_clear = !app.log_search.is_empty();

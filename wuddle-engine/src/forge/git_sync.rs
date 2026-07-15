@@ -6,6 +6,8 @@ use git2::{
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
+use crate::gam_compat;
+
 #[derive(Debug, Clone)]
 pub struct GitHeadState {
     pub oid: String,
@@ -289,27 +291,28 @@ fn clone_repo(url: &str, path: &Path, branch: &str) -> Result<()> {
 
 fn sync_existing_repo(url: &str, path: &Path, remote: &GitHeadState) -> Result<()> {
     let repo = Repository::open(path).with_context(|| format!("open repo {}", path.display()))?;
-    let mut origin = match repo.find_remote("origin") {
-        Ok(_) => {
-            repo.remote_set_url("origin", url)
-                .with_context(|| format!("set origin remote {}", url))?;
-            repo.find_remote("origin")
-                .context("re-open origin remote after URL update")?
-        }
+    let configured = gam_compat::preferred_remote(&repo);
+    let remote_name = configured
+        .as_ref()
+        .map(|configured| configured.name.as_str())
+        .unwrap_or("origin")
+        .to_string();
+    let mut git_remote = match repo.find_remote(&remote_name) {
+        Ok(remote) => remote,
         Err(_) => repo
-            .remote("origin", url)
-            .with_context(|| format!("add origin remote {}", url))?,
+            .remote(&remote_name, url)
+            .with_context(|| format!("add {} remote {}", remote_name, url))?,
     };
 
-    let plain_fetch = origin
+    let plain_fetch = git_remote
         .fetch(&[remote.remote_ref.as_str()], None, None)
-        .or_else(|_| origin.fetch(&[remote.branch.as_str()], None, None));
+        .or_else(|_| git_remote.fetch(&[remote.branch.as_str()], None, None));
     if let Err(first_err) = plain_fetch {
         let mut fo = FetchOptions::new();
         fo.remote_callbacks(remote_callbacks());
-        origin
+        git_remote
             .fetch(&[remote.remote_ref.as_str()], Some(&mut fo), None)
-            .or_else(|_| origin.fetch(&[remote.branch.as_str()], Some(&mut fo), None))
+            .or_else(|_| git_remote.fetch(&[remote.branch.as_str()], Some(&mut fo), None))
             .with_context(|| {
                 format!(
                     "fetch {} {} (plain failed: {})",
@@ -318,7 +321,7 @@ fn sync_existing_repo(url: &str, path: &Path, remote: &GitHeadState) -> Result<(
             })?;
     }
 
-    let tracking_ref = format!("refs/remotes/origin/{}", remote.branch);
+    let tracking_ref = format!("refs/remotes/{}/{}", remote_name, remote.branch);
     let target_oid = repo
         .refname_to_id(&tracking_ref)
         .or_else(|_| repo.refname_to_id("FETCH_HEAD"))
@@ -330,7 +333,9 @@ fn sync_existing_repo(url: &str, path: &Path, remote: &GitHeadState) -> Result<(
         r.set_target(target_oid, "wuddle git sync")?;
     } else {
         let commit = repo.find_commit(target_oid)?;
-        repo.branch(&remote.branch, &commit, true)?;
+        let mut branch = repo.branch(&remote.branch, &commit, true)?;
+        let upstream = format!("{}/{}", remote_name, remote.branch);
+        let _ = branch.set_upstream(Some(&upstream));
     }
 
     if repo.set_head(&local_ref).is_err() {
@@ -342,8 +347,9 @@ fn sync_existing_repo(url: &str, path: &Path, remote: &GitHeadState) -> Result<(
 }
 
 pub fn sync_repo(url: &str, path: &Path, preferred_branch: Option<&str>) -> Result<GitHeadState> {
-    let (remote, remote_url) = choose_remote_head_with_url(url, preferred_branch)?;
     let exists = ensure_git_repo(path)?;
+    let effective_url = effective_remote_url(path, url).unwrap_or_else(|| url.to_string());
+    let (remote, remote_url) = choose_remote_head_with_url(&effective_url, preferred_branch)?;
     if !exists {
         clone_repo(&remote_url, path, &remote.branch)?;
     } else {
@@ -357,6 +363,19 @@ pub fn sync_repo(url: &str, path: &Path, preferred_branch: Option<&str>) -> Resu
         branch: remote.branch,
         remote_ref: remote.remote_ref,
     })
+}
+
+/// GAM follows the checked-out branch's configured upstream. Preserve that
+/// choice for existing worktrees and use the database URL only for a new clone
+/// or a repository without a configured remote.
+pub fn effective_remote_url(path: &Path, fallback: &str) -> Option<String> {
+    if let Ok(repo) = Repository::open(path) {
+        if let Some(remote) = gam_compat::preferred_remote(&repo) {
+            return Some(remote.url);
+        }
+    }
+    let fallback = fallback.trim();
+    (!fallback.is_empty()).then(|| fallback.to_string())
 }
 
 pub fn remote_head_for_branch(url: &str, preferred_branch: Option<&str>) -> Result<GitHeadState> {
@@ -421,3 +440,84 @@ pub fn addon_repo_legacy_staging_dir(wow_dir: &Path, host: &str, owner: &str, re
         .join(sanitize_fs_component(repo_name))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn commit_value(repo: &Repository, root: &Path, value: &str) -> Oid {
+        fs::write(root.join("value.txt"), value.as_bytes()).unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("Wuddle Test", "test@example.invalid").unwrap();
+        let parents = repo
+            .head()
+            .ok()
+            .and_then(|head| head.target())
+            .and_then(|oid| repo.find_commit(oid).ok())
+            .into_iter()
+            .collect::<Vec<_>>();
+        let parent_refs = parents.iter().collect::<Vec<_>>();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            value,
+            &tree,
+            &parent_refs,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn existing_repo_follows_upstream_without_rewriting_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let right_path = temp.path().join("right");
+        let wrong_path = temp.path().join("wrong");
+        let worktree = temp.path().join("worktree");
+        fs::create_dir_all(&right_path).unwrap();
+        fs::create_dir_all(&wrong_path).unwrap();
+        let right = Repository::init(&right_path).unwrap();
+        let wrong = Repository::init(&wrong_path).unwrap();
+        commit_value(&right, &right_path, "right-v1");
+        commit_value(&wrong, &wrong_path, "wrong-v1");
+
+        sync_repo(&right_path.to_string_lossy(), &worktree, None).unwrap();
+        {
+            let repo = Repository::open(&worktree).unwrap();
+            repo.remote_rename("origin", "gam").unwrap();
+            repo.remote("origin", &wrong_path.to_string_lossy()).unwrap();
+            let head_name = repo.head().unwrap().name().unwrap().to_string();
+            let branch_name = head_name.strip_prefix("refs/heads/").unwrap();
+            let mut config = repo.config().unwrap();
+            config
+                .set_str(&format!("branch.{branch_name}.remote"), "gam")
+                .unwrap();
+            config
+                .set_str(
+                    &format!("branch.{branch_name}.merge"),
+                    &format!("refs/heads/{branch_name}"),
+                )
+                .unwrap();
+        }
+
+        commit_value(&right, &right_path, "right-v2");
+        sync_repo(&wrong_path.to_string_lossy(), &worktree, None).unwrap();
+
+        assert_eq!(fs::read_to_string(worktree.join("value.txt")).unwrap(), "right-v2");
+        let repo = Repository::open(&worktree).unwrap();
+        assert_eq!(
+            repo.find_remote("origin").unwrap().url(),
+            Some(wrong_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            repo.find_remote("gam").unwrap().url(),
+            Some(right_path.to_string_lossy().as_ref())
+        );
+    }
+}

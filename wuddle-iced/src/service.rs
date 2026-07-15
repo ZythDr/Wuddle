@@ -25,11 +25,11 @@ fn rescan_progress_slot() -> &'static Mutex<Option<RescanProgress>> {
 }
 
 pub fn set_rescan_progress(stage: impl Into<String>, detail: impl Into<String>) {
+    let stage = stage.into();
+    let detail = detail.into();
+    crate::diagnostics::trace("rescan", format!("progress: stage={stage}; detail omitted"));
     if let Ok(mut guard) = rescan_progress_slot().lock() {
-        *guard = Some(RescanProgress {
-            stage: stage.into(),
-            detail: detail.into(),
-        });
+        *guard = Some(RescanProgress { stage, detail });
     }
 }
 
@@ -426,6 +426,15 @@ fn update_check_progress_slot() -> &'static Mutex<Option<wuddle_engine::UpdateCh
 }
 
 fn set_update_check_progress(progress: Option<wuddle_engine::UpdateCheckProgress>) {
+    if let Some(progress) = &progress {
+        crate::diagnostics::trace(
+            "update_check",
+            format!(
+                "progress: stage={:?}; mode={}; repository identity omitted",
+                progress.stage, progress.mode
+            ),
+        );
+    }
     if let Ok(mut slot) = update_check_progress_slot().lock() {
         *slot = progress;
     }
@@ -489,6 +498,7 @@ pub async fn detect_tweak_client(
     wow_dir: String,
     auto_launch_exe: Option<String>,
 ) -> Result<ClientVersionInfo, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("detect_tweak_client");
     tokio::task::spawn_blocking(move || {
         let wow_path = Path::new(&wow_dir);
         let exe_path = resolve_tweak_target_executable(wow_path, auto_launch_exe.as_deref())?;
@@ -617,6 +627,7 @@ pub async fn initialize_profile_database(
     db_path: PathBuf,
     wow_dir: String,
 ) -> Result<usize, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("initialize_profile_database");
     tokio::task::spawn_blocking(move || {
         let eng = Engine::open(&db_path).map_err(|e| e.to_string())?;
         let wow_dir = wow_dir.trim();
@@ -757,6 +768,7 @@ pub async fn list_repos(
     wow_dir: Option<String>,
     fix_casing: bool,
 ) -> Result<RepoLoadResult, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("list_repos");
     clear_rescan_progress();
     set_rescan_progress("Repository load", "Resolving WoW directory...");
 
@@ -1006,6 +1018,7 @@ pub async fn check_updates(
     wow_dir: Option<String>,
     mode: CheckMode,
 ) -> Result<Vec<PlanRow>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("check_updates");
     check_updates_skip(db_path, wow_dir, mode, std::collections::HashSet::new()).await
 }
 
@@ -1015,6 +1028,7 @@ pub async fn check_updates_skip(
     mode: CheckMode,
     skip_repo_ids: std::collections::HashSet<i64>,
 ) -> Result<Vec<PlanRow>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("check_updates_skip");
     clear_update_check_progress();
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
@@ -1057,6 +1071,15 @@ pub async fn add_repo(
     asset_regex: Option<String>,
     selected_addons: Option<Vec<String>>,
 ) -> Result<i64, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("add_repo");
+    crate::diagnostics::trace(
+        "service",
+        format!(
+            "add_repo: mode={mode}; selected_addons={}; asset_filter={}",
+            selected_addons.as_ref().map(Vec::len).unwrap_or(0),
+            asset_regex.is_some()
+        ),
+    );
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let install_mode = InstallMode::from_str(&mode).unwrap_or(InstallMode::Auto);
@@ -1074,6 +1097,7 @@ pub async fn add_local_archive_file(
     db_path: Option<PathBuf>,
     path: PathBuf,
 ) -> Result<i64, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("add_local_archive_file");
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         eng.add_local_archive_file(&path).map_err(|e| e.to_string())
@@ -1089,6 +1113,15 @@ pub async fn update_collection_selection(
     selected_addons: Vec<String>,
     opts: InstallOptions,
 ) -> Result<String, CollectionSelectionError> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("update_collection_selection");
+    crate::diagnostics::trace(
+        "service",
+        format!(
+            "update_collection_selection: repo_id={repo_id}; selected_count={}; replace_conflicts={}",
+            selected_addons.len(),
+            opts.replace_addon_conflicts
+        ),
+    );
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref()).map_err(CollectionSelectionError::Other)?;
         let repo = eng
@@ -1161,6 +1194,7 @@ pub async fn probe_conflicts(
     url: String,
     wow_dir: String,
 ) -> Result<wuddle_engine::AddonProbeResult, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("probe_conflicts");
     // NOTE: probe_addon_repo_conflicts is async, so we can't simply call it inside
     // spawn_blocking. Using Handle::current().block_on() inside spawn_blocking would
     // deadlock because both sides wait on the same Tokio runtime. Instead we build a
@@ -1202,6 +1236,14 @@ pub async fn check_pre_install_conflicts(
     wow_dir: String,
     addon_names: Vec<String>,
 ) -> Result<PreInstallConflictInfo, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("check_pre_install_conflicts");
+    crate::diagnostics::trace(
+        "service",
+        format!(
+            "check_pre_install_conflicts: repo_id={repo_id}; addon_count={}",
+            addon_names.len()
+        ),
+    );
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let repo = eng.db().get_repo(repo_id).map_err(|e| e.to_string())?;
@@ -1239,6 +1281,11 @@ pub async fn remove_repo(
     wow_dir: Option<String>,
     remove_local_files: bool,
 ) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("remove_repo");
+    crate::diagnostics::trace(
+        "service",
+        format!("remove_repo: repo_id={id}; remove_local_files={remove_local_files}"),
+    );
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         eng.remove_repo(id, wow_dir.as_deref().map(Path::new), remove_local_files)
@@ -1256,6 +1303,7 @@ pub async fn set_repo_enabled(
     wow_dir: String,
     use_dlls_txt: bool,
 ) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("set_repo_enabled");
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let wow_path = (!wow_dir.trim().is_empty()).then(|| Path::new(&wow_dir));
@@ -1291,6 +1339,7 @@ pub async fn list_repo_installs(
     db_path: Option<PathBuf>,
     repo_id: i64,
 ) -> Result<Vec<(String, String)>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("list_repo_installs");
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let entries = eng.db().list_installs(repo_id).map_err(|e| e.to_string())?;
@@ -1307,6 +1356,7 @@ pub async fn set_dll_enabled(
     enabled: bool,
     use_dlls_txt: bool,
 ) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("set_dll_enabled");
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         eng.set_dll_enabled(&dll_name, enabled, Path::new(&wow_dir), use_dlls_txt)
@@ -1339,6 +1389,11 @@ pub async fn update_all(
     ids_to_update: Vec<i64>,
     opts: InstallOptions,
 ) -> Result<Vec<UpdateOneResult>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("update_all");
+    crate::diagnostics::trace(
+        "service",
+        format!("update_all: requested_count={}", ids_to_update.len()),
+    );
     if ids_to_update.is_empty() {
         return Ok(Vec::new());
     }
@@ -1437,6 +1492,8 @@ pub async fn install_new_repo(
     wow_dir: String,
     opts: InstallOptions,
 ) -> Result<String, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("install_new_repo");
+    crate::diagnostics::trace("service", format!("install_new_repo: repo_id={id}"));
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let wow_path = Path::new(&wow_dir);
@@ -1468,6 +1525,8 @@ pub async fn update_repo(
     wow_dir: String,
     opts: InstallOptions,
 ) -> Result<Option<PlanRow>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("update_repo");
+    crate::diagnostics::trace("service", format!("update_repo: repo_id={id}"));
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let plan = tokio::runtime::Builder::new_current_thread()
@@ -1488,6 +1547,8 @@ pub async fn reinstall_repo(
     wow_dir: String,
     opts: InstallOptions,
 ) -> Result<PlanRow, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("reinstall_repo");
+    crate::diagnostics::trace("service", format!("reinstall_repo: repo_id={id}"));
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let plan = tokio::runtime::Builder::new_current_thread()
@@ -1513,6 +1574,7 @@ pub async fn list_repo_branches(
     db_path: Option<PathBuf>,
     repo_id: i64,
 ) -> (i64, Result<Vec<String>, String>) {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("list_repo_branches");
     let result: Result<Vec<String>, String> = tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         eng.list_repo_branches(repo_id).map_err(|e| e.to_string())
@@ -1528,6 +1590,7 @@ pub async fn set_repo_branch(
     repo_id: i64,
     branch: String,
 ) -> Result<i64, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("set_repo_branch");
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let branch_opt = if branch.is_empty() {
@@ -1548,6 +1611,7 @@ pub async fn set_merge_installs(
     repo_id: i64,
     merge: bool,
 ) -> Result<i64, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("set_merge_installs");
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         eng.set_repo_merge_installs(repo_id, merge)
@@ -1563,6 +1627,7 @@ pub async fn set_pinned_version(
     repo_id: i64,
     version: Option<String>,
 ) -> Result<i64, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("set_pinned_version");
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         eng.set_repo_pinned_version(repo_id, version)
@@ -1585,6 +1650,7 @@ pub async fn list_repo_versions(
     db_path: Option<PathBuf>,
     repo_url: String,
 ) -> Result<Vec<VersionItem>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("list_repo_versions");
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let releases = tokio::runtime::Handle::current()
@@ -1606,6 +1672,9 @@ pub async fn fetch_latest_release_archive_options(
     db_path: Option<PathBuf>,
     repo_url: String,
 ) -> Result<Vec<ReleaseAssetOption>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new(
+        "fetch_latest_release_archive_options",
+    );
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let releases = tokio::runtime::Handle::current()
@@ -1645,6 +1714,7 @@ pub async fn open_repo_folder(
     repo_id: i64,
     wow_dir: PathBuf,
 ) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("open_repo_folder");
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let repo = eng.db().get_repo(repo_id).map_err(|e| e.to_string())?;
@@ -1706,6 +1776,7 @@ pub async fn open_addon_folder(
     wow_dir: PathBuf,
     addon_name: String,
 ) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("open_addon_folder");
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let installs = eng.db().list_installs(repo_id).map_err(|e| e.to_string())?;
@@ -1876,6 +1947,18 @@ fn clean_env_for_child(cmd: &mut Command) {
 }
 
 pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("launch_game");
+    #[cfg(feature = "auto-login")]
+    let auto_login_requested = cfg.auto_login_account_id.is_some();
+    #[cfg(not(feature = "auto-login"))]
+    let auto_login_requested = false;
+    crate::diagnostics::trace(
+        "launch",
+        format!(
+            "launch_game: method={}; clear_wdb={}; auto_login_requested={}",
+            cfg.method, cfg.clear_wdb, auto_login_requested
+        ),
+    );
     tokio::task::spawn_blocking(move || {
         let wow_path = PathBuf::from(wow_dir.trim());
         if !wow_path.is_dir() {
@@ -2015,6 +2098,11 @@ pub async fn launch_wow_root_tool(
     cfg: LaunchConfig,
     candidates: Vec<String>,
 ) -> Result<String, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("launch_wow_root_tool");
+    crate::diagnostics::trace(
+        "launch",
+        format!("launch_wow_root_tool: candidate_count={}", candidates.len()),
+    );
     tokio::task::spawn_blocking(move || {
         let wow_path = PathBuf::from(wow_dir.trim());
         if !wow_path.is_dir() {
@@ -2066,6 +2154,7 @@ pub async fn patch_wow_with_awesome_wotlk(
     wow_dir: String,
     cfg: LaunchConfig,
 ) -> Result<String, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("patch_wow_with_awesome_wotlk");
     tokio::task::spawn_blocking(move || {
         let wow_path = PathBuf::from(wow_dir.trim());
         if !wow_path.is_dir() {
@@ -2398,6 +2487,7 @@ mod launch_target_tests {
 }
 
 pub async fn save_github_token(token: String) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("save_github_token");
     tokio::task::spawn_blocking(move || {
         let token = token.trim().to_string();
         if token.is_empty() {
@@ -2441,6 +2531,7 @@ pub async fn save_github_token(token: String) -> Result<(), String> {
 }
 
 pub async fn clear_github_token() -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("clear_github_token");
     tokio::task::spawn_blocking(|| {
         #[cfg(not(target_os = "windows"))]
         if crate::settings::portable_mode_enabled() {
@@ -2539,11 +2630,14 @@ pub fn parse_forge_url(url: &str) -> Option<ForgeInfo> {
             });
         }
     } else if let Some(r) = rest.strip_prefix("gitlab.com/") {
-        let parts: Vec<&str> = r.splitn(3, '/').collect();
-        if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
-            let repo = parts[1].trim_end_matches(".git").to_string();
+        let mut parts: Vec<&str> = r.split('/').filter(|part| !part.is_empty()).collect();
+        if let Some(metadata) = parts.iter().position(|part| *part == "-") {
+            parts.truncate(metadata);
+        }
+        if parts.len() >= 2 {
+            let repo = parts.pop().unwrap().trim_end_matches(".git").to_string();
             return Some(ForgeInfo {
-                owner: parts[0].to_string(),
+                owner: parts.join("/"),
                 repo,
                 forge: "gitlab",
                 host: "gitlab.com".into(),
@@ -2571,6 +2665,32 @@ pub fn parse_forge_url(url: &str) -> Option<ForgeInfo> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod forge_url_tests {
+    use super::parse_forge_url;
+
+    #[test]
+    fn gitlab_nested_namespace_is_not_truncated() {
+        let parsed = parse_forge_url(
+            "https://gitlab.com/group/subgroup/addons/project.git",
+        )
+        .unwrap();
+        assert_eq!(parsed.forge, "gitlab");
+        assert_eq!(parsed.owner, "group/subgroup/addons");
+        assert_eq!(parsed.repo, "project");
+    }
+
+    #[test]
+    fn gitlab_browse_suffix_is_not_part_of_identity() {
+        let parsed = parse_forge_url(
+            "https://gitlab.com/group/subgroup/project/-/tree/main/Addon",
+        )
+        .unwrap();
+        assert_eq!(parsed.owner, "group/subgroup");
+        assert_eq!(parsed.repo, "project");
+    }
 }
 
 pub fn normalize_repo_input_url(url: &str) -> String {
@@ -2883,6 +3003,7 @@ pub async fn fetch_raw_file(
     raw_base_url: String,
     path: String,
 ) -> Result<(String, String), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("fetch_raw_file");
     let base = raw_base_url.trim_end_matches('/');
     let url = format!("{}/{}", base, path.trim_start_matches('/'));
     let client = Client::builder()
@@ -2991,6 +3112,7 @@ pub async fn fetch_dir_contents(
     forge_url: String,
     dir_path: String,
 ) -> Result<(String, Vec<RepoFileEntry>), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("fetch_dir_contents");
     let fi = parse_forge_url(&forge_url).ok_or_else(|| "Could not parse repo URL".to_string())?;
     let client = Client::builder()
         .user_agent("wuddle-iced")
@@ -3075,6 +3197,7 @@ pub async fn fetch_dir_contents(
 // ---------------------------------------------------------------------------
 
 pub async fn fetch_repo_preview(url: String) -> Result<RepoPreviewInfo, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("fetch_repo_preview");
     let fi = parse_forge_url(&url).ok_or_else(|| "Could not parse repo URL".to_string())?;
 
     let client = Client::builder()
@@ -3317,6 +3440,7 @@ async fn fetch_gitea_preview(
 
 /// Fetch and parse the WeirdUtils README to find a live description for a specific DLL.
 pub async fn fetch_dll_description(dll_name: String) -> Result<(String, String), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("fetch_dll_description");
     let url = "https://codeberg.org/MarcelineVQ/WeirdUtils/raw/branch/main/README.md";
     let client = Client::builder()
         .user_agent("wuddle-iced")
@@ -3384,6 +3508,7 @@ pub async fn read_tweaks(
     wow_dir: String,
     auto_launch_exe: Option<String>,
 ) -> Result<crate::tweaks::ReadTweakValues, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("read_tweaks");
     tokio::task::spawn_blocking(move || {
         crate::tweaks::read_tweaks(std::path::Path::new(&wow_dir), auto_launch_exe.as_deref())
     })
@@ -3396,6 +3521,7 @@ pub async fn apply_tweaks(
     auto_launch_exe: Option<String>,
     opts: crate::tweaks::TweakOptions,
 ) -> Result<String, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("apply_tweaks");
     tokio::task::spawn_blocking(move || {
         crate::tweaks::apply_tweaks(
             std::path::Path::new(&wow_dir),
@@ -3411,6 +3537,7 @@ pub async fn restore_tweaks(
     wow_dir: String,
     auto_launch_exe: Option<String>,
 ) -> Result<String, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("restore_tweaks");
     tokio::task::spawn_blocking(move || {
         crate::tweaks::restore_backup(std::path::Path::new(&wow_dir), auto_launch_exe.as_deref())
     })
@@ -3433,6 +3560,7 @@ pub struct ReleaseItem {
 }
 
 pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("fetch_releases");
     let fi = parse_forge_url(&forge_url).ok_or_else(|| "Could not parse forge URL".to_string())?;
 
     let client = Client::builder()
@@ -3587,6 +3715,7 @@ const CHANGELOG_URL: &str = "https://raw.githubusercontent.com/ZythDr/Wuddle/mai
 const CHANGELOG_EMBEDDED: &str = include_str!("../../CHANGELOG.md");
 
 pub async fn fetch_changelog() -> Result<String, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("fetch_changelog");
     let client = Client::builder()
         .user_agent(concat!("wuddle/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(15))
@@ -3601,6 +3730,7 @@ pub async fn fetch_changelog() -> Result<String, String> {
 
 /// Write the generated dxvk.conf content to the given path.
 pub async fn save_dxvk_conf(path: std::path::PathBuf, content: String) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("save_dxvk_conf");
     tokio::task::spawn_blocking(move || {
         std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())
     })
@@ -3815,6 +3945,11 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
 
 /// Check whether self-update is supported and whether an update is available.
 pub async fn check_self_update_full(beta_channel: bool) -> Result<SelfUpdateStatus, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("check_self_update_full");
+    crate::diagnostics::trace(
+        "self_update",
+        format!("check_self_update_full: beta_channel={beta_channel}"),
+    );
     let current = env!("CARGO_PKG_VERSION");
     let supported = is_self_update_supported();
 
@@ -3904,6 +4039,7 @@ fn pick_platform_asset(release: &GhReleaseFull) -> Option<&GhReleaseAsset> {
 
 /// Download and apply the latest release. Returns a status message.
 pub async fn apply_self_update(beta_channel: bool) -> Result<String, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("apply_self_update");
     let current = env!("CARGO_PKG_VERSION");
     let release = fetch_release_full(beta_channel).await?;
     let latest = normalize_tag(&release.tag_name);
@@ -4113,6 +4249,7 @@ pub struct GitHubRateInfo {
 }
 
 pub async fn fetch_github_rate_limit() -> Option<GitHubRateInfo> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("fetch_github_rate_limit");
     #[derive(Deserialize)]
     struct RateLimitResponse {
         rate: RateCore,

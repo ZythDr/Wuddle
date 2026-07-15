@@ -10,8 +10,8 @@ pub enum InstallMode {
     Auto,
     Addon,
     /// Track addon directly from its Git repository using clone/fetch/pull.
-    /// Synced into hidden staging under WoW/Interface/AddOns/.wuddle/,
-    /// then addon folders are deployed into Interface/AddOns by .toc detection.
+    /// New installs are staged under WoW/.wuddle/cache first, then deployed
+    /// into Interface/AddOns after .toc detection and conflict checks.
     AddonGit,
     Dll,
     Mixed,

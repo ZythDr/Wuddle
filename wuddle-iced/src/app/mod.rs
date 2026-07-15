@@ -57,6 +57,7 @@ pub struct App {
     pub log_search: String,
     pub log_wrap: bool,
     pub log_autoscroll: bool,
+    pub verbose_diagnostics: bool,
     // Error sub-filters (only active when log_filter == Errors)
     pub log_error_fetch: bool,
     pub log_error_misc: bool,
@@ -146,6 +147,7 @@ pub struct App {
     pub add_repo_collection_choice: Option<bool>,
     pub add_repo_existing_addons: HashSet<String>,
     pub add_repo_selected_addons: HashSet<String>,
+    pub pending_add_repo_addon_names: Vec<String>,
     pub add_repo_release_asset_options: Vec<service::ReleaseAssetOption>,
     pub add_repo_selected_release_asset: Option<String>,
     pub add_repo_manage_repo_id: Option<i64>,
@@ -269,6 +271,7 @@ impl App {
             log_search: String::new(),
             log_wrap: false,
             log_autoscroll: true,
+            verbose_diagnostics: crate::diagnostics::is_verbose(),
             log_error_fetch: true,
             log_error_misc: true,
             dialog: None,
@@ -329,6 +332,7 @@ impl App {
             add_repo_collection_choice: None,
             add_repo_existing_addons: HashSet::new(),
             add_repo_selected_addons: HashSet::new(),
+            pending_add_repo_addon_names: Vec::new(),
             add_repo_release_asset_options: Vec::new(),
             add_repo_selected_release_asset: None,
             add_repo_manage_repo_id: None,
@@ -365,6 +369,12 @@ impl App {
         if let Some(error) = app.github_token_storage_error.clone() {
             app.log(LogLevel::Error, &error);
         }
+        if let Some(error) = crate::diagnostics::init_error() {
+            app.log(
+                LogLevel::Error,
+                &format!("Persistent diagnostic logging is unavailable: {error}"),
+            );
+        }
 
         // Load settings synchronously (fast, local JSON), then kick off async repo load
         let settings_task =
@@ -376,6 +386,7 @@ impl App {
     }
 
     pub fn log(&mut self, level: LogLevel, msg: &str) {
+        crate::diagnostics::write_app(level, msg);
         self.log_lines.push(LogLine {
             level,
             text: msg.to_string(),
@@ -397,6 +408,7 @@ impl App {
         self.add_repo_collection_choice = None;
         self.add_repo_existing_addons.clear();
         self.add_repo_selected_addons.clear();
+        self.pending_add_repo_addon_names.clear();
         self.add_repo_release_asset_options.clear();
         self.add_repo_selected_release_asset = None;
         self.add_repo_manage_repo_id = None;
@@ -474,6 +486,7 @@ impl App {
             opt_friz_font: self.opt_friz_font,
             log_wrap: self.log_wrap,
             log_autoscroll: self.log_autoscroll,
+            verbose_diagnostics: self.verbose_diagnostics,
             auto_check_minutes: self.auto_check_minutes,
             profiles: self.profiles.clone(),
             ignored_update_ids: current_ignored,
@@ -919,6 +932,19 @@ impl App {
                 self.log_autoscroll = b;
                 self.save_settings();
             }
+            Message::ToggleVerboseDiagnostics(b) => {
+                self.verbose_diagnostics = b;
+                crate::diagnostics::set_verbose(b);
+                self.save_settings();
+                self.log(
+                    LogLevel::Info,
+                    if b {
+                        "Verbose diagnostic logging enabled. Reproduce the issue, then export diagnostics from the Logs page."
+                    } else {
+                        "Verbose diagnostic logging disabled."
+                    },
+                );
+            }
             Message::ToggleLogErrorFetch(b) => {
                 self.log_error_fetch = b;
                 self.rebuild_log_content();
@@ -936,6 +962,53 @@ impl App {
                     &format!("Logs cleared ({} entries removed).", count),
                 );
             }
+            Message::ExportDiagnostics => {
+                let filename = crate::diagnostics::default_export_filename();
+                return self.finish_update(Task::perform(
+                    async move {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Export Wuddle Diagnostics")
+                            .set_file_name(&filename)
+                            .add_filter("ZIP archive", &["zip"])
+                            .save_file()
+                            .await
+                            .map(|handle| handle.path().to_path_buf())
+                    },
+                    Message::DiagnosticsExportPathSelected,
+                ));
+            }
+            Message::DiagnosticsExportPathSelected(path) => {
+                let Some(path) = path else {
+                    return self.finish_update(Task::none());
+                };
+                let summary = crate::diagnostics::build_summary(self);
+                return self.finish_update(Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::diagnostics::export_bundle(&path, &summary)
+                        })
+                        .await
+                        .map_err(|error| format!("Diagnostic export task failed: {error}"))?
+                    },
+                    Message::DiagnosticsExported,
+                ));
+            }
+            Message::DiagnosticsExported(result) => match result {
+                Ok(()) => {
+                    self.log(LogLevel::Info, "Diagnostic bundle exported successfully.");
+                    self.show_toast("Diagnostic bundle saved.", ToastKind::Success);
+                }
+                Err(error) => {
+                    self.log(
+                        LogLevel::Error,
+                        &format!("Could not export diagnostics: {error}"),
+                    );
+                    self.show_toast(
+                        format!("Could not export diagnostics: {error}"),
+                        ToastKind::Error,
+                    );
+                }
+            },
             Message::LogEditorAction(action) => {
                 if !action.is_edit() {
                     self.log_editor_content.perform(action);
@@ -1630,7 +1703,7 @@ impl App {
                             )
                             .text_size(12)
                             .padding([8, 10]),
-                            "Single Addon — installs the whole repo as one addon.\nCollection — lets you pick individual sub-folders to install as separate addons.",
+                            "Single Addon — installs the whole repo as one addon.\nCollection — lets you pick individual sub-folders to install separately. GAM does not store this selection and may expose every folder after a GAM update.",
                             iced::widget::tooltip::Position::Bottom,
                             colors,
                         );

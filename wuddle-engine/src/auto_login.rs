@@ -328,6 +328,7 @@ impl<B: CredentialBackend> AutoLoginService<B> {
         account_id: &AccountId,
         input: CredentialInput,
     ) -> Result<(), AutoLoginError> {
+        let _diagnostic = crate::diagnostics::OperationGuard::new("auto_login_save_account");
         let key = credential_key(profile_id, account_id)?;
         let existing = self.read_stored_by_key(&key)?;
         let previous_encoded = existing
@@ -376,6 +377,8 @@ impl<B: CredentialBackend> AutoLoginService<B> {
         profile_id: &str,
         account_id: &AccountId,
     ) -> Result<AccountDetails, AutoLoginError> {
+        let _diagnostic =
+            crate::diagnostics::OperationGuard::new("auto_login_load_account_details");
         let credential = self.read_stored(profile_id, account_id)?;
         Ok(AccountDetails {
             login: credential.login.clone(),
@@ -389,6 +392,7 @@ impl<B: CredentialBackend> AutoLoginService<B> {
         profile_id: &str,
         account_id: &AccountId,
     ) -> Result<(), AutoLoginError> {
+        let _diagnostic = crate::diagnostics::OperationGuard::new("auto_login_delete_account");
         let key = credential_key(profile_id, account_id)?;
         self.backend.delete(&key)?;
         if self.backend.get(&key)?.is_some() {
@@ -402,6 +406,7 @@ impl<B: CredentialBackend> AutoLoginService<B> {
         profile_id: &str,
         account_id: &AccountId,
     ) -> Result<PreparedArguments, AutoLoginError> {
+        let _diagnostic = crate::diagnostics::OperationGuard::new("auto_login_prepare_arguments");
         let credential = self.read_stored(profile_id, account_id)?;
         PreparedArguments::from_stored(&credential)
     }

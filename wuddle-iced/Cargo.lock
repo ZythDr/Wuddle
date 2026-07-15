@@ -7127,7 +7127,7 @@ dependencies = [
 
 [[package]]
 name = "wuddle-iced"
-version = "3.6.1-beta.2"
+version = "3.6.2-beta.1"
 dependencies = [
  "arboard",
  "async-stream",
@@ -7146,6 +7146,7 @@ dependencies = [
  "serde",
  "serde_json",
  "syntect",
+ "tempfile",
  "tokio",
  "tokio-util",
  "windows-sys 0.52.0",

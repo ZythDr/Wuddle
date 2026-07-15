@@ -592,6 +592,12 @@ pub fn forge_svg_handle(forge: &str, forge_url: &str) -> iced::widget::svg::Hand
             r#"9.452H7.582L4.918 1.263c-.135-.423-.731-.423-.867 0L1.386 9.452.044 13.587c-.121"#,
             r#".374.014.784.33 1.016L12 22.047l11.625-8.444c.317-.232.452-.642.33-1.016"/></svg>"#,
         ),
+        "git" => concat!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" "#,
+            r#"stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">"#,
+            r#"<circle cx="6" cy="4" r="2"/><circle cx="18" cy="8" r="2"/><circle cx="6" cy="20" r="2"/>"#,
+            r#"<path d="M6 6v12M8 6c1.5 2 3.5 2 8 2M8 18c4 0 6-1.5 7.5-4.5"/></svg>"#,
+        ),
         _ => "",
     };
 

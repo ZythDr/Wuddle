@@ -30,18 +30,36 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.5.0
+### What's New in v3.6.0 / v3.6.1
+
+#### New Features
+- **WotLK Auto-Login** — Save multiple accounts per game profile using Linux Secret Service or Windows Credential Manager, then launch WoW 3.3.5 through Awesome WotLK without storing credentials in Wuddle's settings.
+- **Client-Aware Quick Add** — See compatible Vanilla 1.12.1, TBC 2.4.3, or WotLK 3.3.5 presets, including Awesome WotLK and wow-optimize.
+- **WotLK Mod Tools** — Patch Awesome WotLK safely with an automatic executable backup and launch wow-optimize's configuration interface from Wuddle.
+- **Single-Window Launching** — Opening Wuddle again now focuses the existing window instead of starting another copy.
+
+#### Improvements
+- **Instance Management Refresh** — Compact wrapping instance cards, clearer active-profile highlighting, and focused Auto-login controls make larger profile collections easier to manage.
+- **Collection Selection Tools** — Add New and Manage Collection dialogs now include Select all and Clear all controls.
+- **Auto-Login Footer Polish** — The account selector and borderless management cog include explanatory tooltips and cleaner launch feedback.
+
+#### Bug Fixes
+- **Beta In-App Updates** — Pre-release versions now compare correctly. The v3.6.1 version number was used to deliver this updater hotfix to existing v3.6.0 beta installations.
+- **Collection Conflict Replacement** — Overwriting a conflict removes only the conflicting addon folders from an existing collection instead of deleting the entire collection.
+- **Case-Insensitive Auto Launch Targets** — Explicit game executables resolve even when filename capitalization differs from the path saved in Wuddle.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.5.0
 
 #### New Features
 - **Local Archive Installs** — Add addons from local `.zip` or `.7z` files through the Add New Addon dialog.
-- **Archive Drag-and-Drop** — Supported desktops can install addon archives by dropping them directly onto Wuddle. (does *not* work on wayland)
+- **Archive Drag-and-Drop** — Supported desktops can install addon archives by dropping them directly onto Wuddle. (does *not* work on Wayland)
 
 #### Improvements
 - **GAM Compatibility** — Rescan now better recognizes regular GitAddonsManager installs.
 - **Rescan Visibility** — Rescan now logs what it is working on when a scan takes longer than expected.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.4.0
 

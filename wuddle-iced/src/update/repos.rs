@@ -54,6 +54,7 @@ pub fn parse_addon_conflict_error(err: &str) -> Vec<String> {
 }
 
 fn install_local_archive(app: &mut App, path: std::path::PathBuf) -> Option<Task<Message>> {
+    crate::diagnostics::register_private_path(&path, "<LOCAL_ARCHIVE>");
     if !service::is_local_archive_path(&path) {
         app.log(
             LogLevel::Error,
@@ -468,6 +469,17 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     return Some(Task::none());
                 }
 
+                app.pending_add_repo_addon_names = if mode == "addon_git" {
+                    selected_addons.clone().unwrap_or_else(|| {
+                        app.add_repo_probe
+                            .as_ref()
+                            .map(|probe| probe.addon_names.clone())
+                            .unwrap_or_default()
+                    })
+                } else {
+                    Vec::new()
+                };
+
                 // Check if this mod requires an AV warning
                 if is_av_false_positive(&url) {
                     app.dialog = Some(Dialog::AvWarning { url, mode });
@@ -518,6 +530,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             install_local_archive(app, path)
         }
         Message::AddRepoResult(result) => {
+            let pending_addon_names = std::mem::take(&mut app.pending_add_repo_addon_names);
             match result {
                 Ok(id) => {
                     app.log(LogLevel::Info, &format!("Repo added (id={}).", id));
@@ -528,7 +541,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         app.updating_repo_ids.insert(id);
 
                         // Collect all addon names that this repo will install.
-                        let addon_names = if !app.add_repo_selected_addons.is_empty() {
+                        let addon_names = if !pending_addon_names.is_empty() {
+                            pending_addon_names
+                        } else if !app.add_repo_selected_addons.is_empty() {
                             app.add_repo_selected_addons.iter().cloned().collect()
                         } else if app.add_repo_collection_choice == Some(true) {
                             app.add_repo_probe
@@ -699,8 +714,29 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             );
             Some(Task::perform(
                 service::remove_repo(db, repo_id, None, false),
-                |_result| Message::RefreshRepos,
+                move |result| Message::CancelConflictInstallResult { repo_id, result },
             ))
+        }
+        Message::CancelConflictInstallResult { repo_id, result } => {
+            match result {
+                Ok(()) => app.log(
+                    LogLevel::Info,
+                    &format!("Cancelled install cleanup completed for repo id={repo_id}."),
+                ),
+                Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!(
+                            "Cancelled install cleanup failed for repo id={repo_id}: {error}"
+                        ),
+                    );
+                    app.show_toast(
+                        "The cancelled repository could not be removed from tracking. Refresh and retry removal.",
+                        ToastKind::Error,
+                    );
+                }
+            }
+            Some(refresh_repos_task(app))
         }
         Message::InstallConflictOverride { repo_id } => {
             // The user confirmed overwriting conflicts for an already-added repo.

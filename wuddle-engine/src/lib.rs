@@ -21,12 +21,14 @@ use url::Url;
 mod db;
 mod direct;
 mod forge;
+mod gam_compat;
 mod install;
 mod model;
 mod util;
 
 #[cfg(feature = "auto-login")]
 pub mod auto_login;
+pub mod diagnostics;
 
 pub use db::Db;
 pub use direct::is_direct_archive_url;
@@ -49,6 +51,72 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
 const IMPORT_FOLDER_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 const IMPORT_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+
+struct StagedGitWorktree {
+    repo_id: i64,
+    path: PathBuf,
+    deployed_paths: Vec<PathBuf>,
+    armed: bool,
+}
+
+impl StagedGitWorktree {
+    fn new(repo_id: i64, path: PathBuf) -> Self {
+        Self {
+            repo_id,
+            path,
+            deployed_paths: Vec::new(),
+            armed: true,
+        }
+    }
+
+    fn retarget(&mut self, path: PathBuf) {
+        self.path = path;
+    }
+
+    fn track_deployed_path(&mut self, path: PathBuf) {
+        if path != self.path && !self.deployed_paths.contains(&path) {
+            self.deployed_paths.push(path);
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagedGitWorktree {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.rollback",
+            format!(
+                "rolling back staged git install: repo_id={}; deployed_target_count={}",
+                self.repo_id,
+                self.deployed_paths.len()
+            ),
+        );
+        for path in self.deployed_paths.iter().rev() {
+            Self::remove_path(path);
+        }
+        Self::remove_path(&self.path);
+    }
+}
+
+impl StagedGitWorktree {
+    fn remove_path(path: &Path) {
+        let Ok(metadata) = fs::symlink_metadata(path) else {
+            return;
+        };
+        if metadata.file_type().is_symlink() || metadata.is_file() {
+            let _ = fs::remove_file(path);
+        } else if metadata.is_dir() {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
 
 #[cfg(windows)]
 fn is_reparse_dir(meta: &fs::Metadata) -> bool {
@@ -445,6 +513,7 @@ impl Engine {
     }
 
     pub fn open(db_path: &Path) -> Result<Self> {
+        let _diagnostic = diagnostics::OperationGuard::new("open_engine");
         Ok(Self {
             db: std::sync::Mutex::new(Db::open(db_path)?),
             client: Client::builder()
@@ -472,13 +541,40 @@ impl Engine {
         asset_regex: Option<String>,
         selected_addons: Option<Vec<String>>,
     ) -> Result<i64> {
-        let det = detect_repo(url)?;
-        let pinned_version = release_tag_from_url(url);
+        let _diagnostic = diagnostics::OperationGuard::new("add_repo");
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine",
+            format!(
+                "add_repo: mode={}; selected_count={}; asset_filter={}",
+                mode.as_str(),
+                selected_addons.as_ref().map(Vec::len).unwrap_or(0),
+                asset_regex.is_some()
+            ),
+        );
+        let identity = if matches!(&mode, InstallMode::AddonGit) {
+            gam_compat::identity_from_remote(url)
+                .context("Could not identify git repository URL")?
+        } else {
+            let det = detect_repo(url)?;
+            gam_compat::GitIdentity {
+                url: det.canonical_url,
+                forge: det.forge_str.to_string(),
+                host: det.host,
+                owner: det.owner,
+                name: det.name,
+            }
+        };
+        let pinned_version = if matches!(&mode, InstallMode::AddonGit) {
+            None
+        } else {
+            release_tag_from_url(url)
+        };
         let selected_addons_json =
             normalize_selected_addons(selected_addons.as_deref().unwrap_or(&[]));
         if let Ok(Some(existing)) = self
             .db()
-            .find_repo_by_identity(&det.host, &det.owner, &det.name)
+            .find_repo_by_identity(&identity.host, &identity.owner, &identity.name)
         {
             if asset_regex.is_some() || pinned_version.is_some() {
                 self.db().set_repo_release_source(
@@ -493,11 +589,11 @@ impl Engine {
         }
         let repo = Repo {
             id: 0,
-            url: det.canonical_url.clone(),
-            forge: det.forge_str.to_string(),
-            host: det.host.clone(),
-            owner: det.owner.clone(),
-            name: det.name.clone(),
+            url: identity.url,
+            forge: identity.forge,
+            host: identity.host,
+            owner: identity.owner,
+            name: identity.name,
             mode,
             enabled: true,
             git_branch: None,
@@ -519,11 +615,13 @@ impl Engine {
     }
 
     pub fn add_direct_archive_url(&self, url: &str) -> Result<i64> {
+        let _diagnostic = diagnostics::OperationGuard::new("add_direct_archive_url");
         let direct = direct::parse_archive_url(url)?;
         self.add_direct_archive(direct)
     }
 
     pub fn add_local_archive_file(&self, path: &Path) -> Result<i64> {
+        let _diagnostic = diagnostics::OperationGuard::new("add_local_archive_file");
         let direct = direct::parse_local_archive_path(path)?;
         self.add_direct_archive(direct)
     }
@@ -574,6 +672,15 @@ impl Engine {
         repo_id: i64,
         selected_addons: Option<Vec<String>>,
     ) -> Result<()> {
+        let _diagnostic = diagnostics::OperationGuard::new("set_repo_selected_addons");
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine",
+            format!(
+                "set_repo_selected_addons: repo_id={repo_id}; selected_count={}",
+                selected_addons.as_ref().map(Vec::len).unwrap_or(0)
+            ),
+        );
         let normalized = normalize_selected_addons(selected_addons.as_deref().unwrap_or(&[]));
         self.db()
             .set_repo_selected_addons(repo_id, normalized.as_deref())?;
@@ -586,6 +693,7 @@ impl Engine {
         wow_dir: &Path,
         addon_folder_names: &[String],
     ) -> Result<Vec<AddonProbeConflict>> {
+        let _diagnostic = diagnostics::OperationGuard::new("addon_selection_conflicts");
         let repo = self.db().get_repo(repo_id)?;
         let resolved_addons = if matches!(repo.mode, InstallMode::AddonGit) {
             self.resolve_addon_git_selected_addons(&repo, wow_dir, addon_folder_names)?
@@ -694,6 +802,7 @@ impl Engine {
         wow_dir: &Path,
         preferred_branch: Option<&str>,
     ) -> Result<AddonProbeResult> {
+        let _diagnostic = diagnostics::OperationGuard::new("probe_addon_repo_conflicts");
         let preferred_branch_inner = preferred_branch.map(str::trim).filter(|b| !b.is_empty());
 
         // Try API probe first for supported forges (extremely fast, avoids full clone)
@@ -1136,69 +1245,6 @@ impl Engine {
         )
     }
 
-    fn normalize_git_remote_url(raw: &str) -> Option<String> {
-        let url = raw.trim();
-        if url.is_empty() {
-            return None;
-        }
-
-        if url.starts_with("https://") || url.starts_with("http://") {
-            return Some(url.to_string());
-        }
-
-        if url.starts_with("ssh://") || url.starts_with("git://") {
-            let parsed = Url::parse(url).ok()?;
-            let host = parsed.host_str()?.trim();
-            if host.is_empty() {
-                return None;
-            }
-            let path = parsed.path().trim().trim_start_matches('/');
-            if path.is_empty() {
-                return None;
-            }
-            return Some(format!("https://{}/{}", host, path));
-        }
-
-        // SCP-like SSH form, e.g. git@github.com:owner/repo.git
-        if let Some(at_pos) = url.find('@') {
-            let rest = &url[at_pos + 1..];
-            if let Some(colon_pos) = rest.find(':') {
-                let host = rest[..colon_pos].trim();
-                let path = rest[colon_pos + 1..].trim();
-                if !host.is_empty() && !path.is_empty() {
-                    return Some(format!("https://{}/{}", host, path.trim_start_matches('/')));
-                }
-            }
-        }
-
-        None
-    }
-
-    fn local_repo_remote_url(repo: &Repository) -> Option<String> {
-        if let Ok(origin) = repo.find_remote("origin") {
-            if let Some(url) = origin.url() {
-                let trimmed = url.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
-            }
-        }
-
-        let remotes = repo.remotes().ok()?;
-        for name in remotes.iter().flatten() {
-            let remote = match repo.find_remote(name) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let url = remote.url()?;
-            let trimmed = url.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-        None
-    }
-
     fn local_repo_branch(repo: &Repository) -> Option<String> {
         let head = repo.head().ok()?;
         let branch = head.shorthand()?.trim();
@@ -1228,39 +1274,12 @@ impl Engine {
         full_link_path: &Path,
         addon_name: &str,
     ) -> bool {
-        if full_link_path == worktree_dir {
-            return install::detect_addon_folders_in_dir(worktree_dir)
-                .iter()
-                .any(|name| name.eq_ignore_ascii_case(addon_name));
-        }
-
-        let meta = match fs::symlink_metadata(full_link_path) {
-            Ok(meta) => meta,
-            Err(_) => return false,
-        };
-
-        if !full_link_path.exists() {
-            return false;
-        }
-
-        if !meta.file_type().is_symlink() && !meta.is_dir() {
-            return false;
-        }
-
-        // For addon_git subfolder installs, GAM-compatible state means the addon
-        // lives as a real folder in AddOns, not as a link back into the worktree.
-        // If the tracked entry still resolves inside the repo worktree, treat it as
-        // stale so repair/rescan will unpack it.
-        let resolved_worktree = fs::canonicalize(worktree_dir).unwrap_or_else(|_| worktree_dir.to_path_buf());
-        if let Ok(resolved_entry) = fs::canonicalize(full_link_path) {
-            if full_link_path != worktree_dir && resolved_entry.starts_with(&resolved_worktree) {
-                return false;
-            }
-        }
-
-        install::detect_addon_folders_in_dir(full_link_path)
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(addon_name))
+        gam_compat::exposed_addon_is_healthy(
+            worktree_dir,
+            full_link_path,
+            addon_name,
+            install::detect_addon_folders_in_dir,
+        )
     }
 
     fn repair_tracked_addon_entry(
@@ -1287,9 +1306,14 @@ impl Engine {
             return Ok(false);
         };
 
-        println!(
-            "[Wuddle] Repairing tracked addon entry for {}: {} -> {:?}",
-            repo.name, addon_name, src
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine.repair",
+            format!(
+                "repairing tracked addon entry: repo_id={}; source_is_root={}",
+                repo.id,
+                src == worktree_dir
+            ),
         );
 
         if full_link_path != worktree_dir {
@@ -1305,11 +1329,20 @@ impl Engine {
         } else {
             if let Ok(rel_src) = src.strip_prefix(worktree_dir) {
                 if let Some(rel_src) = rel_src.to_str() {
-                    let _ = install::link_addon_subfolder(
+                    // GAM's move fallback removes this folder from the worktree.
+                    // If the exposed copy is later lost, restore only this path
+                    // from HEAD before recreating GAM's normal exposure.
+                    if !src.exists() {
+                        if let Ok(repo) = Repository::open(worktree_dir) {
+                            let mut checkout = git2::build::CheckoutBuilder::new();
+                            checkout.force().path(rel_src);
+                            let _ = repo.checkout_head(Some(&mut checkout));
+                        }
+                    }
+                    let _ = gam_compat::expose_module(
                         worktree_dir,
                         rel_src,
                         full_link_path,
-                        false,
                     );
                 }
             }
@@ -1329,6 +1362,7 @@ impl Engine {
     /// addon folder with the expected `.toc`. It intentionally avoids broad
     /// addon discovery across the entire AddOns directory.
     pub fn verify_and_repair_tracked_addon_links(&self, wow_dir: &Path) -> Result<usize> {
+        let _diagnostic = diagnostics::OperationGuard::new("verify_and_repair_tracked_addon_links");
         let repos = self.db().list_repos()?;
         let mut repaired = 0usize;
 
@@ -1378,9 +1412,10 @@ impl Engine {
         }
 
         if repaired > 0 {
-            println!(
-                "[Wuddle] Verified tracked addon links and repaired {} broken entry(s).",
-                repaired
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Debug,
+                "engine.repair",
+                format!("repaired {repaired} tracked addon link(s)"),
             );
         }
 
@@ -1399,6 +1434,7 @@ impl Engine {
     where
         F: FnMut(String),
     {
+        let _diagnostic = diagnostics::OperationGuard::new("import_existing_addons");
         let addons_root = wow_dir.join("Interface").join("AddOns");
         if !addons_root.is_dir() {
             return Ok(0);
@@ -1444,7 +1480,7 @@ impl Engine {
                 .unwrap_or_default()
                 .to_string();
 
-            if folder_name.starts_with('.') {
+            if folder_name.starts_with('.') || gam_compat::is_backup_folder_name(&folder_name) {
                 continue;
             }
 
@@ -1471,94 +1507,96 @@ impl Engine {
 
             if Self::has_local_git_marker(root) {
                 progress(format!("checking git folder {}", folder_name));
-                if let Ok(repo) = Repository::open(&root) {
-                    if let Some(remote_raw) = Self::local_repo_remote_url(&repo) {
-                        if let Some(remote_url) = Self::normalize_git_remote_url(&remote_raw) {
-                            if let Ok(det) = detect_repo(&remote_url) {
-                                let key =
-                                    Self::repo_key(&det.host, &det.owner, &det.name).to_lowercase();
-                                if let Some((repo_id, _)) = known_repos.get(&key) {
-                                    let has_tracked_addons = self
-                                        .db()
-                                        .list_installs(*repo_id)
-                                        .map(|installs| {
-                                            installs.iter().any(|entry| entry.kind == "addon")
-                                        })
-                                        .unwrap_or(false);
-                                    if has_tracked_addons {
-                                        continue;
-                                    }
-                                }
+                let Ok(repo) = gam_compat::open_worktree(root) else {
+                    continue;
+                };
+                let identity = gam_compat::identity_for_worktree(&repo, root);
+                let key = Self::repo_key(&identity.host, &identity.owner, &identity.name);
+                if let Some((repo_id, _)) = known_repos.get(&key) {
+                    let has_tracked_addons = self
+                        .db()
+                        .list_installs(*repo_id)
+                        .map(|installs| installs.iter().any(|entry| entry.kind == "addon"))
+                        .unwrap_or(false);
+                    if has_tracked_addons {
+                        continue;
+                    }
+                }
 
-                                progress(format!("scanning addon tree in {}", folder_name));
-                                let (detected_addons, timed_out) =
-                                    install::detect_addons_in_tree_with_time_limit(
-                                        root,
-                                        IMPORT_FOLDER_SCAN_TIMEOUT,
-                                    );
-                                if timed_out {
-                                    progress(format!(
-                                        "skipping {} after {}s import scan budget",
-                                        folder_name,
-                                        IMPORT_FOLDER_SCAN_TIMEOUT.as_secs()
-                                    ));
-                                    continue;
-                                }
-                                if detected_addons.is_empty() {
-                                    continue;
-                                }
+                progress(format!("scanning addon tree in {}", folder_name));
+                let (detected_addons, timed_out) =
+                    install::detect_addons_in_tree_with_time_limit(
+                        root,
+                        IMPORT_FOLDER_SCAN_TIMEOUT,
+                    );
+                if timed_out {
+                    progress(format!(
+                        "skipping {} after {}s import scan budget",
+                        folder_name,
+                        IMPORT_FOLDER_SCAN_TIMEOUT.as_secs()
+                    ));
+                    continue;
+                }
+                if detected_addons.is_empty() {
+                    continue;
+                }
 
-                                let mut repo_id = known_repos.get(&key).map(|(id, _)| *id);
-                                if repo_id.is_none() {
-                                    let branch = Self::local_repo_branch(&repo)
-                                        .unwrap_or_else(|| "master".to_string());
-                                    let short_oid = Self::local_repo_short_oid(&repo);
-                                    let full_oid = Self::local_repo_oid(&repo);
+                let mut repo_id = known_repos.get(&key).map(|(id, _)| *id);
+                if repo_id.is_none() {
+                    let branch = Self::local_repo_branch(&repo);
+                    let short_oid = Self::local_repo_short_oid(&repo);
+                    let full_oid = Self::local_repo_oid(&repo);
+                    let installed_asset_name = branch.as_ref().map(|branch| format!("git:{branch}"));
 
-                                    let mut tracked = Repo {
-                                        id: 0,
-                                        url: det.canonical_url.clone(),
-                                        forge: det.forge_str.to_string(),
-                                        host: det.host.clone(),
-                                        owner: det.owner.clone(),
-                                        name: det.name.clone(),
-                                        mode: InstallMode::AddonGit,
-                                        enabled: true,
-                                        git_branch: Some(branch),
-                                        asset_regex: None,
-                                        last_version: short_oid,
-                                        etag: full_oid,
-                                        installed_asset_id: None,
-                                        installed_asset_name: None,
-                                        installed_asset_size: None,
-                                        installed_asset_url: None,
-                                        installed_at_unix: None,
-                                        published_at_unix: None,
-                                        merge_installs: false,
-                                        pinned_version: None,
-                                        selected_addons_json: None,
-                                    };
+                    let mut tracked = Repo {
+                        id: 0,
+                        url: identity.url,
+                        forge: identity.forge,
+                        host: identity.host,
+                        owner: identity.owner,
+                        name: identity.name,
+                        mode: InstallMode::AddonGit,
+                        enabled: true,
+                        git_branch: branch,
+                        asset_regex: None,
+                        last_version: short_oid,
+                        etag: full_oid,
+                        installed_asset_id: None,
+                        installed_asset_name,
+                        installed_asset_size: None,
+                        installed_asset_url: None,
+                        installed_at_unix: None,
+                        published_at_unix: None,
+                        merge_installs: false,
+                        pinned_version: None,
+                        selected_addons_json: None,
+                    };
 
-                                    let add_repo_result = { self.db().add_repo(&tracked) };
-                                    if let Ok(id) = add_repo_result {
-                                        tracked.id = id;
-                                        known_repos.insert(key, (id, tracked.name));
-                                        imported += 1;
-                                        repo_id = Some(id);
-                                    }
-                                }
+                    if let Ok(id) = self.db().add_repo(&tracked) {
+                        tracked.id = id;
+                        known_repos.insert(key, (id, tracked.name));
+                        imported += 1;
+                        repo_id = Some(id);
+                    }
+                }
 
-                                for (src, name) in detected_addons {
-                                    let sibling = addons_root.join(&name);
-                                    let install_path = if sibling.exists() { sibling } else { src };
-                                    let m = Self::to_manifest_path(&install_path, wow_dir);
-                                    claimed_paths.insert(m.to_lowercase());
-                                    if let Some(id) = repo_id {
-                                        let _ = self.db().add_install(id, &m, "addon", None);
-                                    }
-                                }
-                            }
-                        }
+                for (src, name) in detected_addons {
+                    let toc_named_sibling = addons_root.join(&name);
+                    let source_named_sibling = src
+                        .file_name()
+                        .and_then(|folder| folder.to_str())
+                        .map(|folder| addons_root.join(folder));
+                    let install_path = Self::find_actual_case(&toc_named_sibling)
+                        .or_else(|| {
+                            source_named_sibling
+                                .as_deref()
+                                .and_then(Self::find_actual_case)
+                        })
+                        .unwrap_or(src);
+                    let m = Self::to_manifest_path(&install_path, wow_dir);
+                    claimed_paths.insert(m.to_lowercase());
+                    if let Some(id) = repo_id {
+                        let _ = self.db().add_install(id, &m, "addon", None);
                     }
                 }
             }
@@ -1643,6 +1681,7 @@ impl Engine {
     /// folders. Keeps the repo whose git remote matches what's actually
     /// cloned on disk; removes the other(s).
     pub fn dedup_addon_repos_by_folder(&self, wow_dir: &Path) -> Result<usize> {
+        let _diagnostic = diagnostics::OperationGuard::new("dedup_addon_repos_by_folder");
         let repos = self.db().list_repos()?;
         let addon_repos: Vec<&Repo> = repos
             .iter()
@@ -1703,24 +1742,10 @@ impl Engine {
                     continue;
                 }
             };
-            let remote_raw = match Self::local_repo_remote_url(&git_repo) {
-                Some(v) => v,
-                None => {
-                    to_remove.push(repo_id);
-                    continue;
-                }
-            };
-            let remote_url = Self::normalize_git_remote_url(&remote_raw);
-            let det = remote_url.as_deref().and_then(|u| detect_repo(u).ok());
-
-            let matches = det
-                .as_ref()
-                .map(|d| {
-                    d.host.eq_ignore_ascii_case(&r.host)
-                        && d.owner.eq_ignore_ascii_case(&r.owner)
-                        && d.name.eq_ignore_ascii_case(&r.name)
-                })
-                .unwrap_or(false);
+            let identity = gam_compat::identity_for_worktree(&git_repo, &worktree);
+            let matches = identity.host.eq_ignore_ascii_case(&r.host)
+                && identity.owner.eq_ignore_ascii_case(&r.owner)
+                && identity.name.eq_ignore_ascii_case(&r.name);
 
             if !matches {
                 // On-disk remote doesn't match this DB entry → stale.
@@ -1743,6 +1768,7 @@ impl Engine {
     /// collision matches a tracked repo. If only one folder exists but its casing
     /// is incorrect compared to the DB, it renames it.
     pub fn cleanup_casing_collisions(&self, wow_dir: &Path) -> Result<usize> {
+        let _diagnostic = diagnostics::OperationGuard::new("cleanup_casing_collisions");
         let base = wow_dir.join("Interface").join("AddOns");
         if !base.is_dir() {
             return Ok(0);
@@ -1817,6 +1843,7 @@ impl Engine {
     /// Unified repair entry point. Performs casing cleanup and then triggers
     /// the deep repair flow for any broken installations.
     pub async fn repair_broken_installations(&self, wow_dir: &Path) -> Result<usize> {
+        let _diagnostic = diagnostics::OperationGuard::new("repair_broken_installations");
         let mut fixed = 0;
 
         // 1 & 2. Cheap local repairs: casing sync and symlink restoration.
@@ -1840,9 +1867,10 @@ impl Engine {
                         .to_path_buf();
                     let new_rel_str = new_rel.to_str().unwrap_or("");
                     if new_rel_str != entry.path {
-                        println!(
-                            "[Wuddle] Syncing DB path casing: {:?} -> {:?}",
-                            entry.path, new_rel_str
+                        diagnostics::emit(
+                            diagnostics::DiagnosticLevel::Trace,
+                            "engine.repair",
+                            format!("synchronizing install path casing: repo_id={repo_id}"),
                         );
                         let _ =
                             eng_clone
@@ -1877,16 +1905,24 @@ impl Engine {
         }
 
         if !needing_repair.is_empty() {
-            println!("[Wuddle] Detected missing files for {} repo(s), performing authoritative repair...", needing_repair.len());
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Debug,
+                "engine.repair",
+                format!(
+                    "detected missing files for {} repo(s); starting authoritative repair",
+                    needing_repair.len()
+                ),
+            );
             // Use batched check (parallel with limited burst) to build repair plans efficiently.
             let plans = self
                 .check_updates_batched(&needing_repair, Some(wow_dir), CheckMode::Force, None)
                 .await?;
             for plan in plans {
                 if plan.repair_needed {
-                    println!(
-                        "[Wuddle] Auto-repairing repo (authoritative): {}",
-                        plan.name
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Trace,
+                        "engine.repair",
+                        format!("authoritative repair: repo_id={}", plan.repo_id),
                     );
                     let opts = InstallOptions::default();
                     let _ = self.apply_one(&plan, wow_dir, None, opts).await;
@@ -1906,6 +1942,7 @@ impl Engine {
     /// an existing path, OR when it has no install entries at all and is not
     /// a manually-added (non-addon_git) repo that was never installed.
     pub fn prune_missing_repos(&self, wow_dir: &Path) -> Result<usize> {
+        let _diagnostic = diagnostics::OperationGuard::new("prune_missing_repos");
         let repos = self.db().list_repos()?;
         let mut pruned = 0usize;
 
@@ -1924,18 +1961,20 @@ impl Engine {
                     // Check if the git worktree still exists
                     let worktree = self.addon_git_worktree_dir(repo.id, wow_dir, repo);
                     if !worktree.is_dir() {
-                        eprintln!(
-                            "[prune] removing addon_git '{}' (no worktree at {:?})",
-                            repo.name, worktree
+                        diagnostics::emit(
+                            diagnostics::DiagnosticLevel::Trace,
+                            "engine.prune",
+                            format!("removing addon_git with missing worktree: repo_id={}", repo.id),
                         );
                         self.db().remove_repo(repo.id)?;
                         pruned += 1;
                     }
                 } else if matches!(repo.mode, InstallMode::Manual) {
                     // Manual repos with no installs are likely orphans or metadata
-                    eprintln!(
-                        "[prune] removing manual repo '{}' — no valid addon folders found inside",
-                        repo.name
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Trace,
+                        "engine.prune",
+                        format!("removing empty manual repo: repo_id={}", repo.id),
                     );
                     self.db().remove_repo(repo.id)?;
                     pruned += 1;
@@ -1955,9 +1994,10 @@ impl Engine {
                         if let Ok(rel) = actual.strip_prefix(wow_dir) {
                             let new_path = Self::normalize_rel_path(rel);
                             if new_path != entry.path {
-                                eprintln!(
-                                    "[prune] '{}' casing changed: '{}' -> '{}'",
-                                    repo.name, entry.path, new_path
+                                diagnostics::emit(
+                                    diagnostics::DiagnosticLevel::Trace,
+                                    "engine.prune",
+                                    format!("correcting install path casing: repo_id={}", repo.id),
                                 );
                                 let _ =
                                     self.db()
@@ -1971,9 +2011,10 @@ impl Engine {
                 if exists {
                     any_present = true;
                 } else {
-                    eprintln!(
-                        "[prune] '{}' install entry '{}' -> {:?} exists=false",
-                        repo.name, entry.path, resolved
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Trace,
+                        "engine.prune",
+                        format!("missing tracked install entry: repo_id={}", repo.id),
                     );
                 }
             }
@@ -1986,31 +2027,36 @@ impl Engine {
             if !force_prune && matches!(repo.mode, InstallMode::Manual) {
                 let repo_root = wow_dir.join("Interface").join("AddOns").join(&repo.name);
                 if install::detect_addon_folders_in_dir(&repo_root).is_empty() {
-                    eprintln!(
-                        "[prune] removing manual repo '{}' — no .toc file found at root",
-                        repo.name
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Trace,
+                        "engine.prune",
+                        format!("manual repo has no root TOC: repo_id={}", repo.id),
                     );
                     force_prune = true;
                 }
             }
 
             if !any_present || force_prune {
-                if force_prune {
-                    eprintln!("[prune] removing manual metadata repo '{}'", repo.name);
-                } else {
-                    eprintln!(
-                        "[prune] removing '{}' ({}) — no install entries found on disk",
-                        repo.name,
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Trace,
+                    "engine.prune",
+                    format!(
+                        "pruning repo: repo_id={}; mode={}; forced={force_prune}",
+                        repo.id,
                         repo.mode.as_str()
-                    );
-                }
+                    ),
+                );
                 self.db().remove_repo(repo.id)?;
                 pruned += 1;
             }
         }
 
         if pruned > 0 {
-            eprintln!("[prune] pruned {} repos from database", pruned);
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Debug,
+                "engine.prune",
+                format!("pruned {pruned} repo(s) from database"),
+            );
         }
 
         Ok(pruned)
@@ -2044,7 +2090,20 @@ impl Engine {
             .as_deref()
             .map(str::trim)
             .filter(|b| !b.is_empty());
-        let remote = match git_sync::remote_head_for_branch(&r.url, preferred_branch) {
+        let Some(remote_url) = git_sync::effective_remote_url(&worktree_dir, &r.url) else {
+            let mut p = Self::blank_plan(r);
+            p.current = local
+                .as_ref()
+                .map(|h| h.short_oid.clone())
+                .or_else(|| Self::normalized_current_version(r));
+            p.not_modified = true;
+            p.error = Some(
+                "This local Git addon has no configured remote. Wuddle can manage its files, but cannot check it for updates."
+                    .to_string(),
+            );
+            return Ok(p);
+        };
+        let remote = match git_sync::remote_head_for_branch(&remote_url, preferred_branch) {
             Ok(v) => v,
             Err(e) => {
                 let mut p = Self::blank_plan(r);
@@ -2072,7 +2131,7 @@ impl Engine {
             host: r.host.clone(),
             owner: r.owner.clone(),
             name: r.name.clone(),
-            url: r.url.clone(),
+            url: remote_url.clone(),
             mode: r.mode.clone(),
             current,
             install_version: remote.short_oid.clone(),
@@ -2080,7 +2139,7 @@ impl Engine {
             asset_id: remote.oid.clone(),
             asset_name: format!("git:{}", remote.branch),
             asset_url: if needs_sync {
-                r.url.clone()
+                remote_url
             } else {
                 "".to_string()
             },
@@ -2128,12 +2187,25 @@ impl Engine {
             .filter(|b| !b.is_empty())
             .map(|b| b.to_string());
 
-        let url = r.url.clone();
+        let Some(url) = git_sync::effective_remote_url(&worktree_dir, &r.url) else {
+            let mut p = Self::blank_plan(r);
+            p.current = local
+                .as_ref()
+                .map(|h| h.short_oid.clone())
+                .or_else(|| Self::normalized_current_version(r));
+            p.not_modified = true;
+            p.error = Some(
+                "This local Git addon has no configured remote. Wuddle can manage its files, but cannot check it for updates."
+                    .to_string(),
+            );
+            return Ok(p);
+        };
         let preferred_for_task = preferred_branch.clone();
+        let url_for_task = url.clone();
         let remote = tokio::time::timeout(
             REMOTE_CHECK_TIMEOUT,
             tokio::task::spawn_blocking(move || {
-                git_sync::remote_head_for_branch(&url, preferred_for_task.as_deref())
+                git_sync::remote_head_for_branch(&url_for_task, preferred_for_task.as_deref())
             }),
         )
         .await;
@@ -2189,7 +2261,7 @@ impl Engine {
             host: r.host.clone(),
             owner: r.owner.clone(),
             name: r.name.clone(),
-            url: r.url.clone(),
+            url: url.clone(),
             mode: r.mode.clone(),
             current,
             install_version: remote.short_oid.clone(),
@@ -2197,7 +2269,7 @@ impl Engine {
             asset_id: remote.oid.clone(),
             asset_name: format!("git:{}", remote.branch),
             asset_url: if needs_sync {
-                r.url.clone()
+                url
             } else {
                 "".to_string()
             },
@@ -2559,6 +2631,7 @@ impl Engine {
     }
 
     pub async fn check_updates(&self) -> Result<Vec<UpdatePlan>> {
+        let _diagnostic = diagnostics::OperationGuard::new("check_updates");
         self.check_updates_with_wow(None, CheckMode::Force).await
     }
 
@@ -2603,6 +2676,12 @@ impl Engine {
         check_mode: CheckMode,
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<UpdateCheckProgress>>,
     ) -> Result<Vec<UpdatePlan>> {
+        let _diagnostic = diagnostics::OperationGuard::new("check_updates_batched");
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine",
+            format!("check_updates_batched: repo_count={}; mode={check_mode:?}", repos.len()),
+        );
         let mut plans = Vec::with_capacity(repos.len());
 
         // Keep release API checks bounded to avoid bursty rate-limit pressure.
@@ -2714,6 +2793,15 @@ impl Engine {
         skip_repo_ids: &HashSet<i64>,
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<UpdateCheckProgress>>,
     ) -> Result<Vec<UpdatePlan>> {
+        let _diagnostic = diagnostics::OperationGuard::new("check_updates_with_wow_skip");
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine",
+            format!(
+                "check_updates_with_wow_skip: skip_count={}; mode={check_mode:?}",
+                skip_repo_ids.len()
+            ),
+        );
         // Update checks must stay focused on network/version work only.
         // Filesystem maintenance belongs to repo refresh/rescan flows; doing it here
         // can stall startup auto-check before any per-repo progress is visible.
@@ -3079,11 +3167,21 @@ impl Engine {
     }
 
     async fn download_asset_to(&self, plan: &UpdatePlan, dest: &Path) -> Result<()> {
+        let _diagnostic = diagnostics::OperationGuard::new("download_asset");
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine",
+            format!(
+                "download_asset: repo_id={}; expected_bytes={:?}",
+                plan.repo_id, plan.asset_size
+            ),
+        );
         Self::validate_asset_url(plan)?;
         self.download_url_to(&plan.asset_url, dest).await
     }
 
     async fn download_url_to(&self, url: &str, dest: &Path) -> Result<()> {
+        let _diagnostic = diagnostics::OperationGuard::new("download_url");
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -3661,6 +3759,12 @@ impl Engine {
         wow_dir: Option<&Path>,
         remove_local_files: bool,
     ) -> Result<usize> {
+        let _diagnostic = diagnostics::OperationGuard::new("remove_repo");
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine",
+            format!("remove_repo: repo_id={repo_id}; remove_local_files={remove_local_files}"),
+        );
         let mut removed_paths = 0usize;
         let mut removed_dlls = Vec::<String>::new();
 
@@ -3720,6 +3824,7 @@ impl Engine {
         raw_dest: Option<&Path>,
         opts: InstallOptions,
     ) -> Result<Vec<UpdatePlan>> {
+        let _diagnostic = diagnostics::OperationGuard::new("apply_updates");
         let repos = self.db().list_repos()?;
         let mut plans = Vec::new();
 
@@ -3750,6 +3855,12 @@ impl Engine {
         raw_dest: Option<&Path>,
         opts: InstallOptions,
     ) -> Result<Option<UpdatePlan>> {
+        let _diagnostic = diagnostics::OperationGuard::new("update_repo");
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine",
+            format!("update_repo: repo_id={repo_id}"),
+        );
         let repo = self.db().get_repo(repo_id)?;
         let mut plan = self
             .build_update_plan_for_repo(&repo, true, Some(wow_dir), CheckMode::Force)
@@ -3836,13 +3947,44 @@ impl Engine {
         raw_dest: Option<&Path>,
         opts: InstallOptions,
     ) -> Result<()> {
+        let _diagnostic = diagnostics::OperationGuard::new("apply_one");
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine",
+            format!(
+                "apply_one: repo_id={}; mode={}; repair={}; replace_conflicts={}",
+                plan.repo_id,
+                plan.mode.as_str(),
+                plan.repair_needed,
+                opts.replace_addon_conflicts
+            ),
+        );
         if matches!(plan.mode, InstallMode::AddonGit) {
             let repo = self.db().get_repo(plan.repo_id)?;
 
             // Migrate legacy staging clones to the direct AddOns location on first encounter.
             self.migrate_staging_clone_if_needed(wow_dir, &repo)?;
 
-            let worktree_dir = self.addon_git_worktree_dir(plan.repo_id, wow_dir, &repo);
+            let installed_worktree_dir =
+                self.addon_git_worktree_dir(plan.repo_id, wow_dir, &repo);
+            let staged_install = !installed_worktree_dir.is_dir()
+                || !Self::has_local_git_marker(&installed_worktree_dir);
+            let mut staging_guard = None;
+            let mut worktree_dir = if staged_install {
+                let staging_dir = util::cache_dir(Some(wow_dir))?
+                    .join("addon_git_staging")
+                    .join(format!("repo-{}", plan.repo_id));
+                Self::remove_any_target(&staging_dir)?;
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Trace,
+                    "engine",
+                    format!("apply_one: repo_id={}; using staged git install", plan.repo_id),
+                );
+                staging_guard = Some(StagedGitWorktree::new(plan.repo_id, staging_dir.clone()));
+                staging_dir
+            } else {
+                installed_worktree_dir
+            };
 
             // Self-correction: Update repo name casing in DB from actual filesystem casing.
             if let Some(actual_name) = worktree_dir.file_name().and_then(|n| n.to_str()) {
@@ -3960,11 +4102,9 @@ impl Engine {
                 );
             }
 
-            // GAM post-clone rename: if the repo directory name differs from the
-            // detected .toc name (single-addon case), rename the directory to match
-            // the .toc name — exactly as GAM's Control::clone() does after cloning.
-            // This ensures cross-compatibility when the repo slug ≠ addon name.
-            let worktree_dir = if chosen.len() == 1 {
+            // Existing installs retain GAM's direct-worktree update behavior. New
+            // installs stay in staging until every target has passed conflict checks.
+            if !staged_install && chosen.len() == 1 {
                 let (ref src, ref toc_name) = chosen[0];
                 if src == &worktree_dir {
                     // Single-addon repo: src is the repo root. Check if names match.
@@ -3998,19 +4138,11 @@ impl Engine {
                             }
                             // Update chosen to reflect the new path.
                             chosen[0].0 = new_dir.clone();
-                            new_dir
-                        } else {
-                            worktree_dir
+                            worktree_dir = new_dir;
                         }
-                    } else {
-                        worktree_dir
                     }
-                } else {
-                    worktree_dir
                 }
-            } else {
-                worktree_dir
-            };
+            }
 
             // Remove previously created sub-addon symlinks/copies for this repo
             // (but never the worktree dir itself or anything inside it).
@@ -4033,7 +4165,7 @@ impl Engine {
             let has_collision = chosen.iter().any(|(src, name)| {
                 src != &worktree_dir && name.eq_ignore_ascii_case(&repo_dir_name)
             });
-            let worktree_dir = if has_collision {
+            if !staged_install && has_collision {
                 let repo_dir = worktree_dir.with_file_name(format!("{}.repo", repo.name));
                 if !repo_dir.exists() {
                     fs::rename(&worktree_dir, &repo_dir).with_context(|| {
@@ -4050,20 +4182,39 @@ impl Engine {
                         }
                     }
                 }
-                repo_dir
+                worktree_dir = repo_dir;
+            }
+
+            let staged_final_name = if staged_install {
+                if chosen.len() == 1 && chosen[0].0 == worktree_dir {
+                    chosen[0].1.clone()
+                } else if has_collision {
+                    format!("{}.repo", repo.name)
+                } else {
+                    repo.name.clone()
+                }
             } else {
-                worktree_dir
+                String::new()
             };
 
-            // Conflict check for sub-addon symlink targets only (not the repo dir itself).
-            let sub_addon_names: Vec<String> = chosen
+            // A staged install can safely check every final target, including the
+            // eventual Git worktree directory, because none of its files are live yet.
+            // Existing installs continue to check only separately deployed modules.
+            let mut conflict_names: Vec<String> = chosen
                 .iter()
-                .filter(|(src, _)| *src != worktree_dir)
+                .filter(|(src, _)| staged_install || *src != worktree_dir)
                 .map(|(_, name)| name.clone())
                 .collect();
-            if !sub_addon_names.is_empty() {
+            if staged_install
+                && !conflict_names
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&staged_final_name))
+            {
+                conflict_names.push(staged_final_name.clone());
+            }
+            if !conflict_names.is_empty() {
                 let conflicts =
-                    self.addon_install_conflicts(plan.repo_id, wow_dir, &sub_addon_names)?;
+                    self.addon_install_conflicts(plan.repo_id, wow_dir, &conflict_names)?;
                 if !conflicts.is_empty() {
                     if !opts.replace_addon_conflicts {
                         anyhow::bail!(Self::format_addon_conflict_message(&conflicts));
@@ -4072,13 +4223,53 @@ impl Engine {
                 }
             }
 
+            if staged_install {
+                let live_worktree = wow_dir
+                    .join("Interface")
+                    .join("AddOns")
+                    .join(&staged_final_name);
+                if let Some(parent) = live_worktree.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let staged_worktree = worktree_dir.clone();
+                fs::rename(&staged_worktree, &live_worktree).with_context(|| {
+                    format!(
+                        "finalize staged addon git worktree {:?} -> {:?}",
+                        staged_worktree, live_worktree
+                    )
+                })?;
+                for (src, _) in &mut chosen {
+                    if let Ok(relative) = src.strip_prefix(&staged_worktree) {
+                        *src = live_worktree.join(relative);
+                    }
+                }
+                worktree_dir = live_worktree;
+                if let Some(guard) = staging_guard.as_mut() {
+                    guard.retarget(worktree_dir.clone());
+                }
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Trace,
+                    "engine",
+                    format!("apply_one: repo_id={}; staged git install finalized", plan.repo_id),
+                );
+            }
+
             let mut records = Vec::<install::InstallRecord>::new();
 
             for (src_dir, addon_folder_name) in chosen {
+                let exposed_folder_name = if src_dir == worktree_dir {
+                    addon_folder_name.clone()
+                } else {
+                    src_dir
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(&addon_folder_name)
+                        .to_string()
+                };
                 let dst_dir = wow_dir
                     .join("Interface")
                     .join("AddOns")
-                    .join(&addon_folder_name);
+                    .join(&exposed_folder_name);
 
                 if src_dir == dst_dir {
                     // Single-addon repo: the clone root is the addon folder — no symlink needed.
@@ -4087,20 +4278,18 @@ impl Engine {
                         kind: "addon",
                     });
                 } else {
-                    // Any addon-git subfolder, including bundled modules from an otherwise
-                    // single-addon repo, should follow GAM's unpack/move workflow rather than
-                    // exposing link-backed entries from the worktree.
+                    // Match GAM: expose nested modules with relative links on Unix,
+                    // then fall back to moving the real folder when linking is unavailable.
+                    // GAM's current Windows implementation reaches the move fallback.
                     let rel_src = src_dir
                         .strip_prefix(&worktree_dir)
                         .ok()
                         .and_then(|path| path.to_str())
                         .unwrap_or(&addon_folder_name);
-                    let rec = install::link_addon_subfolder(
-                        &worktree_dir,
-                        rel_src,
-                        &dst_dir,
-                        false,
-                    )?;
+                    let rec = gam_compat::expose_module(&worktree_dir, rel_src, &dst_dir)?;
+                    if let Some(guard) = staging_guard.as_mut() {
+                        guard.track_deployed_path(rec.path.clone());
+                    }
                     records.push(rec);
                 }
             }
@@ -4113,6 +4302,9 @@ impl Engine {
             // addon folders themselves. The .git dir inside the addon folder is the
             // ground truth; import_existing_addon_git_repos() will re-discover it.
             self.persist_installs(plan.repo_id, wow_dir, &records, Some(&synced.short_oid))?;
+            if let Some(guard) = staging_guard.as_mut() {
+                guard.disarm();
+            }
             self.db().set_installed_asset_state(
                 plan.repo_id,
                 Some(&synced.short_oid),
@@ -4353,6 +4545,12 @@ impl Engine {
         raw_dest: Option<&Path>,
         opts: InstallOptions,
     ) -> Result<UpdatePlan> {
+        let _diagnostic = diagnostics::OperationGuard::new("reinstall_repo");
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine",
+            format!("reinstall_repo: repo_id={repo_id}"),
+        );
         let r = self.db().get_repo(repo_id)?;
 
         if r.forge.eq_ignore_ascii_case("direct") {
@@ -4449,11 +4647,12 @@ impl Engine {
 mod tests {
     use super::{
         selected_addons_from_json, AddonInstallConflict, Engine, InstallMode, InstallOptions,
-        LatestRelease, ReleaseAsset, UpdatePlan,
+        LatestRelease, ReleaseAsset, Repo, UpdatePlan,
     };
     use crate::db::AddonInstallOwner;
     use git2::Repository;
     use std::fs;
+    use std::path::Path;
 
     fn asset(name: &str) -> ReleaseAsset {
         ReleaseAsset {
@@ -4501,6 +4700,286 @@ mod tests {
             previous_dll_count: 0,
             new_dll_count: 0,
             is_manual: false,
+        }
+    }
+
+    fn create_local_git_addon_repo(path: &Path, addon_names: &[&str]) -> String {
+        fs::create_dir_all(path).unwrap();
+        for addon_name in addon_names {
+            let addon_dir = path.join(addon_name);
+            fs::create_dir_all(&addon_dir).unwrap();
+            fs::write(
+                addon_dir.join(format!("{addon_name}.toc")),
+                b"## Interface: 30300\n",
+            )
+            .unwrap();
+        }
+        let repository = Repository::init(path).unwrap();
+        let mut index = repository.index().unwrap();
+        index
+            .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repository.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("Wuddle Test", "test@example.invalid").unwrap();
+        repository
+            .commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+            .unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    fn create_local_git_root_addon_repo(path: &Path, addon_name: &str) -> String {
+        fs::create_dir_all(path).unwrap();
+        fs::write(
+            path.join(format!("{addon_name}.toc")),
+            b"## Interface: 30300\n",
+        )
+        .unwrap();
+        let repository = Repository::init(path).unwrap();
+        let mut index = repository.index().unwrap();
+        index
+            .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repository.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("Wuddle Test", "test@example.invalid").unwrap();
+        repository
+            .commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+            .unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    fn add_local_git_repo(engine: &Engine, url: String, name: &str) -> i64 {
+        engine
+            .db()
+            .add_repo(&Repo {
+                id: 0,
+                url,
+                forge: "local".to_string(),
+                host: "local".to_string(),
+                owner: "tests".to_string(),
+                name: name.to_string(),
+                mode: InstallMode::AddonGit,
+                enabled: true,
+                git_branch: None,
+                asset_regex: None,
+                last_version: None,
+                etag: None,
+                installed_asset_id: None,
+                installed_asset_name: None,
+                installed_asset_size: None,
+                installed_asset_url: None,
+                installed_at_unix: None,
+                published_at_unix: None,
+                merge_installs: false,
+                pinned_version: None,
+                selected_addons_json: None,
+            })
+            .unwrap()
+    }
+
+    fn local_git_plan(repo_id: i64, url: String, name: &str) -> UpdatePlan {
+        UpdatePlan {
+            repo_id,
+            forge: "local".to_string(),
+            host: "local".to_string(),
+            owner: "tests".to_string(),
+            name: name.to_string(),
+            url: url.clone(),
+            mode: InstallMode::AddonGit,
+            current: None,
+            install_version: "pending".to_string(),
+            latest: "pending".to_string(),
+            asset_id: "pending".to_string(),
+            asset_name: "git:master".to_string(),
+            asset_url: url,
+            asset_size: None,
+            asset_sha256: None,
+            repair_needed: false,
+            externally_modified: false,
+            not_modified: false,
+            applied: false,
+            error: None,
+            extra_assets: Vec::new(),
+            previous_dll_count: 0,
+            new_dll_count: 0,
+            is_manual: false,
+        }
+    }
+
+    #[test]
+    fn new_git_addon_conflict_removes_staging_without_touching_live_addons() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let existing = addons.join("ModuleOne");
+        fs::create_dir_all(&existing).unwrap();
+        fs::write(existing.join("ModuleOne.toc"), b"## Interface: 30300\n").unwrap();
+        fs::write(existing.join("keep.txt"), b"original").unwrap();
+
+        let remote_url = create_local_git_addon_repo(
+            &tmp.path().join("remote-collection"),
+            &["ModuleOne", "ModuleTwo"],
+        );
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let existing_repo_id = engine
+            .add_repo(
+                "https://github.com/tests/existing-collection",
+                InstallMode::AddonGit,
+                None,
+                Some(vec!["ModuleOne".to_string()]),
+            )
+            .unwrap();
+        engine
+            .db()
+            .add_install(
+                existing_repo_id,
+                "Interface/AddOns/ModuleOne",
+                "addon",
+                Some("existing"),
+            )
+            .unwrap();
+        let repo_id = add_local_git_repo(&engine, remote_url.clone(), "NewCollection");
+        let plan = local_git_plan(repo_id, remote_url, "NewCollection");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let error = runtime
+            .block_on(engine.apply_one(&plan, &wow, None, InstallOptions::default()))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("ADDON_CONFLICT:"));
+        assert_eq!(fs::read(existing.join("keep.txt")).unwrap(), b"original");
+        assert!(!addons.join("NewCollection").exists());
+        assert!(!wow
+            .join(".wuddle")
+            .join("cache")
+            .join("addon_git_staging")
+            .join(format!("repo-{repo_id}"))
+            .exists());
+
+        engine.remove_repo(repo_id, None, false).unwrap();
+        assert_eq!(engine.import_existing_addons(&wow).unwrap(), 0);
+        assert!(engine
+            .db()
+            .list_repos()
+            .unwrap()
+            .iter()
+            .all(|repo| repo.name != "NewCollection"));
+    }
+
+    #[test]
+    fn new_git_addon_is_finalized_only_after_staged_checks_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let remote_url = create_local_git_addon_repo(
+            &tmp.path().join("remote-collection"),
+            &["ModuleOne", "ModuleTwo"],
+        );
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let repo_id = add_local_git_repo(&engine, remote_url.clone(), "NewCollection");
+        let plan = local_git_plan(repo_id, remote_url, "NewCollection");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(engine.apply_one(&plan, &wow, None, InstallOptions::default()))
+            .unwrap();
+
+        assert!(addons.join("NewCollection").join(".git").is_dir());
+        assert!(addons.join("ModuleOne").join("ModuleOne.toc").is_file());
+        assert!(addons.join("ModuleTwo").join("ModuleTwo.toc").is_file());
+        #[cfg(unix)]
+        {
+            assert!(fs::symlink_metadata(addons.join("ModuleOne"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(fs::symlink_metadata(addons.join("ModuleTwo"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+        assert!(!wow
+            .join(".wuddle")
+            .join("cache")
+            .join("addon_git_staging")
+            .join(format!("repo-{repo_id}"))
+            .exists());
+    }
+
+    #[test]
+    fn staged_single_addon_uses_toc_name_for_live_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let remote_url =
+            create_local_git_root_addon_repo(&tmp.path().join("remote-addon"), "ActualAddon");
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let repo_id = add_local_git_repo(&engine, remote_url.clone(), "RepositorySlug");
+        let plan = local_git_plan(repo_id, remote_url, "RepositorySlug");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(engine.apply_one(&plan, &wow, None, InstallOptions::default()))
+            .unwrap();
+
+        assert!(addons.join("ActualAddon").join(".git").is_dir());
+        assert!(addons
+            .join("ActualAddon")
+            .join("ActualAddon.toc")
+            .is_file());
+        assert!(!addons.join("RepositorySlug").exists());
+    }
+
+    #[test]
+    fn staged_collection_uses_repo_suffix_for_gam_name_collision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let remote_url = create_local_git_addon_repo(
+            &tmp.path().join("remote-addon"),
+            &["MyAddon", "MyAddon_Config"],
+        );
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let repo_id = add_local_git_repo(&engine, remote_url.clone(), "MyAddon");
+        let plan = local_git_plan(repo_id, remote_url, "MyAddon");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(engine.apply_one(&plan, &wow, None, InstallOptions::default()))
+            .unwrap();
+
+        assert!(addons.join("MyAddon.repo").join(".git").is_dir());
+        assert!(addons.join("MyAddon").join("MyAddon.toc").is_file());
+        assert!(addons
+            .join("MyAddon_Config")
+            .join("MyAddon_Config.toc")
+            .is_file());
+        #[cfg(unix)]
+        {
+            assert!(fs::symlink_metadata(addons.join("MyAddon"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(fs::symlink_metadata(addons.join("MyAddon_Config"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
         }
     }
 
@@ -4641,6 +5120,276 @@ mod tests {
                 "Interface/AddOns/MyAddon_Config"
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_preserves_gam_symlink_layout_during_health_check() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let repo_dir = addons.join("LinkedCollection.repo");
+        let module = repo_dir.join("LinkedCollection");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(
+            module.join("LinkedCollection.toc"),
+            b"## Interface: 30300\n",
+        )
+        .unwrap();
+
+        let repo = Repository::init(&repo_dir).unwrap();
+        repo.remote(
+            "origin",
+            "https://github.com/TestOwner/LinkedCollection.git",
+        )
+        .unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Wuddle Test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+
+        let exposed = addons.join("LinkedCollection");
+        symlink("./LinkedCollection.repo/LinkedCollection", &exposed).unwrap();
+
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        assert_eq!(engine.import_existing_addons(&wow).unwrap(), 1);
+        assert_eq!(engine.verify_and_repair_tracked_addon_links(&wow).unwrap(), 0);
+        assert!(fs::symlink_metadata(&exposed)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        let repo_id = engine.db().list_repos().unwrap()[0].id;
+        engine.remove_repo(repo_id, Some(&wow), false).unwrap();
+        assert!(fs::symlink_metadata(&exposed)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(engine.import_existing_addons(&wow).unwrap(), 1);
+    }
+
+    #[test]
+    fn import_accepts_gam_move_fallback_with_modules_absent_from_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let repo_dir = addons.join("MovedCollection");
+        fs::create_dir_all(repo_dir.join("MovedOne")).unwrap();
+        fs::create_dir_all(repo_dir.join("MovedTwo")).unwrap();
+        fs::write(
+            repo_dir.join("MovedOne").join("MovedOne.toc"),
+            b"## Interface: 30300\n",
+        )
+        .unwrap();
+        fs::write(
+            repo_dir.join("MovedTwo").join("MovedTwo.toc"),
+            b"## Interface: 30300\n",
+        )
+        .unwrap();
+
+        let repo = Repository::init(&repo_dir).unwrap();
+        repo.remote(
+            "origin",
+            "https://github.com/TestOwner/MovedCollection.git",
+        )
+        .unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Wuddle Test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+
+        for name in ["MovedOne", "MovedTwo"] {
+            fs::rename(repo_dir.join(name), addons.join(name)).unwrap();
+        }
+
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        assert_eq!(engine.import_existing_addons(&wow).unwrap(), 1);
+        let repos = engine.db().list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        let paths = engine
+            .db()
+            .list_installs(repos[0].id)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                "Interface/AddOns/MovedOne".to_string(),
+                "Interface/AddOns/MovedTwo".to_string()
+            ]
+        );
+        assert_eq!(engine.verify_and_repair_tracked_addon_links(&wow).unwrap(), 0);
+
+        fs::remove_dir_all(addons.join("MovedOne")).unwrap();
+        assert_eq!(engine.verify_and_repair_tracked_addon_links(&wow).unwrap(), 1);
+        assert!(addons.join("MovedOne").join("MovedOne.toc").is_file());
+        #[cfg(unix)]
+        assert!(fs::symlink_metadata(addons.join("MovedOne"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn import_uses_gam_module_directory_casing_for_exposed_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let repo_dir = addons.join("CaseCollection");
+        let module = repo_dir.join("caseaddon");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("CaseAddon.toc"), b"## Interface: 30300\n").unwrap();
+        let repo = Repository::init(&repo_dir).unwrap();
+        repo.remote(
+            "origin",
+            "https://github.com/TestOwner/CaseCollection.git",
+        )
+        .unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Wuddle Test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+        fs::rename(repo_dir.join("caseaddon"), addons.join("caseaddon")).unwrap();
+
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        assert_eq!(engine.import_existing_addons(&wow).unwrap(), 1);
+        let repo_id = engine.db().list_repos().unwrap()[0].id;
+        let installs = engine.db().list_installs(repo_id).unwrap();
+        assert_eq!(installs[0].path, "Interface/AddOns/caseaddon");
+    }
+
+    #[test]
+    fn import_ignores_gam_backup_folders_without_deleting_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        for folder in ["ActiveAddon", "OldAddon.bak", "OlderAddon.BAK.2"] {
+            let dir = addons.join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            let toc = folder.split('.').next().unwrap();
+            fs::write(dir.join(format!("{toc}.toc")), b"## Interface: 30300\n").unwrap();
+        }
+
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        assert_eq!(engine.import_existing_addons(&wow).unwrap(), 1);
+        let repos = engine.db().list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, "ActiveAddon");
+        assert!(addons.join("OldAddon.bak").exists());
+        assert!(addons.join("OlderAddon.BAK.2").exists());
+    }
+
+    #[test]
+    fn import_tracks_remote_less_gam_worktree_as_local_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addon = wow
+            .join("Interface")
+            .join("AddOns")
+            .join("LocalGitAddon");
+        fs::create_dir_all(&addon).unwrap();
+        fs::write(
+            addon.join("LocalGitAddon.toc"),
+            b"## Interface: 30300\n",
+        )
+        .unwrap();
+        let repo = Repository::init(&addon).unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Wuddle Test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        assert_eq!(engine.import_existing_addons(&wow).unwrap(), 1);
+        let repos = engine.db().list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].forge, "git");
+        assert_eq!(repos[0].name, "LocalGitAddon");
+        assert!(repos[0].url.is_empty());
+        assert_eq!(repos[0].mode, InstallMode::AddonGit);
+    }
+
+    #[test]
+    fn import_uses_gam_branch_upstream_instead_of_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addon = wow
+            .join("Interface")
+            .join("AddOns")
+            .join("UpstreamAddon");
+        fs::create_dir_all(&addon).unwrap();
+        fs::write(
+            addon.join("UpstreamAddon.toc"),
+            b"## Interface: 30300\n",
+        )
+        .unwrap();
+        let repo = Repository::init(&addon).unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Wuddle Test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+        repo.remote("origin", "https://github.com/example/wrong.git")
+            .unwrap();
+        repo.remote(
+            "gam",
+            "https://gitlab.com/right-group/subgroup/UpstreamAddon.git",
+        )
+        .unwrap();
+        let head_name = repo.head().unwrap().name().unwrap().to_string();
+        let branch_name = head_name.strip_prefix("refs/heads/").unwrap();
+        let mut config = repo.config().unwrap();
+        config
+            .set_str(&format!("branch.{branch_name}.remote"), "gam")
+            .unwrap();
+        config
+            .set_str(
+                &format!("branch.{branch_name}.merge"),
+                &format!("refs/heads/{branch_name}"),
+            )
+            .unwrap();
+
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        assert_eq!(engine.import_existing_addons(&wow).unwrap(), 1);
+        let repos = engine.db().list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].forge, "gitlab");
+        assert_eq!(repos[0].owner, "right-group/subgroup");
+        assert_eq!(repos[0].name, "UpstreamAddon");
+        assert!(repos[0].url.contains("gitlab.com/right-group/subgroup"));
     }
 
     #[test]

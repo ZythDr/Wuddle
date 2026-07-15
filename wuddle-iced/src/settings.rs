@@ -148,6 +148,7 @@ pub struct AppSettings {
     pub opt_friz_font: bool,
     pub log_wrap: bool,
     pub log_autoscroll: bool,
+    pub verbose_diagnostics: bool,
     pub auto_check_minutes: u32,
     pub profiles: Vec<ProfileConfig>,
     pub ignored_update_ids: Vec<i64>,
@@ -173,6 +174,7 @@ impl Default for AppSettings {
             opt_friz_font: false,
             log_wrap: false,
             log_autoscroll: true,
+            verbose_diagnostics: false,
             auto_check_minutes: 15,
             profiles: vec![ProfileConfig::default()],
             ignored_update_ids: Vec::new(),
@@ -775,6 +777,7 @@ mod tests {
     #[test]
     fn legacy_settings_default_to_manual_login() {
         let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.verbose_diagnostics);
         assert!(!settings.auto_login_warning_acknowledged);
         assert!(!settings.profiles[0].auto_login_enabled);
         assert!(settings.profiles[0].auto_login_accounts.is_empty());

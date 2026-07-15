@@ -416,7 +416,7 @@ fn install_file_or_symlink(src: &Path, dst: &Path, use_symlink: bool) -> Result<
     }
     remove_any_target(dst)?;
 
-    if use_symlink {
+    if use_symlink && src.is_dir() {
         if symlink_path(src, dst).is_ok() {
             return Ok(());
         }

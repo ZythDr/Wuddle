@@ -40,9 +40,13 @@ pub enum Message {
     SetLogSearch(String),
     ToggleLogWrap(bool),
     ToggleLogAutoScroll(bool),
+    ToggleVerboseDiagnostics(bool),
     ToggleLogErrorFetch(bool),
     ToggleLogErrorMisc(bool),
     ClearLogs,
+    ExportDiagnostics,
+    DiagnosticsExportPathSelected(Option<PathBuf>),
+    DiagnosticsExported(Result<(), String>),
 
     // Toast notifications
     DismissToast(usize),
@@ -99,6 +103,10 @@ pub enum Message {
     /// repo. Removes the repo from the DB so it doesn't remain tracked.
     CancelConflictInstall {
         repo_id: i64,
+    },
+    CancelConflictInstallResult {
+        repo_id: i64,
+        result: Result<(), String>,
     },
     RemoveRepoConfirm(i64, bool),
     ToggleRemoveFiles(bool),

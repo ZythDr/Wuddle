@@ -2,6 +2,22 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.6.2
+
+### New Features
+- **Verbose Diagnostics** — The Logs page can now record detailed internal operations and export a rolling diagnostic ZIP for issue reports. Exported logs redact registered game paths, profile details, local archive paths, credentials, tokens, command arguments, account details, raw settings, and database contents.
+
+### Improvements
+- **GitAddonsManager Compatibility Layer** — Wuddle now recognizes GAM root addons, modular repositories, `.repo` collision worktrees, linked or moved modules, mixed-case names, remote-less worktrees, and arbitrary Git remotes without requiring an existing Wuddle database entry.
+- **GAM-Compatible Deployment** — New addon-git installs still use Wuddle's staging and conflict approval, then finalize with GAM-compatible worktree names and module exposure. Unix prefers relative links while Windows retains the real-folder fallback.
+- **Git Remote Preservation** — Existing addon worktrees now follow the checked-out branch's configured upstream first and preserve `origin` and other remotes instead of rewriting them.
+- **Generic Git Hosting** — Self-hosted, local, SSH, and otherwise unknown Git repositories remain manageable as neutral Git sources without being misidentified as a specific forge.
+- **Non-Destructive GAM Import** — GAM `.bak` and `.bak.N` folders are ignored during active-addon import, while valid linked and moved module layouts are preserved rather than needlessly repaired.
+
+### Bug Fixes
+- **Cancelled Conflict Installs** — Cancelling an addon conflict now removes the pending repository from Wuddle's tracking, and new addon-git worktrees remain in staging until conflicts are accepted.
+- **Conflict-Safe Finalization** — Addon files and GAM metadata reach `Interface/AddOns` only after conflict checks pass, preventing cancelled installs from leaving a second addon copy behind.
+
 ## v3.6.1
 
 ### New Features

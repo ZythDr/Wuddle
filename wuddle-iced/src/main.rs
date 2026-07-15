@@ -1,6 +1,7 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod anchored_overlay;
+mod diagnostics;
 #[cfg(feature = "auto-login")]
 mod auto_login;
 mod monitor;
@@ -63,6 +64,23 @@ fn main() -> iced::Result {
             None
         }
     };
+    if let Err(error) = diagnostics::init(saved.verbose_diagnostics) {
+        eprintln!("Wuddle diagnostic logging failed: {error}");
+    }
+    diagnostics::register_settings_paths(&saved);
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|location| format!("{}:{}:{}", location.file(), location.line(), location.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        diagnostics::write_system(
+            "ERROR",
+            "panic",
+            &format!("Unexpected application panic at {location}; payload omitted for privacy"),
+        );
+        default_panic_hook(info);
+    }));
 
     let window_icon = iced::window::icon::from_file_data(
         include_bytes!("../assets/icons/128x128.png"),

@@ -297,6 +297,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 if app.active_profile_id == profile_id {
                     app.wow_dir = dir.clone();
                 }
+                crate::diagnostics::register_private_value(&profile_id, "<PROFILE_ID>");
+                crate::diagnostics::register_private_value(&profile_name, "<PROFILE_NAME>");
+                if !dir.trim().is_empty() {
+                    crate::diagnostics::register_private_path(&dir, "<GAME_PATH>");
+                }
                 app.save_settings();
                 app.log(
                     LogLevel::Info,
@@ -487,6 +492,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
 
             app.log_wrap = s.log_wrap;
             app.log_autoscroll = s.log_autoscroll;
+            app.verbose_diagnostics = s.verbose_diagnostics;
+            crate::diagnostics::set_verbose(s.verbose_diagnostics);
             app.auto_check_minutes = s.auto_check_minutes.max(1);
             app.ignored_update_ids_by_profile = s
                 .ignored_update_ids_by_profile
@@ -514,6 +521,25 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             } else {
                 s.profiles
             };
+            for profile in &app.profiles {
+                crate::diagnostics::register_private_value(&profile.id, "<PROFILE_ID>");
+                crate::diagnostics::register_private_value(
+                    &profile.name,
+                    "<PROFILE_NAME>",
+                );
+                if !profile.wow_dir.trim().is_empty() {
+                    crate::diagnostics::register_private_path(
+                        &profile.wow_dir,
+                        "<GAME_PATH>",
+                    );
+                }
+                if !profile.working_dir.trim().is_empty() {
+                    crate::diagnostics::register_private_path(
+                        &profile.working_dir,
+                        "<WORKING_DIR>",
+                    );
+                }
+            }
             #[cfg(feature = "auto-login")]
             for profile in &mut app.profiles {
                 let selection_exists =
@@ -574,6 +600,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 let selected = path.to_string_lossy().to_string();
                 let (dir, auto_launch_exe) = settings::normalize_wow_path_input(&selected);
                 let display = settings::wow_path_display(&dir, auto_launch_exe.as_deref());
+                crate::diagnostics::register_private_path(&dir, "<GAME_PATH>");
                 app.log(LogLevel::Info, &format!("WoW path set: {}", display));
                 if let Some(Dialog::InstanceSettings {
                     ref mut wow_dir, ..
