@@ -2,6 +2,9 @@ use crate::{App, LogLevel, Message, ToastKind};
 use crate::components::helpers::copy_to_clipboard;
 use crate::service;
 use iced::Task;
+use std::time::{Duration, Instant};
+
+const MINIMUM_LAUNCH_FEEDBACK: Duration = Duration::from_secs(1);
 
 pub fn open_url(app: &mut App, url: String) -> Task<Message> {
     if let Err(e) = open::that(&url) {
@@ -32,6 +35,9 @@ pub fn copy_to_clipboard_handler(app: &mut App, text_val: String) -> Task<Messag
 }
 
 pub fn launch_game(app: &mut App) -> Task<Message> {
+    if app.launch_in_progress {
+        return Task::none();
+    }
     if app.wow_dir.is_empty() {
         app.log(LogLevel::Error, "Set a WoW directory in Options first.");
         Task::none()
@@ -60,15 +66,28 @@ pub fn launch_game(app: &mut App) -> Task<Message> {
         app.log(LogLevel::Info, &format!(
             "Launching game (method: {})...", cfg.method
         ));
+        app.launch_in_progress = true;
         let wow = app.wow_dir.clone();
-        Task::perform(
-            service::launch_game(wow, cfg),
-            Message::LaunchGameResult,
-        )
+        Task::perform(launch_game_with_minimum_feedback(wow, cfg), Message::LaunchGameResult)
     }
 }
 
+/// Keep the launch affordance visible long enough to acknowledge the click.
+/// The launcher still starts immediately; only the UI result is delayed.
+async fn launch_game_with_minimum_feedback(
+    wow_dir: String,
+    cfg: service::LaunchConfig,
+) -> Result<String, String> {
+    let started_at = Instant::now();
+    let result = service::launch_game(wow_dir, cfg).await;
+    if let Some(remaining) = MINIMUM_LAUNCH_FEEDBACK.checked_sub(started_at.elapsed()) {
+        tokio::time::sleep(remaining).await;
+    }
+    result
+}
+
 pub fn launch_game_result(app: &mut App, result: Result<String, String>) -> Task<Message> {
+    app.launch_in_progress = false;
     match result {
         Ok(msg) => app.log(LogLevel::Info, &msg),
         Err(e) => {
@@ -77,6 +96,19 @@ pub fn launch_game_result(app: &mut App, result: Result<String, String>) -> Task
         }
     }
     Task::none()
+}
+
+fn focus_existing_window() -> Task<Message> {
+    iced::window::latest().and_then(|id| {
+        Task::batch([
+            iced::window::minimize(id, false),
+            iced::window::gain_focus(id),
+            iced::window::request_user_attention(
+                id,
+                Some(iced::window::UserAttention::Informational),
+            ),
+        ])
+    })
 }
 
 fn launch_root_tool(app: &mut App, candidates: &[&str], result: fn(Result<String, String>) -> Message) -> Task<Message> {
@@ -146,6 +178,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::CopyToClipboard(text) => Some(copy_to_clipboard_handler(app, text)),
         Message::LaunchGame => Some(launch_game(app)),
         Message::LaunchGameResult(res) => Some(launch_game_result(app, res)),
+        Message::PollSingleInstanceActivation => {
+            if crate::single_instance::take_focus_request() {
+                Some(focus_existing_window())
+            } else {
+                Some(Task::none())
+            }
+        }
         Message::LaunchWowOptimize => Some(launch_root_tool(
             app,
             &["wow_optimize_launcher.exe"],

@@ -567,6 +567,18 @@ pub fn play_button_hovered_style(colors: ThemeColors) -> button::Style {
     s
 }
 
+/// Play button held while a launch request is being handed to the operating system.
+pub fn play_button_pressed_style(colors: ThemeColors) -> button::Style {
+    let mut s = play_button_style(colors);
+    s.background = Some(v_gradient(colors.play_bottom, colors.play_top));
+    s.shadow = Shadow {
+        color: rgba_color(0, 0, 0, 0.20),
+        offset: Vector::new(0.0, 2.0),
+        blur_radius: 6.0,
+    };
+    s
+}
+
 /// Footer bar container — gradient
 pub fn footer_style(colors: ThemeColors) -> container::Style {
     container::Style {

@@ -3325,40 +3325,52 @@ impl Engine {
         format!("ADDON_CONFLICT: Existing addon files were found for: {}. Confirm replacement to delete those folders and continue.", details)
     }
 
-    fn clear_conflicting_addon_tracking(
+    fn replace_conflicting_addons(
         &self,
         current_repo_id: i64,
         wow_dir: &Path,
         conflicts: &[AddonInstallConflict],
     ) -> Result<()> {
-        let mut repo_ids = HashSet::<i64>::new();
+        let mut replaced_paths_by_repo = HashMap::<i64, HashSet<String>>::new();
+
         for conflict in conflicts {
+            Self::remove_any_target(&conflict.target_path)?;
+
             for owner in &conflict.owners {
                 if owner.repo_id == current_repo_id {
                     continue;
                 }
-                repo_ids.insert(owner.repo_id);
+
+                replaced_paths_by_repo
+                    .entry(owner.repo_id)
+                    .or_default()
+                    .insert(owner.manifest_path.to_ascii_lowercase());
             }
         }
 
-        for repo_id in repo_ids {
-            let addon_installs = self
-                .db()
-                .list_installs(repo_id)?
-                .into_iter()
-                .filter(|entry| entry.kind == "addon")
-                .collect::<Vec<_>>();
-
-            for entry in &addon_installs {
-                if let Some(full_path) = Self::resolve_install_path(&entry.path, Some(wow_dir)) {
-                    let _ = Self::remove_any_target(&full_path)?;
+        for (repo_id, replaced_paths) in replaced_paths_by_repo {
+            let tracked_installs = self.db().list_installs(repo_id)?;
+            for entry in tracked_installs {
+                if entry.kind == "addon"
+                    && replaced_paths.contains(&entry.path.to_ascii_lowercase())
+                {
+                    self.db().remove_install(repo_id, &entry.path)?;
                 }
-                self.db().remove_install(repo_id, &entry.path)?;
             }
 
             let remaining_installs = self.db().list_installs(repo_id)?;
-            let has_addon_installs = remaining_installs.iter().any(|entry| entry.kind == "addon");
-            if !has_addon_installs {
+            let remaining_addons = remaining_installs
+                .iter()
+                .filter(|entry| entry.kind == "addon")
+                .collect::<Vec<_>>();
+            let is_addon_git = self
+                .db()
+                .get_repo(repo_id)
+                .ok()
+                .map(|repo| matches!(repo.mode, InstallMode::AddonGit))
+                .unwrap_or(false);
+
+            if remaining_addons.is_empty() {
                 // If this was an addon_git repo and no addon installs remain after conflict
                 // replacement, remove it from tracking entirely so duplicate forks cannot
                 // coexist in the tracked addons list.
@@ -3374,6 +3386,22 @@ impl Engine {
                     self.db()
                         .set_installed_asset_state(repo_id, None, None, None, None, None, None)?;
                 }
+            } else if is_addon_git {
+                // Pin the collection to its surviving addon folders. Without this, a future
+                // update could interpret the repo as "install everything" and restore the
+                // addon that the user just replaced with another source.
+                let selected_addons = remaining_addons
+                    .iter()
+                    .filter_map(|entry| {
+                        Path::new(&entry.path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(str::to_string)
+                    })
+                    .collect::<Vec<_>>();
+                let selected_addons_json = normalize_selected_addons(&selected_addons);
+                self.db()
+                    .set_repo_selected_addons(repo_id, selected_addons_json.as_deref())?;
             }
         }
 
@@ -4040,10 +4068,7 @@ impl Engine {
                     if !opts.replace_addon_conflicts {
                         anyhow::bail!(Self::format_addon_conflict_message(&conflicts));
                     }
-                    for conflict in &conflicts {
-                        let _ = Self::remove_any_target(&conflict.target_path)?;
-                    }
-                    self.clear_conflicting_addon_tracking(plan.repo_id, wow_dir, &conflicts)?;
+                    self.replace_conflicting_addons(plan.repo_id, wow_dir, &conflicts)?;
                 }
             }
 
@@ -4422,7 +4447,11 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    use super::{Engine, InstallMode, InstallOptions, LatestRelease, ReleaseAsset, UpdatePlan};
+    use super::{
+        selected_addons_from_json, AddonInstallConflict, Engine, InstallMode, InstallOptions,
+        LatestRelease, ReleaseAsset, UpdatePlan,
+    };
+    use crate::db::AddonInstallOwner;
     use git2::Repository;
     use std::fs;
 
@@ -4473,6 +4502,89 @@ mod tests {
             new_dll_count: 0,
             is_manual: false,
         }
+    }
+
+    #[test]
+    fn conflict_replacement_removes_only_matching_collection_addons() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let old_repo_id = engine
+            .add_repo(
+                "https://github.com/example/collection",
+                InstallMode::AddonGit,
+                None,
+                Some(vec![
+                    "AddonOne".to_string(),
+                    "AddonTwo".to_string(),
+                    "AddonThree".to_string(),
+                ]),
+            )
+            .unwrap();
+        let new_repo_id = engine
+            .add_repo(
+                "https://github.com/example/replacement",
+                InstallMode::AddonGit,
+                None,
+                Some(vec!["AddonTwo".to_string()]),
+            )
+            .unwrap();
+
+        for addon_name in ["AddonOne", "AddonTwo", "AddonThree"] {
+            let addon_dir = addons.join(addon_name);
+            fs::create_dir_all(&addon_dir).unwrap();
+            fs::write(addon_dir.join(format!("{addon_name}.toc")), b"## Interface: 30300\n")
+                .unwrap();
+            engine
+                .db()
+                .add_install(
+                    old_repo_id,
+                    &format!("Interface/AddOns/{addon_name}"),
+                    "addon",
+                    Some("old"),
+                )
+                .unwrap();
+        }
+
+        engine
+            .replace_conflicting_addons(
+                new_repo_id,
+                &wow,
+                &[AddonInstallConflict {
+                    addon_name: "AddonTwo".to_string(),
+                    target_path: addons.join("AddonTwo"),
+                    owners: vec![AddonInstallOwner {
+                        repo_id: old_repo_id,
+                        owner: "example".to_string(),
+                        name: "collection".to_string(),
+                        manifest_path: "Interface/AddOns/AddonTwo".to_string(),
+                    }],
+                }],
+            )
+            .unwrap();
+
+        assert!(addons.join("AddonOne").exists());
+        assert!(!addons.join("AddonTwo").exists());
+        assert!(addons.join("AddonThree").exists());
+
+        let installs = engine.db().list_installs(old_repo_id).unwrap();
+        assert_eq!(
+            installs
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Interface/AddOns/AddonOne",
+                "Interface/AddOns/AddonThree"
+            ]
+        );
+
+        let old_repo = engine.db().get_repo(old_repo_id).unwrap();
+        assert_eq!(
+            selected_addons_from_json(old_repo.selected_addons_json.as_deref()),
+            vec!["AddonOne".to_string(), "AddonThree".to_string()]
+        );
     }
 
     #[test]

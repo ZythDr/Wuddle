@@ -8,6 +8,7 @@ mod storage;
 pub mod panels;
 pub mod service;
 pub(crate) mod settings;
+mod single_instance;
 #[allow(dead_code)]
 pub(crate) mod theme;
 pub(crate) mod tweaks;
@@ -54,6 +55,14 @@ fn main() -> iced::Result {
     // Friz Quadrata overrides it when the user opts in.
     let saved = settings::load_settings();
     let default_font = if saved.opt_friz_font { FRIZ } else { NOTO };
+    let _single_instance_guard = match single_instance::acquire() {
+        Ok(single_instance::AcquireResult::Primary(guard)) => Some(guard),
+        Ok(single_instance::AcquireResult::ExistingInstanceActivated) => return Ok(()),
+        Err(error) => {
+            eprintln!("Wuddle single-instance setup failed: {error}");
+            None
+        }
+    };
 
     let window_icon = iced::window::icon::from_file_data(
         include_bytes!("../assets/icons/128x128.png"),

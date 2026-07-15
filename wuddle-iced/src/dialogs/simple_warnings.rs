@@ -220,7 +220,11 @@ pub fn addon_conflict<'a>(
         existing_repos
             .iter()
             .map(|group| {
-                let items = group.addon_names.iter().map(|n| (n.clone(), true)).collect();
+                let items = group
+                    .conflicting_addons
+                    .iter()
+                    .map(|n| (n.clone(), true))
+                    .collect();
                 (group.repo_label.clone(), items)
             })
             .collect()
@@ -312,7 +316,7 @@ pub fn addon_conflict<'a>(
         .spacing(20)
         .height(Length::Fill),
         Space::new().height(20),
-        text("Overwriting will stop tracking the existing folders on the left and replace them with the new versions shown on the right.")
+        text("Overwriting will remove only the conflicting existing folders shown on the left and replace them with the new versions shown on the right. Other addons from their collections will be kept.")
             .size(13)
             .color(colors.text_soft),
         Space::new().height(16),
@@ -374,7 +378,11 @@ pub fn collection_addon_conflict<'a>(
         existing_repos
             .iter()
             .map(|group| {
-                let items = group.addon_names.iter().map(|n| (n.clone(), true)).collect();
+                let items = group
+                    .conflicting_addons
+                    .iter()
+                    .map(|n| (n.clone(), true))
+                    .collect();
                 (group.repo_label.clone(), items)
             })
             .collect()
@@ -421,12 +429,12 @@ pub fn collection_addon_conflict<'a>(
         .align_y(iced::Alignment::Center),
         text(if existing_repos.len() == 1 && direct_conflicts.len() == 1 {
             format!(
-                "An existing addon with the same name is already tracked by {}. Replacing it will stop tracking that repo's addon folders listed on the left and install the new conflicting addon shown on the right.",
+                "An existing addon with the same name is already tracked by {}. Replacing it will remove only that conflicting addon from the old collection and install the new version shown on the right.",
                 existing_repos[0].repo_label
             )
         } else {
             format!(
-                "Some addons in '{}' conflict with addon folders that are already tracked. Wuddle can stop tracking and remove the existing folders on the left, then install the conflicting new addons on the right.",
+                "Some addons in '{}' conflict with addon folders that are already tracked. Wuddle can remove only the conflicting entries from their old collections, then install the new addons on the right.",
                 repo_name
             )
         })
@@ -438,7 +446,7 @@ pub fn collection_addon_conflict<'a>(
         ]
         .spacing(20),
         text(
-            "Overwriting will stop tracking the existing addon folders shown on the left, remove them from AddOns, and then install and track the conflicting addon folders shown on the right."
+            "Overwriting will remove only the conflicting addon folders shown on the left. Other addons in their collections will remain installed and selected."
         )
         .size(14)
         .color(colors.text),

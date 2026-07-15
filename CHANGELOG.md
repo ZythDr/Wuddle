@@ -4,8 +4,16 @@ All notable changes to Wuddle are documented in this file.
 
 ## v3.6.1
 
+### New Features
+- **Single-Window Launching** — Opening Wuddle while it is already running now focuses the existing window instead of starting another copy.
+
+### Improvements
+- **Auto-Login Footer Polish** — The account picker and account-management cog now have explanatory tooltips, the cog uses a cleaner borderless style, and opening the picker no longer overlaps its tooltip.
+- **Clearer Launch Feedback** — The PLAY button now remains visibly pressed for at least one second while Wuddle hands the launch request to the operating system.
+
 ### Bug Fixes
 - **Beta In-App Updates** — Pre-release version numbers now compare correctly, so each newer beta can be installed through Wuddle without a manual download. This hotfix is published as `v3.6.1-beta.1` so existing `v3.6.0-beta.2` installations can receive it.
+- **Collection Conflict Replacement** — Overwriting an addon conflict now removes only the conflicting addon folders from an existing collection and updates that collection's selection, leaving its other addons installed.
 
 ## v3.6.0
 

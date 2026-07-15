@@ -1,7 +1,8 @@
 use iced::widget::{
-    button, checkbox, column, container, pick_list, row, scrollable, text, text_input, Space,
+    button, checkbox, column, container, mouse_area, pick_list, row, scrollable, text,
+    text_input, Space,
 };
-use iced::{Element, Length, Task};
+use iced::{Color, Element, Length, Task};
 use wuddle_engine::auto_login::{
     AccountDetails, AccountId, AccountRef, AutoLoginService, CredentialInput, SecretText,
 };
@@ -53,6 +54,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::OpenAutoLoginAccounts => {
             app.auto_login_ui = UiState::default();
             app.dialog = Some(Dialog::AutoLoginAccounts);
+            Some(Task::none())
+        }
+        Message::SetAutoLoginAccountPickerTooltipVisible(visible) => {
+            app.auto_login_account_picker_tooltip_visible = visible;
+            Some(Task::none())
+        }
+        Message::DismissAutoLoginAccountPickerTooltip => {
+            app.auto_login_account_picker_tooltip_visible = false;
             Some(Task::none())
         }
         Message::AddAutoLoginAccount => {
@@ -247,6 +256,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::SelectAutoLoginAccount(account_id) => {
+            app.auto_login_account_picker_tooltip_visible = false;
             if let Some(profile) = app
                 .profiles
                 .iter_mut()
@@ -493,12 +503,31 @@ pub fn account_picker<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Mess
         .cloned()
         .or_else(|| choices.first().cloned());
     let c = colors;
-    row![
-        pick_list(choices, selected, |choice| Message::SelectAutoLoginAccount(
-            choice.id
-        ))
-        .text_size(12)
-        .width(150),
+    let selector_tooltip: Element<'a, Message> = if app.auto_login_account_picker_tooltip_visible {
+        container(
+            text("Select account for auto-login. Requires 'Awesome WotLK'.")
+                .size(13)
+                .color(c.text),
+        )
+        .padding([6, 10])
+        .style(move |_theme| theme::tooltip_style(c))
+        .into()
+    } else {
+        Space::new().width(0).height(0).into()
+    };
+    let account_selector = iced::widget::tooltip(
+        mouse_area(
+            pick_list(choices, selected, |choice| Message::SelectAutoLoginAccount(choice.id))
+                .text_size(12)
+                .width(150),
+        )
+        .on_enter(Message::SetAutoLoginAccountPickerTooltipVisible(true))
+        .on_exit(Message::SetAutoLoginAccountPickerTooltipVisible(false)),
+        selector_tooltip,
+        iced::widget::tooltip::Position::Top,
+    )
+    .padding(0);
+    let manage_accounts = iced::widget::tooltip(
         button(
             container(text("⚙").size(20))
                 .width(Length::Fill)
@@ -506,14 +535,34 @@ pub fn account_picker<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Mess
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
         )
-            .on_press(Message::OpenAutoLoginAccounts)
-            .padding(0)
-            .width(30)
-            .height(30)
-            .style(move |_theme, status| match status {
-                button::Status::Hovered => theme::tab_button_hovered_style(c),
-                _ => theme::tab_button_style(c),
-            }),
+        .on_press(Message::OpenAutoLoginAccounts)
+        .padding(0)
+        .width(30)
+        .height(30)
+        .style(move |_theme, status| match status {
+            button::Status::Hovered | button::Status::Pressed => button::Style {
+                background: None,
+                text_color: c.primary_text,
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+                snap: true,
+            },
+            _ => button::Style {
+                background: None,
+                text_color: Color { a: 0.62, ..c.text },
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+                snap: true,
+            },
+        }),
+        container(text("Manage auto-login accounts").size(13).color(c.text))
+            .padding([6, 10])
+            .style(move |_theme| theme::tooltip_style(c)),
+        iced::widget::tooltip::Position::Top,
+    );
+    row![
+        account_selector,
+        manage_accounts,
     ]
     .spacing(6)
     .align_y(iced::Alignment::Center)

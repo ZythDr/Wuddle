@@ -134,6 +134,7 @@ pub enum Message {
     CopyToClipboard(String),
     LaunchGame,
     LaunchGameResult(Result<String, String>),
+    PollSingleInstanceActivation,
 
     #[cfg(feature = "auto-login")]
     OpenAutoLoginAccounts,
@@ -172,6 +173,10 @@ pub enum Message {
     RollbackAutoLoginAccountResult(Result<(), String>),
     #[cfg(feature = "auto-login")]
     SelectAutoLoginAccount(Option<wuddle_engine::auto_login::AccountId>),
+    #[cfg(feature = "auto-login")]
+    SetAutoLoginAccountPickerTooltipVisible(bool),
+    #[cfg(feature = "auto-login")]
+    DismissAutoLoginAccountPickerTooltip,
     #[cfg(feature = "auto-login")]
     DeleteAutoLoginAccount(wuddle_engine::auto_login::AccountId),
     #[cfg(feature = "auto-login")]

@@ -50,7 +50,6 @@ pub fn latest_rescan_progress() -> Option<RescanProgress> {
 pub struct CollectionConflictOwnerGroup {
     pub repo_id: i64,
     pub repo_label: String,
-    pub addon_names: Vec<String>,
     pub conflicting_addons: Vec<String>,
 }
 
@@ -162,17 +161,9 @@ pub fn suggested_addon_for_expansion(
         .cloned()
 }
 
-fn addon_name_from_manifest_path(path: &str) -> Option<String> {
-    Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.to_string())
-}
-
 fn build_collection_conflict_owner_groups(
-    eng: &Engine,
     conflicts: &[wuddle_engine::AddonProbeConflict],
-) -> Result<Vec<CollectionConflictOwnerGroup>, CollectionSelectionError> {
+) -> Vec<CollectionConflictOwnerGroup> {
     let mut groups = std::collections::BTreeMap::<i64, CollectionConflictOwnerGroup>::new();
     let mut untracked_locals = Vec::<String>::new();
 
@@ -184,19 +175,9 @@ fn build_collection_conflict_owner_groups(
 
         for owner in &conflict.owners {
             let group = groups.entry(owner.repo_id).or_insert_with(|| {
-                let addon_names = eng
-                    .db()
-                    .list_installs(owner.repo_id)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|entry| entry.kind == "addon")
-                    .filter_map(|entry| addon_name_from_manifest_path(&entry.path))
-                    .collect::<Vec<_>>();
-
                 CollectionConflictOwnerGroup {
                     repo_id: owner.repo_id,
                     repo_label: format!("{}/{}", owner.owner, owner.name),
-                    addon_names,
                     conflicting_addons: Vec::new(),
                 }
             });
@@ -214,12 +195,6 @@ fn build_collection_conflict_owner_groups(
     let mut out = groups.into_values().collect::<Vec<_>>();
     for group in &mut out {
         group
-            .addon_names
-            .sort_by_key(|name| name.to_ascii_lowercase());
-        group
-            .addon_names
-            .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-        group
             .conflicting_addons
             .sort_by_key(|name| name.to_ascii_lowercase());
         group
@@ -233,12 +208,11 @@ fn build_collection_conflict_owner_groups(
         out.push(CollectionConflictOwnerGroup {
             repo_id: 0,
             repo_label: "Untracked local folders".to_string(),
-            addon_names: untracked_locals.clone(),
             conflicting_addons: untracked_locals,
         });
     }
 
-    Ok(out)
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1128,7 +1102,7 @@ pub async fn update_collection_selection(
                 .addon_selection_conflicts(repo_id, Path::new(&wow_dir), &selected_addons)
                 .map_err(|e| CollectionSelectionError::Other(e.to_string()))?;
             if !conflicts.is_empty() {
-                let existing_repos = build_collection_conflict_owner_groups(&eng, &conflicts)?;
+                let existing_repos = build_collection_conflict_owner_groups(&conflicts);
                 return Err(CollectionSelectionError::Conflict {
                     repo_id,
                     repo_name: format!("{}/{}", repo.owner, repo.name),
@@ -1245,7 +1219,7 @@ pub async fn check_pre_install_conflicts(
         let existing_repos = if conflicts.is_empty() {
             Vec::new()
         } else {
-            build_collection_conflict_owner_groups(&eng, &conflicts).unwrap_or_else(|_| Vec::new())
+            build_collection_conflict_owner_groups(&conflicts)
         };
 
         Ok(PreInstallConflictInfo {

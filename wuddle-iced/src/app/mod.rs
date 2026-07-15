@@ -98,6 +98,9 @@ pub struct App {
     pub local_archive_hover_path: Option<PathBuf>,
     pub busy_started_at: Option<Instant>,
     pub busy_state_snapshot: Option<String>,
+    pub launch_in_progress: bool,
+    #[cfg(feature = "auto-login")]
+    pub auto_login_account_picker_tooltip_visible: bool,
 
     // Tweak values and compatibility status
     pub tweak_values: TweakValues,
@@ -293,6 +296,9 @@ impl App {
             local_archive_hover_path: None,
             busy_started_at: None,
             busy_state_snapshot: None,
+            launch_in_progress: false,
+            #[cfg(feature = "auto-login")]
+            auto_login_account_picker_tooltip_visible: false,
             tweak_values: TweakValues::default(),
             tweak_client_info: None,
             tweak_client_error: None,
@@ -665,6 +671,13 @@ impl App {
             );
         }
 
+        if crate::single_instance::is_primary_instance() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(150))
+                    .map(|_| Message::PollSingleInstanceActivation),
+            );
+        }
+
         subs.push(
             iced::time::every(std::time::Duration::from_secs(60)).map(|_| Message::GithubRateTick),
         );
@@ -679,6 +692,17 @@ impl App {
                     _ => None,
                 },
             ));
+        }
+
+        #[cfg(feature = "auto-login")]
+        if self.auto_login_account_picker_tooltip_visible {
+            subs.push(iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_))
+                | iced::Event::Touch(iced::touch::Event::FingerPressed { .. }) => {
+                    Some(Message::DismissAutoLoginAccountPickerTooltip)
+                }
+                _ => None,
+            }));
         }
 
         subs.push(iced::event::listen_with(
@@ -4777,11 +4801,13 @@ impl App {
             .into()
         };
 
+        let launch_in_progress = self.launch_in_progress;
         let play_btn = button(container(text("PLAY").size(16)).center_x(Length::Shrink))
             .on_press(Message::LaunchGame)
             .padding([10, 36])
             .width(108)
             .style(move |_theme, status| match status {
+                _ if launch_in_progress => theme::play_button_pressed_style(c),
                 button::Status::Hovered => theme::play_button_hovered_style(c),
                 _ => theme::play_button_style(c),
             });
