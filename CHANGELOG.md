@@ -17,6 +17,7 @@ All notable changes to Wuddle are documented in this file.
 ### Bug Fixes
 - **Cancelled Conflict Installs** — Cancelling an addon conflict now removes the pending repository from Wuddle's tracking, and new addon-git worktrees remain in staging until conflicts are accepted.
 - **Conflict-Safe Finalization** — Addon files and GAM metadata reach `Interface/AddOns` only after conflict checks pass, preventing cancelled installs from leaving a second addon copy behind.
+- **Addon Repository Switching** — Replacing an installed addon with a same-named fork now installs from the newly selected repository instead of continuing to use the old repository's Git remote. Refreshing or rescanning no longer removes the replacement and restores the old source. Should fix #17.
 
 ## v3.6.1
 
