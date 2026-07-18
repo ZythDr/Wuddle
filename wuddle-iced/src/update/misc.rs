@@ -160,14 +160,51 @@ pub fn spinner_tick(app: &mut App) -> Task<Message> {
     if app.collection_marquee_hovered {
         app.collection_marquee_tick = app.collection_marquee_tick.wrapping_add(1);
     }
-    // Auto-dismiss toasts
-    for t in &mut app.toasts { t.ttl = t.ttl.saturating_sub(1); }
-    app.toasts.retain(|t| t.ttl > 0);
+    // Auto-dismiss visible toasts. Entering and exiting transitions do not
+    // consume any of the notification's readable lifetime.
+    for toast in &mut app.toasts {
+        if matches!(toast.animation, crate::ToastAnimation::Visible) {
+            toast.ttl = toast.ttl.saturating_sub(1);
+            if toast.ttl == 0 {
+                toast.animation = crate::ToastAnimation::Exiting(0);
+            }
+        }
+    }
     Task::none()
 }
 
 pub fn dismiss_toast(app: &mut App, id: usize) -> Task<Message> {
-    app.toasts.retain(|t| t.id != id);
+    if let Some(toast) = app.toasts.iter_mut().find(|toast| toast.id == id) {
+        if !matches!(toast.animation, crate::ToastAnimation::Exiting(_)) {
+            toast.animation = crate::ToastAnimation::Exiting(0);
+        }
+    }
+    Task::none()
+}
+
+pub fn toast_animation_tick(app: &mut App) -> Task<Message> {
+    for toast in &mut app.toasts {
+        toast.animation = match toast.animation {
+            crate::ToastAnimation::Entering(tick)
+                if tick.saturating_add(1) >= crate::TOAST_ANIMATION_TICKS =>
+            {
+                crate::ToastAnimation::Visible
+            }
+            crate::ToastAnimation::Entering(tick) => {
+                crate::ToastAnimation::Entering(tick.saturating_add(1))
+            }
+            crate::ToastAnimation::Visible => crate::ToastAnimation::Visible,
+            crate::ToastAnimation::Exiting(tick) => {
+                crate::ToastAnimation::Exiting(tick.saturating_add(1))
+            }
+        };
+    }
+    app.toasts.retain(|toast| {
+        !matches!(
+            toast.animation,
+            crate::ToastAnimation::Exiting(tick) if tick >= crate::TOAST_ANIMATION_TICKS
+        )
+    });
     Task::none()
 }
 
@@ -220,6 +257,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::RunAwesomeWotlkPatchResult(res) => Some(launch_tool_result(app, res)),
         Message::SpinnerTick => Some(spinner_tick(app)),
         Message::DismissToast(id) => Some(dismiss_toast(app, id)),
+        Message::ToastAnimationTick => Some(toast_animation_tick(app)),
         _ => None,
     }
 }

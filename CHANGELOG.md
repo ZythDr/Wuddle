@@ -13,11 +13,15 @@ All notable changes to Wuddle are documented in this file.
 - **Git Remote Preservation** — Existing addon worktrees now follow the checked-out branch's configured upstream first and preserve `origin` and other remotes instead of rewriting them.
 - **Generic Git Hosting** — Self-hosted, local, SSH, and otherwise unknown Git repositories remain manageable as neutral Git sources without being misidentified as a specific forge.
 - **Non-Destructive GAM Import** — GAM `.bak` and `.bak.N` folders are ignored during active-addon import, while valid linked and moved module layouts are preserved rather than needlessly repaired.
+- **Complete Addon Reinstalls** — Reinstall / Repair now prepares a fresh addon-git clone in staging before replacing the live installation, removes stale or untracked files, and preserves the repository's tracked identity and settings.
+- **Notification Controls and Animation** — In-app notifications can now be dismissed by right-clicking anywhere on them and use subtle fade-and-slide transitions when appearing or closing.
+- **Quick Add Catalog Polish** — LuaBoost is now linked as a companion addon for wow-optimize, while the DXVK description and antivirus false-positive tooltip use clearer client-neutral wording.
 
 ### Bug Fixes
 - **Cancelled Conflict Installs** — Cancelling an addon conflict now removes the pending repository from Wuddle's tracking, and new addon-git worktrees remain in staging until conflicts are accepted.
 - **Conflict-Safe Finalization** — Addon files and GAM metadata reach `Interface/AddOns` only after conflict checks pass, preventing cancelled installs from leaving a second addon copy behind.
 - **Addon Repository Switching** — Replacing an installed addon with a same-named fork now installs from the newly selected repository instead of continuing to use the old repository's Git remote. Refreshing or rescanning no longer removes the replacement and restores the old source. Should fix #17.
+- **Multi-TOC Addon Selection** — Installing or reinstalling a single-addon repository with multiple root `.toc` files now requires an explicit main TOC choice, with a client-aware suggestion such as `Questie-335.toc` for WotLK profiles.
 
 ## v3.6.1
 

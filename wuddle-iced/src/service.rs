@@ -161,6 +161,38 @@ pub fn suggested_addon_for_expansion(
         .cloned()
 }
 
+#[cfg(test)]
+mod primary_toc_tests {
+    use super::{root_probe_addon_names, suggested_addon_for_expansion};
+    use wuddle_engine::{AddonProbeEntry, AddonProbeResult};
+
+    #[test]
+    fn questie_root_tocs_are_choices_and_335_is_suggested_for_wotlk() {
+        let probe = AddonProbeResult {
+            addon_names: vec!["Questie".to_string(), "Questie-335".to_string()],
+            addon_entries: vec![
+                AddonProbeEntry {
+                    addon_name: "Questie".to_string(),
+                    source_path: String::new(),
+                },
+                AddonProbeEntry {
+                    addon_name: "Questie-335".to_string(),
+                    source_path: String::new(),
+                },
+            ],
+            conflicts: Vec::new(),
+            resolved_branch: "main".to_string(),
+        };
+
+        let options = root_probe_addon_names(&probe);
+        assert_eq!(options, vec!["Questie".to_string(), "Questie-335".to_string()]);
+        assert_eq!(
+            suggested_addon_for_expansion(&options, Some("wotlk")),
+            Some("Questie-335".to_string())
+        );
+    }
+}
+
 fn build_collection_conflict_owner_groups(
     conflicts: &[wuddle_engine::AddonProbeConflict],
 ) -> Vec<CollectionConflictOwnerGroup> {
@@ -1194,6 +1226,15 @@ pub async fn probe_conflicts(
     url: String,
     wow_dir: String,
 ) -> Result<wuddle_engine::AddonProbeResult, String> {
+    probe_conflicts_on_branch(db_path, url, wow_dir, None).await
+}
+
+pub async fn probe_conflicts_on_branch(
+    db_path: Option<PathBuf>,
+    url: String,
+    wow_dir: String,
+    preferred_branch: Option<String>,
+) -> Result<wuddle_engine::AddonProbeResult, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("probe_conflicts");
     // NOTE: probe_addon_repo_conflicts is async, so we can't simply call it inside
     // spawn_blocking. Using Handle::current().block_on() inside spawn_blocking would
@@ -1207,7 +1248,11 @@ pub async fn probe_conflicts(
             .build()
             .map_err(|e| e.to_string())?
             .block_on(async {
-                eng.probe_addon_repo_conflicts(&normalized_url, Path::new(&wow_dir), None)
+                eng.probe_addon_repo_conflicts(
+                    &normalized_url,
+                    Path::new(&wow_dir),
+                    preferred_branch.as_deref(),
+                )
                     .await
             })
             .map_err(|e| e.to_string())
@@ -1561,6 +1606,53 @@ pub async fn reinstall_repo(
             })
             .map_err(|e| e.to_string())?;
         Ok(PlanRow::from(plan))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn reinstall_repo_with_selection(
+    db_path: Option<PathBuf>,
+    id: i64,
+    wow_dir: String,
+    opts: InstallOptions,
+    selected_addon: String,
+) -> Result<PlanRow, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("reinstall_repo_with_selection");
+    crate::diagnostics::trace(
+        "service",
+        format!("reinstall_repo_with_selection: repo_id={id}"),
+    );
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        let repo = eng.db().get_repo(id).map_err(|e| e.to_string())?;
+        let previous_selected = parse_selected_addons(repo.selected_addons_json.as_deref());
+        eng.set_repo_selected_addons(id, Some(vec![selected_addon]))
+            .map_err(|e| e.to_string())?;
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?
+            .block_on(async {
+                eng.reinstall_repo(id, Path::new(&wow_dir), None, opts)
+                    .await
+            });
+
+        match result {
+            Ok(plan) => Ok(PlanRow::from(plan)),
+            Err(error) => {
+                let _ = eng.set_repo_selected_addons(
+                    id,
+                    if previous_selected.is_empty() {
+                        None
+                    } else {
+                        Some(previous_selected)
+                    },
+                );
+                Err(error.to_string())
+            }
+        }
     })
     .await
     .map_err(|e| e.to_string())?

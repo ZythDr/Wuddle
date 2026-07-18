@@ -133,7 +133,7 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
         Preset {
             name: "DXVK (GPLAsync fork)",
             url: "https://gitlab.com/Ph42oN/dxvk-gplasync",
-            description: "DXVK can massively improve performance in old Direct3D titles (including WoW 1.12) by using Vulkan. This fork includes Async + GPL options aimed at further reducing stutters. Async/GPL behavior is controlled through dxvk.conf, so users can keep default behavior if they prefer.",
+            description: "DXVK can massively improve performance in old Direct3D titles (including WoW) by using Vulkan. This fork includes Async + GPL options aimed at further reducing stutters. Async/GPL behavior is controlled through dxvk.conf, so users can keep default behavior if they prefer.",
             categories: &["Performance"],
             recommended: true,
             warning: None,
@@ -149,7 +149,7 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
             categories: &["Performance"],
             recommended: false,
             warning: Some("wow-optimize uses DLL injection and may trigger antivirus alerts on Windows."),
-            companion_links: &[],
+            companion_links: &[("LuaBoost", "https://github.com/suprepupre/LuaBoost")],
             expanded_notes: &[],
             is_addon: false,
             supported_clients: WOTLK,
@@ -275,7 +275,7 @@ pub fn build_quick_add_presets<'a>(
                     iced::Color::from_rgb8(0xfc, 0xa5, 0xa5),
                     iced::Color::from_rgb8(0xef, 0x44, 0x44),
                 ),
-                "This mod is known to trigger an antivirus false-positive.",
+                "This mod may trigger an antivirus false-positive.",
                 iced::widget::tooltip::Position::Top,
                 colors,
             ));

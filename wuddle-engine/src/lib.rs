@@ -3989,6 +3989,17 @@ impl Engine {
         raw_dest: Option<&Path>,
         opts: InstallOptions,
     ) -> Result<()> {
+        self.apply_one_internal(plan, wow_dir, raw_dest, opts, false).await
+    }
+
+    async fn apply_one_internal(
+        &self,
+        plan: &UpdatePlan,
+        wow_dir: &Path,
+        raw_dest: Option<&Path>,
+        opts: InstallOptions,
+        force_clean_git_reinstall: bool,
+    ) -> Result<()> {
         let _diagnostic = diagnostics::OperationGuard::new("apply_one");
         diagnostics::emit(
             diagnostics::DiagnosticLevel::Trace,
@@ -4009,7 +4020,7 @@ impl Engine {
 
             let installed_worktree_dir =
                 self.addon_git_worktree_dir(plan.repo_id, wow_dir, &repo);
-            let staged_install = installed_worktree_dir.is_none();
+            let staged_install = force_clean_git_reinstall || installed_worktree_dir.is_none();
             let mut staging_guard = None;
             let mut worktree_dir = if staged_install {
                 let staging_dir = util::cache_dir(Some(wow_dir))?
@@ -4024,7 +4035,9 @@ impl Engine {
                 staging_guard = Some(StagedGitWorktree::new(plan.repo_id, staging_dir.clone()));
                 staging_dir
             } else {
-                installed_worktree_dir.expect("existing addon Git worktree")
+                installed_worktree_dir
+                    .clone()
+                    .expect("existing addon Git worktree")
             };
 
             // Self-correction: Update repo name casing in DB from actual filesystem casing.
@@ -4185,20 +4198,6 @@ impl Engine {
                 }
             }
 
-            // Remove previously created sub-addon symlinks/copies for this repo
-            // (but never the worktree dir itself or anything inside it).
-            for entry in self.db().list_installs(plan.repo_id)? {
-                if entry.kind != "addon" {
-                    continue;
-                }
-                if let Some(full) = Self::resolve_install_path(&entry.path, Some(wow_dir)) {
-                    if full == worktree_dir || full.starts_with(&worktree_dir) {
-                        continue;
-                    }
-                    Self::remove_any_target(&full)?;
-                }
-            }
-
             // GAM subfolder collision: if a subfolder has the same name as the repo
             // directory, rename the repo dir to "{name}.repo" first — exactly as
             // GAM's Addon::unpackSubfolders() does — so the symlink can be created.
@@ -4246,7 +4245,18 @@ impl Engine {
                 .filter(|(src, _)| staged_install || *src != worktree_dir)
                 .map(|(_, name)| name.clone())
                 .collect();
+            let staged_target_is_current_worktree = force_clean_git_reinstall
+                && installed_worktree_dir.as_ref().is_some_and(|installed| {
+                    installed
+                        .file_name()
+                        .zip(Path::new(&staged_final_name).file_name())
+                        .is_some_and(|(left, right)| {
+                            left.to_string_lossy()
+                                .eq_ignore_ascii_case(&right.to_string_lossy())
+                        })
+                });
             if staged_install
+                && !staged_target_is_current_worktree
                 && !conflict_names
                     .iter()
                     .any(|name| name.eq_ignore_ascii_case(&staged_final_name))
@@ -4261,6 +4271,29 @@ impl Engine {
                         anyhow::bail!(Self::format_addon_conflict_message(&conflicts));
                     }
                     self.replace_conflicting_addons(plan.repo_id, wow_dir, &conflicts)?;
+                }
+            }
+
+            // Only disturb the live installation after the replacement clone has
+            // synced, its addon layout has been detected, and all conflicts have
+            // been approved. A forced repair therefore behaves like a clean
+            // remove-and-add while retaining the repository's DB identity/settings.
+            for entry in self.db().list_installs(plan.repo_id)? {
+                if entry.kind != "addon" {
+                    continue;
+                }
+                if let Some(full) = Self::resolve_install_path(&entry.path, Some(wow_dir)) {
+                    if !force_clean_git_reinstall
+                        && (full == worktree_dir || full.starts_with(&worktree_dir))
+                    {
+                        continue;
+                    }
+                    Self::remove_any_target(&full)?;
+                }
+            }
+            if force_clean_git_reinstall {
+                if let Some(installed_worktree) = installed_worktree_dir.as_ref() {
+                    Self::remove_any_target(installed_worktree)?;
                 }
             }
 
@@ -4608,7 +4641,7 @@ impl Engine {
             }
             // Force sync even if already up to date.
             plan.asset_url = r.url.clone();
-            self.apply_one(&plan, wow_dir, raw_dest, opts).await?;
+            self.apply_one_internal(&plan, wow_dir, raw_dest, opts, true).await?;
             plan.applied = true;
             return Ok(plan);
         }
@@ -5101,6 +5134,144 @@ mod tests {
         let repos = engine.db().list_repos().unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].id, new_repo_id);
+    }
+
+    #[test]
+    fn selected_questie_toc_names_worktree_and_remains_gam_discoverable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let remote = tmp.path().join("owner").join("Questie-335");
+        let remote_url = create_local_git_root_addon_repo(&remote, "Questie");
+        commit_local_git_file(
+            &remote,
+            "Questie-335.toc",
+            b"## Interface: 30300\n",
+            "add 3.3.5 toc",
+        );
+
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let repo_id = add_identified_local_git_repo(&engine, remote_url.clone());
+        engine
+            .set_repo_selected_addons(repo_id, Some(vec!["Questie-335".to_string()]))
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let installed = runtime
+            .block_on(engine.update_repo(
+                repo_id,
+                &wow,
+                None,
+                InstallOptions::default(),
+            ))
+            .unwrap();
+        assert!(installed.is_some());
+
+        let worktree = addons.join("Questie-335");
+        assert!(worktree.join(".git").is_dir());
+        assert!(worktree.join("Questie.toc").is_file());
+        assert!(worktree.join("Questie-335.toc").is_file());
+        assert!(!addons.join("Questie").exists());
+
+        let imported_engine = Engine::open(&tmp.path().join("gam-import.sqlite")).unwrap();
+        assert_eq!(imported_engine.import_existing_addons(&wow).unwrap(), 1);
+        let repos = imported_engine.db().list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].url, remote_url);
+        assert_eq!(repos[0].name, "Questie-335");
+    }
+
+    #[test]
+    fn reinstall_repo_reclones_addon_git_worktree_cleanly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let remote = tmp.path().join("owner").join("CleanRepair");
+        let remote_url = create_local_git_root_addon_repo(&remote, "CleanRepair");
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let repo_id = add_identified_local_git_repo(&engine, remote_url.clone());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(engine.update_repo(repo_id, &wow, None, InstallOptions::default()))
+            .unwrap();
+        let worktree = addons.join("CleanRepair");
+        fs::write(worktree.join("stale-user-file.txt"), b"remove me").unwrap();
+
+        runtime
+            .block_on(engine.reinstall_repo(
+                repo_id,
+                &wow,
+                None,
+                InstallOptions::default(),
+            ))
+            .unwrap();
+
+        assert!(worktree.join(".git").is_dir());
+        assert!(!worktree.join("stale-user-file.txt").exists());
+        let repo = engine.db().get_repo(repo_id).unwrap();
+        assert_eq!(repo.id, repo_id);
+        assert_eq!(repo.url, remote_url);
+    }
+
+    #[test]
+    fn reinstall_repo_applies_a_reselected_root_toc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let remote = tmp.path().join("owner").join("Questie");
+        let remote_url = create_local_git_root_addon_repo(&remote, "Questie");
+        commit_local_git_file(
+            &remote,
+            "Questie-335.toc",
+            b"## Interface: 30300\n",
+            "add 3.3.5 toc",
+        );
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let repo_id = add_identified_local_git_repo(&engine, remote_url);
+        engine
+            .set_repo_selected_addons(repo_id, Some(vec!["Questie".to_string()]))
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(engine.update_repo(repo_id, &wow, None, InstallOptions::default()))
+            .unwrap();
+        assert!(addons.join("Questie").join(".git").is_dir());
+
+        engine
+            .set_repo_selected_addons(repo_id, Some(vec!["Questie-335".to_string()]))
+            .unwrap();
+        runtime
+            .block_on(engine.reinstall_repo(
+                repo_id,
+                &wow,
+                None,
+                InstallOptions::default(),
+            ))
+            .unwrap();
+
+        assert!(!addons.join("Questie").exists());
+        assert!(addons.join("Questie-335").join(".git").is_dir());
+        assert_eq!(
+            selected_addons_from_json(
+                engine
+                    .db()
+                    .get_repo(repo_id)
+                    .unwrap()
+                    .selected_addons_json
+                    .as_deref()
+            ),
+            vec!["Questie-335".to_string()]
+        );
     }
 
     #[test]

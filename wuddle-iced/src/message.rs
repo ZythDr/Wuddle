@@ -50,6 +50,7 @@ pub enum Message {
 
     // Toast notifications
     DismissToast(usize),
+    ToastAnimationTick,
 
     // Dialogs
     OpenDialog(Dialog),
@@ -122,6 +123,10 @@ pub enum Message {
     UpdateRepo(i64),
     UpdateRepoResult(Result<Option<PlanRow>, String>),
     ReinstallRepo(i64),
+    ReinstallRepoProbeResult {
+        repo_id: i64,
+        result: Result<wuddle_engine::AddonProbeResult, String>,
+    },
     ReinstallRepoResult(Result<PlanRow, String>),
     FetchBranches(i64),
     GithubRateTick,

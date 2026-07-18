@@ -30,7 +30,29 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.6.0 / v3.6.1
+### What's New in v3.6.2
+
+#### New Features
+- **Verbose Diagnostics** — Record detailed internal operations and export a rolling, privacy-sanitized diagnostic ZIP for issue reports.
+
+#### Improvements
+- **GitAddonsManager Compatibility Layer** — Recognizes GAM root addons, modular repositories, `.repo` collision worktrees, linked or moved modules, backup folders, mixed-case names, and arbitrary Git remotes.
+- **GAM-Compatible Deployment** — Uses Wuddle's safer staging and conflict approval while finalizing new addon-git installs with GAM-compatible worktree names and module exposure.
+- **Git Remote Preservation** — Follows the checked-out branch's configured upstream and preserves existing remotes instead of rewriting `origin`.
+- **Complete Addon Reinstalls** — Reinstall / Repair prepares a fresh clone in staging, removes stale files, and preserves tracked repository settings.
+- **Notification Controls and Animation** — Right-click in-app notifications to dismiss them, with subtle fade-and-slide transitions when they appear or close.
+- **Quick Add Catalog Polish** — Adds LuaBoost as a companion addon for wow-optimize and clarifies the DXVK and antivirus warning text.
+
+#### Bug Fixes
+- **Cancelled Conflict Installs** — Cancelling an addon conflict no longer leaves a tracked repository or staged addon files behind.
+- **Conflict-Safe Finalization** — Addon files and GAM metadata reach `Interface/AddOns` only after conflict checks are accepted.
+- **Addon Repository Switching** — Replacing an addon with a same-named fork now keeps the newly selected repository through refresh and rescan. Should fix #17.
+- **Multi-TOC Addon Selection** — Installing or reinstalling repositories such as Questie now requires an explicit main TOC choice and offers a client-aware suggestion.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.6.0 / v3.6.1
 
 #### New Features
 - **WotLK Auto-Login** — Save multiple accounts per game profile using Linux Secret Service or Windows Credential Manager, then launch WoW 3.3.5 through Awesome WotLK without storing credentials in Wuddle's settings.
@@ -47,9 +69,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **Beta In-App Updates** — Pre-release versions now compare correctly. The v3.6.1 version number was used to deliver this updater hotfix to existing v3.6.0 beta installations.
 - **Collection Conflict Replacement** — Overwriting a conflict removes only the conflicting addon folders from an existing collection instead of deleting the entire collection.
 - **Case-Insensitive Auto Launch Targets** — Explicit game executables resolve even when filename capitalization differs from the path saved in Wuddle.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.5.0
 

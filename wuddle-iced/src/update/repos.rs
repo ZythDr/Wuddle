@@ -414,8 +414,28 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         return Some(Task::none());
                     }
 
-                    // Default to Single modular addon when the user hasn't explicitly chosen.
-                    // (No blocking prompt — Collection must be opted into manually.)
+                    if let Some(probe) = app.add_repo_probe.as_ref() {
+                        let root_options = service::root_probe_addon_names(probe);
+                        if root_options.len() > 1
+                            && !treat_as_collection
+                            && !app.add_repo_primary_toc_confirmed
+                        {
+                            let suggested = service::suggested_addon_for_expansion(
+                                &root_options,
+                                app.expansion_hint(),
+                            );
+                            app.dialog = Some(Dialog::SelectMainAddon {
+                                url,
+                                options: root_options,
+                                suggested,
+                                reinstall_repo_id: None,
+                            });
+                            return Some(Task::none());
+                        }
+                    }
+
+                    // Collection must be opted into manually. Single-addon repos with
+                    // multiple root TOCs are blocked above until one is explicitly chosen.
 
                     let mut selected = app
                         .add_repo_selected_addons
@@ -878,31 +898,28 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.add_repo_probe = Some(probe);
 
                     if let Some(probe) = app.add_repo_probe.as_ref() {
-                        if probe.addon_names.len() > 1 
-                            && app.add_repo_collection_choice.is_none() 
+                        if probe.addon_names.len() > 1
                             && app.add_repo_manage_repo_id.is_none()
                             && matches!(app.dialog, Some(Dialog::AddRepo { .. }))
                         {
                             let root_options = service::root_probe_addon_names(probe);
-                            if root_options.len() > 1 {
+                            if root_options.len() > 1
+                                && app.add_repo_collection_choice != Some(true)
+                                && !app.add_repo_primary_toc_confirmed
+                            {
                                 let suggested = service::suggested_addon_for_expansion(
                                     &root_options,
                                     app.expansion_hint(),
                                 );
-                                if app.add_repo_selected_addons.is_empty() {
-                                    let default_selection = suggested
-                                        .clone()
-                                        .or_else(|| root_options.first().cloned());
-                                    if let Some(name) = default_selection {
-                                        app.add_repo_selected_addons.insert(name);
-                                    }
-                                }
-                                app.dialog = Some(Dialog::SelectMainAddon { 
-                                    url: url.clone(), 
+                                app.dialog = Some(Dialog::SelectMainAddon {
+                                    url: url.clone(),
                                     options: root_options,
-                                    suggested
+                                    suggested,
+                                    reinstall_repo_id: None,
                                 });
-                            } else if root_options.is_empty() {
+                            } else if root_options.is_empty()
+                                && app.add_repo_collection_choice.is_none()
+                            {
                                 app.dialog = Some(Dialog::CollectionChoice { 
                                     url: url.clone(), 
                                     addon_names: probe.addon_names.clone() 
@@ -924,6 +941,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::SetAddRepoCollectionMode(is_collection) => {
             let from_primary_toc_choice = matches!(app.dialog, Some(Dialog::SelectMainAddon { .. }));
             app.add_repo_collection_choice = Some(is_collection);
+            app.add_repo_primary_toc_confirmed = false;
             if is_collection {
                 if let Some(probe) = app.add_repo_probe.as_ref() {
                     if app.add_repo_selected_addons.is_empty() || from_primary_toc_choice {
@@ -967,9 +985,29 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::SetAddRepoPrimaryAddon(name) => {
+            let reinstall_repo_id = match app.dialog.as_ref() {
+                Some(Dialog::SelectMainAddon { reinstall_repo_id, .. }) => *reinstall_repo_id,
+                _ => None,
+            };
+            if let Some(repo_id) = reinstall_repo_id {
+                app.dialog = None;
+                app.log(
+                    LogLevel::Info,
+                    &format!("Clean-reinstalling repo id={} with {}.toc...", repo_id, name),
+                );
+                let db = app.db_path.clone();
+                let wow = app.wow_dir.clone();
+                let opts = app.install_options();
+                return Some(Task::perform(
+                    service::reinstall_repo_with_selection(db, repo_id, wow, opts, name),
+                    Message::ReinstallRepoResult,
+                ));
+            }
+
             app.add_repo_selected_addons.clear();
             if !name.is_empty() {
                 app.add_repo_selected_addons.insert(name);
+                app.add_repo_primary_toc_confirmed = true;
             }
             if let Some(Dialog::SelectMainAddon { url, .. }) = app.dialog.as_ref() {
                 let url = url.clone();
@@ -1718,6 +1756,24 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 app.log(LogLevel::Error, "Set a WoW directory in Options first.");
             } else {
                 app.dialog = None;
+                let repo = app.repos.iter().find(|repo| repo.id == id).cloned();
+                if repo.as_ref().is_some_and(|repo| repo.mode == "addon_git") {
+                    let repo = repo.expect("checked addon_git repo");
+                    app.log(
+                        LogLevel::Info,
+                        &format!("Inspecting {}/{} before clean reinstall...", repo.owner, repo.name),
+                    );
+                    let db = app.db_path.clone();
+                    let wow = app.wow_dir.clone();
+                    return Some(Task::perform(
+                        service::probe_conflicts_on_branch(db, repo.url, wow, repo.git_branch),
+                        move |result| Message::ReinstallRepoProbeResult {
+                            repo_id: id,
+                            result,
+                        },
+                    ));
+                }
+
                 app.log(LogLevel::Info, &format!("Reinstalling repo id={}...", id));
                 let db = app.db_path.clone();
                 let wow = app.wow_dir.clone();
@@ -1726,6 +1782,54 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     service::reinstall_repo(db, id, wow, opts),
                     Message::ReinstallRepoResult,
                 ));
+            }
+            Some(Task::none())
+        }
+        Message::ReinstallRepoProbeResult { repo_id, result } => {
+            let Some(repo) = app.repos.iter().find(|repo| repo.id == repo_id).cloned() else {
+                app.log(LogLevel::Error, "Reinstall failed: repository is no longer tracked.");
+                return Some(Task::none());
+            };
+
+            match result {
+                Ok(probe) => {
+                    let root_options = service::root_probe_addon_names(&probe);
+                    if root_options.len() > 1 {
+                        let suggested = service::suggested_addon_for_expansion(
+                            &root_options,
+                            app.expansion_hint(),
+                        );
+                        app.dialog = Some(Dialog::SelectMainAddon {
+                            url: repo.url,
+                            options: root_options,
+                            suggested,
+                            reinstall_repo_id: Some(repo_id),
+                        });
+                        return Some(Task::none());
+                    }
+
+                    app.log(
+                        LogLevel::Info,
+                        &format!("Clean-reinstalling {}/{}...", repo.owner, repo.name),
+                    );
+                    let db = app.db_path.clone();
+                    let wow = app.wow_dir.clone();
+                    let opts = app.install_options();
+                    return Some(Task::perform(
+                        service::reinstall_repo(db, repo_id, wow, opts),
+                        Message::ReinstallRepoResult,
+                    ));
+                }
+                Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!("Reinstall inspection failed: {}", error),
+                    );
+                    app.show_toast(
+                        "Could not inspect the addon; no files were changed.".to_string(),
+                        ToastKind::Error,
+                    );
+                }
             }
             Some(Task::none())
         }
@@ -2117,6 +2221,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.add_repo_selected_release_asset = None;
             app.add_repo_probe = None;
             app.add_repo_probe_loading = false;
+            app.add_repo_primary_toc_confirmed = false;
             if app.add_repo_manage_repo_id.is_none() {
                 app.add_repo_collection_choice = None;
             }

@@ -173,6 +173,8 @@ pub enum Dialog {
         url: String,
         options: Vec<String>,
         suggested: Option<String>,
+        /// Set for a Reinstall / Repair TOC choice; absent for a new repo.
+        reinstall_repo_id: Option<i64>,
     },
     /// Shown when a release publishes multiple compatible archive assets.
     SelectReleaseAsset {

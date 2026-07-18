@@ -1,5 +1,5 @@
 use iced::widget::{
-    button, canvas, checkbox, column, container, mouse_area, pick_list, row, rule, scrollable,
+    button, canvas, checkbox, column, container, float, mouse_area, pick_list, row, rule, scrollable,
     stack, text,
     Space,
 };
@@ -147,6 +147,7 @@ pub struct App {
     pub add_repo_collection_choice: Option<bool>,
     pub add_repo_existing_addons: HashSet<String>,
     pub add_repo_selected_addons: HashSet<String>,
+    pub add_repo_primary_toc_confirmed: bool,
     pub pending_add_repo_addon_names: Vec<String>,
     pub add_repo_release_asset_options: Vec<service::ReleaseAssetOption>,
     pub add_repo_selected_release_asset: Option<String>,
@@ -332,6 +333,7 @@ impl App {
             add_repo_collection_choice: None,
             add_repo_existing_addons: HashSet::new(),
             add_repo_selected_addons: HashSet::new(),
+            add_repo_primary_toc_confirmed: false,
             pending_add_repo_addon_names: Vec::new(),
             add_repo_release_asset_options: Vec::new(),
             add_repo_selected_release_asset: None,
@@ -408,6 +410,7 @@ impl App {
         self.add_repo_collection_choice = None;
         self.add_repo_existing_addons.clear();
         self.add_repo_selected_addons.clear();
+        self.add_repo_primary_toc_confirmed = false;
         self.pending_add_repo_addon_names.clear();
         self.add_repo_release_asset_options.clear();
         self.add_repo_selected_release_asset = None;
@@ -448,6 +451,7 @@ impl App {
             kind,
             ttl,
             on_click,
+            animation: ToastAnimation::Entering(0),
         });
         // Keep max 5 toasts
         while self.toasts.len() > 5 {
@@ -667,6 +671,17 @@ impl App {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(80))
                     .map(|_| Message::SpinnerTick),
+            );
+        }
+
+        if self
+            .toasts
+            .iter()
+            .any(|toast| toast.animation.is_animating())
+        {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(16))
+                    .map(|_| Message::ToastAnimationTick),
             );
         }
 
@@ -1504,36 +1519,42 @@ impl App {
                 .toasts
                 .iter()
                 .map(|t| {
-                    let accent = match t.kind {
+                    let visibility = t.animation.visibility();
+                    let accent_base = match t.kind {
                         ToastKind::Info => c.primary,
                         ToastKind::Success => c.good,
                         ToastKind::Warn => c.warn,
                         ToastKind::Error => c.bad,
                     };
+                    let accent = Color { a: accent_base.a * visibility, ..accent_base };
+                    let text_color = Color { a: c.text.a * visibility, ..c.text };
+                    let muted_color = Color { a: c.muted.a * visibility, ..c.muted };
+                    let link_color = Color { a: c.link.a * visibility, ..c.link };
+                    let card_color = Color { a: c.card.a * visibility, ..c.card };
                     let id = t.id;
 
                     let dismiss_btn = button(
-                        text("\u{2715}").size(12).color(c.muted), // \u{2715}
+                        text("\u{2715}").size(12).color(muted_color), // \u{2715}
                     )
                     .on_press(Message::DismissToast(id))
                     .padding([2, 6])
                     .style(move |_theme, _status| button::Style {
                         background: None,
-                        text_color: c.muted,
+                        text_color: muted_color,
                         border: iced::Border::default(),
                         shadow: iced::Shadow::default(),
                         snap: true,
                     });
 
                     let msg_element: Element<Message> = if let Some(ref action) = t.on_click {
-                        button(text(t.message.clone()).size(13).color(c.text))
+                        button(text(t.message.clone()).size(13).color(text_color))
                             .on_press(action.clone())
                             .padding(0)
                             .style(move |_theme, status| {
                                 let underline = matches!(status, button::Status::Hovered);
                                 button::Style {
                                     background: None,
-                                    text_color: if underline { c.link } else { c.text },
+                                    text_color: if underline { link_color } else { text_color },
                                     border: iced::Border::default(),
                                     shadow: iced::Shadow::default(),
                                     snap: true,
@@ -1541,7 +1562,7 @@ impl App {
                             })
                             .into()
                     } else {
-                        text(t.message.clone()).size(13).color(c.text).into()
+                        text(t.message.clone()).size(13).color(text_color).into()
                     };
 
                     let toast_row =
@@ -1550,23 +1571,35 @@ impl App {
                             .align_y(iced::Alignment::Center);
 
                     let accent_color = accent;
-                    container(toast_row)
+                    let toast_card = container(toast_row)
                         .padding([8, 12])
                         .width(Length::Fill)
                         .style(move |_theme| container::Style {
-                            background: Some(iced::Background::Color(c.card)),
+                            background: Some(iced::Background::Color(card_color)),
                             border: iced::Border {
                                 radius: 4.0.into(),
                                 width: 1.0,
                                 color: accent_color,
                             },
                             shadow: iced::Shadow {
-                                color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+                                color: iced::Color::from_rgba(
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.35 * visibility,
+                                ),
                                 offset: iced::Vector::new(0.0, 4.0),
                                 blur_radius: 12.0,
                             },
                             text_color: None,
                             snap: true,
+                        });
+
+                    let dismissible = mouse_area(toast_card)
+                        .on_right_press(Message::DismissToast(id));
+                    float(dismissible)
+                        .translate(move |_bounds, _viewport| {
+                            iced::Vector::new(0.0, (1.0 - visibility) * 14.0)
                         })
                         .into()
                 })
@@ -4409,6 +4442,7 @@ impl App {
                 url,
                 options,
                 suggested,
+                reinstall_repo_id,
             } => {
                 let c = colors;
                 let domain = url
@@ -4421,14 +4455,14 @@ impl App {
 
                 let mut rows: Vec<Element<Message>> = vec![
                     row![
-                        text("Primary Addon Selection").size(15).color(colors.title),
+                        text("Select Main TOC").size(15).color(colors.title),
                         Space::new().width(Length::Fill),
                         close_button(c),
                     ]
                     .align_y(iced::Alignment::Center)
                     .into(),
                     text(format!(
-                        "\"{}\" contains multiple .toc files at the root. Which one should define the folder name?",
+                        "\"{}\" contains multiple .toc files at the root. Which TOC should define the addon folder name?",
                         domain
                     ))
                     .size(12)
@@ -4446,7 +4480,7 @@ impl App {
 
                     let mut row_items = vec![
                         text("\u{1f4c1}").size(14).color(colors.muted).into(),
-                        text(name).size(13).color(colors.text).into(),
+                        text(format!("{name}.toc")).size(13).color(colors.text).into(),
                     ];
 
                     if is_suggested {
@@ -4482,36 +4516,38 @@ impl App {
                         .into(),
                 );
 
-                rows.push(
-                    row![
-                        Space::new().width(Length::Fill),
-                        button(text("Install as Collection instead").size(11))
-                            .on_press(Message::SetAddRepoCollectionMode(true))
-                            .padding([6, 12])
-                            .style(move |_t, status| {
-                                let c = colors.muted;
-                                let is_hovered = matches!(status, button::Status::Hovered);
-                                let alpha_text = if is_hovered { 0.8 } else { 0.5 };
-                                let alpha_border = if is_hovered { 0.4 } else { 0.2 };
+                if reinstall_repo_id.is_none() {
+                    rows.push(
+                        row![
+                            Space::new().width(Length::Fill),
+                            button(text("Install as Collection instead").size(11))
+                                .on_press(Message::SetAddRepoCollectionMode(true))
+                                .padding([6, 12])
+                                .style(move |_t, status| {
+                                    let c = colors.muted;
+                                    let is_hovered = matches!(status, button::Status::Hovered);
+                                    let alpha_text = if is_hovered { 0.8 } else { 0.5 };
+                                    let alpha_border = if is_hovered { 0.4 } else { 0.2 };
 
-                                button::Style {
-                                    background: None,
-                                    text_color: Color { a: alpha_text, ..c },
-                                    border: iced::Border {
-                                        color: Color {
-                                            a: alpha_border,
-                                            ..c
+                                    button::Style {
+                                        background: None,
+                                        text_color: Color { a: alpha_text, ..c },
+                                        border: iced::Border {
+                                            color: Color {
+                                                a: alpha_border,
+                                                ..c
+                                            },
+                                            width: 1.0,
+                                            radius: 4.0.into(),
                                         },
-                                        width: 1.0,
-                                        radius: 4.0.into(),
-                                    },
-                                    shadow: iced::Shadow::default(),
-                                    snap: true,
-                                }
-                            }),
-                    ]
-                    .into(),
-                );
+                                        shadow: iced::Shadow::default(),
+                                        snap: true,
+                                    }
+                                }),
+                        ]
+                        .into(),
+                    );
+                }
 
                 column(rows).spacing(10).width(Length::Fixed(440.0)).into()
             }
