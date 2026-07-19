@@ -185,6 +185,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 ref mut name,
                 ref mut wow_dir,
                 ref mut launch_method,
+                ref mut show_mods_tab,
+                ref mut show_addons_tab,
+                ref mut show_patches_tab,
+                ref mut show_tweaks_tab,
                 ref mut clear_wdb,
                 ref mut auto_login_enabled,
                 ref mut lutris_target,
@@ -199,6 +203,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     InstanceField::Name(v) => *name = v,
                     InstanceField::WowDir(v) => *wow_dir = v,
                     InstanceField::LaunchMethod(v) => *launch_method = v,
+                    InstanceField::ShowModsTab(v) => *show_mods_tab = v,
+                    InstanceField::ShowAddonsTab(v) => *show_addons_tab = v,
+                    InstanceField::ShowPatchesTab(v) => *show_patches_tab = v,
+                    InstanceField::ShowTweaksTab(v) => *show_tweaks_tab = v,
                     InstanceField::ClearWdb(v) => *clear_wdb = v,
                     InstanceField::AutoLoginEnabled(v) => *auto_login_enabled = v,
                     InstanceField::LutrisTarget(v) => *lutris_target = v,
@@ -217,6 +225,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 name,
                 wow_dir,
                 launch_method,
+                show_mods_tab,
+                show_addons_tab,
+                show_patches_tab,
+                show_tweaks_tab,
                 clear_wdb,
                 auto_login_enabled,
                 lutris_target,
@@ -251,6 +263,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     wow_dir: dir.clone(),
                     auto_launch_exe,
                     launch_method,
+                    show_mods_tab,
+                    show_addons_tab,
+                    show_patches_tab,
+                    show_tweaks_tab,
                     clear_wdb,
                     auto_login_enabled,
                     lutris_target,
@@ -296,6 +312,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
 
                 if app.active_profile_id == profile_id {
                     app.wow_dir = dir.clone();
+                    if !app.profile_tab_enabled(app.active_tab) {
+                        app.active_tab = crate::Tab::Home;
+                        app.filter = crate::Filter::All;
+                        app.project_search.clear();
+                    }
                 }
                 crate::diagnostics::register_private_value(&profile_id, "<PROFILE_ID>");
                 crate::diagnostics::register_private_value(&profile_name, "<PROFILE_NAME>");
@@ -314,10 +335,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         return Some(Task::perform(
                             service::initialize_profile_database(db_path, dir.clone()),
                             move |result| {
-                                Message::InitializeProfileDbResult(
-                                    init_profile_id.clone(),
-                                    result,
-                                )
+                                Message::InitializeProfileDbResult(init_profile_id.clone(), result)
                             },
                         ));
                     }
@@ -341,6 +359,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     );
                     app.active_profile_id = pid.clone();
                     app.wow_dir = p.wow_dir.clone();
+                    if !app.profile_tab_enabled(app.active_tab) {
+                        app.active_tab = crate::Tab::Home;
+                        app.filter = crate::Filter::All;
+                        app.project_search.clear();
+                    }
                     app.db_path = settings::resolve_profile_db_path(&pid).ok();
                     app.repos.clear();
                     if let Some((plans, last_checked)) = app.cached_plans.get(&pid).cloned() {
@@ -369,6 +392,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             .contains(&app.active_profile_id)
                     {
                         app.dialog = Some(Dialog::ModsWarning {
+                            do_not_show_again: false,
+                        });
+                    }
+                    if app.active_tab == crate::Tab::Patches
+                        && !app
+                            .patches_warning_dismissed_profile_ids
+                            .contains(&app.active_profile_id)
+                    {
+                        app.dialog = Some(Dialog::PatchesWarning {
                             do_not_show_again: false,
                         });
                     }
@@ -443,6 +475,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             };
             app.profiles.retain(|p| p.id != pid);
             app.mods_warning_dismissed_profile_ids.remove(&pid);
+            app.patches_warning_dismissed_profile_ids.remove(&pid);
             app.ignored_update_ids_by_profile.remove(&pid);
             if let Some(e) = err {
                 app.log(LogLevel::Error, &e);
@@ -468,7 +501,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 ),
                 Err(err) => app.log(
                     LogLevel::Error,
-                    &format!("Failed to initialize profile database for {}: {}", profile_id, err),
+                    &format!(
+                        "Failed to initialize profile database for {}: {}",
+                        profile_id, err
+                    ),
                 ),
             }
             Some(Task::none())
@@ -513,6 +549,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 .unwrap_or_default();
             app.mods_warning_dismissed_profile_ids =
                 s.mods_warning_dismissed_profile_ids.into_iter().collect();
+            app.patches_warning_dismissed_profile_ids = s
+                .patches_warning_dismissed_profile_ids
+                .into_iter()
+                .collect();
             app.update_channel = s.update_channel;
             app.ui_scale_mode = s.ui_scale_mode;
             app.ui_scale = resolve_ui_scale(s.ui_scale_mode);
@@ -523,15 +563,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             };
             for profile in &app.profiles {
                 crate::diagnostics::register_private_value(&profile.id, "<PROFILE_ID>");
-                crate::diagnostics::register_private_value(
-                    &profile.name,
-                    "<PROFILE_NAME>",
-                );
+                crate::diagnostics::register_private_value(&profile.name, "<PROFILE_NAME>");
                 if !profile.wow_dir.trim().is_empty() {
-                    crate::diagnostics::register_private_path(
-                        &profile.wow_dir,
-                        "<GAME_PATH>",
-                    );
+                    crate::diagnostics::register_private_path(&profile.wow_dir, "<GAME_PATH>");
                 }
                 if !profile.working_dir.trim().is_empty() {
                     crate::diagnostics::register_private_path(

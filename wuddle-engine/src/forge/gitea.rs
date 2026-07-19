@@ -66,6 +66,7 @@ pub async fn list_releases(
             all.push(crate::model::LatestRelease {
                 tag: rel.tag_name.clone(),
                 name: rel.name.clone(),
+                prerelease: false,
                 assets,
                 published_at: rel
                     .published_at
@@ -131,8 +132,12 @@ pub async fn latest_release(
         Some(LatestRelease {
             tag: rel.tag_name,
             name: rel.name,
+            prerelease: false,
             assets,
-            published_at: rel.published_at.as_deref().and_then(super::parse_rfc3339_unix),
+            published_at: rel
+                .published_at
+                .as_deref()
+                .and_then(super::parse_rfc3339_unix),
         }),
         false,
     ))

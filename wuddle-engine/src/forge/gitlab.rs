@@ -30,10 +30,7 @@ struct GitLabLink {
 }
 
 /// Fetch all releases for a GitLab project (paginated, newest first).
-pub async fn list_releases(
-    client: &Client,
-    repo: &DetectedRepo,
-) -> Result<Vec<LatestRelease>> {
+pub async fn list_releases(client: &Client, repo: &DetectedRepo) -> Result<Vec<LatestRelease>> {
     let encoded = urlencoding::encode(&repo.project_path);
     let mut page = 1u32;
     let mut all = Vec::new();
@@ -79,6 +76,7 @@ pub async fn list_releases(
             all.push(LatestRelease {
                 tag: rel.tag_name.clone(),
                 name: rel.name.clone(),
+                prerelease: false,
                 assets,
                 published_at: rel
                     .released_at
@@ -148,8 +146,12 @@ pub async fn latest_release(
         Some(LatestRelease {
             tag: rel.tag_name,
             name: rel.name,
+            prerelease: false,
             assets,
-            published_at: rel.released_at.as_deref().and_then(super::parse_rfc3339_unix),
+            published_at: rel
+                .released_at
+                .as_deref()
+                .and_then(super::parse_rfc3339_unix),
         }),
         false,
     ))

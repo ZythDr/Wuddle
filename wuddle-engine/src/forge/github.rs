@@ -8,6 +8,8 @@ use crate::model::{LatestRelease, ReleaseAsset};
 struct GhRelease {
     tag_name: String,
     name: Option<String>,
+    #[serde(default)]
+    prerelease: bool,
     published_at: Option<String>,
     assets: Vec<GhAsset>,
 }
@@ -131,8 +133,12 @@ impl GitHub {
             Some(LatestRelease {
                 tag: gh.tag_name,
                 name: gh.name,
+                prerelease: gh.prerelease,
                 assets,
-                published_at: gh.published_at.as_deref().and_then(super::parse_rfc3339_unix),
+                published_at: gh
+                    .published_at
+                    .as_deref()
+                    .and_then(super::parse_rfc3339_unix),
             }),
             false,
         ))
@@ -150,10 +156,7 @@ pub async fn latest_release(
 }
 
 /// Fetch all releases for a GitHub repo (paginated, newest first).
-pub async fn list_releases(
-    client: &Client,
-    repo: &DetectedRepo,
-) -> Result<Vec<LatestRelease>> {
+pub async fn list_releases(client: &Client, repo: &DetectedRepo) -> Result<Vec<LatestRelease>> {
     let mut page = 1u32;
     let mut all = Vec::new();
     loop {
@@ -168,7 +171,10 @@ pub async fn list_releases(
         if let Some(token) = crate::github_token() {
             req = req.bearer_auth(token);
         }
-        let resp = req.send().await.context("github list_releases request failed")?;
+        let resp = req
+            .send()
+            .await
+            .context("github list_releases request failed")?;
         if resp.status() == StatusCode::NOT_FOUND {
             break;
         }
@@ -195,6 +201,7 @@ pub async fn list_releases(
             all.push(LatestRelease {
                 tag: gh.tag_name.clone(),
                 name: gh.name.clone(),
+                prerelease: gh.prerelease,
                 assets,
                 published_at: gh
                     .published_at
@@ -261,9 +268,13 @@ pub async fn list_files_recursive(
     }
 
     let tree: GhTreeResponse = resp.json().await.context("invalid github tree json")?;
-    
-    Ok(tree.tree.into_iter().map(|e| RepoFile {
-        path: e.path,
-        is_dir: e.kind == "tree",
-    }).collect())
+
+    Ok(tree
+        .tree
+        .into_iter()
+        .map(|e| RepoFile {
+            path: e.path,
+            is_dir: e.kind == "tree",
+        })
+        .collect())
 }

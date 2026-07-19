@@ -31,14 +31,21 @@ pub fn generate_conf(cfg: &DxvkConfig) -> String {
     }
 
     s.push('\n');
-    let latency: u32 = cfg.max_frame_latency.trim().parse().unwrap_or(1).clamp(1, 16);
+    let latency: u32 = cfg
+        .max_frame_latency
+        .trim()
+        .parse()
+        .unwrap_or(1)
+        .clamp(1, 16);
     s.push_str("# Frames the GPU may buffer ahead. Fewer frames = lower input latency (1 is recommended).\n");
     s.push_str(&format!("d3d9.maxFrameLatency = {}\n", latency));
 
     match cfg.latency_sleep {
         TriState::Auto => {} // DXVK default — omit
         TriState::True => {
-            s.push_str("\n# Enable NVAPI/Reflex latency sleep for reduced input latency on NVIDIA GPUs.\n");
+            s.push_str(
+                "\n# Enable NVAPI/Reflex latency sleep for reduced input latency on NVIDIA GPUs.\n",
+            );
             s.push_str("dxvk.latencySleep = True\n");
         }
         TriState::False => {
@@ -53,8 +60,12 @@ pub fn generate_conf(cfg: &DxvkConfig) -> String {
     s.push_str("############################\n\n");
 
     if cfg.enable_async {
-        s.push_str("# Enable asynchronous shader compilation — the primary fix for D3D9 stutter in WoW.\n");
-        s.push_str("# Requires the gplasync/async fork of DXVK. Has no effect on vanilla DXVK builds.\n");
+        s.push_str(
+            "# Enable asynchronous shader compilation — the primary fix for D3D9 stutter in WoW.\n",
+        );
+        s.push_str(
+            "# Requires the gplasync/async fork of DXVK. Has no effect on vanilla DXVK builds.\n",
+        );
         s.push_str("dxvk.enableAsync = true\n");
     } else {
         s.push_str("# dxvk.enableAsync = true  # Async disabled; enable for gplasync builds.\n");
@@ -75,7 +86,9 @@ pub fn generate_conf(cfg: &DxvkConfig) -> String {
     match cfg.enable_gpl {
         TriState::Auto => {} // DXVK default — omit
         TriState::True => {
-            s.push_str("# Use the Graphics Pipeline Library extension to reduce shader compile stutter.\n");
+            s.push_str(
+                "# Use the Graphics Pipeline Library extension to reduce shader compile stutter.\n",
+            );
             s.push_str("# Warning: True may cause crashes or rendering issues on some clients or server setups. Auto is recommended.\n");
             s.push_str("dxvk.enableGraphicsPipelineLibrary = True\n");
             s.push('\n');
@@ -126,7 +139,9 @@ pub fn generate_conf(cfg: &DxvkConfig) -> String {
             s.push('\n');
         }
         PresentInterval::Vsync => {
-            s.push_str("# Force VSync on regardless of in-game setting (adds ~1 frame of latency).\n");
+            s.push_str(
+                "# Force VSync on regardless of in-game setting (adds ~1 frame of latency).\n",
+            );
             s.push_str("d3d9.presentInterval = 1\n");
             s.push('\n');
         }
@@ -164,7 +179,9 @@ pub fn generate_conf(cfg: &DxvkConfig) -> String {
             s.push('\n');
         }
         AnisotropyLevel::X2 => {
-            s.push_str("# Force 2x anisotropic filtering — sharpens textures viewed at shallow angles.\n");
+            s.push_str(
+                "# Force 2x anisotropic filtering — sharpens textures viewed at shallow angles.\n",
+            );
             s.push_str("d3d9.samplerAnisotropy = 2\n");
             s.push('\n');
         }
@@ -174,7 +191,9 @@ pub fn generate_conf(cfg: &DxvkConfig) -> String {
             s.push('\n');
         }
         AnisotropyLevel::X8 => {
-            s.push_str("# Force 8x anisotropic filtering — high quality, minimal performance impact.\n");
+            s.push_str(
+                "# Force 8x anisotropic filtering — high quality, minimal performance impact.\n",
+            );
             s.push_str("d3d9.samplerAnisotropy = 8\n");
             s.push('\n');
         }
@@ -337,7 +356,10 @@ fn conf_highlight_format(
     h: &Option<iced::Color>,
     _theme: &iced::Theme,
 ) -> iced::advanced::text::highlighter::Format<Font> {
-    iced::advanced::text::highlighter::Format { color: *h, font: None }
+    iced::advanced::text::highlighter::Format {
+        color: *h,
+        font: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -589,11 +611,9 @@ pub fn view<'a>(
             })
     } else {
         let icon_color = c2.text;
-        let file_icon = iced::widget::svg(
-            iced::widget::svg::Handle::from_memory(
-                include_bytes!("../../assets/icons/file.svg").to_vec(),
-            ),
-        )
+        let file_icon = iced::widget::svg(iced::widget::svg::Handle::from_memory(
+            include_bytes!("../../assets/icons/file.svg").to_vec(),
+        ))
         .width(14)
         .height(14)
         .style(move |_t, _s| iced::widget::svg::Style {
@@ -645,31 +665,46 @@ pub fn view<'a>(
         }
     };
 
-    let preview_tip = if show_preview { "Go back to DXVK settings" } else { "Preview the generated dxvk.conf file" };
+    let preview_tip = if show_preview {
+        "Go back to DXVK settings"
+    } else {
+        "Preview the generated dxvk.conf file"
+    };
     let preview_toggle_btn = tooltip(
         preview_toggle_btn,
         container(text(String::from(preview_tip)).size(13).color(c.text))
             .padding([3, 8])
             .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Top,
-    ).gap(4.0);
+    )
+    .gap(4.0);
 
     let copy_btn = tooltip(
         copy_btn,
-        container(text("Copy the DXVK config to clipboard").size(13).color(c.text))
-            .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(c)),
+        container(
+            text("Copy the DXVK config to clipboard")
+                .size(13)
+                .color(c.text),
+        )
+        .padding([3, 8])
+        .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Top,
-    ).gap(4.0);
+    )
+    .gap(4.0);
 
-    let save_tip = if has_wow_dir { "Write dxvk.conf to your WoW directory" } else { "Set a WoW directory in Options first" };
+    let save_tip = if has_wow_dir {
+        "Write dxvk.conf to your WoW directory"
+    } else {
+        "Set a WoW directory in Options first"
+    };
     let save_btn = tooltip(
         save_btn,
         container(text(String::from(save_tip)).size(13).color(c.text))
             .padding([3, 8])
             .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Top,
-    ).gap(4.0);
+    )
+    .gap(4.0);
 
     let footer = row![
         preview_toggle_btn,

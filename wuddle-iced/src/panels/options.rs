@@ -31,6 +31,10 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                         name: String::new(),
                         wow_dir: String::new(),
                         launch_method: String::from("auto"),
+                        show_mods_tab: true,
+                        show_addons_tab: true,
+                        show_patches_tab: true,
+                        show_tweaks_tab: true,
                         clear_wdb: false,
                         auto_login_enabled: false,
                         lutris_target: String::new(),
@@ -76,6 +80,10 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 name: p.name.clone(),
                 wow_dir: settings::wow_path_display(&p.wow_dir, p.auto_launch_exe.as_deref()),
                 launch_method: p.launch_method.clone(),
+                show_mods_tab: p.show_mods_tab,
+                show_addons_tab: p.show_addons_tab,
+                show_patches_tab: p.show_patches_tab,
+                show_tweaks_tab: p.show_tweaks_tab,
                 clear_wdb: p.clear_wdb,
                 auto_login_enabled: p.auto_login_enabled,
                 lutris_target: p.lutris_target.clone(),
@@ -172,21 +180,23 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
             let c2 = c;
             let is_active = t == app.wuddle_theme;
             let (top_hex, bot_hex): (u32, u32) = match t {
-                WuddleTheme::Cata     => (0xd18a38, 0x9d581f),
+                WuddleTheme::Cata => (0xd18a38, 0x9d581f),
                 WuddleTheme::Obsidian => (0x4f8bc4, 0x223a56),
-                WuddleTheme::Emerald  => (0x4aa475, 0x1f4d39),
-                WuddleTheme::Ashen    => (0xcb6a62, 0x5d2d2f),
-                WuddleTheme::WowUi    => (0xd63d2f, 0x7a1717),
+                WuddleTheme::Emerald => (0x4aa475, 0x1f4d39),
+                WuddleTheme::Ashen => (0xcb6a62, 0x5d2d2f),
+                WuddleTheme::WowUi => (0xd63d2f, 0x7a1717),
             };
             let swatch = container(Space::new().width(0).height(0))
                 .width(34)
                 .height(34)
                 .style(move |_| {
-                    let fh = |h: u32| iced::Color::from_rgb(
-                        ((h >> 16) & 0xFF) as f32 / 255.0,
-                        ((h >> 8)  & 0xFF) as f32 / 255.0,
-                        (h         & 0xFF) as f32 / 255.0,
-                    );
+                    let fh = |h: u32| {
+                        iced::Color::from_rgb(
+                            ((h >> 16) & 0xFF) as f32 / 255.0,
+                            ((h >> 8) & 0xFF) as f32 / 255.0,
+                            (h & 0xFF) as f32 / 255.0,
+                        )
+                    };
                     let grad = iced::Gradient::Linear(
                         iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI))
                             .add_stop(0.0, fh(top_hex))
@@ -404,12 +414,9 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     scrollable(
         column![
             instances_section,
-            row![
-                behavior_section,
-                display_section,
-            ]
-            .spacing(8)
-            .height(280),
+            row![behavior_section, display_section,]
+                .spacing(8)
+                .height(280),
             github_section,
         ]
         .spacing(8)
@@ -422,7 +429,12 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
 }
 
 /// Wrap any element in a tooltip with consistent styling.
-fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: ThemeColors) -> Element<'a, Message> {
+fn tip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    tip_text: &str,
+    pos: tooltip::Position,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
     let c = colors;
     let tip_str = String::from(tip_text);
     tooltip(

@@ -7,8 +7,8 @@
 //! - `about` — self-update, changelog, release channel
 //! - `tweaks` - all tweak messages
 
-pub mod misc;
-pub mod tweaks;
 pub mod about;
-pub mod settings;
+pub mod misc;
 pub mod repos;
+pub mod settings;
+pub mod tweaks;

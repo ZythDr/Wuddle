@@ -185,7 +185,10 @@ mod primary_toc_tests {
         };
 
         let options = root_probe_addon_names(&probe);
-        assert_eq!(options, vec!["Questie".to_string(), "Questie-335".to_string()]);
+        assert_eq!(
+            options,
+            vec!["Questie".to_string(), "Questie-335".to_string()]
+        );
         assert_eq!(
             suggested_addon_for_expansion(&options, Some("wotlk")),
             Some("Questie-335".to_string())
@@ -206,13 +209,14 @@ fn build_collection_conflict_owner_groups(
         }
 
         for owner in &conflict.owners {
-            let group = groups.entry(owner.repo_id).or_insert_with(|| {
-                CollectionConflictOwnerGroup {
-                    repo_id: owner.repo_id,
-                    repo_label: format!("{}/{}", owner.owner, owner.name),
-                    conflicting_addons: Vec::new(),
-                }
-            });
+            let group =
+                groups
+                    .entry(owner.repo_id)
+                    .or_insert_with(|| CollectionConflictOwnerGroup {
+                        repo_id: owner.repo_id,
+                        repo_label: format!("{}/{}", owner.owner, owner.name),
+                        conflicting_addons: Vec::new(),
+                    });
 
             if !group
                 .conflicting_addons
@@ -267,6 +271,8 @@ pub struct RepoRow {
     /// Empty for non-DLL repos. More than one entry means this is a multi-DLL mod.
     pub installed_dlls: Vec<(String, bool, Option<String>)>,
     pub installed_addons: Vec<String>,
+    pub installed_mpqs: Vec<wuddle_engine::mpq::MpqInstalledFile>,
+    pub dependencies: Vec<(i64, String)>,
     pub selected_addons: Vec<String>,
     pub is_collection: bool,
     pub merge_installs: bool,
@@ -312,6 +318,8 @@ impl From<Repo> for RepoRow {
                 .map(|branch| branch.to_string()),
             installed_dlls: Vec::new(),
             installed_addons: Vec::new(),
+            installed_mpqs: Vec::new(),
+            dependencies: Vec::new(),
             selected_addons: parse_selected_addons(r.selected_addons_json.as_deref()),
             is_collection: r
                 .selected_addons_json
@@ -354,6 +362,7 @@ pub struct RepoLoadLog {
 #[derive(Debug, Clone)]
 pub struct RepoLoadResult {
     pub rows: Vec<RepoRow>,
+    pub untracked_mpqs: Vec<wuddle_engine::mpq::MpqProtectionEntry>,
     pub logs: Vec<RepoLoadLog>,
 }
 
@@ -365,6 +374,7 @@ pub struct ClientVersionInfo {
     pub file_version: Option<String>,
     pub product_version: Option<String>,
     pub supports_legacy_1121_tweaks: bool,
+    pub is_wotlk_335a_12340: bool,
     pub quick_add_family: ClientFamily,
 }
 
@@ -448,6 +458,47 @@ mod client_family_tests {
 pub enum CheckUpdatesStreamEvent {
     Progress(wuddle_engine::UpdateCheckProgress),
     Finished(Result<Vec<PlanRow>, String>),
+}
+
+#[derive(Debug, Clone)]
+pub struct WdmReleaseAsset {
+    pub name: String,
+    pub download_url: String,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WdmReleaseSet {
+    pub version: String,
+    pub assets: Vec<WdmReleaseAsset>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WdmCatalog {
+    pub locale: wuddle_engine::mpq::LocaleDetection,
+    pub stable: WdmReleaseSet,
+    pub caverns: Option<WdmReleaseSet>,
+    pub addon: WdmReleaseSet,
+}
+
+pub const WDM_PATCH_URL: &str = "https://github.com/Trimitor/WDM-patch";
+
+pub fn is_wdm_repo(repo: &RepoRow) -> bool {
+    repo.mode == "mpq"
+        && repo
+            .url
+            .trim_end_matches('/')
+            .eq_ignore_ascii_case(WDM_PATCH_URL)
+}
+
+impl WdmReleaseSet {
+    pub fn locale_asset(&self, locale: &str, suffix: char) -> Option<&WdmReleaseAsset> {
+        let expected = format!("patch-{locale}-{suffix}.MPQ");
+        self.assets
+            .iter()
+            .find(|asset| asset.name.eq_ignore_ascii_case(&expected))
+    }
 }
 
 static UPDATE_CHECK_PROGRESS: OnceLock<Mutex<Option<wuddle_engine::UpdateCheckProgress>>> =
@@ -596,6 +647,7 @@ pub async fn detect_tweak_client(
         let supports_legacy_1121_tweaks = version_tuple
             .map(|(major, minor, patch, _)| (major, minor, patch) == (1, 12, 1))
             .unwrap_or(false);
+        let is_wotlk_335a_12340 = version_tuple == Some((3, 3, 5, 12340));
 
         Ok(ClientVersionInfo {
             executable_path: exe_path.to_string_lossy().to_string(),
@@ -607,6 +659,7 @@ pub async fn detect_tweak_client(
             file_version,
             product_version,
             supports_legacy_1121_tweaks,
+            is_wotlk_335a_12340,
             quick_add_family: classify_legacy_client(version_tuple),
         })
     })
@@ -671,6 +724,518 @@ pub async fn initialize_profile_database(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+pub async fn inspect_local_mpq(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    source: PathBuf,
+) -> Result<wuddle_engine::mpq::MpqInspection, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("inspect_local_mpq");
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.inspect_local_mpq_source(Path::new(&wow_dir), &source)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn install_local_mpq(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    source: PathBuf,
+    selections: Vec<wuddle_engine::mpq::MpqInstallSelection>,
+    set_xattr_comment: bool,
+) -> Result<i64, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("install_local_mpq");
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.install_local_mpq_package(Path::new(&wow_dir), &source, &selections, set_xattr_comment)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn preview_local_mpq_targets(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    source: PathBuf,
+    selections: Vec<wuddle_engine::mpq::MpqInstallSelection>,
+) -> Result<Vec<wuddle_engine::mpq::MpqTargetPreview>, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.preview_local_mpq_targets(Path::new(&wow_dir), &source, &selections)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn load_mpq_protection(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+) -> Result<Vec<wuddle_engine::mpq::MpqProtectionEntry>, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.list_mpq_protection(Path::new(&wow_dir))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn rescan_mpqs(db_path: Option<PathBuf>, wow_dir: String) -> Result<usize, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.list_mpq_protection(Path::new(&wow_dir))
+            .map(|entries| entries.len())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn change_mpq_protection(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    protected: bool,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_mpq_protected(Path::new(&wow_dir), &path, protected)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn change_mpq_classification(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    core: bool,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_mpq_core_classification(Path::new(&wow_dir), &path, core)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn set_untracked_mpq_enabled(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    enabled: bool,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_untracked_mpq_enabled(Path::new(&wow_dir), &path, enabled)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn rename_untracked_mpq(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    display_name: String,
+    set_xattr_comment: bool,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.rename_untracked_mpq_display_name(
+            Path::new(&wow_dir),
+            &path,
+            &display_name,
+            set_xattr_comment,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn rename_untracked_mpq_file(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    file_name: String,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.rename_untracked_mpq_file(Path::new(&wow_dir), &path, &file_name)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn rename_mpq_component(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    repo_id: i64,
+    path: String,
+    display_name: String,
+    set_xattr_comment: bool,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.rename_mpq_display_name(
+            repo_id,
+            &path,
+            &display_name,
+            Path::new(&wow_dir),
+            set_xattr_comment,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn remove_mpq_component(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    repo_id: i64,
+    path: String,
+    force_modified: bool,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.remove_mpq_component(repo_id, &path, Path::new(&wow_dir), force_modified)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn set_mpq_enabled(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    repo_id: i64,
+    path: Option<String>,
+    enabled: bool,
+) -> Result<bool, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("set_mpq_enabled");
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_mpq_enabled(repo_id, path.as_deref(), enabled, Path::new(&wow_dir))
+            .map(|_| enabled)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn protect_modified_mpq(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    repo_id: i64,
+    path: String,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.protect_modified_mpq(repo_id, &path, Path::new(&wow_dir))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn wdm_release_set(release: &wuddle_engine::LatestRelease, suffix: char) -> Option<WdmReleaseSet> {
+    let assets = release
+        .assets
+        .iter()
+        .filter(|asset| {
+            let lower = asset.name.to_ascii_lowercase();
+            lower.starts_with("patch-")
+                && lower.ends_with(&format!("-{suffix}.mpq").to_ascii_lowercase())
+        })
+        .map(|asset| WdmReleaseAsset {
+            name: asset.name.clone(),
+            download_url: asset.download_url.clone(),
+            size: asset.size,
+            sha256: asset.sha256.clone(),
+        })
+        .collect::<Vec<_>>();
+    (!assets.is_empty()).then(|| WdmReleaseSet {
+        version: release.tag.clone(),
+        assets,
+    })
+}
+
+async fn resolve_wdm_stable(
+    eng: &Engine,
+) -> Result<(WdmReleaseSet, Vec<wuddle_engine::LatestRelease>), String> {
+    let patch_releases = eng
+        .list_releases(WDM_PATCH_URL)
+        .await
+        .map_err(|error| error.to_string())?;
+    let stable = patch_releases
+        .iter()
+        .filter(|release| !release.prerelease)
+        .find_map(|release| wdm_release_set(release, 'M'))
+        .ok_or_else(|| "WDM has no stable locale-specific M patch release.".to_string())?;
+    Ok((stable, patch_releases))
+}
+
+#[cfg(test)]
+mod wdm_recipe_tests {
+    use super::*;
+
+    fn asset(name: &str) -> wuddle_engine::ReleaseAsset {
+        wuddle_engine::ReleaseAsset {
+            id: None,
+            name: name.to_string(),
+            download_url: format!("https://example.invalid/{name}"),
+            size: None,
+            content_type: None,
+            sha256: None,
+        }
+    }
+
+    #[test]
+    fn selects_only_exact_locale_letter_assets() {
+        let release = wuddle_engine::LatestRelease {
+            tag: "current".to_string(),
+            name: None,
+            prerelease: false,
+            assets: vec![
+                asset("patch-enUS-M.MPQ"),
+                asset("patch-deDE-M.MPQ"),
+                asset("patch-enUS-N.MPQ"),
+                asset("notes.zip"),
+            ],
+            published_at: None,
+        };
+        let main = wdm_release_set(&release, 'M').unwrap();
+        assert_eq!(main.assets.len(), 2);
+        assert_eq!(
+            main.locale_asset("ENus", 'M')
+                .map(|asset| asset.name.as_str()),
+            Some("patch-enUS-M.MPQ")
+        );
+        assert!(main.locale_asset("frFR", 'M').is_none());
+    }
+
+    #[test]
+    fn update_checks_use_the_main_wdm_patch_version_even_when_disabled() {
+        let installs = [
+            ("Data/enUS/patch-enUS-N.MPQ", Some("caverns-preview")),
+            ("Data/enUS/patch-enUS-M.MPQ.disabled", Some("v1.4.0")),
+        ];
+        assert_eq!(
+            installed_wdm_main_version(installs).as_deref(),
+            Some("v1.4.0")
+        );
+    }
+}
+
+pub async fn resolve_wdm(db_path: Option<PathBuf>, wow_dir: String) -> Result<WdmCatalog, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("resolve_wdm");
+    let eng = open_engine(db_path.as_deref())?;
+    let locale = eng.detect_wow_locale(Path::new(&wow_dir));
+    let (stable, patch_releases) = resolve_wdm_stable(&eng).await?;
+    let caverns = patch_releases
+        .iter()
+        .filter(|release| release.prerelease)
+        .find_map(|release| wdm_release_set(release, 'N'));
+
+    let addon_releases = eng
+        .list_releases("https://github.com/Trimitor/WDM-addons")
+        .await
+        .map_err(|error| error.to_string())?;
+    let addon_release = addon_releases
+        .iter()
+        .find(|release| !release.prerelease)
+        .or_else(|| addon_releases.first())
+        .ok_or_else(|| "WDM-addons has no release.".to_string())?;
+    let addon_asset = addon_release
+        .assets
+        .iter()
+        .find(|asset| asset.name.eq_ignore_ascii_case("WDM.zip"))
+        .ok_or_else(|| "The latest WDM-addons release has no WDM.zip asset.".to_string())?;
+    let addon = WdmReleaseSet {
+        version: addon_release.tag.clone(),
+        assets: vec![WdmReleaseAsset {
+            name: addon_asset.name.clone(),
+            download_url: addon_asset.download_url.clone(),
+            size: addon_asset.size,
+            sha256: addon_asset.sha256.clone(),
+        }],
+    };
+    Ok(WdmCatalog {
+        locale,
+        stable,
+        caverns,
+        addon,
+    })
+}
+
+pub async fn install_wdm(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    catalog: WdmCatalog,
+    locale: String,
+    include_caverns: bool,
+    install_addon: bool,
+    options: InstallOptions,
+) -> Result<i64, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("install_wdm");
+    let eng = open_engine(db_path.as_deref())?;
+    let wow_path = Path::new(&wow_dir);
+    let locale = wuddle_engine::mpq::normalize_locale(&locale)
+        .ok_or_else(|| "Choose a supported WoW locale.".to_string())?;
+    let main = catalog
+        .stable
+        .locale_asset(&locale, 'M')
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "WDM {} has no patch-{locale}-M.MPQ asset.",
+                catalog.stable.version
+            )
+        })?;
+    let caverns = if include_caverns {
+        Some(
+            catalog
+                .caverns
+                .as_ref()
+                .and_then(|release| {
+                    release
+                        .locale_asset(&locale, 'N')
+                        .map(|asset| (release, asset))
+                })
+                .ok_or_else(|| format!("No Caverns & Mines patch is available for {locale}."))?,
+        )
+    } else {
+        None
+    };
+    if include_caverns && !install_addon {
+        return Err("The WDM addon is required by Caverns & Mines.".to_string());
+    }
+
+    let addon_url = "https://github.com/Trimitor/WDM-addons";
+    let existing_addon = eng
+        .db()
+        .list_repos()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|repo| {
+            repo.url
+                .trim_end_matches('/')
+                .eq_ignore_ascii_case(addon_url)
+        });
+    let mut newly_installed_addon = None;
+    if install_addon && existing_addon.is_none() {
+        let addon_id = eng
+            .add_repo(
+                addon_url,
+                InstallMode::Addon,
+                Some(r"(?i)^WDM\.zip$".to_string()),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        if let Err(error) = eng.reinstall_repo(addon_id, wow_path, None, options).await {
+            let _ = eng.remove_repo(addon_id, Some(wow_path), true);
+            return Err(format!(
+                "The WDM companion addon could not be installed: {error}"
+            ));
+        }
+        newly_installed_addon = Some(addon_id);
+    }
+
+    let destination = wuddle_engine::mpq::MpqDestination::Locale(locale.clone());
+    let mut assets = vec![wuddle_engine::mpq::MpqRemoteAsset {
+        asset_name: main.name.clone(),
+        download_url: main.download_url.clone(),
+        size: main.size,
+        sha256: main.sha256.clone(),
+        display_name: "WDM Dungeon Maps".to_string(),
+        destination: destination.clone(),
+        replace_unprotected: true,
+        version: Some(catalog.stable.version.clone()),
+    }];
+    if let Some((release, asset)) = caverns {
+        assets.push(wuddle_engine::mpq::MpqRemoteAsset {
+            asset_name: asset.name.clone(),
+            download_url: asset.download_url.clone(),
+            size: asset.size,
+            sha256: asset.sha256.clone(),
+            display_name: "WDM Caverns & Mines".to_string(),
+            destination,
+            replace_unprotected: true,
+            version: Some(release.version.clone()),
+        });
+    }
+    let package = wuddle_engine::mpq::MpqRemotePackage {
+        url: WDM_PATCH_URL.to_string(),
+        forge: "github".to_string(),
+        host: "github.com".to_string(),
+        owner: "Trimitor".to_string(),
+        name: "WDM".to_string(),
+    };
+    let mpq_repo_id = match eng
+        .install_remote_mpq_package(wow_path, package, &assets, options.set_xattr_comment)
+        .await
+    {
+        Ok(repo_id) => repo_id,
+        Err(error) => {
+            if let Some(addon_id) = newly_installed_addon {
+                let _ = eng.remove_repo(addon_id, Some(wow_path), true);
+            }
+            return Err(error.to_string());
+        }
+    };
+
+    if !include_caverns {
+        let stale = eng
+            .list_installed_mpqs(mpq_repo_id, wow_path)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|entry| entry.path.to_ascii_lowercase().ends_with("-n.mpq"));
+        if let Some(stale) = stale {
+            eng.remove_mpq_component(mpq_repo_id, &stale.path, wow_path, false)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    if let Some(addon_id) = newly_installed_addon {
+        eng.record_repo_dependency(mpq_repo_id, addon_id, "wdm-companion")
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(mpq_repo_id)
+}
+
+pub async fn remove_wdm(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    mpq_repo_id: i64,
+    addon_repo_id: i64,
+    remove_addon: bool,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        let wow = Path::new(&wow_dir);
+        eng.remove_mpq_package(mpq_repo_id, wow, false)
+            .map_err(|error| error.to_string())?;
+        let addon_exists = { eng.db().get_repo(addon_repo_id).is_ok() };
+        if remove_addon && addon_exists {
+            eng.remove_repo(addon_repo_id, Some(wow), true)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 // ---------------------------------------------------------------------------
@@ -811,6 +1376,7 @@ pub async fn list_repos(
             clear_rescan_progress();
             return Ok(RepoLoadResult {
                 rows: Vec::new(),
+                untracked_mpqs: Vec::new(),
                 logs: Vec::new(),
             });
         }
@@ -1030,9 +1596,23 @@ pub async fn list_repos(
                 .sort_by_key(|name| name.to_ascii_lowercase());
             row.installed_addons
                 .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+            if row.mode == "mpq" {
+                row.installed_mpqs = eng
+                    .list_installed_mpqs(row.id, wow_path)
+                    .unwrap_or_default();
+                row.dependencies = eng.repo_dependencies(row.id).unwrap_or_default();
+            }
             rows.push(row);
         }
-        Ok::<RepoLoadResult, String>(RepoLoadResult { rows, logs })
+        set_rescan_progress("Repository load", "Scanning custom MPQs...");
+        let untracked_mpqs = eng
+            .list_mpq_protection(wow_path)
+            .map_err(|error| error.to_string())?;
+        Ok::<RepoLoadResult, String>(RepoLoadResult {
+            rows,
+            untracked_mpqs,
+            logs,
+        })
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -1041,6 +1621,7 @@ pub async fn list_repos(
     set_rescan_progress("Repository load", "Finished loading repositories.");
     Ok(RepoLoadResult {
         rows: background_logs.rows,
+        untracked_mpqs: background_logs.untracked_mpqs,
         logs,
     })
 }
@@ -1054,6 +1635,68 @@ pub async fn check_updates(
     check_updates_skip(db_path, wow_dir, mode, std::collections::HashSet::new()).await
 }
 
+async fn build_wdm_update_plan(eng: &Engine, repo: Repo) -> PlanRow {
+    let installs = eng.db().list_installs(repo.id).unwrap_or_default();
+    let current = installed_wdm_main_version(
+        installs
+            .iter()
+            .filter(|entry| entry.kind == "mpq")
+            .map(|entry| (entry.path.as_str(), entry.version.as_deref())),
+    );
+    match resolve_wdm_stable(eng).await {
+        Ok((stable, _)) => {
+            let has_update = current.as_deref() != Some(stable.version.as_str());
+            PlanRow {
+                repo_id: repo.id,
+                owner: repo.owner,
+                name: repo.name,
+                current,
+                latest: stable.version,
+                asset_name: "Locale-specific WDM patch".to_string(),
+                has_update,
+                repair_needed: false,
+                externally_modified: false,
+                not_modified: !has_update,
+                mode: "mpq".to_string(),
+                host: repo.host,
+                error: None,
+                previous_dll_count: 0,
+                new_dll_count: 0,
+            }
+        }
+        Err(error) => PlanRow {
+            repo_id: repo.id,
+            owner: repo.owner,
+            name: repo.name,
+            current,
+            latest: String::new(),
+            asset_name: String::new(),
+            has_update: false,
+            repair_needed: false,
+            externally_modified: false,
+            not_modified: false,
+            mode: "mpq".to_string(),
+            host: repo.host,
+            error: Some(error),
+            previous_dll_count: 0,
+            new_dll_count: 0,
+        },
+    }
+}
+
+fn installed_wdm_main_version<'a>(
+    installs: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+) -> Option<String> {
+    installs
+        .into_iter()
+        .find(|(path, _)| {
+            let path = path.to_ascii_lowercase();
+            let enabled_path = path.strip_suffix(".disabled").unwrap_or(&path);
+            enabled_path.ends_with("-m.mpq")
+        })
+        .and_then(|(_, version)| version.map(str::to_string))
+}
+
 pub async fn check_updates_skip(
     db_path: Option<PathBuf>,
     wow_dir: Option<String>,
@@ -1064,29 +1707,53 @@ pub async fn check_updates_skip(
     clear_update_check_progress();
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
+        let wdm_repo = eng
+            .db()
+            .list_repos()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|repo| {
+                repo.mode == InstallMode::Mpq
+                    && repo
+                        .url
+                        .trim_end_matches('/')
+                        .eq_ignore_ascii_case(WDM_PATCH_URL)
+            });
+        // WDM needs locale-aware asset selection, so keep it out of the
+        // generic forge updater and append a purpose-built release plan below.
+        let mut engine_skip_repo_ids = skip_repo_ids.clone();
+        if let Some(repo) = &wdm_repo {
+            engine_skip_repo_ids.insert(repo.id);
+        }
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let progress_forwarder = std::thread::spawn(move || {
             while let Some(progress) = progress_rx.blocking_recv() {
                 set_update_check_progress(Some(progress));
             }
         });
-        let plans = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let plans = runtime
             .block_on(async {
                 eng.check_updates_with_wow_skip_progress(
                     wow_dir.as_deref().map(Path::new),
                     mode,
-                    &skip_repo_ids,
+                    &engine_skip_repo_ids,
                     progress_tx,
                 )
                 .await
             })
             .map_err(|e| e.to_string())?;
+        let mut rows = plans.into_iter().map(PlanRow::from).collect::<Vec<_>>();
+        if let Some(repo) = wdm_repo.filter(|repo| !skip_repo_ids.contains(&repo.id)) {
+            rows.retain(|plan| plan.repo_id != repo.id);
+            rows.push(runtime.block_on(build_wdm_update_plan(&eng, repo)));
+        }
         let _ = progress_forwarder.join();
         clear_update_check_progress();
-        Ok(plans.into_iter().map(PlanRow::from).collect())
+        Ok(rows)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1253,7 +1920,7 @@ pub async fn probe_conflicts_on_branch(
                     Path::new(&wow_dir),
                     preferred_branch.as_deref(),
                 )
-                    .await
+                .await
             })
             .map_err(|e| e.to_string())
     })
@@ -1360,10 +2027,7 @@ pub async fn set_repo_enabled(
     .map_err(|e| e.to_string())?
 }
 
-pub async fn is_awesome_wotlk_repo(
-    db_path: Option<PathBuf>,
-    repo_id: i64,
-) -> bool {
+pub async fn is_awesome_wotlk_repo(db_path: Option<PathBuf>, repo_id: i64) -> bool {
     tokio::task::spawn_blocking(move || {
         let Ok(engine) = open_engine(db_path.as_deref()) else {
             return false;
@@ -1764,9 +2428,8 @@ pub async fn fetch_latest_release_archive_options(
     db_path: Option<PathBuf>,
     repo_url: String,
 ) -> Result<Vec<ReleaseAssetOption>, String> {
-    let _diagnostic = crate::diagnostics::OperationGuard::new(
-        "fetch_latest_release_archive_options",
-    );
+    let _diagnostic =
+        crate::diagnostics::OperationGuard::new("fetch_latest_release_archive_options");
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let releases = tokio::runtime::Handle::current()
@@ -2198,7 +2861,10 @@ pub async fn launch_wow_root_tool(
     tokio::task::spawn_blocking(move || {
         let wow_path = PathBuf::from(wow_dir.trim());
         if !wow_path.is_dir() {
-            return Err(format!("WoW path is not a directory: {}", wow_path.display()));
+            return Err(format!(
+                "WoW path is not a directory: {}",
+                wow_path.display()
+            ));
         }
         let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
         let tool = first_existing_file(&wow_path, &candidate_refs).ok_or_else(|| {
@@ -2765,10 +3431,8 @@ mod forge_url_tests {
 
     #[test]
     fn gitlab_nested_namespace_is_not_truncated() {
-        let parsed = parse_forge_url(
-            "https://gitlab.com/group/subgroup/addons/project.git",
-        )
-        .unwrap();
+        let parsed =
+            parse_forge_url("https://gitlab.com/group/subgroup/addons/project.git").unwrap();
         assert_eq!(parsed.forge, "gitlab");
         assert_eq!(parsed.owner, "group/subgroup/addons");
         assert_eq!(parsed.repo, "project");
@@ -2776,10 +3440,8 @@ mod forge_url_tests {
 
     #[test]
     fn gitlab_browse_suffix_is_not_part_of_identity() {
-        let parsed = parse_forge_url(
-            "https://gitlab.com/group/subgroup/project/-/tree/main/Addon",
-        )
-        .unwrap();
+        let parsed =
+            parse_forge_url("https://gitlab.com/group/subgroup/project/-/tree/main/Addon").unwrap();
         assert_eq!(parsed.owner, "group/subgroup");
         assert_eq!(parsed.repo, "project");
     }
@@ -3870,7 +4532,9 @@ enum PreReleaseIdentifier {
 /// `3.6.0-beta.3` must sort after `3.6.0-beta.2`.
 fn parse_version_parts(raw: &str) -> (Vec<u64>, Option<Vec<PreReleaseIdentifier>>) {
     let tag = normalize_tag(raw);
-    let without_build = tag.split_once('+').map_or(tag.as_str(), |(version, _)| version);
+    let without_build = tag
+        .split_once('+')
+        .map_or(tag.as_str(), |(version, _)| version);
     let (core_raw, pre_raw) = without_build
         .split_once('-')
         .map_or((without_build, None), |(core, pre)| (core, Some(pre)));
@@ -3933,7 +4597,8 @@ fn is_version_newer(latest: &str, current: &str) -> bool {
                     (Some(_), None) => return true,
                     (None, Some(_)) => return false,
                     (Some(latest_identifier), Some(current_identifier)) => {
-                        match compare_pre_release_identifier(latest_identifier, current_identifier) {
+                        match compare_pre_release_identifier(latest_identifier, current_identifier)
+                        {
                             std::cmp::Ordering::Greater => return true,
                             std::cmp::Ordering::Less => return false,
                             std::cmp::Ordering::Equal => {}

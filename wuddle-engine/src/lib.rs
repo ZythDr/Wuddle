@@ -26,6 +26,8 @@ mod install;
 mod model;
 mod util;
 
+pub mod mpq;
+
 #[cfg(feature = "auto-login")]
 pub mod auto_login;
 pub mod diagnostics;
@@ -404,14 +406,22 @@ fn release_tag_from_url(url: &str) -> Option<String> {
         {
             return segs
                 .get(index + 2)
-                .map(|tag| urlencoding::decode(tag).map(|t| t.into_owned()).unwrap_or_else(|_| (*tag).to_string()))
+                .map(|tag| {
+                    urlencoding::decode(tag)
+                        .map(|t| t.into_owned())
+                        .unwrap_or_else(|_| (*tag).to_string())
+                })
                 .filter(|tag| !tag.trim().is_empty());
         }
 
         if index > 0 && segs.get(index - 1) == Some(&"-") {
             return segs
                 .get(index + 1)
-                .map(|tag| urlencoding::decode(tag).map(|t| t.into_owned()).unwrap_or_else(|_| (*tag).to_string()))
+                .map(|tag| {
+                    urlencoding::decode(tag)
+                        .map(|t| t.into_owned())
+                        .unwrap_or_else(|_| (*tag).to_string())
+                })
                 .filter(|tag| !tag.trim().is_empty());
         }
     }
@@ -572,9 +582,9 @@ impl Engine {
         };
         let selected_addons_json =
             normalize_selected_addons(selected_addons.as_deref().unwrap_or(&[]));
-        if let Ok(Some(existing)) = self
-            .db()
-            .find_repo_by_identity(&identity.host, &identity.owner, &identity.name)
+        if let Ok(Some(existing)) =
+            self.db()
+                .find_repo_by_identity(&identity.host, &identity.owner, &identity.name)
         {
             if asset_regex.is_some() || pinned_version.is_some() {
                 self.db().set_repo_release_source(
@@ -745,7 +755,9 @@ impl Engine {
                         let rel_name = full.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         let src_in_repo = worktree_dir.join(rel_name);
                         if src_in_repo.exists() {
-                            if let Some(folder_name) = install::detect_single_addon_folder(&src_in_repo) {
+                            if let Some(folder_name) =
+                                install::detect_single_addon_folder(&src_in_repo)
+                            {
                                 detected.push((src_in_repo, folder_name));
                             }
                         }
@@ -811,7 +823,14 @@ impl Engine {
                     .user_agent("wuddle-engine")
                     .timeout(std::time::Duration::from_secs(10))
                     .build()?;
-                if let Ok(files) = forge::github::list_files_recursive(&client, &repo.owner, &repo.name, preferred_branch).await {
+                if let Ok(files) = forge::github::list_files_recursive(
+                    &client,
+                    &repo.owner,
+                    &repo.name,
+                    preferred_branch,
+                )
+                .await
+                {
                     let mut addon_names = Vec::<String>::new();
                     let mut addon_entries = Vec::<AddonProbeEntry>::new();
                     let mut seen_names = HashSet::<String>::new();
@@ -828,15 +847,20 @@ impl Engine {
                             let path = Path::new(&f.path);
                             let parent = path.parent().unwrap_or(Path::new(""));
                             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                            
+
                             // Check if stem matches parent dir name OR if it's in the root
-                            let parent_name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                            if stem.eq_ignore_ascii_case(parent_name) || parent.to_str() == Some("") {
+                            let parent_name =
+                                parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            if stem.eq_ignore_ascii_case(parent_name) || parent.to_str() == Some("")
+                            {
                                 if seen_names.insert(stem.to_lowercase()) {
                                     addon_names.push(stem.to_string());
                                     addon_entries.push(AddonProbeEntry {
                                         addon_name: stem.to_string(),
-                                        source_path: parent.to_str().unwrap_or("").replace('\\', "/"),
+                                        source_path: parent
+                                            .to_str()
+                                            .unwrap_or("")
+                                            .replace('\\', "/"),
                                     });
                                 }
                             }
@@ -848,7 +872,9 @@ impl Engine {
                             addon_names: addon_names.clone(),
                             addon_entries: addon_entries.clone(),
                             conflicts: self.check_conflicts_for_addons(&addon_names, wow_dir)?,
-                            resolved_branch: preferred_branch_inner.unwrap_or("default").to_string(),
+                            resolved_branch: preferred_branch_inner
+                                .unwrap_or("default")
+                                .to_string(),
                         });
                     }
                 }
@@ -872,7 +898,10 @@ impl Engine {
                     .strip_prefix(probe_dir.path())
                     .ok()
                     .and_then(|rel| rel.to_str())
-                    .map(|rel| rel.trim_start_matches(std::path::MAIN_SEPARATOR).replace('\\', "/"))
+                    .map(|rel| {
+                        rel.trim_start_matches(std::path::MAIN_SEPARATOR)
+                            .replace('\\', "/")
+                    })
                     .unwrap_or_else(|| addon_name.clone());
                 addon_entries.push(AddonProbeEntry {
                     addon_name: addon_name.clone(),
@@ -1159,7 +1188,11 @@ impl Engine {
     fn is_mod_mode(mode: &InstallMode) -> bool {
         matches!(
             mode,
-            InstallMode::Dll | InstallMode::Mixed | InstallMode::Raw | InstallMode::Auto
+            InstallMode::Dll
+                | InstallMode::Mixed
+                | InstallMode::Mpq
+                | InstallMode::Raw
+                | InstallMode::Auto
         )
     }
 
@@ -1208,12 +1241,7 @@ impl Engine {
             && identity.name.eq_ignore_ascii_case(&repo.name)
     }
 
-    fn addon_git_worktree_dir(
-        &self,
-        repo_id: i64,
-        wow_dir: &Path,
-        repo: &Repo,
-    ) -> Option<PathBuf> {
+    fn addon_git_worktree_dir(&self, repo_id: i64, wow_dir: &Path, repo: &Repo) -> Option<PathBuf> {
         // 1. Check DB install entries for an existing valid git repo on disk.
         let entries = self.db().list_installs(repo_id).unwrap_or_default();
         for entry in &entries {
@@ -1363,11 +1391,7 @@ impl Engine {
                             let _ = repo.checkout_head(Some(&mut checkout));
                         }
                     }
-                    let _ = gam_compat::expose_module(
-                        worktree_dir,
-                        rel_src,
-                        full_link_path,
-                    );
+                    let _ = gam_compat::expose_module(worktree_dir, rel_src, full_link_path);
                 }
             }
         }
@@ -1547,11 +1571,10 @@ impl Engine {
                 }
 
                 progress(format!("scanning addon tree in {}", folder_name));
-                let (detected_addons, timed_out) =
-                    install::detect_addons_in_tree_with_time_limit(
-                        root,
-                        IMPORT_FOLDER_SCAN_TIMEOUT,
-                    );
+                let (detected_addons, timed_out) = install::detect_addons_in_tree_with_time_limit(
+                    root,
+                    IMPORT_FOLDER_SCAN_TIMEOUT,
+                );
                 if timed_out {
                     progress(format!(
                         "skipping {} after {}s import scan budget",
@@ -1569,7 +1592,8 @@ impl Engine {
                     let branch = Self::local_repo_branch(&repo);
                     let short_oid = Self::local_repo_short_oid(&repo);
                     let full_oid = Self::local_repo_oid(&repo);
-                    let installed_asset_name = branch.as_ref().map(|branch| format!("git:{branch}"));
+                    let installed_asset_name =
+                        branch.as_ref().map(|branch| format!("git:{branch}"));
 
                     let mut tracked = Repo {
                         id: 0,
@@ -1986,7 +2010,10 @@ impl Engine {
                         diagnostics::emit(
                             diagnostics::DiagnosticLevel::Trace,
                             "engine.prune",
-                            format!("removing addon_git with missing worktree: repo_id={}", repo.id),
+                            format!(
+                                "removing addon_git with missing worktree: repo_id={}",
+                                repo.id
+                            ),
                         );
                         self.db().remove_repo(repo.id)?;
                         pruned += 1;
@@ -2310,11 +2337,7 @@ impl Engine {
             latest: remote.short_oid.clone(),
             asset_id: remote.oid.clone(),
             asset_name: format!("git:{}", remote.branch),
-            asset_url: if needs_sync {
-                url
-            } else {
-                "".to_string()
-            },
+            asset_url: if needs_sync { url } else { "".to_string() },
             asset_size: None,
             asset_sha256: None,
             repair_needed,
@@ -2397,7 +2420,7 @@ impl Engine {
             return Ok(p);
         }
 
-        if matches!(r.mode, InstallMode::Manual) {
+        if matches!(r.mode, InstallMode::Manual | InstallMode::Mpq) {
             let mut p = Self::blank_plan(r);
             p.is_manual = true;
             p.not_modified = true;
@@ -2435,36 +2458,35 @@ impl Engine {
         let mut attempted_uncached = !use_cached_etag;
 
         let rel = loop {
-            let (new_etag, rel_opt, not_modified) =
-                match tokio::time::timeout(
-                    REMOTE_CHECK_TIMEOUT,
-                    forge::latest_release(&self.client, &det, etag),
-                )
-                .await
-                {
-                    Ok(Ok(v)) => v,
-                    Ok(Err(e)) => {
-                        let msg = e.to_string();
-                        if det.kind == ForgeKind::GitHub {
-                            if let Some(reset_epoch) = Self::parse_github_reset_epoch(&msg) {
-                                let _ = self.db().set_rate_limit(&r.host, reset_epoch);
-                                return Ok(Self::rate_limited_plan(r, reset_epoch));
-                            }
+            let (new_etag, rel_opt, not_modified) = match tokio::time::timeout(
+                REMOTE_CHECK_TIMEOUT,
+                forge::latest_release(&self.client, &det, etag),
+            )
+            .await
+            {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    let msg = e.to_string();
+                    if det.kind == ForgeKind::GitHub {
+                        if let Some(reset_epoch) = Self::parse_github_reset_epoch(&msg) {
+                            let _ = self.db().set_rate_limit(&r.host, reset_epoch);
+                            return Ok(Self::rate_limited_plan(r, reset_epoch));
                         }
-                        let mut p = Self::blank_plan(r);
-                        p.error = Some(msg);
-                        return Ok(p);
                     }
-                    Err(_) => {
-                        let mut p = Self::blank_plan(r);
-                        p.error = Some(format!(
-                            "Release check timed out after {}s for {}.",
-                            REMOTE_CHECK_TIMEOUT.as_secs(),
-                            r.url
-                        ));
-                        return Ok(p);
-                    }
-                };
+                    let mut p = Self::blank_plan(r);
+                    p.error = Some(msg);
+                    return Ok(p);
+                }
+                Err(_) => {
+                    let mut p = Self::blank_plan(r);
+                    p.error = Some(format!(
+                        "Release check timed out after {}s for {}.",
+                        REMOTE_CHECK_TIMEOUT.as_secs(),
+                        r.url
+                    ));
+                    return Ok(p);
+                }
+            };
 
             if let Some(ref et) = new_etag {
                 let _ = self.db().update_etag(r.id, Some(et.as_str()));
@@ -2557,15 +2579,12 @@ impl Engine {
         // Collect ALL .dll assets for repos that publish individual DLL files (e.g. WeirdUtils).
         // Applies to Dll mode always, and to Auto/Mixed when no archive asset is present
         // (an archive would bundle all the DLLs itself, so we only need the archive in that case).
-        let has_archive_asset = target_rel
-            .assets
-            .iter()
-            .any(|a| {
-                Self::asset_extension(&a.name)
-                    .map(|ext| Self::is_archive_extension(&ext))
-                    .unwrap_or(false)
-                    && Self::is_asset_allowed(a, &mode)
-            });
+        let has_archive_asset = target_rel.assets.iter().any(|a| {
+            Self::asset_extension(&a.name)
+                .map(|ext| Self::is_archive_extension(&ext))
+                .unwrap_or(false)
+                && Self::is_asset_allowed(a, &mode)
+        });
         let collect_all_dlls = matches!(mode, InstallMode::Dll)
             || (!has_archive_asset && matches!(mode, InstallMode::Auto | InstallMode::Mixed));
         let all_dll_assets: Vec<ReleaseAsset> = if collect_all_dlls {
@@ -2688,12 +2707,20 @@ impl Engine {
             match repos {
                 [] => Ok(Vec::new()),
                 [repo] => {
-                    Self::send_update_progress(progress_tx, repo, UpdateCheckProgressStage::Started);
+                    Self::send_update_progress(
+                        progress_tx,
+                        repo,
+                        UpdateCheckProgressStage::Started,
+                    );
                     let plan = self
                         .build_update_plan_for_repo(repo, true, wow_dir, check_mode)
                         .await
                         .with_context(|| format!("checking updates for '{}'", repo.name))?;
-                    Self::send_update_progress(progress_tx, repo, UpdateCheckProgressStage::Finished);
+                    Self::send_update_progress(
+                        progress_tx,
+                        repo,
+                        UpdateCheckProgressStage::Finished,
+                    );
                     Ok(vec![plan])
                 }
                 _ => {
@@ -2722,7 +2749,10 @@ impl Engine {
         diagnostics::emit(
             diagnostics::DiagnosticLevel::Trace,
             "engine",
-            format!("check_updates_batched: repo_count={}; mode={check_mode:?}", repos.len()),
+            format!(
+                "check_updates_batched: repo_count={}; mode={check_mode:?}",
+                repos.len()
+            ),
         );
         let mut plans = Vec::with_capacity(repos.len());
 
@@ -2915,9 +2945,9 @@ impl Engine {
                 .any(|a| a.name.to_ascii_lowercase().starts_with("vanillafixes"));
 
             if has_vanillafixes_assets {
-                if let Some(a) = Self::find_archive_asset(assets, is_allowed, |lower| {
-                    !lower.contains("-dxvk")
-                }) {
+                if let Some(a) =
+                    Self::find_archive_asset(assets, is_allowed, |lower| !lower.contains("-dxvk"))
+                {
                     return Ok(a.clone());
                 }
             }
@@ -3021,6 +3051,7 @@ impl Engine {
             InstallMode::AddonGit => false,
             InstallMode::Dll => ext == "dll" || Self::is_archive_extension(&ext),
             InstallMode::Auto => ext == "dll" || Self::is_archive_extension(&ext),
+            InstallMode::Mpq => ext == "mpq",
             InstallMode::Raw => true,
             InstallMode::Manual => false,
         }
@@ -3197,7 +3228,10 @@ impl Engine {
             return Ok(None);
         }
         if !plan.forge.eq_ignore_ascii_case("direct") || !plan.host.eq_ignore_ascii_case("local") {
-            anyhow::bail!("Blocked local asset URL for non-local repo: {}", plan.asset_url);
+            anyhow::bail!(
+                "Blocked local asset URL for non-local repo: {}",
+                plan.asset_url
+            );
         }
         let path = parsed
             .to_file_path()
@@ -3807,11 +3841,23 @@ impl Engine {
             "engine",
             format!("remove_repo: repo_id={repo_id}; remove_local_files={remove_local_files}"),
         );
+        let repo = self.db().get_repo(repo_id)?;
+        if repo.mode == InstallMode::Mpq {
+            let wow_dir = wow_dir.ok_or_else(|| {
+                anyhow::anyhow!("The WoW directory is required to remove an MPQ package")
+            })?;
+            if !remove_local_files {
+                anyhow::bail!(
+                    "MPQ packages must be removed with their deployed files so protected backups can be restored"
+                );
+            }
+            return self.remove_mpq_package(repo_id, wow_dir, false);
+        }
+
         let mut removed_paths = 0usize;
         let mut removed_dlls = Vec::<String>::new();
 
         if remove_local_files {
-            let repo = self.db().get_repo(repo_id)?;
             // 1. Remove tracked install folders/files
             for entry in self.db().list_installs(repo_id)? {
                 if let Some(full) = Self::resolve_install_path(&entry.path, wow_dir) {
@@ -3989,7 +4035,8 @@ impl Engine {
         raw_dest: Option<&Path>,
         opts: InstallOptions,
     ) -> Result<()> {
-        self.apply_one_internal(plan, wow_dir, raw_dest, opts, false).await
+        self.apply_one_internal(plan, wow_dir, raw_dest, opts, false)
+            .await
     }
 
     async fn apply_one_internal(
@@ -4018,8 +4065,7 @@ impl Engine {
             // Migrate legacy staging clones to the direct AddOns location on first encounter.
             self.migrate_staging_clone_if_needed(wow_dir, &repo)?;
 
-            let installed_worktree_dir =
-                self.addon_git_worktree_dir(plan.repo_id, wow_dir, &repo);
+            let installed_worktree_dir = self.addon_git_worktree_dir(plan.repo_id, wow_dir, &repo);
             let staged_install = force_clean_git_reinstall || installed_worktree_dir.is_none();
             let mut staging_guard = None;
             let mut worktree_dir = if staged_install {
@@ -4030,7 +4076,10 @@ impl Engine {
                 diagnostics::emit(
                     diagnostics::DiagnosticLevel::Trace,
                     "engine",
-                    format!("apply_one: repo_id={}; using staged git install", plan.repo_id),
+                    format!(
+                        "apply_one: repo_id={}; using staged git install",
+                        plan.repo_id
+                    ),
                 );
                 staging_guard = Some(StagedGitWorktree::new(plan.repo_id, staging_dir.clone()));
                 staging_dir
@@ -4124,9 +4173,9 @@ impl Engine {
                 let key = addon_name.to_lowercase();
                 let is_new_name = seen_names.insert(key);
                 let is_new_path = seen_paths.insert(src.clone());
-                
+
                 // If we have a selection, keep all names for filtering later.
-                // Otherwise, only keep one name per source folder path to avoid 
+                // Otherwise, only keep one name per source folder path to avoid
                 // multiple installs of the same directory.
                 if is_new_name && (is_new_path || !selected_addons.is_empty()) {
                     chosen.push((src, addon_name));
@@ -4143,8 +4192,8 @@ impl Engine {
                     )
                 });
 
-                // Deduplicate by source path: if multiple selected TOCs point to the 
-                // same folder, only keep one (the first matching one) to avoid 
+                // Deduplicate by source path: if multiple selected TOCs point to the
+                // same folder, only keep one (the first matching one) to avoid
                 // double-installation crashes.
                 let mut path_seen = HashSet::new();
                 chosen.retain(|(src, _)| path_seen.insert(src.clone()));
@@ -4324,7 +4373,10 @@ impl Engine {
                 diagnostics::emit(
                     diagnostics::DiagnosticLevel::Trace,
                     "engine",
-                    format!("apply_one: repo_id={}; staged git install finalized", plan.repo_id),
+                    format!(
+                        "apply_one: repo_id={}; staged git install finalized",
+                        plan.repo_id
+                    ),
                 );
             }
 
@@ -4386,7 +4438,12 @@ impl Engine {
                 Some(&format!("git:{}", synced.branch)),
                 None,
                 Some(&plan.url),
-                Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64),
+                Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64,
+                ),
             )?;
             return Ok(());
         }
@@ -4521,7 +4578,12 @@ impl Engine {
 
         if merge_mode {
             // Merge: keep existing install entries, only add/overwrite new ones.
-            self.persist_installs_merge(plan.repo_id, wow_dir, &records, Some(&plan.install_version))?;
+            self.persist_installs_merge(
+                plan.repo_id,
+                wow_dir,
+                &records,
+                Some(&plan.install_version),
+            )?;
         } else {
             // Clean: remove previously tracked addon targets that are no longer
             // part of this release (e.g. suffix variants collapsing).
@@ -4536,7 +4598,12 @@ impl Engine {
             Some(&plan.asset_name),
             Self::size_u64_to_i64(plan.asset_size),
             Some(&plan.asset_url),
-            Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64),
+            Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64,
+            ),
         )?;
         if is_local_asset {
             self.db().mark_repo_manual(plan.repo_id)?;
@@ -4641,7 +4708,8 @@ impl Engine {
             }
             // Force sync even if already up to date.
             plan.asset_url = r.url.clone();
-            self.apply_one_internal(&plan, wow_dir, raw_dest, opts, true).await?;
+            self.apply_one_internal(&plan, wow_dir, raw_dest, opts, true)
+                .await?;
             plan.applied = true;
             return Ok(plan);
         }
@@ -4743,6 +4811,7 @@ mod tests {
         LatestRelease {
             tag: "v1.0.0".to_string(),
             name: None,
+            prerelease: false,
             assets,
             published_at: None,
         }
@@ -4762,7 +4831,9 @@ mod tests {
             latest: "v1.0.0".to_string(),
             asset_id: asset_name.to_string(),
             asset_name: asset_name.to_string(),
-            asset_url: format!("https://github.com/owner/repo/releases/download/v1.0.0/{asset_name}"),
+            asset_url: format!(
+                "https://github.com/owner/repo/releases/download/v1.0.0/{asset_name}"
+            ),
             asset_size: size,
             asset_sha256: None,
             repair_needed: false,
@@ -5064,10 +5135,7 @@ mod tests {
             .unwrap();
 
         assert!(addons.join("ActualAddon").join(".git").is_dir());
-        assert!(addons
-            .join("ActualAddon")
-            .join("ActualAddon.toc")
-            .is_file());
+        assert!(addons.join("ActualAddon").join("ActualAddon.toc").is_file());
         assert!(!addons.join("RepositorySlug").exists());
     }
 
@@ -5090,12 +5158,7 @@ mod tests {
             .build()
             .unwrap();
         let first_install = runtime
-            .block_on(engine.update_repo(
-                old_repo_id,
-                &wow,
-                None,
-                InstallOptions::default(),
-            ))
+            .block_on(engine.update_repo(old_repo_id, &wow, None, InstallOptions::default()))
             .unwrap();
         assert!(first_install.is_some());
         assert_eq!(
@@ -5160,12 +5223,7 @@ mod tests {
             .build()
             .unwrap();
         let installed = runtime
-            .block_on(engine.update_repo(
-                repo_id,
-                &wow,
-                None,
-                InstallOptions::default(),
-            ))
+            .block_on(engine.update_repo(repo_id, &wow, None, InstallOptions::default()))
             .unwrap();
         assert!(installed.is_some());
 
@@ -5204,12 +5262,7 @@ mod tests {
         fs::write(worktree.join("stale-user-file.txt"), b"remove me").unwrap();
 
         runtime
-            .block_on(engine.reinstall_repo(
-                repo_id,
-                &wow,
-                None,
-                InstallOptions::default(),
-            ))
+            .block_on(engine.reinstall_repo(repo_id, &wow, None, InstallOptions::default()))
             .unwrap();
 
         assert!(worktree.join(".git").is_dir());
@@ -5251,12 +5304,7 @@ mod tests {
             .set_repo_selected_addons(repo_id, Some(vec!["Questie-335".to_string()]))
             .unwrap();
         runtime
-            .block_on(engine.reinstall_repo(
-                repo_id,
-                &wow,
-                None,
-                InstallOptions::default(),
-            ))
+            .block_on(engine.reinstall_repo(repo_id, &wow, None, InstallOptions::default()))
             .unwrap();
 
         assert!(!addons.join("Questie").exists());
@@ -5344,8 +5392,11 @@ mod tests {
         for addon_name in ["AddonOne", "AddonTwo", "AddonThree"] {
             let addon_dir = addons.join(addon_name);
             fs::create_dir_all(&addon_dir).unwrap();
-            fs::write(addon_dir.join(format!("{addon_name}.toc")), b"## Interface: 30300\n")
-                .unwrap();
+            fs::write(
+                addon_dir.join(format!("{addon_name}.toc")),
+                b"## Interface: 30300\n",
+            )
+            .unwrap();
             engine
                 .db()
                 .add_install(
@@ -5384,10 +5435,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.path.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "Interface/AddOns/AddonOne",
-                "Interface/AddOns/AddonThree"
-            ]
+            vec!["Interface/AddOns/AddonOne", "Interface/AddOns/AddonThree"]
         );
 
         let old_repo = engine.db().get_repo(old_repo_id).unwrap();
@@ -5409,11 +5457,19 @@ mod tests {
         fs::create_dir_all(&main_in_repo).unwrap();
         fs::create_dir_all(&config_in_repo).unwrap();
         fs::write(main_in_repo.join("MyAddon.toc"), b"## Interface: 30300\n").unwrap();
-        fs::write(config_in_repo.join("MyAddon_Config.toc"), b"## Interface: 30300\n").unwrap();
+        fs::write(
+            config_in_repo.join("MyAddon_Config.toc"),
+            b"## Interface: 30300\n",
+        )
+        .unwrap();
 
         fs::create_dir_all(addons.join("MyAddon")).unwrap();
         fs::create_dir_all(addons.join("MyAddon_Config")).unwrap();
-        fs::write(addons.join("MyAddon").join("MyAddon.toc"), b"## Interface: 30300\n").unwrap();
+        fs::write(
+            addons.join("MyAddon").join("MyAddon.toc"),
+            b"## Interface: 30300\n",
+        )
+        .unwrap();
         fs::write(
             addons.join("MyAddon_Config").join("MyAddon_Config.toc"),
             b"## Interface: 30300\n",
@@ -5492,7 +5548,10 @@ mod tests {
 
         let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
         assert_eq!(engine.import_existing_addons(&wow).unwrap(), 1);
-        assert_eq!(engine.verify_and_repair_tracked_addon_links(&wow).unwrap(), 0);
+        assert_eq!(
+            engine.verify_and_repair_tracked_addon_links(&wow).unwrap(),
+            0
+        );
         assert!(fs::symlink_metadata(&exposed)
             .unwrap()
             .file_type()
@@ -5527,11 +5586,8 @@ mod tests {
         .unwrap();
 
         let repo = Repository::init(&repo_dir).unwrap();
-        repo.remote(
-            "origin",
-            "https://github.com/TestOwner/MovedCollection.git",
-        )
-        .unwrap();
+        repo.remote("origin", "https://github.com/TestOwner/MovedCollection.git")
+            .unwrap();
         let mut index = repo.index().unwrap();
         index
             .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
@@ -5565,10 +5621,16 @@ mod tests {
                 "Interface/AddOns/MovedTwo".to_string()
             ]
         );
-        assert_eq!(engine.verify_and_repair_tracked_addon_links(&wow).unwrap(), 0);
+        assert_eq!(
+            engine.verify_and_repair_tracked_addon_links(&wow).unwrap(),
+            0
+        );
 
         fs::remove_dir_all(addons.join("MovedOne")).unwrap();
-        assert_eq!(engine.verify_and_repair_tracked_addon_links(&wow).unwrap(), 1);
+        assert_eq!(
+            engine.verify_and_repair_tracked_addon_links(&wow).unwrap(),
+            1
+        );
         assert!(addons.join("MovedOne").join("MovedOne.toc").is_file());
         #[cfg(unix)]
         assert!(fs::symlink_metadata(addons.join("MovedOne"))
@@ -5587,11 +5649,8 @@ mod tests {
         fs::create_dir_all(&module).unwrap();
         fs::write(module.join("CaseAddon.toc"), b"## Interface: 30300\n").unwrap();
         let repo = Repository::init(&repo_dir).unwrap();
-        repo.remote(
-            "origin",
-            "https://github.com/TestOwner/CaseCollection.git",
-        )
-        .unwrap();
+        repo.remote("origin", "https://github.com/TestOwner/CaseCollection.git")
+            .unwrap();
         let mut index = repo.index().unwrap();
         index
             .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
@@ -5636,16 +5695,9 @@ mod tests {
     fn import_tracks_remote_less_gam_worktree_as_local_git() {
         let tmp = tempfile::tempdir().unwrap();
         let wow = tmp.path().join("wow");
-        let addon = wow
-            .join("Interface")
-            .join("AddOns")
-            .join("LocalGitAddon");
+        let addon = wow.join("Interface").join("AddOns").join("LocalGitAddon");
         fs::create_dir_all(&addon).unwrap();
-        fs::write(
-            addon.join("LocalGitAddon.toc"),
-            b"## Interface: 30300\n",
-        )
-        .unwrap();
+        fs::write(addon.join("LocalGitAddon.toc"), b"## Interface: 30300\n").unwrap();
         let repo = Repository::init(&addon).unwrap();
         let mut index = repo.index().unwrap();
         index
@@ -5672,16 +5724,9 @@ mod tests {
     fn import_uses_gam_branch_upstream_instead_of_origin() {
         let tmp = tempfile::tempdir().unwrap();
         let wow = tmp.path().join("wow");
-        let addon = wow
-            .join("Interface")
-            .join("AddOns")
-            .join("UpstreamAddon");
+        let addon = wow.join("Interface").join("AddOns").join("UpstreamAddon");
         fs::create_dir_all(&addon).unwrap();
-        fs::write(
-            addon.join("UpstreamAddon.toc"),
-            b"## Interface: 30300\n",
-        )
-        .unwrap();
+        fs::write(addon.join("UpstreamAddon.toc"), b"## Interface: 30300\n").unwrap();
         let repo = Repository::init(&addon).unwrap();
         let mut index = repo.index().unwrap();
         index
@@ -5865,21 +5910,31 @@ mod tests {
         assert!(Engine::is_asset_allowed(&seven, &InstallMode::Dll));
         assert!(Engine::is_asset_allowed(&seven, &InstallMode::Mixed));
 
-        assert!(!Engine::is_asset_allowed(&asset("mod.rar"), &InstallMode::Auto));
-        assert!(!Engine::is_asset_allowed(&asset("mod.exe"), &InstallMode::Auto));
+        assert!(!Engine::is_asset_allowed(
+            &asset("mod.rar"),
+            &InstallMode::Auto
+        ));
+        assert!(!Engine::is_asset_allowed(
+            &asset("mod.exe"),
+            &InstallMode::Auto
+        ));
     }
 
     #[test]
     fn auto_prefers_zip_then_7z_then_dll() {
         let rel = release(vec![asset("mod.dll"), asset("mod.7z"), asset("mod.zip")]);
         assert_eq!(
-            Engine::pick_asset(&rel, InstallMode::Auto, None).unwrap().name,
+            Engine::pick_asset(&rel, InstallMode::Auto, None)
+                .unwrap()
+                .name,
             "mod.zip"
         );
 
         let rel = release(vec![asset("mod.dll"), asset("mod.7z")]);
         assert_eq!(
-            Engine::pick_asset(&rel, InstallMode::Auto, None).unwrap().name,
+            Engine::pick_asset(&rel, InstallMode::Auto, None)
+                .unwrap()
+                .name,
             "mod.7z"
         );
     }
@@ -5888,19 +5943,25 @@ mod tests {
     fn dll_prefers_direct_dll_then_zip_then_7z() {
         let rel = release(vec![asset("mod.7z"), asset("mod.zip"), asset("mod.dll")]);
         assert_eq!(
-            Engine::pick_asset(&rel, InstallMode::Dll, None).unwrap().name,
+            Engine::pick_asset(&rel, InstallMode::Dll, None)
+                .unwrap()
+                .name,
             "mod.dll"
         );
 
         let rel = release(vec![asset("mod.7z"), asset("mod.zip")]);
         assert_eq!(
-            Engine::pick_asset(&rel, InstallMode::Dll, None).unwrap().name,
+            Engine::pick_asset(&rel, InstallMode::Dll, None)
+                .unwrap()
+                .name,
             "mod.zip"
         );
 
         let rel = release(vec![asset("mod.7z")]);
         assert_eq!(
-            Engine::pick_asset(&rel, InstallMode::Dll, None).unwrap().name,
+            Engine::pick_asset(&rel, InstallMode::Dll, None)
+                .unwrap()
+                .name,
             "mod.7z"
         );
     }

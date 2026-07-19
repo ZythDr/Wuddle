@@ -19,7 +19,10 @@ fn x11_monitor_size() -> Option<(u32, u32)> {
     let (conn, screen_num) = x11rb::connect(None).ok()?;
     let screen = &conn.setup().roots[screen_num];
     let root = screen.root;
-    let res = randr::get_screen_resources_current(&conn, root).ok()?.reply().ok()?;
+    let res = randr::get_screen_resources_current(&conn, root)
+        .ok()?
+        .reply()
+        .ok()?;
 
     // Find the first active CRTC (has non-zero dimensions)
     for &crtc in res.crtcs.iter() {

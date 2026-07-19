@@ -30,7 +30,30 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.6.2
+### What's New in v3.7.0
+
+#### New Features
+- **Generic MPQ Patch Management** — Install, inspect, protect, rename, enable, disable, and remove local MPQ packages through a dedicated Patches tab.
+- **WDM Quick Add** — WoW 3.3.5a profiles can install locale-specific WDM dungeon maps, optional Caverns & Mines content, and the companion addon through one curated workflow.
+- **Per-Profile Tab Visibility** — Hide Mods, Addons, Patches, or Tweaks independently for each game profile.
+
+#### Improvements
+- **Safe MPQ Deployment** — New patches are staged and validated before installation, with collision review, protected-file handling, rollback, and restoration of displaced files.
+- **Fast MPQ Scanning** — Routine health checks use lightweight filesystem metadata rather than repeatedly hashing multi-gigabyte archives.
+- **Manual Patch Controls** — Existing custom MPQs receive friendly labels, safe on-disk rename controls, Manual status, and `.disabled` toggling.
+- **Curated Patch Updates** — WDM participates in update checks and includes source links and README previews.
+- **Locale-Aware Placement** — Locale-named patches default to their matching `Data/<locale>/` folder, while generic patches default to `Data/`.
+- **Cohesive Patches UI** — Patch rows, dialogs, menus, tooltips, scrollbars, expansion controls, and status styling now follow the Mods and Addons interface.
+
+#### Bug Fixes
+- **Repository Load Deadlock** — Legacy MPQ fingerprint handling no longer risks leaving Wuddle indefinitely busy while repository rows are built.
+- **Managed MPQ Labels** — Internal hash-suffixed local package identities are no longer presented as apparent filenames.
+- **MPQ Scan Coverage** — Core, custom, locale-specific, and disabled MPQs are classified consistently.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.6.2
 
 #### New Features
 - **Verbose Diagnostics** — Record detailed internal operations and export a rolling, privacy-sanitized diagnostic ZIP for issue reports.
@@ -48,9 +71,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **Conflict-Safe Finalization** — Addon files and GAM metadata reach `Interface/AddOns` only after conflict checks are accepted.
 - **Addon Repository Switching** — Replacing an addon with a same-named fork now keeps the newly selected repository through refresh and rescan. Should fix #17.
 - **Multi-TOC Addon Selection** — Installing or reinstalling repositories such as Questie now requires an explicit main TOC choice and offers a client-aware suggestion.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.6.0 / v3.6.1
 

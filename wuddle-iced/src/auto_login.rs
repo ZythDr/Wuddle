@@ -1,6 +1,6 @@
 use iced::widget::{
-    button, checkbox, column, container, mouse_area, pick_list, row, scrollable, text,
-    text_input, Space,
+    button, checkbox, column, container, mouse_area, pick_list, row, scrollable, text, text_input,
+    Space,
 };
 use iced::{Color, Element, Length, Task};
 use wuddle_engine::auto_login::{
@@ -517,9 +517,11 @@ pub fn account_picker<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Mess
     };
     let account_selector = iced::widget::tooltip(
         mouse_area(
-            pick_list(choices, selected, |choice| Message::SelectAutoLoginAccount(choice.id))
-                .text_size(12)
-                .width(150),
+            pick_list(choices, selected, |choice| {
+                Message::SelectAutoLoginAccount(choice.id)
+            })
+            .text_size(12)
+            .width(150),
         )
         .on_enter(Message::SetAutoLoginAccountPickerTooltipVisible(true))
         .on_exit(Message::SetAutoLoginAccountPickerTooltipVisible(false)),
@@ -560,13 +562,10 @@ pub fn account_picker<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Mess
             .style(move |_theme| theme::tooltip_style(c)),
         iced::widget::tooltip::Position::Top,
     );
-    row![
-        account_selector,
-        manage_accounts,
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center)
-    .into()
+    row![account_selector, manage_accounts,]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+        .into()
 }
 
 pub fn view_dialog<'a>(

@@ -1,11 +1,13 @@
-use iced::Task;
-use crate::{App, Message, LogLevel, Dialog, ToastKind, CheckStats};
-use crate::settings::UpdateChannel;
+use crate::components::presets::{
+    is_av_false_positive, WEIRD_UTILS_DESCRIPTIONS, WEIRD_UTILS_DLLS,
+};
 use crate::service;
-use crate::components::presets::{WEIRD_UTILS_DESCRIPTIONS, WEIRD_UTILS_DLLS, is_av_false_positive};
-use wuddle_engine;
+use crate::settings::UpdateChannel;
+use crate::{App, CheckStats, Dialog, LogLevel, Message, ToastKind};
+use iced::Task;
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use wuddle_engine;
 
 pub const INFREQUENT_CHECK_INTERVAL_SECS: i64 = 4 * 3600;
 
@@ -85,7 +87,6 @@ fn install_local_archive(app: &mut App, path: std::path::PathBuf) -> Option<Task
     ))
 }
 
-
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
         Message::ReposLoaded(result) => {
@@ -99,12 +100,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     for entry in &load_result.logs {
                         app.log(entry.level, &entry.text);
                     }
+                    app.untracked_mpqs = load_result.untracked_mpqs;
                     let repos = load_result.rows;
                     let count = repos.len();
                     let mod_count = repos.iter().filter(|r| service::is_mod(r)).count();
                     let addon_count = count - mod_count;
                     app.repos = repos;
-                    app.log(LogLevel::Info, &format!("Loaded {} repos ({} mods, {} addons).", count, mod_count, addon_count));
+                    app.log(
+                        LogLevel::Info,
+                        &format!(
+                            "Loaded {} repos ({} mods, {} addons).",
+                            count, mod_count, addon_count
+                        ),
+                    );
                     // Fetch branches for addon_git repos that aren't cached yet
                     let mut tasks: Vec<Task<Message>> = app
                         .repos
@@ -119,14 +127,21 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         })
                         .collect();
                     // Auto-check on launch if the option is enabled (only once per session)
-                    if app.opt_auto_check && !app.repos.is_empty() && !app.checking_updates && !app.autocheck_done {
+                    if app.opt_auto_check
+                        && !app.repos.is_empty()
+                        && !app.checking_updates
+                        && !app.autocheck_done
+                    {
                         app.autocheck_done = true;
                         app.checking_updates = true;
                         app.log(LogLevel::Api, "Auto-checking for updates on launch...");
                         tasks.push(check_updates_task(app));
                     }
                     // Always fire self-update check on launch
-                    tasks.push(Task::perform(service::check_self_update_full(app.update_channel == UpdateChannel::Beta), Message::CheckSelfUpdateResult));
+                    tasks.push(Task::perform(
+                        service::check_self_update_full(app.update_channel == UpdateChannel::Beta),
+                        Message::CheckSelfUpdateResult,
+                    ));
                     if !tasks.is_empty() {
                         return Some(Task::batch(tasks));
                     }
@@ -140,7 +155,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::PollRescanProgress => {
             let progress = service::latest_rescan_progress();
-            let snapshot = progress.as_ref().map(|p| format!("{}|{}", p.stage, p.detail));
+            let snapshot = progress
+                .as_ref()
+                .map(|p| format!("{}|{}", p.stage, p.detail));
 
             if snapshot != app.current_rescan_snapshot {
                 app.current_rescan_snapshot = snapshot;
@@ -156,7 +173,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 if let Some(started_at) = app.current_rescan_started_at {
                     let elapsed = started_at.elapsed().as_secs();
                     let should_warn = elapsed >= 10
-                        && app.last_rescan_warning_secs.map_or(true, |last| elapsed >= last + 10);
+                        && app
+                            .last_rescan_warning_secs
+                            .map_or(true, |last| elapsed >= last + 10);
                     if should_warn {
                         app.last_rescan_warning_secs = Some(elapsed);
                         app.log(
@@ -194,9 +213,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::PollUpdateCheckProgress => {
             let progress = service::latest_update_check_progress();
-            let snapshot = progress.as_ref().map(|p| {
-                format!("{:?}|{}/{}|{}", p.stage, p.owner, p.name, p.mode)
-            });
+            let snapshot = progress
+                .as_ref()
+                .map(|p| format!("{:?}|{}/{}|{}", p.stage, p.owner, p.name, p.mode));
 
             if snapshot != app.current_update_check_snapshot {
                 app.current_update_check_snapshot = snapshot;
@@ -209,9 +228,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                                 LogLevel::Api,
                                 &format!(
                                     "Checking {}/{} ({})...",
-                                    progress.owner,
-                                    progress.name,
-                                    progress.mode
+                                    progress.owner, progress.name, progress.mode
                                 ),
                             );
                         }
@@ -230,16 +247,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     if let Some(started_at) = app.current_update_check_started_at {
                         let elapsed = started_at.elapsed().as_secs();
                         let should_warn = elapsed >= 10
-                            && app.last_update_check_warning_secs.map_or(true, |last| elapsed >= last + 10);
+                            && app
+                                .last_update_check_warning_secs
+                                .map_or(true, |last| elapsed >= last + 10);
                         if should_warn {
                             app.last_update_check_warning_secs = Some(elapsed);
                             app.log(
                                 LogLevel::Error,
                                 &format!(
                                     "Still checking {}/{} after {}s.",
-                                    progress.owner,
-                                    progress.name,
-                                    elapsed
+                                    progress.owner, progress.name, elapsed
                                 ),
                             );
                         }
@@ -267,8 +284,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             service::clear_update_check_progress();
             match result {
                 Ok(mut plans) => {
-                    let update_count = plans.iter().filter(|p| p.has_update && !app.ignored_update_ids.contains(&p.repo_id)).count();
-                    
+                    let update_count = plans
+                        .iter()
+                        .filter(|p| p.has_update && !app.ignored_update_ids.contains(&p.repo_id))
+                        .count();
+
                     let mut stats = CheckStats {
                         updates_found: update_count,
                         ..Default::default()
@@ -294,7 +314,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             // Suppress -16 (GIT_EAUTH): deleted/private repos the user
                             // has acknowledged; they generate noise on every check.
                             if !is_silenced_git_error(err) {
-                                app.log(LogLevel::Error, &format!("{}/{} - {}", p.owner, p.name, simplify_git_error(err)));
+                                app.log(
+                                    LogLevel::Error,
+                                    &format!(
+                                        "{}/{} - {}",
+                                        p.owner,
+                                        p.name,
+                                        simplify_git_error(err)
+                                    ),
+                                );
                             }
                         }
                     }
@@ -302,7 +330,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     if is_explicit_check {
                         if update_count > 0 {
                             app.show_toast(
-                                format!("{} update{} available.", update_count, if update_count == 1 { "" } else { "s" }),
+                                format!(
+                                    "{} update{} available.",
+                                    update_count,
+                                    if update_count == 1 { "" } else { "s" }
+                                ),
                                 ToastKind::Info,
                             );
                         } else {
@@ -322,8 +354,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     // we always check everything, so update the timestamp.
                     // If no token, only update if the window actually expired.
                     let now = now_unix();
-                    let was_full_check = wuddle_engine::github_token().is_some() ||
-                        (now - app.last_infrequent_check_unix) >= INFREQUENT_CHECK_INTERVAL_SECS;
+                    let was_full_check = wuddle_engine::github_token().is_some()
+                        || (now - app.last_infrequent_check_unix) >= INFREQUENT_CHECK_INTERVAL_SECS;
 
                     if was_full_check || app.last_infrequent_check_unix == 0 {
                         app.last_infrequent_check_unix = now;
@@ -341,7 +373,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         let _ = notify_rust::Notification::new()
                             .appname("Wuddle")
                             .summary("Wuddle")
-                            .body(&format!("{} update{} available", update_count, if update_count == 1 { "" } else { "s" }))
+                            .body(&format!(
+                                "{} update{} available",
+                                update_count,
+                                if update_count == 1 { "" } else { "s" }
+                            ))
                             .icon(crate::notification_icon_path())
                             .show();
                     }
@@ -363,11 +399,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             ));
                         }
                     }
-                    
+
                     // Final summary rate fetch
                     version_tasks.push(Task::perform(
                         service::fetch_github_rate_limit(),
-                        move |info| Message::UpdateCheckRateLimitResult(stats.clone(), info)
+                        move |info| Message::UpdateCheckRateLimitResult(stats.clone(), info),
                     ));
 
                     if !version_tasks.is_empty() {
@@ -383,7 +419,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::AddRepoSubmit => {
-            if let Some(Dialog::AddRepo { ref url, ref mode, .. }) = app.dialog {
+            if let Some(Dialog::AddRepo {
+                ref url, ref mode, ..
+            }) = app.dialog
+            {
                 if app.add_repo_manage_repo_id.is_some() {
                     return Some(Task::done(Message::SaveCollectionSelection));
                 }
@@ -484,8 +523,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 }
 
                 if matches!(selected_addons.as_ref(), Some(selected) if selected.is_empty()) {
-                    app.log(LogLevel::Error, "Select at least one addon from the collection.");
-                    app.show_toast("Select at least one addon from the collection.", ToastKind::Warn);
+                    app.log(
+                        LogLevel::Error,
+                        "Select at least one addon from the collection.",
+                    );
+                    app.show_toast(
+                        "Select at least one addon from the collection.",
+                        ToastKind::Warn,
+                    );
                     return Some(Task::none());
                 }
 
@@ -587,7 +632,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         app.log(LogLevel::Info, "Checking for conflicts\u{2026}");
                         return Some(Task::perform(
                             service::check_pre_install_conflicts(db, id, wow, addon_names),
-                            move |result| Message::PreInstallConflictResult { repo_id: id, result },
+                            move |result| Message::PreInstallConflictResult {
+                                repo_id: id,
+                                result,
+                            },
                         ));
                     }
                     app.show_toast("Repo added successfully.", ToastKind::Info);
@@ -607,10 +655,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Err(e) => {
                     // Conflict check itself failed — log and proceed to install
                     // (the engine's own ADDON_CONFLICT guard is still active).
-                    app.log(LogLevel::Error, &format!(
-                        "Pre-install conflict check failed for repo id={}: {}",
-                        repo_id, e
-                    ));
+                    app.log(
+                        LogLevel::Error,
+                        &format!(
+                            "Pre-install conflict check failed for repo id={}: {}",
+                            repo_id, e
+                        ),
+                    );
                     service::PreInstallConflictInfo {
                         conflicts: Vec::new(),
                         existing_repos: Vec::new(),
@@ -701,7 +752,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         .repos
                         .iter()
                         .find(|r| r.id == repo_id)
-                        .map(|r| (r.url.clone(), r.mode.clone(), format!("{}/{}", r.owner, r.name)))
+                        .map(|r| {
+                            (
+                                r.url.clone(),
+                                r.mode.clone(),
+                                format!("{}/{}", r.owner, r.name),
+                            )
+                        })
                         .unwrap_or_default();
                     app.dialog = Some(Dialog::AddonConflict {
                         url,
@@ -746,9 +803,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Err(error) => {
                     app.log(
                         LogLevel::Error,
-                        &format!(
-                            "Cancelled install cleanup failed for repo id={repo_id}: {error}"
-                        ),
+                        &format!("Cancelled install cleanup failed for repo id={repo_id}: {error}"),
                     );
                     app.show_toast(
                         "The cancelled repository could not be removed from tracking. Refresh and retry removal.",
@@ -770,7 +825,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             opts.replace_addon_conflicts = true;
             app.log(
                 LogLevel::Info,
-                &format!("Overwriting conflicts and installing repo id={}...", repo_id),
+                &format!(
+                    "Overwriting conflicts and installing repo id={}...",
+                    repo_id
+                ),
             );
             return Some(Task::perform(
                 service::install_new_repo(db, repo_id, wow, opts),
@@ -834,7 +892,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::FetchCollectionProbeResult(url, result) => {
             app.add_repo_probe_loading = false;
-            if let Some(Dialog::AddRepo { url: current_url, .. }) = app.dialog.as_ref() {
+            if let Some(Dialog::AddRepo {
+                url: current_url, ..
+            }) = app.dialog.as_ref()
+            {
                 if service::normalize_repo_input_url(current_url)
                     != service::normalize_repo_input_url(&url)
                 {
@@ -843,11 +904,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             match result {
                 Ok(probe) => {
-                    let hinted_addon = if let Some(Dialog::AddRepo { url, .. }) = app.dialog.as_ref() {
-                        service::selected_addon_hint_from_url(url)
-                    } else {
-                        None
-                    };
+                    let hinted_addon =
+                        if let Some(Dialog::AddRepo { url, .. }) = app.dialog.as_ref() {
+                            service::selected_addon_hint_from_url(url)
+                        } else {
+                            None
+                        };
                     let detected_names = probe
                         .addon_names
                         .iter()
@@ -859,7 +921,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         app.add_repo_collection_choice = Some(true);
                     }
 
-                    let old_selected: Vec<String> = std::mem::take(&mut app.add_repo_selected_addons).into_iter().collect();
+                    let old_selected: Vec<String> =
+                        std::mem::take(&mut app.add_repo_selected_addons)
+                            .into_iter()
+                            .collect();
                     for selected_name in old_selected {
                         let name_lower = selected_name.to_ascii_lowercase();
                         if detected_names.contains(&name_lower) {
@@ -870,11 +935,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         for entry in &probe.addon_entries {
                             let src = entry.source_path.to_ascii_lowercase();
                             if src == name_lower || src.starts_with(&path_prefix) {
-                                app.add_repo_selected_addons.insert(entry.addon_name.clone());
+                                app.add_repo_selected_addons
+                                    .insert(entry.addon_name.clone());
                             }
                         }
                     }
-                    if app.add_repo_selected_addons.is_empty() && app.add_repo_collection_choice == Some(true) {
+                    if app.add_repo_selected_addons.is_empty()
+                        && app.add_repo_collection_choice == Some(true)
+                    {
                         if let Some(hint) = hinted_addon {
                             let hint_key = hint.to_ascii_lowercase();
                             if detected_names.contains(&hint_key) {
@@ -889,8 +957,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     }
 
                     // Update AddonConflict dialog if visible for this repo
-                    if let Some(Dialog::AddonConflict { url: ref d_url, ref mut selected_addons, .. }) = app.dialog {
-                        if service::normalize_repo_input_url(d_url) == service::normalize_repo_input_url(&url) {
+                    if let Some(Dialog::AddonConflict {
+                        url: ref d_url,
+                        ref mut selected_addons,
+                        ..
+                    }) = app.dialog
+                    {
+                        if service::normalize_repo_input_url(d_url)
+                            == service::normalize_repo_input_url(&url)
+                        {
                             *selected_addons = probe.addon_names.clone();
                         }
                     }
@@ -920,16 +995,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             } else if root_options.is_empty()
                                 && app.add_repo_collection_choice.is_none()
                             {
-                                app.dialog = Some(Dialog::CollectionChoice { 
-                                    url: url.clone(), 
-                                    addon_names: probe.addon_names.clone() 
+                                app.dialog = Some(Dialog::CollectionChoice {
+                                    url: url.clone(),
+                                    addon_names: probe.addon_names.clone(),
                                 });
                             }
                         }
                     }
                 }
                 Err(e) => {
-            app.add_repo_probe = None;
+                    app.add_repo_probe = None;
                     app.log(LogLevel::Error, &format!("Addon probe failed: {:#}", e));
                 }
             }
@@ -939,7 +1014,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::SetAddRepoCollectionMode(is_collection) => {
-            let from_primary_toc_choice = matches!(app.dialog, Some(Dialog::SelectMainAddon { .. }));
+            let from_primary_toc_choice =
+                matches!(app.dialog, Some(Dialog::SelectMainAddon { .. }));
             app.add_repo_collection_choice = Some(is_collection);
             app.add_repo_primary_toc_confirmed = false;
             if is_collection {
@@ -986,14 +1062,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::SetAddRepoPrimaryAddon(name) => {
             let reinstall_repo_id = match app.dialog.as_ref() {
-                Some(Dialog::SelectMainAddon { reinstall_repo_id, .. }) => *reinstall_repo_id,
+                Some(Dialog::SelectMainAddon {
+                    reinstall_repo_id, ..
+                }) => *reinstall_repo_id,
                 _ => None,
             };
             if let Some(repo_id) = reinstall_repo_id {
                 app.dialog = None;
                 app.log(
                     LogLevel::Info,
-                    &format!("Clean-reinstalling repo id={} with {}.toc...", repo_id, name),
+                    &format!(
+                        "Clean-reinstalling repo id={} with {}.toc...",
+                        repo_id, name
+                    ),
                 );
                 let db = app.db_path.clone();
                 let wow = app.wow_dir.clone();
@@ -1048,8 +1129,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                                 .unwrap_or(entry.addon_name.as_str());
                             source_path == folder_path_key
                                 || source_path.starts_with(&folder_path_prefix)
-                                || service::normalize_collection_entry_key(source_top)
-                                    == folder_key
+                                || service::normalize_collection_entry_key(source_top) == folder_key
                                 || service::normalize_collection_entry_key(&entry.addon_name)
                                     == folder_key
                         })
@@ -1107,21 +1187,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             let folder_path_lower = folder_name.trim().trim_matches('/').to_ascii_lowercase();
             let descendant_prefix = format!("{}/", folder_path_lower);
 
-            let all_selected = matching_addons
-                .iter()
-                .all(|name| {
-                    app.add_repo_selected_addons
-                        .iter()
-                        .any(|selected| {
-                            selected.eq_ignore_ascii_case(name)
-                                || service::normalize_collection_entry_key(selected)
-                                    == service::normalize_collection_entry_key(name)
-                        })
+            let all_selected = matching_addons.iter().all(|name| {
+                app.add_repo_selected_addons.iter().any(|selected| {
+                    selected.eq_ignore_ascii_case(name)
+                        || service::normalize_collection_entry_key(selected)
+                            == service::normalize_collection_entry_key(name)
                 })
-                || app.add_repo_selected_addons.iter().any(|selected| {
-                    let selected_path = selected.trim().trim_matches('/').to_ascii_lowercase();
-                    selected_path == folder_path_lower
-                });
+            }) || app.add_repo_selected_addons.iter().any(|selected| {
+                let selected_path = selected.trim().trim_matches('/').to_ascii_lowercase();
+                selected_path == folder_path_lower
+            });
 
             let has_any_selected = all_selected
                 || app.add_repo_selected_addons.iter().any(|selected| {
@@ -1133,27 +1208,20 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if has_any_selected {
                 app.add_repo_selected_addons.retain(|selected| {
                     let selected_path = selected.trim().trim_matches('/').to_ascii_lowercase();
-                    !matching_addons
-                        .iter()
-                        .any(|addon_name| {
-                            addon_name.eq_ignore_ascii_case(selected)
-                                || service::normalize_collection_entry_key(addon_name)
-                                    == service::normalize_collection_entry_key(selected)
-                        })
-                        && selected_path != folder_path_lower
+                    !matching_addons.iter().any(|addon_name| {
+                        addon_name.eq_ignore_ascii_case(selected)
+                            || service::normalize_collection_entry_key(addon_name)
+                                == service::normalize_collection_entry_key(selected)
+                    }) && selected_path != folder_path_lower
                         && !selected_path.starts_with(&descendant_prefix)
                 });
             } else {
                 for addon_name in matching_addons {
-                    if !app
-                        .add_repo_selected_addons
-                        .iter()
-                        .any(|selected| {
-                            selected.eq_ignore_ascii_case(&addon_name)
-                                || service::normalize_collection_entry_key(selected)
-                                    == service::normalize_collection_entry_key(&addon_name)
-                        })
-                    {
+                    if !app.add_repo_selected_addons.iter().any(|selected| {
+                        selected.eq_ignore_ascii_case(&addon_name)
+                            || service::normalize_collection_entry_key(selected)
+                                == service::normalize_collection_entry_key(&addon_name)
+                    }) {
                         app.add_repo_selected_addons.insert(addon_name);
                     }
                 }
@@ -1172,7 +1240,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.show_toast(
                 format!(
                     "{} {}",
-                    if has_any_selected { "Marked for removal:" } else { "Marked to keep/install:" },
+                    if has_any_selected {
+                        "Marked for removal:"
+                    } else {
+                        "Marked to keep/install:"
+                    },
                     folder_display_name
                 ),
                 ToastKind::Info,
@@ -1261,7 +1333,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.show_toast(
                 format!(
                     "{} {}",
-                    if already_selected { "Marked for removal:" } else { "Marked to keep/install:" },
+                    if already_selected {
+                        "Marked for removal:"
+                    } else {
+                        "Marked to keep/install:"
+                    },
                     addon_name
                 ),
                 ToastKind::Info,
@@ -1296,11 +1372,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                                         .next()
                                         .unwrap_or(entry.addon_name.as_str());
                                     let source_path_lower = entry.source_path.to_ascii_lowercase();
-                                    service::normalize_collection_entry_key(source_top) == selected_key
-                                        || service::normalize_collection_entry_key(&entry.addon_name)
-                                            == selected_key
+                                    service::normalize_collection_entry_key(source_top)
+                                        == selected_key
+                                        || service::normalize_collection_entry_key(
+                                            &entry.addon_name,
+                                        ) == selected_key
                                         || source_path_lower == selected_key
-                                        || source_path_lower.starts_with(&format!("{}/", selected_key))
+                                        || source_path_lower
+                                            .starts_with(&format!("{}/", selected_key))
                                 })
                                 .map(|entry| entry.addon_name.clone())
                                 .collect::<Vec<_>>()
@@ -1321,13 +1400,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             let wow = app.wow_dir.clone();
             let opts = app.install_options();
             app.dialog = None;
-            app.log(LogLevel::Info, &format!("Saving collection selection for repo id={}...", repo_id));
+            app.log(
+                LogLevel::Info,
+                &format!("Saving collection selection for repo id={}...", repo_id),
+            );
             Some(Task::perform(
                 service::update_collection_selection(db, repo_id, wow, selected, opts),
                 Message::SaveCollectionSelectionResult,
             ))
         }
-        Message::SaveCollectionSelectionOverride { repo_id, selected_addons } => {
+        Message::SaveCollectionSelectionOverride {
+            repo_id,
+            selected_addons,
+        } => {
             if app.wow_dir.trim().is_empty() {
                 app.log(LogLevel::Error, "Set a WoW directory in Options first.");
                 return Some(Task::none());
@@ -1390,7 +1475,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.reset_add_repo_state();
             Some(refresh_repos_task(app))
         }
-        Message::BrowseAddonInstall { repo_id, addon_name } => {
+        Message::BrowseAddonInstall {
+            repo_id,
+            addon_name,
+        } => {
             app.open_menu = None;
             let db = app.db_path.clone();
             let wow = app.wow_dir.clone();
@@ -1404,7 +1492,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
-        Message::RemoveCollectionAddonPrompt { repo_id, addon_name } => {
+        Message::RemoveCollectionAddonPrompt {
+            repo_id,
+            addon_name,
+        } => {
             let repo_name = app
                 .repos
                 .iter()
@@ -1416,11 +1507,17 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 repo_id,
                 repo_name,
                 addon_name: addon_name.clone(),
-                files: vec![(format!("Interface/AddOns/{}", addon_name), "addon".to_string())],
+                files: vec![(
+                    format!("Interface/AddOns/{}", addon_name),
+                    "addon".to_string(),
+                )],
             });
             Some(Task::none())
         }
-        Message::RemoveCollectionAddonConfirm { repo_id, addon_name } => {
+        Message::RemoveCollectionAddonConfirm {
+            repo_id,
+            addon_name,
+        } => {
             let Some(repo) = app.repos.iter().find(|repo| repo.id == repo_id).cloned() else {
                 return Some(Task::none());
             };
@@ -1441,7 +1538,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             let wow = app.wow_dir.clone();
             let opts = app.install_options();
             app.dialog = None;
-            app.log(LogLevel::Info, &format!("Removing '{}' from collection repo id={}...", addon_name, repo_id));
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "Removing '{}' from collection repo id={}...",
+                    addon_name, repo_id
+                ),
+            );
             Some(Task::perform(
                 service::update_collection_selection(db, repo_id, wow, selected, opts),
                 Message::SaveCollectionSelectionResult,
@@ -1449,9 +1552,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::RemoveRepoConfirm(id, remove_files) => {
             let db = app.db_path.clone();
-            let wow = if app.wow_dir.is_empty() { None } else { Some(app.wow_dir.clone()) };
+            let wow = if app.wow_dir.is_empty() {
+                None
+            } else {
+                Some(app.wow_dir.clone())
+            };
             app.dialog = None;
-            app.log(LogLevel::Info, &format!("Removing repo id={} (remove_files={})...", id, remove_files));
+            app.log(
+                LogLevel::Info,
+                &format!("Removing repo id={} (remove_files={})...", id, remove_files),
+            );
             Some(Task::perform(
                 service::remove_repo(db, id, wow, remove_files),
                 Message::RemoveRepoResult,
@@ -1479,22 +1589,44 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 app.ignored_update_ids.insert(id);
             }
             app.save_settings();
-            let repo_name = app.repos.iter().find(|r| r.id == id).map(|r| r.name.as_str()).unwrap_or("?");
-            app.log(LogLevel::Info, &format!("Repo '{}': updates {}.", repo_name, if was_ignored { "unignored" } else { "ignored" }));
+            let repo_name = app
+                .repos
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| r.name.as_str())
+                .unwrap_or("?");
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "Repo '{}': updates {}.",
+                    repo_name,
+                    if was_ignored { "unignored" } else { "ignored" }
+                ),
+            );
             Some(Task::none())
         }
         Message::ToggleMergeInstalls(id, merge) => {
-            let repo_name = app.repos.iter().find(|r| r.id == id).map(|r| r.name.clone()).unwrap_or_default();
-            app.log(LogLevel::Info, &format!("Repo '{}': merge installs {}.", repo_name, if merge { "enabled" } else { "disabled" }));
+            let repo_name = app
+                .repos
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| r.name.clone())
+                .unwrap_or_default();
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "Repo '{}': merge installs {}.",
+                    repo_name,
+                    if merge { "enabled" } else { "disabled" }
+                ),
+            );
             let db = app.db_path.clone();
             Some(iced::Task::perform(
                 service::set_merge_installs(db, id, merge),
                 Message::ToggleMergeInstallsResult,
             ))
         }
-        Message::ToggleMergeInstallsResult(Ok(_id)) => {
-            Some(refresh_repos_task(app))
-        }
+        Message::ToggleMergeInstallsResult(Ok(_id)) => Some(refresh_repos_task(app)),
         Message::ToggleMergeInstallsResult(Err(e)) => {
             app.log(LogLevel::Error, &format!("Toggle merge failed: {}", e));
             Some(Task::none())
@@ -1539,14 +1671,20 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             let db = app.db_path.clone();
             let v_str = version.clone().unwrap_or_else(|| "none".to_string());
-            app.log(LogLevel::Info, &format!("Pinning version to '{}' for repo id={}...", v_str, id));
+            app.log(
+                LogLevel::Info,
+                &format!("Pinning version to '{}' for repo id={}...", v_str, id),
+            );
             Some(Task::perform(
                 service::set_pinned_version(db, id, version),
                 Message::SetPinnedVersionResult,
             ))
         }
         Message::SetPinnedVersionResult(Ok(_id)) => {
-            app.log(LogLevel::Info, "Version pin updated. Re-checking updates...");
+            app.log(
+                LogLevel::Info,
+                "Version pin updated. Re-checking updates...",
+            );
             // A version choice must always be evaluated, even when this repo
             // would normally be skipped by the low-frequency API check.
             Some(Task::batch(vec![
@@ -1565,7 +1703,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if merge {
                 let db = app.db_path.clone();
                 return Some(Task::batch(vec![
-                    Task::perform(service::set_merge_installs(db, repo_id, true), Message::ToggleMergeInstallsResult),
+                    Task::perform(
+                        service::set_merge_installs(db, repo_id, true),
+                        Message::ToggleMergeInstallsResult,
+                    ),
                     Task::done(Message::UpdateRepo(repo_id)),
                 ]));
             } else {
@@ -1588,6 +1729,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::UpdateRepo(id) => {
             app.open_menu = None;
+            if app
+                .repos
+                .iter()
+                .find(|repo| repo.id == id)
+                .map(service::is_wdm_repo)
+                .unwrap_or(false)
+            {
+                return Some(Task::done(Message::OpenWdm));
+            }
             if app.wow_dir.is_empty() {
                 app.log(LogLevel::Error, "Set a WoW directory in Options first.");
             } else {
@@ -1613,7 +1763,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     }
                 }
                 if let Some(repo) = app.repos.iter().find(|r| r.id == id) {
-                    app.log(LogLevel::Info, &format!("Updating {}/{}...", repo.owner, repo.name));
+                    app.log(
+                        LogLevel::Info,
+                        &format!("Updating {}/{}...", repo.owner, repo.name),
+                    );
                 }
                 app.updating_repo_ids.insert(id);
                 let db = app.db_path.clone();
@@ -1694,7 +1847,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 let mut targets = Vec::new();
                 let mut names = Vec::new();
                 for plan in &app.plans {
-                    if plan.has_update && !app.ignored_update_ids.contains(&plan.repo_id) {
+                    let curated_wdm = app
+                        .repos
+                        .iter()
+                        .find(|repo| repo.id == plan.repo_id)
+                        .map(service::is_wdm_repo)
+                        .unwrap_or(false);
+                    if plan.has_update
+                        && !curated_wdm
+                        && !app.ignored_update_ids.contains(&plan.repo_id)
+                    {
                         targets.push(plan.repo_id);
                         names.push(format!("{}/{}", plan.owner, plan.name));
                     }
@@ -1708,7 +1870,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 if targets.is_empty() {
                     app.log(LogLevel::Info, "Nothing to update.");
                 } else {
-                    app.log(LogLevel::Info, &format!("Updating {} repo(s)...", targets.len()));
+                    app.log(
+                        LogLevel::Info,
+                        &format!("Updating {} repo(s)...", targets.len()),
+                    );
                     return Some(Task::perform(
                         service::update_all(db, wow, targets, opts),
                         Message::UpdateAllResult,
@@ -1727,7 +1892,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         let name = format!("{}/{}", r.owner, r.name);
                         if let Some(e) = r.error {
                             errors += 1;
-                            app.log(LogLevel::Error, &format!("{} update failed: {}", name, simplify_git_error(&e)));
+                            app.log(
+                                LogLevel::Error,
+                                &format!("{} update failed: {}", name, simplify_git_error(&e)),
+                            );
                         } else {
                             applied += 1;
                             app.log(LogLevel::Info, &format!("Updated {}.", name));
@@ -1736,9 +1904,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         }
                     }
                     if errors > 0 {
-                        app.show_toast(format!("Update all partial: {} OK, {} failed.", applied, errors), ToastKind::Warn);
+                        app.show_toast(
+                            format!("Update all partial: {} OK, {} failed.", applied, errors),
+                            ToastKind::Warn,
+                        );
                     } else if applied > 0 {
-                        app.log(LogLevel::Info, &format!("Done. Updated {} repo(s).", applied));
+                        app.log(
+                            LogLevel::Info,
+                            &format!("Done. Updated {} repo(s).", applied),
+                        );
                         app.show_toast(format!("Updated {} repo(s).", applied), ToastKind::Info);
                     }
                     return Some(refresh_repos_task(app));
@@ -1761,7 +1935,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     let repo = repo.expect("checked addon_git repo");
                     app.log(
                         LogLevel::Info,
-                        &format!("Inspecting {}/{} before clean reinstall...", repo.owner, repo.name),
+                        &format!(
+                            "Inspecting {}/{} before clean reinstall...",
+                            repo.owner, repo.name
+                        ),
                     );
                     let db = app.db_path.clone();
                     let wow = app.wow_dir.clone();
@@ -1787,7 +1964,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::ReinstallRepoProbeResult { repo_id, result } => {
             let Some(repo) = app.repos.iter().find(|repo| repo.id == repo_id).cloned() else {
-                app.log(LogLevel::Error, "Reinstall failed: repository is no longer tracked.");
+                app.log(
+                    LogLevel::Error,
+                    "Reinstall failed: repository is no longer tracked.",
+                );
                 return Some(Task::none());
             };
 
@@ -1836,7 +2016,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::ReinstallRepoResult(result) => {
             match result {
                 Ok(plan) => {
-                    app.log(LogLevel::Info, &format!("Reinstalled {}/{}.", plan.owner, plan.name));
+                    app.log(
+                        LogLevel::Info,
+                        &format!("Reinstalled {}/{}.", plan.owner, plan.name),
+                    );
                     return Some(refresh_repos_task(app));
                 }
                 Err(e) => app.log(LogLevel::Error, &format!("Reinstall failed: {}", e)),
@@ -1856,12 +2039,21 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.branches.insert(repo_id, branch_list);
                 }
                 Err(e) => {
-                    let repo_name = app.repos.iter()
+                    let repo_name = app
+                        .repos
+                        .iter()
                         .find(|r| r.id == repo_id)
                         .map(|r| format!("{}/{}", r.owner, r.name))
                         .unwrap_or_else(|| format!("repo#{}", repo_id));
                     if !is_silenced_git_error(&e) {
-                        app.log(LogLevel::Error, &format!("Failed to fetch branches for {}: {}", repo_name, simplify_git_error(&e)));
+                        app.log(
+                            LogLevel::Error,
+                            &format!(
+                                "Failed to fetch branches for {}: {}",
+                                repo_name,
+                                simplify_git_error(&e)
+                            ),
+                        );
                     }
                 }
             }
@@ -1869,7 +2061,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::SetRepoBranch(repo_id, branch) => {
             let db = app.db_path.clone();
-            app.log(LogLevel::Info, &format!("Setting branch to '{}' for repo id={}...", branch, repo_id));
+            app.log(
+                LogLevel::Info,
+                &format!("Setting branch to '{}' for repo id={}...", branch, repo_id),
+            );
             Some(Task::perform(
                 service::set_repo_branch(db, repo_id, branch),
                 Message::SetRepoBranchResult,
@@ -1882,20 +2077,29 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.branches.remove(&repo_id);
                     return Some(refresh_repos_task(app));
                 }
-                Err(e) => app.log(LogLevel::Error, &format!("Set branch failed: {}", simplify_git_error(&e))),
+                Err(e) => app.log(
+                    LogLevel::Error,
+                    &format!("Set branch failed: {}", simplify_git_error(&e)),
+                ),
             }
             Some(Task::none())
         }
         Message::UpdateCheckRateLimitResult(stats, info) => {
             app.github_rate_info = info;
 
-            let updates = if stats.updates_found == 1 { "update" } else { "updates" };
-            let mut parts = vec![
-                format!("{} {}", stats.updates_found, updates)
-            ];
+            let updates = if stats.updates_found == 1 {
+                "update"
+            } else {
+                "updates"
+            };
+            let mut parts = vec![format!("{} {}", stats.updates_found, updates)];
 
             if stats.api_hits > 0 {
-                parts.push(format!("spent {} API point{}", stats.api_hits, if stats.api_hits == 1 { "" } else { "s" }));
+                parts.push(format!(
+                    "spent {} API point{}",
+                    stats.api_hits,
+                    if stats.api_hits == 1 { "" } else { "s" }
+                ));
             }
             if stats.api_cached > 0 {
                 parts.push(format!("{} cached (free)", stats.api_cached));
@@ -1904,18 +2108,28 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 parts.push(format!("{} synced (git)", stats.git_syncs));
             }
             if stats.other_hits > 0 {
-                parts.push(format!("{} other check{}", stats.other_hits, if stats.other_hits == 1 { "" } else { "s" }));
+                parts.push(format!(
+                    "{} other check{}",
+                    stats.other_hits,
+                    if stats.other_hits == 1 { "" } else { "s" }
+                ));
             }
 
             let summary = parts.join(", ");
             let rate_suffix = if let Some(r) = &app.github_rate_info {
                 let mins = (r.reset_epoch - now_unix()) / 60;
-                format!(". ({}/{} remaining, resets in {} min)", r.remaining, r.limit, mins)
+                format!(
+                    ". ({}/{} remaining, resets in {} min)",
+                    r.remaining, r.limit, mins
+                )
             } else {
                 "".to_string()
             };
 
-            app.log(LogLevel::Api, &format!("Check complete: {}{}", summary, rate_suffix));
+            app.log(
+                LogLevel::Api,
+                &format!("Check complete: {}{}", summary, rate_suffix),
+            );
             None
         }
 
@@ -1924,7 +2138,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::ToggleRemoveFiles(val) => {
-            if let Some(Dialog::RemoveRepo { ref mut remove_files, .. }) = app.dialog {
+            if let Some(Dialog::RemoveRepo {
+                ref mut remove_files,
+                ..
+            }) = app.dialog
+            {
                 *remove_files = val;
             }
             Some(Task::none())
@@ -1940,7 +2158,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         });
                         *files = entries;
                     }
-                    Err(e) => app.log(LogLevel::Error, &format!("Failed to list files for removal: {}", e)),
+                    Err(e) => app.log(
+                        LogLevel::Error,
+                        &format!("Failed to list files for removal: {}", e),
+                    ),
                 }
             }
             Some(Task::none())
@@ -1955,7 +2176,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::FetchRepoPreviewResult(url, result) => {
             app.add_repo_preview_loading = false;
-            if let Some(Dialog::AddRepo { url: current_url, .. }) = app.dialog.as_ref() {
+            if let Some(Dialog::AddRepo {
+                url: current_url, ..
+            }) = app.dialog.as_ref()
+            {
                 if service::normalize_repo_input_url(current_url)
                     != service::normalize_repo_input_url(&url)
                 {
@@ -1964,7 +2188,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             match result {
                 Ok(info) => {
-                    app.readme_editor_content = iced::widget::text_editor::Content::with_text(&info.readme_text);
+                    app.readme_editor_content =
+                        iced::widget::text_editor::Content::with_text(&info.readme_text);
                     app.readme_source_view = false;
                     app.add_repo_release_notes = None;
                     app.add_repo_show_releases = false;
@@ -1997,8 +2222,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.add_repo_preview = Some(info.clone());
 
                     // Update AddonConflict dialog if visible for this repo
-                    if let Some(Dialog::AddonConflict { url: ref d_url, ref mut new_repo_preview, .. }) = app.dialog {
-                        if service::normalize_repo_input_url(d_url) == service::normalize_repo_input_url(&url) {
+                    if let Some(Dialog::AddonConflict {
+                        url: ref d_url,
+                        ref mut new_repo_preview,
+                        ..
+                    }) = app.dialog
+                    {
+                        if service::normalize_repo_input_url(d_url)
+                            == service::normalize_repo_input_url(&url)
+                        {
                             *new_repo_preview = Some(info.files.clone());
                         }
                     }
@@ -2029,10 +2261,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             ))
         }
         Message::FetchReleaseAssetOptionsResult(url, result) => {
-            let Some(Dialog::AddRepo { url: current_url, .. }) = app.dialog.as_ref() else {
+            let Some(Dialog::AddRepo {
+                url: current_url, ..
+            }) = app.dialog.as_ref()
+            else {
                 return Some(Task::none());
             };
-            if service::normalize_repo_input_url(current_url) != service::normalize_repo_input_url(&url) {
+            if service::normalize_repo_input_url(current_url)
+                != service::normalize_repo_input_url(&url)
+            {
                 return Some(Task::none());
             }
 
@@ -2093,12 +2330,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
-        Message::FetchDirContents(forge_url, path) => {
-            Some(Task::perform(
-                service::fetch_dir_contents(forge_url, path),
-                Message::FetchDirContentsResult,
-            ))
-        }
+        Message::FetchDirContents(forge_url, path) => Some(Task::perform(
+            service::fetch_dir_contents(forge_url, path),
+            Message::FetchDirContentsResult,
+        )),
         Message::FetchDirContentsResult(result) => {
             if let Ok((dir_path, entries)) = result {
                 let mut sorted = entries;
@@ -2128,7 +2363,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Ok(releases) => {
                     app.add_repo_release_notes = Some(releases.clone());
                     // Also update dialog if it's the changelog
-                    if let Some(Dialog::Changelog { ref mut items, ref mut loading, ref mut title }) = app.dialog {
+                    if let Some(Dialog::Changelog {
+                        ref mut items,
+                        ref mut loading,
+                        ref mut title,
+                    }) = app.dialog
+                    {
                         *loading = false;
                         *title = "Changelog".to_string();
                         // Transform ReleaseItem into Markdown Item
@@ -2138,13 +2378,18 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             markdown_text.push_str(&rel.body);
                             markdown_text.push_str("\n\n---\n\n");
                         }
-                        *items = iced::widget::markdown::Content::parse(&markdown_text).items().to_vec();
+                        *items = iced::widget::markdown::Content::parse(&markdown_text)
+                            .items()
+                            .to_vec();
                     }
                 }
                 Err(e) => {
                     app.add_repo_show_releases = false;
                     app.log(LogLevel::Error, &format!("Failed to fetch releases: {}", e));
-                    if let Some(Dialog::Changelog { ref mut loading, .. }) = app.dialog {
+                    if let Some(Dialog::Changelog {
+                        ref mut loading, ..
+                    }) = app.dialog
+                    {
                         *loading = false;
                     }
                 }
@@ -2202,10 +2447,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             ));
         }
         Message::SetAddRepoUrl(url) => {
-            if let Some(Dialog::AddRepo { url: ref mut old_url, .. }) = app.dialog {
+            if let Some(Dialog::AddRepo {
+                url: ref mut old_url,
+                ..
+            }) = app.dialog
+            {
                 *old_url = url.clone();
             }
-            app.add_repo_url_debounce_generation = app.add_repo_url_debounce_generation.wrapping_add(1);
+            app.add_repo_url_debounce_generation =
+                app.add_repo_url_debounce_generation.wrapping_add(1);
             let debounce_generation = app.add_repo_url_debounce_generation;
             let mut tasks = vec![iced::widget::operation::focus(iced::widget::Id::new(
                 "add_repo_url",
@@ -2249,7 +2499,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if generation != app.add_repo_url_debounce_generation {
                 return Some(Task::none());
             }
-            if let Some(Dialog::AddRepo { url: current_url, .. }) = app.dialog.as_ref() {
+            if let Some(Dialog::AddRepo {
+                url: current_url, ..
+            }) = app.dialog.as_ref()
+            {
                 if service::normalize_repo_input_url(current_url)
                     != service::normalize_repo_input_url(&url)
                 {
@@ -2274,7 +2527,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::ResolveAddRepoUrl => {
-            app.add_repo_url_debounce_generation = app.add_repo_url_debounce_generation.wrapping_add(1);
+            app.add_repo_url_debounce_generation =
+                app.add_repo_url_debounce_generation.wrapping_add(1);
             let (url, is_addons, mode) = if let Some(Dialog::AddRepo {
                 ref url,
                 ref mode,
@@ -2317,8 +2571,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::OpenModFileInfo(name) => {
             // Priority: if it's a WeirdUtils DLL, try to fetch live info from the README first.
-            if WEIRD_UTILS_DLLS.iter().any(|&d| d.eq_ignore_ascii_case(&name)) {
-                app.dialog = Some(Dialog::Changelog { title: name.clone(), items: Vec::new(), loading: true });
+            if WEIRD_UTILS_DLLS
+                .iter()
+                .any(|&d| d.eq_ignore_ascii_case(&name))
+            {
+                app.dialog = Some(Dialog::Changelog {
+                    title: name.clone(),
+                    items: Vec::new(),
+                    loading: true,
+                });
                 return Some(Task::perform(
                     service::fetch_dll_description(name),
                     Message::FetchDllDescriptionResult,
@@ -2326,15 +2587,30 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
 
             // Check if we have a hardcoded description for this DLL (non-WeirdUtils fallback or legacy)
-            if let Some((dll, desc)) = WEIRD_UTILS_DESCRIPTIONS.iter().find(|(dll, _)| dll.eq_ignore_ascii_case(&name)) {
-                let items = iced::widget::markdown::Content::parse(desc).items().to_vec();
-                app.dialog = Some(Dialog::Changelog { title: dll.to_string(), items, loading: false });
+            if let Some((dll, desc)) = WEIRD_UTILS_DESCRIPTIONS
+                .iter()
+                .find(|(dll, _)| dll.eq_ignore_ascii_case(&name))
+            {
+                let items = iced::widget::markdown::Content::parse(desc)
+                    .items()
+                    .to_vec();
+                app.dialog = Some(Dialog::Changelog {
+                    title: dll.to_string(),
+                    items,
+                    loading: false,
+                });
                 return Some(Task::none());
             }
 
             // Fallback: search for a repo with this name AND a forge_url (likely release notes)
-            app.dialog = Some(Dialog::Changelog { title: name.clone(), items: Vec::new(), loading: true });
-            let url = app.repos.iter()
+            app.dialog = Some(Dialog::Changelog {
+                title: name.clone(),
+                items: Vec::new(),
+                loading: true,
+            });
+            let url = app
+                .repos
+                .iter()
                 .find(|r| r.name.eq_ignore_ascii_case(&name) && !r.url.is_empty())
                 .map(|r| r.url.clone());
 
@@ -2345,9 +2621,18 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 ));
             } else {
                 // If no repo found, just show "No info available"
-                if let Some(Dialog::Changelog { ref mut items, ref mut loading, .. }) = app.dialog {
+                if let Some(Dialog::Changelog {
+                    ref mut items,
+                    ref mut loading,
+                    ..
+                }) = app.dialog
+                {
                     *loading = false;
-                    *items = iced::widget::markdown::Content::parse("No additional information available for this mod.").items().to_vec();
+                    *items = iced::widget::markdown::Content::parse(
+                        "No additional information available for this mod.",
+                    )
+                    .items()
+                    .to_vec();
                 }
                 return Some(Task::none());
             }
@@ -2356,25 +2641,49 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::FetchDllDescriptionResult(result) => {
             match result {
                 Ok((name, desc)) => {
-                    if let Some(Dialog::Changelog { ref mut title, ref mut items, ref mut loading, .. }) = app.dialog {
+                    if let Some(Dialog::Changelog {
+                        ref mut title,
+                        ref mut items,
+                        ref mut loading,
+                        ..
+                    }) = app.dialog
+                    {
                         *title = name;
-                        *items = iced::widget::markdown::Content::parse(&desc).items().to_vec();
+                        *items = iced::widget::markdown::Content::parse(&desc)
+                            .items()
+                            .to_vec();
                         *loading = false;
                     }
                 }
                 Err(_e) => {
                     // Fallback to hardcoded description if fetch fails
                     let mut found_fallback = false;
-                    if let Some(Dialog::Changelog { ref mut title, ref mut items, ref mut loading, .. }) = app.dialog {
-                        if let Some((_dll, desc)) = WEIRD_UTILS_DESCRIPTIONS.iter().find(|(dll, _)| dll.eq_ignore_ascii_case(title)) {
-                            *items = iced::widget::markdown::Content::parse(desc).items().to_vec();
+                    if let Some(Dialog::Changelog {
+                        ref mut title,
+                        ref mut items,
+                        ref mut loading,
+                        ..
+                    }) = app.dialog
+                    {
+                        if let Some((_dll, desc)) = WEIRD_UTILS_DESCRIPTIONS
+                            .iter()
+                            .find(|(dll, _)| dll.eq_ignore_ascii_case(title))
+                        {
+                            *items = iced::widget::markdown::Content::parse(desc)
+                                .items()
+                                .to_vec();
                             *loading = false;
                             found_fallback = true;
                         }
                     }
-                    
+
                     if !found_fallback {
-                        if let Some(Dialog::Changelog { ref mut items, ref mut loading, .. }) = app.dialog {
+                        if let Some(Dialog::Changelog {
+                            ref mut items,
+                            ref mut loading,
+                            ..
+                        }) = app.dialog
+                        {
                             *loading = false;
                             *items = iced::widget::markdown::Content::parse("Could not fetch live information, and no offline description is available.").items().to_vec();
                         }
@@ -2407,7 +2716,10 @@ pub fn refresh_repos_task_inner(app: &App, fix_casing: bool) -> Task<Message> {
     } else {
         Some(app.wow_dir.clone())
     };
-    Task::perform(service::list_repos(db, wow, fix_casing), Message::ReposLoaded)
+    Task::perform(
+        service::list_repos(db, wow, fix_casing),
+        Message::ReposLoaded,
+    )
 }
 
 pub fn check_updates_task(app: &mut App) -> Task<Message> {
@@ -2425,7 +2737,10 @@ pub fn check_updates_task(app: &mut App) -> Task<Message> {
         }
         s
     } else {
-        app.log(LogLevel::Api, "Checking all repositories (authenticated)...");
+        app.log(
+            LogLevel::Api,
+            "Checking all repositories (authenticated)...",
+        );
         HashSet::new()
     };
 
@@ -2455,14 +2770,18 @@ pub const INFREQUENT_THRESHOLD_SECS: i64 = 3 * 24 * 3600;
 
 pub fn recompute_infrequent_ids(app: &mut App) {
     let now = now_unix();
-    let has_update: HashSet<i64> = app.plans.iter()
+    let has_update: HashSet<i64> = app
+        .plans
+        .iter()
         .filter(|p| p.has_update)
         .map(|p| p.repo_id)
         .collect();
-    app.infrequent_repo_ids = app.repos.iter()
+    app.infrequent_repo_ids = app
+        .repos
+        .iter()
         .filter(|r| {
             if has_update.contains(&r.id) {
-                return false; 
+                return false;
             }
             match r.published_at_unix {
                 Some(pub_at) => (now - pub_at) > INFREQUENT_THRESHOLD_SECS,
@@ -2473,7 +2792,11 @@ pub fn recompute_infrequent_ids(app: &mut App) {
         .collect();
 }
 
-pub fn infrequent_skip_ids(repos: &[service::RepoRow], plans: &[service::PlanRow], last_infrequent_check_unix: i64) -> HashSet<i64> {
+pub fn infrequent_skip_ids(
+    repos: &[service::RepoRow],
+    plans: &[service::PlanRow],
+    last_infrequent_check_unix: i64,
+) -> HashSet<i64> {
     let now = now_unix();
     let recently_checked = (now - last_infrequent_check_unix) < INFREQUENT_CHECK_INTERVAL_SECS;
 
@@ -2481,15 +2804,17 @@ pub fn infrequent_skip_ids(repos: &[service::RepoRow], plans: &[service::PlanRow
         return HashSet::new();
     }
 
-    let has_update: HashSet<i64> = plans.iter()
+    let has_update: HashSet<i64> = plans
+        .iter()
         .filter(|p| p.has_update)
         .map(|p| p.repo_id)
         .collect();
 
-    repos.iter()
+    repos
+        .iter()
         .filter(|r| {
             if has_update.contains(&r.id) {
-                return false; 
+                return false;
             }
             match r.published_at_unix {
                 Some(pub_at) => (now - pub_at) > INFREQUENT_THRESHOLD_SECS,
@@ -2500,28 +2825,24 @@ pub fn infrequent_skip_ids(repos: &[service::RepoRow], plans: &[service::PlanRow
         .collect()
 }
 
-
-
 pub fn is_silenced_git_error(raw: &str) -> bool {
     raw.contains("(-16)")
 }
 
 pub fn simplify_git_error(raw: &str) -> String {
     // Extract numeric error code from "code=Something (-NN)" anywhere in the raw string.
-    let error_code: Option<String> = raw
-        .find("code=")
-        .and_then(|i| {
-            let after = &raw[i..];
-            let lparen = after.find('(')?;
-            let rparen = after.find(')')?;
-            if rparen > lparen {
-                let num = after[lparen + 1..rparen].trim();
-                if num.chars().all(|c| c.is_ascii_digit() || c == '-') {
-                    return Some(num.to_string());
-                }
+    let error_code: Option<String> = raw.find("code=").and_then(|i| {
+        let after = &raw[i..];
+        let lparen = after.find('(')?;
+        let rparen = after.find(')')?;
+        if rparen > lparen {
+            let num = after[lparen + 1..rparen].trim();
+            if num.chars().all(|c| c.is_ascii_digit() || c == '-') {
+                return Some(num.to_string());
             }
-            None
-        });
+        }
+        None
+    });
 
     // Unwrap "list remote ... (last tried ...): INNER" chains.
     let mut inner = raw;
@@ -2535,7 +2856,9 @@ pub fn simplify_git_error(raw: &str) -> String {
     }
 
     // Strip "Git sync check failed: " prefix if still present.
-    inner = inner.strip_prefix("Git sync check failed: ").unwrap_or(inner);
+    inner = inner
+        .strip_prefix("Git sync check failed: ")
+        .unwrap_or(inner);
 
     let lower = inner.to_lowercase();
     let msg = if lower.contains("authentication required")

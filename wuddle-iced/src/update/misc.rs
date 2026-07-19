@@ -1,6 +1,6 @@
-use crate::{App, LogLevel, Message, ToastKind};
 use crate::components::helpers::copy_to_clipboard;
 use crate::service;
+use crate::{App, LogLevel, Message, ToastKind};
 use iced::Task;
 use std::time::{Duration, Instant};
 
@@ -42,7 +42,9 @@ pub fn launch_game(app: &mut App) -> Task<Message> {
         app.log(LogLevel::Error, "Set a WoW directory in Options first.");
         Task::none()
     } else {
-        let active = app.profiles.iter()
+        let active = app
+            .profiles
+            .iter()
             .find(|p| p.id == app.active_profile_id)
             .cloned()
             .unwrap_or_default();
@@ -63,12 +65,16 @@ pub fn launch_game(app: &mut App) -> Task<Message> {
                 .then(|| active.selected_auto_login_account_id.clone())
                 .flatten(),
         };
-        app.log(LogLevel::Info, &format!(
-            "Launching game (method: {})...", cfg.method
-        ));
+        app.log(
+            LogLevel::Info,
+            &format!("Launching game (method: {})...", cfg.method),
+        );
         app.launch_in_progress = true;
         let wow = app.wow_dir.clone();
-        Task::perform(launch_game_with_minimum_feedback(wow, cfg), Message::LaunchGameResult)
+        Task::perform(
+            launch_game_with_minimum_feedback(wow, cfg),
+            Message::LaunchGameResult,
+        )
     }
 }
 
@@ -111,7 +117,11 @@ fn focus_existing_window() -> Task<Message> {
     })
 }
 
-fn launch_root_tool(app: &mut App, candidates: &[&str], result: fn(Result<String, String>) -> Message) -> Task<Message> {
+fn launch_root_tool(
+    app: &mut App,
+    candidates: &[&str],
+    result: fn(Result<String, String>) -> Message,
+) -> Task<Message> {
     if app.wow_dir.is_empty() {
         app.show_toast("Set a WoW directory in Options first.", ToastKind::Warn);
         return Task::none();

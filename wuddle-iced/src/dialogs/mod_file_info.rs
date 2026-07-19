@@ -1,11 +1,11 @@
 //! ModFileInfo dialog — shows a markdown README/description for a single DLL/addon file.
 
-use iced::widget::{column, row, scrollable, text, Space};
-use iced::widget::markdown;
-use iced::{Element, Font, Length};
-use crate::{Message, theme};
 use crate::components::helpers::close_button;
-use crate::components::markdown::{ImageViewer, empty_image_cache, empty_gif_cache};
+use crate::components::markdown::{empty_gif_cache, empty_image_cache, ImageViewer};
+use crate::{theme, Message};
+use iced::widget::markdown;
+use iced::widget::{column, row, scrollable, text, Space};
+use iced::{Element, Font, Length};
 use theme::ThemeColors;
 
 pub fn view<'a>(
@@ -45,13 +45,10 @@ pub fn view<'a>(
 
     column![
         row![
-            text(name)
-                .size(20)
-                .color(colors.title)
-                .font(Font {
-                    weight: iced::font::Weight::Bold,
-                    ..Default::default()
-                }),
+            text(name).size(20).color(colors.title).font(Font {
+                weight: iced::font::Weight::Bold,
+                ..Default::default()
+            }),
             Space::new().width(Length::Fill),
             close_button(c),
         ]

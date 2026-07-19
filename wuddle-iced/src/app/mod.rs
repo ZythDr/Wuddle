@@ -1,7 +1,6 @@
 use iced::widget::{
-    button, canvas, checkbox, column, container, float, mouse_area, pick_list, row, rule, scrollable,
-    stack, text,
-    Space,
+    button, canvas, checkbox, column, container, float, mouse_area, pick_list, row, rule,
+    scrollable, stack, text, Space,
 };
 use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
 use std::collections::{HashMap, HashSet};
@@ -13,6 +12,7 @@ use crate::components::helpers::*;
 use crate::components::markdown::ImageViewer;
 use crate::components::presets::build_quick_add_presets;
 use crate::dialogs::mods_warning;
+use crate::dialogs::patches_warning;
 use crate::dialogs::simple_warnings::{
     addon_conflict, av_false_positive_warning, collection_addon_conflict,
 };
@@ -75,6 +75,7 @@ pub struct App {
 
     // Engine data
     pub repos: Vec<RepoRow>,
+    pub untracked_mpqs: Vec<wuddle_engine::mpq::MpqProtectionEntry>,
     pub plans: Vec<PlanRow>,
     pub loading: bool,
     pub error: Option<String>,
@@ -131,6 +132,7 @@ pub struct App {
     #[cfg(feature = "auto-login")]
     pub auto_login_ui: crate::auto_login::UiState,
     pub auto_login_warning_acknowledged: bool,
+    pub mpq_ui: crate::mpq::UiState,
 
     // Spinner animation tick (0..36, one full rotation = 36 ticks @ 80ms each)
     pub spinner_tick: usize,
@@ -170,6 +172,7 @@ pub struct App {
     pub ignored_update_ids: HashSet<i64>,
     pub ignored_update_ids_by_profile: HashMap<String, HashSet<i64>>,
     pub mods_warning_dismissed_profile_ids: HashSet<String>,
+    pub patches_warning_dismissed_profile_ids: HashSet<String>,
 
     // GitHub API rate limit info (fetched after update checks)
     pub github_rate_info: Option<service::GitHubRateInfo>,
@@ -280,6 +283,7 @@ impl App {
             add_new_menu_open: false,
             branches: HashMap::new(),
             repos: Vec::new(),
+            untracked_mpqs: Vec::new(),
             plans: Vec::new(),
             cached_plans: HashMap::new(),
             loading: true,
@@ -322,6 +326,7 @@ impl App {
             #[cfg(feature = "auto-login")]
             auto_login_ui: crate::auto_login::UiState::default(),
             auto_login_warning_acknowledged: false,
+            mpq_ui: crate::mpq::UiState::default(),
             spinner_tick: 0,
             collection_marquee_hovered: false,
             collection_marquee_tick: 0,
@@ -348,6 +353,7 @@ impl App {
             ignored_update_ids: HashSet::new(),
             ignored_update_ids_by_profile: HashMap::new(),
             mods_warning_dismissed_profile_ids: HashSet::new(),
+            patches_warning_dismissed_profile_ids: HashSet::new(),
             github_rate_info: None,
             repo_versions: HashMap::new(),
             repo_versions_loading: HashSet::new(),
@@ -402,7 +408,8 @@ impl App {
     }
 
     pub fn reset_add_repo_state(&mut self) {
-        self.add_repo_url_debounce_generation = self.add_repo_url_debounce_generation.wrapping_add(1);
+        self.add_repo_url_debounce_generation =
+            self.add_repo_url_debounce_generation.wrapping_add(1);
         self.add_repo_preview = None;
         self.add_repo_preview_loading = false;
         self.add_repo_probe = None;
@@ -504,6 +511,15 @@ impl App {
                 ids.sort();
                 ids
             },
+            patches_warning_dismissed_profile_ids: {
+                let mut ids = self
+                    .patches_warning_dismissed_profile_ids
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                ids.sort();
+                ids
+            },
             update_channel: self.update_channel,
             ui_scale_mode: self.ui_scale_mode,
             migrated_from_tauri: self.migrated_from_tauri,
@@ -559,6 +575,7 @@ impl App {
             || self.updating_all
             || !self.updating_repo_ids.is_empty()
             || self.add_repo_preview_loading
+            || self.mpq_ui.busy
     }
 
     pub fn busy_reasons(&self) -> Vec<String> {
@@ -577,6 +594,9 @@ impl App {
         }
         if self.add_repo_preview_loading {
             reasons.push("loading add-repo preview".to_string());
+        }
+        if self.mpq_ui.busy {
+            reasons.push("managing MPQ patches".to_string());
         }
         reasons
     }
@@ -724,13 +744,15 @@ impl App {
 
         #[cfg(feature = "auto-login")]
         if self.auto_login_account_picker_tooltip_visible {
-            subs.push(iced::event::listen_with(|event, _status, _window| match event {
-                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_))
-                | iced::Event::Touch(iced::touch::Event::FingerPressed { .. }) => {
-                    Some(Message::DismissAutoLoginAccountPickerTooltip)
-                }
-                _ => None,
-            }));
+            subs.push(iced::event::listen_with(
+                |event, _status, _window| match event {
+                    iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_))
+                    | iced::Event::Touch(iced::touch::Event::FingerPressed { .. }) => {
+                        Some(Message::DismissAutoLoginAccountPickerTooltip)
+                    }
+                    _ => None,
+                },
+            ));
         }
 
         subs.push(iced::event::listen_with(
@@ -772,6 +794,7 @@ impl App {
         match tab {
             Tab::Home => "Home".into(),
             Tab::Mods => "Mods".into(),
+            Tab::Patches => "Patches".into(),
             Tab::Addons => "Addons".into(),
             Tab::Tweaks => "Tweaks".into(),
             _ => tab.icon_label().into(),
@@ -784,11 +807,26 @@ impl App {
             .find(|p| p.id == self.active_profile_id)
     }
 
+    pub fn profile_tab_enabled(&self, tab: Tab) -> bool {
+        let Some(profile) = self.active_profile() else {
+            return true;
+        };
+        match tab {
+            Tab::Mods => profile.show_mods_tab,
+            Tab::Addons => profile.show_addons_tab,
+            Tab::Patches => profile.show_patches_tab,
+            Tab::Tweaks => profile.show_tweaks_tab,
+            Tab::Home | Tab::Options | Tab::Logs | Tab::About => true,
+        }
+    }
+
     pub fn show_tweaks_tab(&self) -> bool {
-        self.tweak_client_info
-            .as_ref()
-            .map(|info| info.supports_legacy_1121_tweaks)
-            .unwrap_or(true)
+        self.profile_tab_enabled(Tab::Tweaks)
+            && self
+                .tweak_client_info
+                .as_ref()
+                .map(|info| info.supports_legacy_1121_tweaks)
+                .unwrap_or(true)
     }
 
     pub fn tweaks_disabled_reason(&self) -> Option<String> {
@@ -851,6 +889,9 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if let Some(task) = crate::mpq::update(self, message.clone()) {
+            return self.finish_update(task);
+        }
         #[cfg(feature = "auto-login")]
         if let Some(task) = crate::auto_login::update(self, message.clone()) {
             return self.finish_update(task);
@@ -873,12 +914,19 @@ impl App {
 
         match message {
             Message::SetTab(tab) => {
+                if !self.profile_tab_enabled(tab) {
+                    return Task::none();
+                }
                 if tab == Tab::Tweaks {
                     if let Some(reason) = self.tweaks_disabled_reason() {
                         self.log(LogLevel::Info, &reason);
                         self.show_toast(reason, ToastKind::Info);
                         return Task::none();
                     }
+                }
+                if tab == Tab::Patches || self.active_tab == Tab::Patches {
+                    self.filter = Filter::All;
+                    self.project_search.clear();
                 }
                 self.active_tab = tab;
                 self.log(LogLevel::Info, &format!("Switched to tab: {:?}.", tab));
@@ -888,6 +936,15 @@ impl App {
                         .contains(&self.active_profile_id)
                 {
                     self.dialog = Some(Dialog::ModsWarning {
+                        do_not_show_again: false,
+                    });
+                }
+                if tab == Tab::Patches
+                    && !self
+                        .patches_warning_dismissed_profile_ids
+                        .contains(&self.active_profile_id)
+                {
+                    self.dialog = Some(Dialog::PatchesWarning {
                         do_not_show_again: false,
                     });
                 }
@@ -1047,9 +1104,29 @@ impl App {
             }
 
             // Dialogs
-            Message::OpenDialog(d) => {
+            Message::OpenDialog(mut d) => {
                 self.open_menu = None;
                 self.add_new_menu_open = false;
+                if matches!(
+                    &d,
+                    Dialog::ManualMpq { .. }
+                        | Dialog::RenameManualMpq { .. }
+                        | Dialog::MpqComponent { .. }
+                ) {
+                    self.mpq_ui.error = None;
+                }
+                if let Dialog::RemoveRepo {
+                    id, remove_files, ..
+                } = &mut d
+                {
+                    if self
+                        .repos
+                        .iter()
+                        .any(|repo| repo.id == *id && repo.mode == "mpq")
+                    {
+                        *remove_files = true;
+                    }
+                }
                 let fetch_task = if let Dialog::RemoveRepo { id, .. } = &d {
                     let db = self.db_path.clone();
                     let repo_id = *id;
@@ -1112,12 +1189,26 @@ impl App {
                 }
             }
             Message::AcceptModsWarning => {
-                if let Some(Dialog::ModsWarning {
-                    do_not_show_again,
-                }) = self.dialog.take()
-                {
+                if let Some(Dialog::ModsWarning { do_not_show_again }) = self.dialog.take() {
                     if do_not_show_again {
                         self.mods_warning_dismissed_profile_ids
+                            .insert(self.active_profile_id.clone());
+                        self.save_settings();
+                    }
+                }
+            }
+            Message::TogglePatchesWarningDoNotShow(checked) => {
+                if let Some(Dialog::PatchesWarning {
+                    ref mut do_not_show_again,
+                }) = self.dialog
+                {
+                    *do_not_show_again = checked;
+                }
+            }
+            Message::AcceptPatchesWarning => {
+                if let Some(Dialog::PatchesWarning { do_not_show_again }) = self.dialog.take() {
+                    if do_not_show_again {
+                        self.patches_warning_dismissed_profile_ids
                             .insert(self.active_profile_id.clone());
                         self.save_settings();
                     }
@@ -1150,10 +1241,7 @@ impl App {
                 if busy.is_some() {
                     std::thread::spawn(move || {
                         if let Some(summary) = busy {
-                            eprintln!(
-                                "[Wuddle] Aborting on close request while busy: {}",
-                                summary
-                            );
+                            eprintln!("[Wuddle] Aborting on close request while busy: {}", summary);
                         }
                         std::thread::sleep(std::time::Duration::from_millis(750));
                         std::process::abort();
@@ -1396,6 +1484,12 @@ impl App {
             } else {
                 let (dialog_max_w, dialog_pad) = match dialog {
                     Dialog::AddRepo { .. } => (1400u32, 16),
+                    Dialog::MpqAdd => (1000u32, 16),
+                    Dialog::MpqInstall | Dialog::ProtectedMpqs | Dialog::WdmInstall => (760u32, 24),
+                    Dialog::MpqComponent { .. }
+                    | Dialog::ManualMpq { .. }
+                    | Dialog::RenameManualMpq { .. }
+                    | Dialog::RemoveWdm { .. } => (560u32, 24),
                     Dialog::InstanceSettings { .. } => (600u32, 24),
                     #[cfg(feature = "auto-login")]
                     Dialog::AutoLoginAccounts | Dialog::AutoLoginEditor => (640u32, 24),
@@ -1403,6 +1497,7 @@ impl App {
                     Dialog::AvWarning { .. } => (720u32, 24),
                     Dialog::AwesomeWotlkPatchWarning
                     | Dialog::ModsWarning { .. }
+                    | Dialog::PatchesWarning { .. }
                     | Dialog::CollectionChoice { .. }
                     | Dialog::SelectReleaseAsset { .. }
                     | Dialog::RemoveCollectionAddon { .. } => (650u32, 24),
@@ -1442,6 +1537,13 @@ impl App {
             let dismiss_on_backdrop = matches!(
                 dialog,
                 Dialog::AddRepo { .. }
+                    | Dialog::MpqAdd
+                    | Dialog::MpqInstall
+                    | Dialog::ProtectedMpqs
+                    | Dialog::WdmInstall
+                    | Dialog::MpqComponent { .. }
+                    | Dialog::ManualMpq { .. }
+                    | Dialog::RenameManualMpq { .. }
                     | Dialog::Changelog { .. }
                     | Dialog::DxvkConfig { .. }
                     | Dialog::InstanceSettings { .. }
@@ -1526,11 +1628,26 @@ impl App {
                         ToastKind::Warn => c.warn,
                         ToastKind::Error => c.bad,
                     };
-                    let accent = Color { a: accent_base.a * visibility, ..accent_base };
-                    let text_color = Color { a: c.text.a * visibility, ..c.text };
-                    let muted_color = Color { a: c.muted.a * visibility, ..c.muted };
-                    let link_color = Color { a: c.link.a * visibility, ..c.link };
-                    let card_color = Color { a: c.card.a * visibility, ..c.card };
+                    let accent = Color {
+                        a: accent_base.a * visibility,
+                        ..accent_base
+                    };
+                    let text_color = Color {
+                        a: c.text.a * visibility,
+                        ..c.text
+                    };
+                    let muted_color = Color {
+                        a: c.muted.a * visibility,
+                        ..c.muted
+                    };
+                    let link_color = Color {
+                        a: c.link.a * visibility,
+                        ..c.link
+                    };
+                    let card_color = Color {
+                        a: c.card.a * visibility,
+                        ..c.card
+                    };
                     let id = t.id;
 
                     let dismiss_btn = button(
@@ -1582,12 +1699,7 @@ impl App {
                                 color: accent_color,
                             },
                             shadow: iced::Shadow {
-                                color: iced::Color::from_rgba(
-                                    0.0,
-                                    0.0,
-                                    0.0,
-                                    0.35 * visibility,
-                                ),
+                                color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.35 * visibility),
                                 offset: iced::Vector::new(0.0, 4.0),
                                 blur_radius: 12.0,
                             },
@@ -1595,8 +1707,8 @@ impl App {
                             snap: true,
                         });
 
-                    let dismissible = mouse_area(toast_card)
-                        .on_right_press(Message::DismissToast(id));
+                    let dismissible =
+                        mouse_area(toast_card).on_right_press(Message::DismissToast(id));
                     float(dismissible)
                         .translate(move |_bounds, _viewport| {
                             iced::Vector::new(0.0, (1.0 - visibility) * 14.0)
@@ -1638,6 +1750,14 @@ impl App {
     ) -> Element<'a, Message> {
         let c = colors;
         match dialog {
+            Dialog::MpqAdd
+            | Dialog::MpqInstall
+            | Dialog::ProtectedMpqs
+            | Dialog::WdmInstall
+            | Dialog::MpqComponent { .. }
+            | Dialog::ManualMpq { .. }
+            | Dialog::RenameManualMpq { .. }
+            | Dialog::RemoveWdm { .. } => crate::mpq::view_dialog(self, dialog, colors),
             #[cfg(feature = "auto-login")]
             Dialog::AutoLoginAccounts
             | Dialog::AutoLoginEditor
@@ -2372,7 +2492,9 @@ impl App {
                             let mut collection_entries = self
                                 .add_repo_probe
                                 .as_ref()
-                                .filter(|probe| treat_preview_as_collection && probe.addon_names.len() > 1)
+                                .filter(|probe| {
+                                    treat_preview_as_collection && probe.addon_names.len() > 1
+                                })
                                 .map(|probe| probe.addon_names.clone())
                                 .unwrap_or_default();
                             if collection_entries.is_empty() && treat_preview_as_collection {
@@ -2429,25 +2551,31 @@ impl App {
                                                 .width(Length::Fill)
                                                 .align_x(iced::Alignment::Center),
                                         )
-                                            .on_press(Message::SetCollectionSelection(select_entries))
-                                            .padding([6, 8])
-                                            .width(Length::Fill)
-                                            .style(move |_t, status| match status {
-                                                button::Status::Hovered => theme::tab_button_hovered_style(c_select),
+                                        .on_press(Message::SetCollectionSelection(select_entries))
+                                        .padding([6, 8])
+                                        .width(Length::Fill)
+                                        .style(
+                                            move |_t, status| match status {
+                                                button::Status::Hovered =>
+                                                    theme::tab_button_hovered_style(c_select),
                                                 _ => theme::tab_button_style(c_select),
-                                            }),
+                                            }
+                                        ),
                                         button(
                                             container(text("Clear all").size(13))
                                                 .width(Length::Fill)
                                                 .align_x(iced::Alignment::Center),
                                         )
-                                            .on_press(Message::SetCollectionSelection(Vec::new()))
-                                            .padding([6, 8])
-                                            .width(Length::Fill)
-                                            .style(move |_t, status| match status {
-                                                button::Status::Hovered => theme::tab_button_hovered_style(c_clear),
+                                        .on_press(Message::SetCollectionSelection(Vec::new()))
+                                        .padding([6, 8])
+                                        .width(Length::Fill)
+                                        .style(
+                                            move |_t, status| match status {
+                                                button::Status::Hovered =>
+                                                    theme::tab_button_hovered_style(c_clear),
                                                 _ => theme::tab_button_style(c_clear),
-                                            }),
+                                            }
+                                        ),
                                     ]
                                     .spacing(6)
                                     .align_y(iced::Alignment::Center),
@@ -2460,7 +2588,10 @@ impl App {
                             sidebar_col.push(files_label);
 
                             let collection_file_label =
-                                |label: String, full_name: String, color: Color| -> Element<Message> {
+                                |label: String,
+                                 full_name: String,
+                                 color: Color|
+                                 -> Element<Message> {
                                     // Do not animate ordinary labels. Overflowed names get both a
                                     // calm marquee and a full-name tooltip for immediate access.
                                     let may_overflow = label.chars().count() > 24;
@@ -2573,13 +2704,11 @@ impl App {
                                                 .align_y(iced::Alignment::Center)
                                                 .width(Length::Shrink)
                                                 .into();
-                                        let folder_label_button = button(
-                                            collection_file_label(
-                                                format!("{} {}", folder_icon, f.name),
-                                                f.name.clone(),
-                                                colors.text,
-                                            ),
-                                        )
+                                        let folder_label_button = button(collection_file_label(
+                                            format!("{} {}", folder_icon, f.name),
+                                            f.name.clone(),
+                                            colors.text,
+                                        ))
                                         .on_press(Message::ToggleAddRepoDir(path.clone()))
                                         .padding([3, 4])
                                         .width(Length::Fill)
@@ -2606,13 +2735,11 @@ impl App {
                                             .align_y(iced::Alignment::Center)
                                             .into()
                                     } else {
-                                        let folder_label_button = button(
-                                            collection_file_label(
-                                                format!("{} {}", folder_icon, f.name),
-                                                f.name.clone(),
-                                                colors.text,
-                                            ),
-                                        )
+                                        let folder_label_button = button(collection_file_label(
+                                            format!("{} {}", folder_icon, f.name),
+                                            f.name.clone(),
+                                            colors.text,
+                                        ))
                                         .on_press(Message::ToggleAddRepoDir(path.clone()))
                                         .padding([3, 4])
                                         .width(Length::Fill)
@@ -3003,13 +3130,11 @@ impl App {
                                     }
                                 } else {
                                     file_rows.push(
-                                        button(
-                                            collection_file_label(
-                                                format!("\u{1f4c4} {}", f.name),
-                                                f.name.clone(),
-                                                colors.text_soft,
-                                            ),
-                                        )
+                                        button(collection_file_label(
+                                            format!("\u{1f4c4} {}", f.name),
+                                            f.name.clone(),
+                                            colors.text_soft,
+                                        ))
                                         .on_press(Message::PreviewRepoFile(path))
                                         .padding([3, 4])
                                         .style(move |_t, status| match status {
@@ -3164,27 +3289,29 @@ impl App {
                         if let Some(ref releases) = self.add_repo_release_notes {
                             if releases.is_empty() {
                                 container(
-                                    container(text("No releases found.").size(13).color(colors.muted))
-                                        .width(Length::Fill)
-                                        .height(Length::Fill)
-                                        .align_x(iced::Alignment::Center)
-                                        .align_y(iced::Alignment::Center),
-                                )
+                                    container(
+                                        text("No releases found.").size(13).color(colors.muted),
+                                    )
                                     .width(Length::Fill)
                                     .height(Length::Fill)
-                                    .padding(8)
-                                    .style(move |_t| container::Style {
-                                        background: Some(iced::Background::Color(
-                                            iced::Color::from_rgba(0.0, 0.0, 0.0, 0.38),
-                                        )),
-                                        border: iced::Border {
-                                            color: c_form.border,
-                                            width: 1.0,
-                                            radius: iced::border::Radius::from(0),
-                                        },
-                                        ..Default::default()
-                                    })
-                                    .into()
+                                    .align_x(iced::Alignment::Center)
+                                    .align_y(iced::Alignment::Center),
+                                )
+                                .width(Length::Fill)
+                                .height(Length::Fill)
+                                .padding(8)
+                                .style(move |_t| container::Style {
+                                    background: Some(iced::Background::Color(
+                                        iced::Color::from_rgba(0.0, 0.0, 0.0, 0.38),
+                                    )),
+                                    border: iced::Border {
+                                        color: c_form.border,
+                                        width: 1.0,
+                                        radius: iced::border::Radius::from(0),
+                                    },
+                                    ..Default::default()
+                                })
+                                .into()
                             } else {
                                 let c_rl = c_form;
                                 let rn_theme = self.theme();
@@ -3451,11 +3578,7 @@ impl App {
                         .padding([12, 0])
                         .into()
                     } else if !is_addons && url.trim().is_empty() {
-                        build_quick_add_presets(
-                            &self.repos,
-                            self.quick_add_client_family(),
-                            colors,
-                        )
+                        build_quick_add_presets(&self.repos, self.quick_add_client_family(), colors)
                     } else {
                         Space::new().height(0).into()
                     };
@@ -3590,6 +3713,11 @@ impl App {
             } => {
                 let rid = *id;
                 let rf = *remove_files;
+                let is_mpq = files.iter().any(|(_, kind)| kind == "mpq")
+                    || self
+                        .repos
+                        .iter()
+                        .any(|repo| repo.id == rid && repo.mode == "mpq");
 
                 // File tree preview
                 let file_rows: Vec<Element<Message>> = files
@@ -3636,10 +3764,22 @@ impl App {
                         ..Default::default()
                     })
                     .into();
+                let remove_files_control: Element<Message> = if is_mpq {
+                    text("Tracked MPQs will be removed; displaced untracked files will be restored from backup.")
+                        .size(13)
+                        .color(colors.text)
+                        .into()
+                } else {
+                    checkbox(rf)
+                        .label("Also delete local files (DLLs / addon folders)")
+                        .on_toggle(Message::ToggleRemoveFiles)
+                        .text_size(13)
+                        .into()
+                };
 
                 column![
                     row![
-                        text("Remove Repository").size(18).color(colors.title),
+                        text(if is_mpq { "Remove MPQ Package" } else { "Remove Repository" }).size(18).color(colors.title),
                         Space::new().width(Length::Fill),
                         close_button(c),
                     ].align_y(iced::Alignment::Center),
@@ -3647,12 +3787,13 @@ impl App {
                         .size(13)
                         .color(colors.text),
                     file_section,
-                    checkbox(rf)
-                        .label("Also delete local files (DLLs / addon folders)")
-                        .on_toggle(Message::ToggleRemoveFiles)
-                        .text_size(13),
+                    remove_files_control,
                     text(if rf {
-                        "\u{26a0}\u{fe0f} Installed files will be permanently deleted from your WoW directory."
+                        if is_mpq {
+                            "Modified MPQs are kept and protected unless you explicitly remove them from their individual Manage dialog."
+                        } else {
+                            "\u{26a0}\u{fe0f} Installed files will be permanently deleted from your WoW directory."
+                        }
                     } else {
                         "Wuddle will stop tracking this mod. Local files will be left on disk."
                     })
@@ -3897,6 +4038,10 @@ impl App {
                 name,
                 wow_dir,
                 launch_method,
+                show_mods_tab,
+                show_addons_tab,
+                show_patches_tab,
+                show_tweaks_tab,
                 clear_wdb,
                 auto_login_enabled,
                 lutris_target,
@@ -3916,34 +4061,71 @@ impl App {
                 let is_active_profile = *profile_id == self.active_profile_id;
                 let remove_id = profile_id.clone();
 
-                let method_buttons: Vec<Element<Message>> = [
-                    ("Auto", "auto"),
-                    ("Lutris", "lutris"),
-                    ("Wine", "wine"),
-                    ("Custom", "custom"),
-                ]
-                .iter()
-                .map(|&(label, m)| {
-                    let c2 = c;
-                    let is_active = launch_method == m;
-                    let m_str = String::from(m);
-                    let btn = button(text(label).size(12))
-                        .on_press(Message::UpdateInstanceField(InstanceField::LaunchMethod(
-                            m_str,
-                        )))
-                        .padding([4, 10]);
-                    if is_active {
-                        btn.style(move |_t, _s| theme::tab_button_active_style(c2))
+                let launch_method_label = match launch_method.as_str() {
+                    "lutris" => "Lutris",
+                    "wine" => "Wine",
+                    "custom" => "Custom",
+                    _ => "Auto",
+                }
+                .to_string();
+                let launch_method_picker = pick_list(
+                    vec![
+                        "Auto".to_string(),
+                        "Lutris".to_string(),
+                        "Wine".to_string(),
+                        "Custom".to_string(),
+                    ],
+                    Some(launch_method_label),
+                    |label| {
+                        Message::UpdateInstanceField(InstanceField::LaunchMethod(
+                            label.to_ascii_lowercase(),
+                        ))
+                    },
+                )
+                .text_size(13)
+                .width(Length::Fill);
+
+                let visibility_button =
+                    |label: &'static str, enabled: bool, field: InstanceField| {
+                        let c2 = c;
+                        let btn = button(text(label).size(12))
+                            .on_press(Message::UpdateInstanceField(field))
+                            .padding([4, 10]);
+                        let element: Element<Message> = if enabled {
+                            btn.style(move |_theme, _status| theme::tab_button_active_style(c2))
+                                .into()
+                        } else {
+                            btn.style(move |_theme, status| match status {
+                                button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                                _ => theme::tab_button_style(c2),
+                            })
                             .into()
-                    } else {
-                        btn.style(move |_t, s| match s {
-                            button::Status::Hovered => theme::tab_button_hovered_style(c2),
-                            _ => theme::tab_button_style(c2),
-                        })
-                        .into()
-                    }
-                })
-                .collect();
+                        };
+                        element
+                    };
+                let visible_tab_buttons = row![
+                    visibility_button(
+                        "Mods",
+                        *show_mods_tab,
+                        InstanceField::ShowModsTab(!*show_mods_tab),
+                    ),
+                    visibility_button(
+                        "Addons",
+                        *show_addons_tab,
+                        InstanceField::ShowAddonsTab(!*show_addons_tab),
+                    ),
+                    visibility_button(
+                        "Patches",
+                        *show_patches_tab,
+                        InstanceField::ShowPatchesTab(!*show_patches_tab),
+                    ),
+                    visibility_button(
+                        "Tweaks",
+                        *show_tweaks_tab,
+                        InstanceField::ShowTweaksTab(!*show_tweaks_tab),
+                    ),
+                ]
+                .spacing(4);
 
                 let (_, auto_launch_exe) = settings::normalize_wow_path_input(wow_dir);
 
@@ -4149,8 +4331,13 @@ impl App {
                     .height(32)
                     .align_y(iced::Alignment::Center),
                     text("Launch method").size(13).color(colors.text),
-                    row(method_buttons).spacing(4),
+                    launch_method_picker,
                     launch_fields,
+                    text("Visible tabs").size(13).color(colors.text),
+                    visible_tab_buttons,
+                    text("Home and Wuddle's utility buttons are always available. Tweaks also requires a supported WoW 1.12 client.")
+                        .size(11)
+                        .color(colors.muted),
                     Space::new().height(4),
                     {
                         let mut footer_items: Vec<Element<Message>> = Vec::new();
@@ -4248,8 +4435,10 @@ impl App {
                             ))
                             .width(15)
                             .height(15)
-                            .style(move |_t, _s| iced::widget::svg::Style {
-                                color: Some(c.text),
+                            .style(move |_t, _s| {
+                                iced::widget::svg::Style {
+                                    color: Some(c.text),
+                                }
                             }),
                         ]
                         .spacing(5)
@@ -4297,10 +4486,13 @@ impl App {
                 ]
                 .spacing(14)
                 .into()
-            },
+            }
             Dialog::AvWarning { url, mode } => av_false_positive_warning(url, mode, colors),
             Dialog::ModsWarning { do_not_show_again } => {
                 mods_warning::view(*do_not_show_again, colors)
+            }
+            Dialog::PatchesWarning { do_not_show_again } => {
+                patches_warning::view(*do_not_show_again, colors)
             }
             Dialog::AddonConflict {
                 url,
@@ -4480,7 +4672,10 @@ impl App {
 
                     let mut row_items = vec![
                         text("\u{1f4c1}").size(14).color(colors.muted).into(),
-                        text(format!("{name}.toc")).size(13).color(colors.text).into(),
+                        text(format!("{name}.toc"))
+                            .size(13)
+                            .color(colors.text)
+                            .into(),
                     ];
 
                     if is_suggested {
@@ -4619,12 +4814,16 @@ impl App {
             .color(colors.title)
             .line_height(1.0);
 
-        let mut view_tabs = row![
-            self.view_tab_button(Tab::Home, colors),
-            self.view_tab_button(Tab::Mods, colors),
-            self.view_tab_button(Tab::Addons, colors),
-        ]
-        .spacing(8);
+        let mut view_tabs = row![self.view_tab_button(Tab::Home, colors)].spacing(8);
+        if self.profile_tab_enabled(Tab::Mods) {
+            view_tabs = view_tabs.push(self.view_tab_button(Tab::Mods, colors));
+        }
+        if self.profile_tab_enabled(Tab::Addons) {
+            view_tabs = view_tabs.push(self.view_tab_button(Tab::Addons, colors));
+        }
+        if self.profile_tab_enabled(Tab::Patches) {
+            view_tabs = view_tabs.push(self.view_tab_button(Tab::Patches, colors));
+        }
         if self.show_tweaks_tab() {
             view_tabs = view_tabs.push(self.view_tab_button(Tab::Tweaks, colors));
         }
@@ -4800,7 +4999,7 @@ impl App {
             } else {
                 // Compact labels prevent the centered tab strip from crowding
                 // the profile selector and action buttons at larger UI scales.
-                Length::Fixed(96.0)
+                Length::Fixed(84.0)
             });
 
         let styled_btn: Element<Message> = if is_active {
@@ -4834,6 +5033,7 @@ impl App {
         let content: Element<Message> = match self.active_tab {
             Tab::Home => panels::home::view(self, colors),
             Tab::Mods => panels::projects::view(self, colors, "Mods"),
+            Tab::Patches => panels::projects::view(self, colors, "Patches"),
             Tab::Addons => panels::projects::view(self, colors, "Addons"),
             Tab::Tweaks => panels::tweaks::view(self, colors),
             Tab::Options => panels::options::view(self, colors),
@@ -4930,9 +5130,9 @@ impl App {
             account_picker,
             play_btn,
         ]
-            .spacing(12)
-            .padding([10, 12])
-            .align_y(iced::Alignment::Center);
+        .spacing(12)
+        .padding([10, 12])
+        .align_y(iced::Alignment::Center);
 
         container(bar)
             .width(Length::Fill)

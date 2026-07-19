@@ -51,23 +51,23 @@ pub enum DxvkField {
 /// State held inside Dialog::DxvkConfig.
 #[derive(Debug, Clone)]
 pub struct DxvkConfig {
-    pub max_frame_rate: String,       // d3d9.maxFrameRate
-    pub max_frame_latency: String,    // d3d9.maxFrameLatency
-    pub latency_sleep: TriState,      // dxvk.latencySleep
-    pub enable_dialog_mode: bool,     // d3d9.enableDialogMode
-    pub dpi_aware: bool,              // d3d9.dpiAware
-    pub present_interval: PresentInterval, // d3d9.presentInterval
-    pub tear_free: TriState,          // dxvk.tearFree
+    pub max_frame_rate: String,              // d3d9.maxFrameRate
+    pub max_frame_latency: String,           // d3d9.maxFrameLatency
+    pub latency_sleep: TriState,             // dxvk.latencySleep
+    pub enable_dialog_mode: bool,            // d3d9.enableDialogMode
+    pub dpi_aware: bool,                     // d3d9.dpiAware
+    pub present_interval: PresentInterval,   // d3d9.presentInterval
+    pub tear_free: TriState,                 // dxvk.tearFree
     pub sampler_anisotropy: AnisotropyLevel, // d3d9.samplerAnisotropy
-    pub clamp_negative_lod_bias: bool, // d3d9.clampNegativeLodBias
-    pub num_compiler_threads: String, // dxvk.numCompilerThreads
-    pub enable_gpl: TriState,         // dxvk.enableGraphicsPipelineLibrary
-    pub track_pipeline_lifetime: TriState, // dxvk.trackPipelineLifetime
-    pub defer_surface_creation: bool, // d3d9.deferSurfaceCreation
-    pub lenient_clear: bool,          // d3d9.lenientClear
-    pub log_path: String,             // dxvk.logPath
-    pub hud: String,                  // dxvk.hud
-    pub enable_async: bool,           // dxvk.enableAsync (gplasync fork)
+    pub clamp_negative_lod_bias: bool,       // d3d9.clampNegativeLodBias
+    pub num_compiler_threads: String,        // dxvk.numCompilerThreads
+    pub enable_gpl: TriState,                // dxvk.enableGraphicsPipelineLibrary
+    pub track_pipeline_lifetime: TriState,   // dxvk.trackPipelineLifetime
+    pub defer_surface_creation: bool,        // d3d9.deferSurfaceCreation
+    pub lenient_clear: bool,                 // d3d9.lenientClear
+    pub log_path: String,                    // dxvk.logPath
+    pub hud: String,                         // dxvk.hud
+    pub enable_async: bool,                  // dxvk.enableAsync (gplasync fork)
 }
 
 impl Default for DxvkConfig {
@@ -96,17 +96,66 @@ impl Default for DxvkConfig {
 
 #[derive(Debug, Clone)]
 pub enum Dialog {
-    AddRepo { url: String, mode: String, is_addons: bool, advanced: bool },
-    ModsWarning { do_not_show_again: bool },
-    RemoveRepo { id: i64, name: String, remove_files: bool, files: Vec<(String, String)> },
+    MpqAdd,
+    MpqInstall,
+    ProtectedMpqs,
+    WdmInstall,
+    RemoveWdm {
+        repo_id: i64,
+        addon_repo_id: i64,
+        remove_addon: bool,
+    },
+    MpqComponent {
+        repo_id: i64,
+        path: String,
+        display_name: String,
+        edited_display_name: String,
+        status: wuddle_engine::mpq::MpqFileStatus,
+    },
+    ManualMpq {
+        path: String,
+        display_name: String,
+        edited_display_name: String,
+    },
+    RenameManualMpq {
+        path: String,
+        file_name: String,
+        edited_file_name: String,
+        return_to_manage: bool,
+    },
+    AddRepo {
+        url: String,
+        mode: String,
+        is_addons: bool,
+        advanced: bool,
+    },
+    ModsWarning {
+        do_not_show_again: bool,
+    },
+    PatchesWarning {
+        do_not_show_again: bool,
+    },
+    RemoveRepo {
+        id: i64,
+        name: String,
+        remove_files: bool,
+        files: Vec<(String, String)>,
+    },
     RemoveCollectionAddon {
         repo_id: i64,
         repo_name: String,
         addon_name: String,
         files: Vec<(String, String)>,
     },
-    Changelog { title: String, items: Vec<iced::widget::markdown::Item>, loading: bool },
-    DxvkConfig { config: DxvkConfig, show_preview: bool },
+    Changelog {
+        title: String,
+        items: Vec<iced::widget::markdown::Item>,
+        loading: bool,
+    },
+    DxvkConfig {
+        config: DxvkConfig,
+        show_preview: bool,
+    },
     AwesomeWotlkPatchWarning,
     DllCountWarning {
         repo_id: i64,
@@ -119,7 +168,11 @@ pub enum Dialog {
         profile_id: String,
         name: String,
         wow_dir: String,
-        launch_method: String,  // "auto", "lutris", "wine", "custom"
+        launch_method: String, // "auto", "lutris", "wine", "custom"
+        show_mods_tab: bool,
+        show_addons_tab: bool,
+        show_patches_tab: bool,
+        show_tweaks_tab: bool,
         clear_wdb: bool,
         auto_login_enabled: bool,
         lutris_target: String,
@@ -137,7 +190,10 @@ pub enum Dialog {
         account_id: wuddle_engine::auto_login::AccountId,
         label: String,
     },
-    AvWarning { url: String, mode: String },
+    AvWarning {
+        url: String,
+        mode: String,
+    },
     AddonConflict {
         url: String,
         mode: String,

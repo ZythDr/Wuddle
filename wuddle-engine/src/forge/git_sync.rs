@@ -422,14 +422,16 @@ pub fn remote_branches(url: &str) -> Result<Vec<String>> {
 pub fn addon_direct_dir(wow_dir: &Path, repo_name: &str) -> PathBuf {
     // Use the raw repo name, matching GAM's behaviour. Forge repo names are
     // already filesystem-safe by the forge's own validation rules.
-    wow_dir
-        .join("Interface")
-        .join("AddOns")
-        .join(repo_name)
+    wow_dir.join("Interface").join("AddOns").join(repo_name)
 }
 
 /// Legacy staging path — used only during the one-time migration.
-pub fn addon_repo_legacy_staging_dir(wow_dir: &Path, host: &str, owner: &str, repo_name: &str) -> PathBuf {
+pub fn addon_repo_legacy_staging_dir(
+    wow_dir: &Path,
+    host: &str,
+    owner: &str,
+    repo_name: &str,
+) -> PathBuf {
     wow_dir
         .join("Interface")
         .join("AddOns")
@@ -491,7 +493,8 @@ mod tests {
         {
             let repo = Repository::open(&worktree).unwrap();
             repo.remote_rename("origin", "gam").unwrap();
-            repo.remote("origin", &wrong_path.to_string_lossy()).unwrap();
+            repo.remote("origin", &wrong_path.to_string_lossy())
+                .unwrap();
             let head_name = repo.head().unwrap().name().unwrap().to_string();
             let branch_name = head_name.strip_prefix("refs/heads/").unwrap();
             let mut config = repo.config().unwrap();
@@ -509,7 +512,10 @@ mod tests {
         commit_value(&right, &right_path, "right-v2");
         sync_repo(&wrong_path.to_string_lossy(), &worktree, None).unwrap();
 
-        assert_eq!(fs::read_to_string(worktree.join("value.txt")).unwrap(), "right-v2");
+        assert_eq!(
+            fs::read_to_string(worktree.join("value.txt")).unwrap(),
+            "right-v2"
+        );
         let repo = Repository::open(&worktree).unwrap();
         assert_eq!(
             repo.find_remote("origin").unwrap().url(),

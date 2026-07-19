@@ -7,10 +7,10 @@
 use iced::widget::{button, canvas, container, mouse_area, row, rule, Space};
 use iced::{Element, Length};
 
-use crate::{settings, App, Message, Tab, LIFECRAFT};
 use crate::components::helpers::tip;
-use crate::theme::{self, ThemeColors};
 use crate::components::helpers::SpinnerCanvas;
+use crate::theme::{self, ThemeColors};
+use crate::{settings, App, Message, Tab, LIFECRAFT};
 
 // ---------------------------------------------------------------------------
 // Top bar
@@ -25,12 +25,16 @@ pub fn view_topbar<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
         .color(colors.title)
         .line_height(1.0);
 
-    let mut view_tabs = row![
-        view_tab_button(app, Tab::Home, colors),
-        view_tab_button(app, Tab::Mods, colors),
-        view_tab_button(app, Tab::Addons, colors),
-    ]
-    .spacing(8);
+    let mut view_tabs = row![view_tab_button(app, Tab::Home, colors)].spacing(8);
+    if app.profile_tab_enabled(Tab::Mods) {
+        view_tabs = view_tabs.push(view_tab_button(app, Tab::Mods, colors));
+    }
+    if app.profile_tab_enabled(Tab::Addons) {
+        view_tabs = view_tabs.push(view_tab_button(app, Tab::Addons, colors));
+    }
+    if app.profile_tab_enabled(Tab::Patches) {
+        view_tabs = view_tabs.push(view_tab_button(app, Tab::Patches, colors));
+    }
     if app.show_tweaks_tab() {
         view_tabs = view_tabs.push(view_tab_button(app, Tab::Tweaks, colors));
     }
@@ -49,12 +53,15 @@ pub fn view_topbar<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
         tip(
             mouse_area(
                 container(
-                    canvas(SpinnerCanvas { tick, color: primary })
-                        .width(26)
-                        .height(26)
+                    canvas(SpinnerCanvas {
+                        tick,
+                        color: primary,
+                    })
+                    .width(26)
+                    .height(26),
                 )
                 .width(26)
-                .height(26)
+                .height(26),
             ),
             &app.busy_tooltip(),
             iced::widget::tooltip::Position::Bottom,
@@ -71,36 +78,51 @@ pub fn view_topbar<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
     let mut right_items: Vec<Element<Message>> = Vec::new();
 
     if app.profiles.len() > 1 {
-        let display_labels: Vec<String> = app.profiles.iter().map(|p| {
-            let dupes = app.profiles.iter().filter(|q| q.name == p.name).count();
-            if dupes > 1 { format!("{} ({})", p.name, p.id) } else { p.name.clone() }
-        }).collect();
+        let display_labels: Vec<String> = app
+            .profiles
+            .iter()
+            .map(|p| {
+                let dupes = app.profiles.iter().filter(|q| q.name == p.name).count();
+                if dupes > 1 {
+                    format!("{} ({})", p.name, p.id)
+                } else {
+                    p.name.clone()
+                }
+            })
+            .collect();
 
-        let active_display = app.profiles.iter()
+        let active_display = app
+            .profiles
+            .iter()
             .find(|p| p.id == app.active_profile_id)
             .map(|p| {
                 let dupes = app.profiles.iter().filter(|q| q.name == p.name).count();
-                if dupes > 1 { format!("{} ({})", p.name, p.id) } else { p.name.clone() }
+                if dupes > 1 {
+                    format!("{} ({})", p.name, p.id)
+                } else {
+                    p.name.clone()
+                }
             })
             .unwrap_or_else(|| "Default".to_string());
 
-        let profile_picker: Element<Message> = iced::widget::pick_list(
-            display_labels,
-            Some(active_display),
-            {
+        let profile_picker: Element<Message> =
+            iced::widget::pick_list(display_labels, Some(active_display), {
                 let profiles = app.profiles.clone();
                 move |display: String| {
                     let profile = profiles.iter().find(|p| {
                         let dupes = profiles.iter().filter(|q| q.name == p.name).count();
-                        let label = if dupes > 1 { format!("{} ({})", p.name, p.id) } else { p.name.clone() };
+                        let label = if dupes > 1 {
+                            format!("{} ({})", p.name, p.id)
+                        } else {
+                            p.name.clone()
+                        };
                         label == display
                     });
                     Message::SwitchProfile(profile.map(|p| p.id.clone()).unwrap_or_default())
                 }
-            },
-        )
-        .text_size(13)
-        .into();
+            })
+            .text_size(13)
+            .into();
 
         let divider = rule::vertical(1).style(move |_theme| theme::divider_style(c));
         right_items.push(profile_picker);
@@ -108,7 +130,9 @@ pub fn view_topbar<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
     }
 
     right_items.push(action_tabs.into());
-    let right_section = row(right_items).spacing(10).align_y(iced::Alignment::Center);
+    let right_section = row(right_items)
+        .spacing(10)
+        .align_y(iced::Alignment::Center);
 
     const BAR_H: f32 = 58.0;
 
@@ -132,7 +156,9 @@ pub fn view_topbar<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
         .align_y(iced::Alignment::Center)
         .padding([0, 0]);
 
-    let bar = iced::widget::stack![sides, center].width(Length::Fill).height(BAR_H);
+    let bar = iced::widget::stack![sides, center]
+        .width(Length::Fill)
+        .height(BAR_H);
 
     container(bar)
         .width(Length::Fill)
@@ -169,7 +195,9 @@ pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: ThemeColors) -> Eleme
             iced::widget::svg(tab_icon_svg(tab))
                 .width(17)
                 .height(17)
-                .style(move |_t, _s| iced::widget::svg::Style { color: Some(icon_color) })
+                .style(move |_t, _s| iced::widget::svg::Style {
+                    color: Some(icon_color),
+                }),
         )
         .width(Length::Fill)
         .center_x(Length::Fill)
@@ -183,7 +211,10 @@ pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: ThemeColors) -> Eleme
             c.text
         };
         container(
-            iced::widget::text(tab.icon_label()).size(17).color(icon_color).line_height(1.0),
+            iced::widget::text(tab.icon_label())
+                .size(17)
+                .color(icon_color)
+                .line_height(1.0),
         )
         .center_x(Length::Fill)
         .into()
@@ -198,11 +229,16 @@ pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: ThemeColors) -> Eleme
 
     let btn = button(content)
         .padding([7, 0])
-        .width(if is_icon || is_unicode_icon { Length::Fixed(32.0) } else { Length::Fixed(96.0) })
+        .width(if is_icon || is_unicode_icon {
+            Length::Fixed(32.0)
+        } else {
+            Length::Fixed(84.0)
+        })
         .on_press(Message::SetTab(tab));
 
     let styled_btn: Element<Message> = if is_active {
-        btn.style(move |_theme, _status| theme::tab_button_active_style(c)).into()
+        btn.style(move |_theme, _status| theme::tab_button_active_style(c))
+            .into()
     } else {
         btn.style(move |_theme, status| match status {
             button::Status::Hovered if !is_disabled => theme::tab_button_hovered_style(c),
@@ -247,13 +283,14 @@ pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: ThemeColors) -> Eleme
 
 pub fn view_panel<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     let content: Element<Message> = match app.active_tab {
-        Tab::Home    => crate::panels::home::view(app, colors),
-        Tab::Mods    => crate::panels::projects::view(app, colors, "Mods"),
-        Tab::Addons  => crate::panels::projects::view(app, colors, "Addons"),
-        Tab::Tweaks  => crate::panels::tweaks::view(app, colors),
+        Tab::Home => crate::panels::home::view(app, colors),
+        Tab::Mods => crate::panels::projects::view(app, colors, "Mods"),
+        Tab::Patches => crate::panels::projects::view(app, colors, "Patches"),
+        Tab::Addons => crate::panels::projects::view(app, colors, "Addons"),
+        Tab::Tweaks => crate::panels::tweaks::view(app, colors),
         Tab::Options => crate::panels::options::view(app, colors),
-        Tab::Logs    => crate::panels::logs::view(app, colors),
-        Tab::About   => crate::panels::about::view(app, colors),
+        Tab::Logs => crate::panels::logs::view(app, colors),
+        Tab::About => crate::panels::about::view(app, colors),
     };
 
     container(content)
@@ -272,9 +309,13 @@ pub fn view_footer<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
 
     let hint: Element<Message> = if app.wow_dir.is_empty() {
         iced::widget::text("No WoW directory set. Go to Options to configure.")
-            .size(12).color(colors.warn).into()
+            .size(12)
+            .color(colors.warn)
+            .into()
     } else {
-        let active = app.profiles.iter()
+        let active = app
+            .profiles
+            .iter()
             .find(|p| p.id == app.active_profile_id)
             .cloned()
             .unwrap_or_default();
@@ -285,15 +326,29 @@ pub fn view_footer<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
                 } else {
                     active.lutris_target.clone()
                 };
-                ("Launch Mode: Lutris".to_string(), format!("Target: {}", target))
+                (
+                    "Launch Mode: Lutris".to_string(),
+                    format!("Target: {}", target),
+                )
             }
             "wine" => {
-                let cmd = if active.wine_command.trim().is_empty() { "wine".to_string() } else { active.wine_command.clone() };
+                let cmd = if active.wine_command.trim().is_empty() {
+                    "wine".to_string()
+                } else {
+                    active.wine_command.clone()
+                };
                 ("Launch Mode: Wine".to_string(), format!("Command: {}", cmd))
             }
             "custom" => {
-                let cmd = if active.custom_command.trim().is_empty() { "(no command set)".to_string() } else { active.custom_command.clone() };
-                ("Launch Mode: Custom".to_string(), format!("Command: {}", cmd))
+                let cmd = if active.custom_command.trim().is_empty() {
+                    "(no command set)".to_string()
+                } else {
+                    active.custom_command.clone()
+                };
+                (
+                    "Launch Mode: Custom".to_string(),
+                    format!("Command: {}", cmd),
+                )
             }
             _ => (
                 "Launch Mode: Auto".to_string(),
@@ -301,7 +356,9 @@ pub fn view_footer<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
             ),
         };
         let tooltip_content = container(
-            iced::widget::text(tooltip_detail).size(13).color(colors.text)
+            iced::widget::text(tooltip_detail)
+                .size(13)
+                .color(colors.text),
         )
         .padding([6, 10]);
         iced::widget::tooltip(
@@ -313,26 +370,19 @@ pub fn view_footer<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
         .into()
     };
 
-    let play_btn = button(
-        container(iced::widget::text("PLAY").size(16))
-            .center_x(Length::Shrink),
-    )
-    .on_press(Message::LaunchGame)
-    .padding([10, 36])
-    .width(108)
-    .style(move |_theme, status| match status {
-        button::Status::Hovered => theme::play_button_hovered_style(c),
-        _ => theme::play_button_style(c),
-    });
+    let play_btn = button(container(iced::widget::text("PLAY").size(16)).center_x(Length::Shrink))
+        .on_press(Message::LaunchGame)
+        .padding([10, 36])
+        .width(108)
+        .style(move |_theme, status| match status {
+            button::Status::Hovered => theme::play_button_hovered_style(c),
+            _ => theme::play_button_style(c),
+        });
 
-    let bar = row![
-        hint,
-        Space::new().width(Length::Fill),
-        play_btn,
-    ]
-    .spacing(12)
-    .padding([10, 12])
-    .align_y(iced::Alignment::Center);
+    let bar = row![hint, Space::new().width(Length::Fill), play_btn,]
+        .spacing(12)
+        .padding([10, 12])
+        .align_y(iced::Alignment::Center);
 
     container(bar)
         .width(Length::Fill)

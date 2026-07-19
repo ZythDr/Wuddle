@@ -62,10 +62,7 @@ where
     }
 
     fn children(&self) -> Vec<Tree> {
-        vec![
-            Tree::new(&self.underlay),
-            Tree::new(&self.overlay_content),
-        ]
+        vec![Tree::new(&self.underlay), Tree::new(&self.overlay_content)]
     }
 
     fn diff(&self, tree: &mut Tree) {
@@ -327,8 +324,13 @@ where
         renderer: &Renderer,
     ) -> mouse::Interaction {
         if let Some(child_layout) = layout.children().next() {
-            self.content
-                .mouse_interaction(self.tree, child_layout, cursor, &layout.bounds(), renderer)
+            self.content.mouse_interaction(
+                self.tree,
+                child_layout,
+                cursor,
+                &layout.bounds(),
+                renderer,
+            )
         } else {
             mouse::Interaction::None
         }

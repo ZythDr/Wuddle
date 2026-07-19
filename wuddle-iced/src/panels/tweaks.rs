@@ -1,4 +1,6 @@
-use iced::widget::{button, checkbox, column, container, row, scrollable, slider, text, text_input, tooltip, Space};
+use iced::widget::{
+    button, checkbox, column, container, row, scrollable, slider, text, text_input, tooltip, Space,
+};
 use iced::{Element, Length};
 
 use crate::theme::{self, ThemeColors};
@@ -9,9 +11,11 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     let tv = &app.tweak_values;
     let t = &app.tweaks;
     let has_wow_dir = !app.wow_dir.is_empty();
-    let selected_exe = app.active_profile().and_then(|profile| profile.auto_launch_exe.as_deref());
-    let has_backup = has_wow_dir
-        && crate::tweaks::has_backup(std::path::Path::new(&app.wow_dir), selected_exe);
+    let selected_exe = app
+        .active_profile()
+        .and_then(|profile| profile.auto_launch_exe.as_deref());
+    let has_backup =
+        has_wow_dir && crate::tweaks::has_backup(std::path::Path::new(&app.wow_dir), selected_exe);
     let tweaks_disabled_reason = app.tweaks_disabled_reason();
     let tweaks_enabled = tweaks_disabled_reason.is_none();
     let tweak_target_name = app
@@ -23,7 +27,11 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     let tweak_target_version = app
         .tweak_client_info
         .as_ref()
-        .and_then(|info| info.file_version.as_deref().or(info.product_version.as_deref()))
+        .and_then(|info| {
+            info.file_version
+                .as_deref()
+                .or(info.product_version.as_deref())
+        })
         .unwrap_or("unknown version");
 
     let header = row![
@@ -35,35 +43,70 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
         ]
         .spacing(2),
         Space::new().width(Length::Fill),
-        tip(btn_action("Read Current", tweaks_enabled.then_some(Message::ReadTweaks), c), &format!("Read current tweak values from {}", tweak_target_name), tooltip::Position::Bottom, colors),
-        tip(btn("Reset to Default", Message::ResetTweaksToDefault, c), "Reset all sliders to default values", tooltip::Position::Bottom, colors),
-        tip(btn_action("Restore", tweaks_enabled.then_some(Message::RestoreTweaks), c), &format!("Restore {} from backup", tweak_target_name), tooltip::Position::Bottom, colors),
-        tip(btn_primary_action("Apply", tweaks_enabled.then_some(Message::ApplyTweaks), c), &format!("Patch {} with selected tweaks (creates backup first)", tweak_target_name), tooltip::Position::Bottom, colors),
+        tip(
+            btn_action(
+                "Read Current",
+                tweaks_enabled.then_some(Message::ReadTweaks),
+                c
+            ),
+            &format!("Read current tweak values from {}", tweak_target_name),
+            tooltip::Position::Bottom,
+            colors
+        ),
+        tip(
+            btn("Reset to Default", Message::ResetTweaksToDefault, c),
+            "Reset all sliders to default values",
+            tooltip::Position::Bottom,
+            colors
+        ),
+        tip(
+            btn_action(
+                "Restore",
+                tweaks_enabled.then_some(Message::RestoreTweaks),
+                c
+            ),
+            &format!("Restore {} from backup", tweak_target_name),
+            tooltip::Position::Bottom,
+            colors
+        ),
+        tip(
+            btn_primary_action("Apply", tweaks_enabled.then_some(Message::ApplyTweaks), c),
+            &format!(
+                "Patch {} with selected tweaks (creates backup first)",
+                tweak_target_name
+            ),
+            tooltip::Position::Bottom,
+            colors
+        ),
     ]
     .spacing(6)
     .align_y(iced::Alignment::Center);
 
     let hint: Element<Message> = if let Some(reason) = tweaks_disabled_reason {
-        text(reason)
-            .size(13)
-            .color(colors.warn)
-            .into()
+        text(reason).size(13).color(colors.warn).into()
     } else {
         let support_label = format!(
             "Tweaks target: {}  ·  Detected version: {}  ·  Compatible with vanilla-tweaks",
-            tweak_target_name,
-            tweak_target_version
+            tweak_target_name, tweak_target_version
         );
         let backup_label = if has_backup {
-            format!("WoW directory: {}  ·  Backup: {}.bak ✓", app.wow_dir, tweak_target_name)
+            format!(
+                "WoW directory: {}  ·  Backup: {}.bak ✓",
+                app.wow_dir, tweak_target_name
+            )
         } else {
-            format!("WoW directory: {}  ·  No backup yet — Apply to create one", app.wow_dir)
+            format!(
+                "WoW directory: {}  ·  No backup yet — Apply to create one",
+                app.wow_dir
+            )
         };
         column![
             text(support_label).size(13).color(colors.good),
-            text(backup_label)
-                .size(13)
-                .color(if has_backup { colors.good } else { colors.muted }),
+            text(backup_label).size(13).color(if has_backup {
+                colors.good
+            } else {
+                colors.muted
+            }),
         ]
         .spacing(2)
         .into()
@@ -199,9 +242,10 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
         c,
     );
 
-    let footnote = text("* Raising this option too high can result in a severe loss of FPS/performance.")
-        .size(16)
-        .color(colors.muted);
+    let footnote =
+        text("* Raising this option too high can result in a severe loss of FPS/performance.")
+            .size(16)
+            .color(colors.muted);
 
     scrollable(
         column![
@@ -241,11 +285,10 @@ where
             .label(String::from(name))
             .on_toggle(move |b| Message::ToggleTweak(id, b)),
         row![
-            slider(range, value, on_change).step(step).width(Length::Fill),
-            text(value_display)
-                .size(12)
-                .color(colors.muted)
-                .width(80),
+            slider(range, value, on_change)
+                .step(step)
+                .width(Length::Fill),
+            text(value_display).size(12).color(colors.muted).width(80),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
@@ -299,9 +342,7 @@ where
                 .on_input(on_change)
                 .width(80)
                 .padding([6, 8]),
-            text(String::from(desc))
-                .size(12)
-                .color(colors.muted),
+            text(String::from(desc)).size(12).color(colors.muted),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
@@ -336,7 +377,12 @@ fn settings_card_fill<'a>(
 }
 
 /// Wrap any element in a tooltip with consistent styling.
-fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: ThemeColors) -> Element<'a, Message> {
+fn tip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    tip_text: &str,
+    pos: tooltip::Position,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
     let c = colors;
     let tip_str = String::from(tip_text);
     tooltip(
@@ -375,7 +421,11 @@ fn btn_action<'a>(label: &str, msg: Option<Message>, colors: ThemeColors) -> Ele
         .into()
 }
 
-fn btn_primary_action<'a>(label: &str, msg: Option<Message>, colors: ThemeColors) -> Element<'a, Message> {
+fn btn_primary_action<'a>(
+    label: &str,
+    msg: Option<Message>,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
     let c = colors;
     let mut button = button(text(String::from(label)).size(13));
     if let Some(ref message) = msg {

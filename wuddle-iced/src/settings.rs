@@ -86,6 +86,14 @@ pub struct ProfileConfig {
     pub wow_dir: String,
     pub auto_launch_exe: Option<String>,
     pub launch_method: String,
+    #[serde(default = "default_true")]
+    pub show_mods_tab: bool,
+    #[serde(default = "default_true")]
+    pub show_addons_tab: bool,
+    #[serde(default = "default_true")]
+    pub show_patches_tab: bool,
+    #[serde(default = "default_true")]
+    pub show_tweaks_tab: bool,
     pub clear_wdb: bool,
     pub auto_login_enabled: bool,
     pub lutris_target: String,
@@ -113,6 +121,10 @@ impl Default for ProfileConfig {
             wow_dir: String::new(),
             auto_launch_exe: None,
             launch_method: String::from("auto"),
+            show_mods_tab: true,
+            show_addons_tab: true,
+            show_patches_tab: true,
+            show_tweaks_tab: true,
             clear_wdb: false,
             auto_login_enabled: false,
             lutris_target: String::new(),
@@ -132,6 +144,10 @@ impl Default for ProfileConfig {
             selected_auto_login_account_id: None,
         }
     }
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +170,7 @@ pub struct AppSettings {
     pub ignored_update_ids: Vec<i64>,
     pub ignored_update_ids_by_profile: HashMap<String, Vec<i64>>,
     pub mods_warning_dismissed_profile_ids: Vec<String>,
+    pub patches_warning_dismissed_profile_ids: Vec<String>,
     pub update_channel: UpdateChannel,
     pub ui_scale_mode: UiScaleMode,
     pub migrated_from_tauri: bool,
@@ -180,6 +197,7 @@ impl Default for AppSettings {
             ignored_update_ids: Vec::new(),
             ignored_update_ids_by_profile: HashMap::new(),
             mods_warning_dismissed_profile_ids: Vec::new(),
+            patches_warning_dismissed_profile_ids: Vec::new(),
             update_channel: UpdateChannel::Beta,
             ui_scale_mode: UiScaleMode::Auto,
             migrated_from_tauri: false,
@@ -556,6 +574,10 @@ fn read_tauri_localstorage_profiles() -> Vec<ProfileConfig> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("auto")
                     .to_string(),
+                show_mods_tab: true,
+                show_addons_tab: true,
+                show_patches_tab: true,
+                show_tweaks_tab: true,
                 clear_wdb: launch
                     .get("clearWdb")
                     .and_then(|v| v.as_bool())
@@ -784,6 +806,41 @@ mod tests {
         assert!(settings.profiles[0]
             .selected_auto_login_account_id
             .is_none());
+        assert!(settings.mods_warning_dismissed_profile_ids.is_empty());
+        assert!(settings.patches_warning_dismissed_profile_ids.is_empty());
+        assert!(settings.profiles[0].show_mods_tab);
+        assert!(settings.profiles[0].show_addons_tab);
+        assert!(settings.profiles[0].show_patches_tab);
+        assert!(settings.profiles[0].show_tweaks_tab);
+    }
+
+    #[test]
+    fn profile_tab_visibility_defaults_on_and_round_trips_overrides() {
+        let legacy: ProfileConfig =
+            serde_json::from_str(r#"{"id":"legacy","name":"Legacy"}"#).unwrap();
+        assert!(legacy.show_mods_tab);
+        assert!(legacy.show_addons_tab);
+        assert!(legacy.show_patches_tab);
+        assert!(legacy.show_tweaks_tab);
+
+        let customized: ProfileConfig = serde_json::from_str(
+            r#"{
+                "id":"restricted",
+                "name":"Restricted server",
+                "show_mods_tab":false,
+                "show_addons_tab":true,
+                "show_patches_tab":false,
+                "show_tweaks_tab":false
+            }"#,
+        )
+        .unwrap();
+        assert!(!customized.show_mods_tab);
+        assert!(customized.show_addons_tab);
+        assert!(!customized.show_patches_tab);
+        assert!(!customized.show_tweaks_tab);
+        let encoded = serde_json::to_string(&customized).unwrap();
+        assert!(encoded.contains("\"show_mods_tab\":false"));
+        assert!(encoded.contains("\"show_addons_tab\":true"));
     }
 
     #[test]

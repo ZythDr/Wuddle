@@ -2,11 +2,11 @@
 //! - `super_wow_warning` — anti-virus false-positive warning for SuperWoW
 //! - `addon_conflict`    — conflict resolution for duplicate addon sources
 
-use iced::widget::{button, column, container, row, scrollable, text, Space};
-use iced::{Element, Length};
-use iced::{Background, Border, Color};
-use crate::{Message, theme};
 use crate::components::helpers::{close_button, forge_svg_handle, tip};
+use crate::{theme, Message};
+use iced::widget::{button, column, container, row, scrollable, text, Space};
+use iced::{Background, Border, Color};
+use iced::{Element, Length};
 use theme::ThemeColors;
 
 fn action_banner_style(colors: ThemeColors, background: Color) -> iced::widget::container::Style {
@@ -49,7 +49,9 @@ fn tree_panel<'a>(
                 row![
                     text("\u{1f4e6}").size(16),
                     text(root_label).size(14).color(c.title).font(theme::FRIZ),
-                ].spacing(8).into()
+                ]
+                .spacing(8)
+                .into(),
             );
             if items.is_empty() {
                 content.push(text("   \u{21b3} none").size(13).color(c.muted).into());
@@ -60,7 +62,9 @@ fn tree_panel<'a>(
                         Space::new().width(14),
                         text(icon).size(13).color(c.muted),
                         text(item).size(13).color(c.text),
-                    ].spacing(8).into()
+                    ]
+                    .spacing(8)
+                    .into()
                 }));
             }
         }
@@ -68,7 +72,10 @@ fn tree_panel<'a>(
 
     container(
         column![
-            text(section_label).size(14).color(c.muted).font(theme::FRIZ),
+            text(section_label)
+                .size(14)
+                .color(c.muted)
+                .font(theme::FRIZ),
             container(text(summary).size(13).color(c.muted))
                 .height(Length::Fixed(52.0))
                 .width(Length::Fill),
@@ -91,7 +98,10 @@ fn tree_panel<'a>(
                 ..container::Style::default()
             }),
             container(
-                text(footer).size(13).color(c.primary_text).font(theme::FRIZ)
+                text(footer)
+                    .size(13)
+                    .color(c.primary_text)
+                    .font(theme::FRIZ)
             )
             .padding([6, 10])
             .width(Length::Fill)
@@ -231,7 +241,7 @@ pub fn addon_conflict<'a>(
     };
 
     // Build "New" (right) panel group showing what will be installed.
-    // We prioritize showing the actual discovered addons (selected_addons) because 
+    // We prioritize showing the actual discovered addons (selected_addons) because
     // these are the folders that Wuddle will actually create.
     let mut new_items = Vec::new();
     for name in selected_addons {
@@ -276,21 +286,34 @@ pub fn addon_conflict<'a>(
 
     let header = row![
         column![
-            text("Addon Conflict").size(20).color(colors.title).font(theme::FRIZ),
-            text("Duplicate addon folders detected").size(12).color(colors.muted),
-        ].spacing(2),
+            text("Addon Conflict")
+                .size(20)
+                .color(colors.title)
+                .font(theme::FRIZ),
+            text("Duplicate addon folders detected")
+                .size(12)
+                .color(colors.muted),
+        ]
+        .spacing(2),
         Space::new().width(Length::Fill),
         close_button(c),
-    ].align_y(iced::Alignment::Center);
+    ]
+    .align_y(iced::Alignment::Center);
 
     let repo_card = container(
         row![
             text("\u{1f4e6}").size(28),
             column![
-                text(new_repo_label).size(16).color(colors.primary).font(theme::FRIZ),
+                text(new_repo_label)
+                    .size(16)
+                    .color(colors.primary)
+                    .font(theme::FRIZ),
                 text(url).size(11).color(colors.muted),
-            ].spacing(2)
-        ].spacing(16).align_y(iced::Alignment::Center)
+            ]
+            .spacing(2)
+        ]
+        .spacing(16)
+        .align_y(iced::Alignment::Center),
     )
     .width(Length::Fill)
     .padding(12)

@@ -26,10 +26,7 @@ impl ToastAnimation {
             }
             Self::Visible => 1.0,
             Self::Exiting(tick) => {
-                1.0
-                    - smoothstep(
-                        (tick as f32 / TOAST_ANIMATION_TICKS as f32).clamp(0.0, 1.0),
-                    )
+                1.0 - smoothstep((tick as f32 / TOAST_ANIMATION_TICKS as f32).clamp(0.0, 1.0))
             }
         }
     }

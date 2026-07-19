@@ -263,10 +263,7 @@ pub async fn latest_release(
 }
 
 /// Fetch all releases for a repo (all pages, newest first).
-pub async fn list_releases(
-    client: &Client,
-    repo: &DetectedRepo,
-) -> Result<Vec<LatestRelease>> {
+pub async fn list_releases(client: &Client, repo: &DetectedRepo) -> Result<Vec<LatestRelease>> {
     match repo.kind {
         ForgeKind::GitHub => github::list_releases(client, repo).await,
         ForgeKind::GitLab => gitlab::list_releases(client, repo).await,
@@ -303,19 +300,33 @@ pub(crate) fn parse_rfc3339_unix(s: &str) -> Option<i64> {
     let b = s.as_bytes();
 
     let year: i64 = s.get(0..4)?.parse().ok()?;
-    if *b.get(4)? != b'-' { return None; }
+    if *b.get(4)? != b'-' {
+        return None;
+    }
     let month: i64 = s.get(5..7)?.parse().ok()?;
-    if *b.get(7)? != b'-' { return None; }
+    if *b.get(7)? != b'-' {
+        return None;
+    }
     let day: i64 = s.get(8..10)?.parse().ok()?;
-    if *b.get(10)? != b'T' { return None; }
+    if *b.get(10)? != b'T' {
+        return None;
+    }
     let hour: i64 = s.get(11..13)?.parse().ok()?;
-    if *b.get(13)? != b':' { return None; }
+    if *b.get(13)? != b':' {
+        return None;
+    }
     let min: i64 = s.get(14..16)?.parse().ok()?;
-    if *b.get(16)? != b':' { return None; }
+    if *b.get(16)? != b':' {
+        return None;
+    }
     let sec: i64 = s.get(17..19)?.parse().ok()?;
 
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) { return None; }
-    if hour > 23 || min > 59 || sec > 60 { return None; }
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    if hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
 
     // Civil date to Unix days (Howard Hinnant algorithm)
     let y = if month <= 2 { year - 1 } else { year };

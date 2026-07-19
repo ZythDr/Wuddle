@@ -17,6 +17,30 @@ pub struct InstallEntry {
     pub sha256: Option<String>,
     /// Release version (tag_name) recorded at install time.
     pub version: Option<String>,
+    /// Optional user-facing label. Currently used by tracked MPQ files.
+    pub display_name: Option<String>,
+    /// Lightweight identity used for managed MPQ status checks.
+    pub file_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MpqProtectionRow {
+    pub path: String,
+    /// Lightweight filesystem identity used to notice ordinary replacements
+    /// without rereading multi-gigabyte MPQ contents.
+    pub fingerprint: String,
+    pub protected: bool,
+    pub core: bool,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MpqBackupRow {
+    pub repo_id: i64,
+    pub path: String,
+    pub backup_path: String,
+    pub sha256: Option<String>,
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,7 +72,7 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        const SCHEMA_VERSION: i32 = 10;
+        const SCHEMA_VERSION: i32 = 14;
 
         let current: i32 = self
             .conn
@@ -188,6 +212,85 @@ impl Db {
             self.conn.execute_batch("PRAGMA user_version = 10")?;
         }
 
+        // v10 -> v11: MPQ labels, protection state, reversible replacements,
+        // and curated bundle dependency ownership.
+        if current < 11 {
+            let cols = self.existing_install_columns()?;
+            if !cols.contains("display_name") {
+                self.conn
+                    .execute_batch("ALTER TABLE installs ADD COLUMN display_name TEXT")?;
+            }
+            self.conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS mpq_protection (
+                  path       TEXT PRIMARY KEY COLLATE NOCASE,
+                  sha256     TEXT NOT NULL,
+                  protected  INTEGER NOT NULL DEFAULT 1,
+                  core       INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS mpq_backups (
+                  repo_id      INTEGER NOT NULL,
+                  path         TEXT NOT NULL COLLATE NOCASE,
+                  backup_path  TEXT NOT NULL,
+                  sha256       TEXT,
+                  PRIMARY KEY(repo_id, path),
+                  FOREIGN KEY(repo_id) REFERENCES repos(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS repo_dependencies (
+                  parent_repo_id  INTEGER NOT NULL,
+                  child_repo_id   INTEGER NOT NULL,
+                  relationship    TEXT NOT NULL,
+                  PRIMARY KEY(parent_repo_id, child_repo_id, relationship),
+                  FOREIGN KEY(parent_repo_id) REFERENCES repos(id) ON DELETE CASCADE,
+                  FOREIGN KEY(child_repo_id) REFERENCES repos(id) ON DELETE CASCADE
+                );
+
+                PRAGMA user_version = 11;
+                "#,
+            )?;
+        }
+
+        // v11 -> v12: stop hashing every untracked MPQ during protection
+        // scans. The legacy sha256 column remains for compatibility with
+        // development databases created while MPQ support was in progress.
+        if current < 12 {
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE mpq_protection
+                  ADD COLUMN fingerprint TEXT NOT NULL DEFAULT '';
+                PRAGMA user_version = 12;
+                "#,
+            )?;
+        }
+
+        // v12 -> v13: make routine status and restored-backup checks use the
+        // same metadata-only identity as untracked MPQ discovery.
+        if current < 13 {
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE installs
+                  ADD COLUMN file_fingerprint TEXT;
+                ALTER TABLE mpq_backups
+                  ADD COLUMN fingerprint TEXT;
+                PRAGMA user_version = 13;
+                "#,
+            )?;
+        }
+
+        // v13 -> v14: allow untracked/manual MPQs to carry the same kind of
+        // persistent friendly label as Wuddle-installed MPQs.
+        if current < 14 {
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE mpq_protection
+                  ADD COLUMN display_name TEXT;
+                PRAGMA user_version = 14;
+                "#,
+            )?;
+        }
+
         Ok(())
     }
 
@@ -238,9 +341,7 @@ impl Db {
                 HAVING COUNT(*) > 1
                 "#,
             )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
 
@@ -264,10 +365,8 @@ impl Db {
                     params![keep_id, remove_id],
                 )?;
                 // Delete leftover installs that conflicted.
-                self.conn.execute(
-                    "DELETE FROM installs WHERE repo_id=?1",
-                    params![remove_id],
-                )?;
+                self.conn
+                    .execute("DELETE FROM installs WHERE repo_id=?1", params![remove_id])?;
                 // Delete the duplicate repo.
                 self.conn
                     .execute("DELETE FROM repos WHERE id=?1", params![remove_id])?;
@@ -402,13 +501,13 @@ impl Db {
                 )
             })?;
 
-        // Best-casing strategy: if the user adds a repo with "better" casing 
+        // Best-casing strategy: if the user adds a repo with "better" casing
         // (mixed/upper) than what we have (all-lowercase from v4 migration), update it.
         let mut update_owner = None;
         let mut update_name = None;
 
         let has_upper = |s: &str| s.chars().any(|c| c.is_uppercase());
-        let is_lower  = |s: &str| s == s.to_lowercase() && s.chars().any(|c| c.is_alphabetic());
+        let is_lower = |s: &str| s == s.to_lowercase() && s.chars().any(|c| c.is_alphabetic());
 
         if has_upper(&repo.owner) && is_lower(&existing_owner) {
             update_owner = Some(&repo.owner);
@@ -426,7 +525,8 @@ impl Db {
         }
 
         if repo.selected_addons_json.is_some() {
-            let _ = self.set_repo_selected_addons(existing_id, repo.selected_addons_json.as_deref());
+            let _ =
+                self.set_repo_selected_addons(existing_id, repo.selected_addons_json.as_deref());
         }
 
         Ok(existing_id)
@@ -478,7 +578,12 @@ impl Db {
         Ok(out)
     }
 
-    pub fn find_repo_by_identity(&self, host: &str, owner: &str, name: &str) -> Result<Option<Repo>> {
+    pub fn find_repo_by_identity(
+        &self,
+        host: &str,
+        owner: &str,
+        name: &str,
+    ) -> Result<Option<Repo>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
@@ -492,30 +597,30 @@ impl Db {
         )?;
 
         let mut rows = stmt.query_map(params![host, owner, name], |row| {
-             let mode_str: String = row.get(6)?;
-             Ok(Repo {
-                 id: row.get(0)?,
-                 url: row.get(1)?,
-                 forge: row.get(2)?,
-                 host: row.get(3)?,
-                 owner: row.get(4)?,
-                 name: row.get(5)?,
-                 enabled: row.get::<_, i64>(7)? != 0,
-                 mode: InstallMode::from_str(&mode_str).unwrap_or(InstallMode::Auto),
-                 git_branch: row.get(8)?,
-                 asset_regex: row.get(9)?,
-                 last_version: row.get(10)?,
-                 etag: row.get(11)?,
-                 installed_asset_id: row.get(12)?,
-                 installed_asset_name: row.get(13)?,
-                 installed_asset_size: row.get(14)?,
-                 installed_asset_url: row.get(15)?,
-                 installed_at_unix: row.get(16)?,
-                 published_at_unix: row.get(17)?,
-                 merge_installs: row.get::<_, i64>(18).unwrap_or(0) != 0,
-                 pinned_version: row.get(19)?,
-                 selected_addons_json: row.get(20)?,
-             })
+            let mode_str: String = row.get(6)?;
+            Ok(Repo {
+                id: row.get(0)?,
+                url: row.get(1)?,
+                forge: row.get(2)?,
+                host: row.get(3)?,
+                owner: row.get(4)?,
+                name: row.get(5)?,
+                enabled: row.get::<_, i64>(7)? != 0,
+                mode: InstallMode::from_str(&mode_str).unwrap_or(InstallMode::Auto),
+                git_branch: row.get(8)?,
+                asset_regex: row.get(9)?,
+                last_version: row.get(10)?,
+                etag: row.get(11)?,
+                installed_asset_id: row.get(12)?,
+                installed_asset_name: row.get(13)?,
+                installed_asset_size: row.get(14)?,
+                installed_asset_url: row.get(15)?,
+                installed_at_unix: row.get(16)?,
+                published_at_unix: row.get(17)?,
+                merge_installs: row.get::<_, i64>(18).unwrap_or(0) != 0,
+                pinned_version: row.get(19)?,
+                selected_addons_json: row.get(20)?,
+            })
         })?;
 
         if let Some(row) = rows.next() {
@@ -680,7 +785,15 @@ impl Db {
               installed_at_unix=?6
             WHERE id=?7
             "#,
-            params![version, asset_id, asset_name, asset_size, asset_url, installed_at_unix, id],
+            params![
+                version,
+                asset_id,
+                asset_name,
+                asset_size,
+                asset_url,
+                installed_at_unix,
+                id
+            ],
         )?;
         Ok(())
     }
@@ -709,7 +822,11 @@ impl Db {
         Ok(())
     }
 
-    pub fn set_repo_selected_addons(&self, id: i64, selected_addons_json: Option<&str>) -> Result<()> {
+    pub fn set_repo_selected_addons(
+        &self,
+        id: i64,
+        selected_addons_json: Option<&str>,
+    ) -> Result<()> {
         self.conn.execute(
             r#"UPDATE repos SET selected_addons_json=?1 WHERE id=?2"#,
             params![selected_addons_json, id],
@@ -754,7 +871,7 @@ impl Db {
     pub fn list_installs(&self, repo_id: i64) -> Result<Vec<InstallEntry>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT path, kind, sha256, version
+            SELECT path, kind, sha256, version, display_name, file_fingerprint
             FROM installs
             WHERE repo_id=?1
             ORDER BY kind, path
@@ -767,6 +884,8 @@ impl Db {
                 kind: row.get(1)?,
                 sha256: row.get(2)?,
                 version: row.get(3)?,
+                display_name: row.get(4)?,
+                file_fingerprint: row.get(5)?,
             })
         })?;
 
@@ -780,7 +899,7 @@ impl Db {
     pub fn list_all_installs_full(&self) -> Result<Vec<(i64, InstallEntry)>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT repo_id, path, kind, sha256, version
+            SELECT repo_id, path, kind, sha256, version, display_name, file_fingerprint
             FROM installs
             "#,
         )?;
@@ -793,6 +912,8 @@ impl Db {
                     kind: row.get(2)?,
                     sha256: row.get(3)?,
                     version: row.get(4)?,
+                    display_name: row.get(5)?,
+                    file_fingerprint: row.get(6)?,
                 },
             ))
         })?;
@@ -822,6 +943,356 @@ impl Db {
         Ok(())
     }
 
+    pub fn add_named_install_with_hash(
+        &self,
+        repo_id: i64,
+        path: &str,
+        kind: &str,
+        sha256: Option<&str>,
+        version: Option<&str>,
+        display_name: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO installs(repo_id, path, kind, sha256, version, display_name)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![repo_id, path, kind, sha256, version, display_name],
+        )?;
+        Ok(())
+    }
+
+    pub fn commit_mpq_installs(
+        &self,
+        repo_id: i64,
+        installs: &[InstallEntry],
+        backups: &[MpqBackupRow],
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM installs WHERE repo_id=?1 AND kind='mpq'",
+            params![repo_id],
+        )?;
+        tx.execute("DELETE FROM mpq_backups WHERE repo_id=?1", params![repo_id])?;
+        for install in installs {
+            tx.execute(
+                r#"
+                INSERT OR REPLACE INTO installs(
+                  repo_id, path, kind, sha256, version, display_name, file_fingerprint
+                )
+                VALUES (?1, ?2, 'mpq', ?3, ?4, ?5, ?6)
+                "#,
+                params![
+                    repo_id,
+                    install.path,
+                    install.sha256,
+                    install.version,
+                    install.display_name,
+                    install.file_fingerprint
+                ],
+            )?;
+        }
+        for backup in backups {
+            tx.execute(
+                r#"
+                INSERT OR REPLACE INTO mpq_backups(
+                  repo_id, path, backup_path, sha256, fingerprint
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                "#,
+                params![
+                    backup.repo_id,
+                    backup.path,
+                    backup.backup_path,
+                    backup.sha256,
+                    backup.fingerprint
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_install_display_name(
+        &self,
+        repo_id: i64,
+        path: &str,
+        display_name: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"UPDATE installs SET display_name=?1 WHERE repo_id=?2 AND path=?3"#,
+            params![display_name, repo_id, path],
+        )?;
+        Ok(())
+    }
+
+    pub fn find_mpq_install_owner(&self, path: &str) -> Result<Option<i64>> {
+        let result = self.conn.query_row(
+            r#"
+            SELECT repo_id FROM installs
+            WHERE kind='mpq' AND LOWER(path)=LOWER(?1)
+            LIMIT 1
+            "#,
+            params![path],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(id) => Ok(Some(id)),
+            Err(SqlError::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn upsert_mpq_protection(
+        &self,
+        path: &str,
+        fingerprint: &str,
+        detected_core: bool,
+    ) -> Result<MpqProtectionRow> {
+        let existing = self.get_mpq_protection(path)?;
+        let matching = existing
+            .as_ref()
+            .filter(|row| row.fingerprint == fingerprint);
+        // Preserve an explicit user classification only while this is still
+        // the same filesystem object. Replacements return to name detection.
+        let core = matching.map(|row| row.core).unwrap_or(detected_core);
+        let protected = matching.map(|row| row.protected).unwrap_or(true) || core;
+        self.conn.execute(
+            r#"
+            INSERT INTO mpq_protection(path, sha256, protected, core, fingerprint)
+            VALUES (?1, '', ?2, ?3, ?4)
+            ON CONFLICT(path) DO UPDATE SET
+              sha256='',
+              protected=excluded.protected,
+              core=excluded.core,
+              fingerprint=excluded.fingerprint
+            "#,
+            params![path, i64::from(protected), i64::from(core), fingerprint],
+        )?;
+        Ok(MpqProtectionRow {
+            path: path.to_string(),
+            fingerprint: fingerprint.to_string(),
+            protected,
+            core,
+            display_name: existing.and_then(|row| row.display_name),
+        })
+    }
+
+    pub fn get_mpq_protection(&self, path: &str) -> Result<Option<MpqProtectionRow>> {
+        let result = self.conn.query_row(
+            r#"
+            SELECT path, fingerprint, protected, core, display_name
+            FROM mpq_protection WHERE path=?1 COLLATE NOCASE
+            "#,
+            params![path],
+            |row| {
+                Ok(MpqProtectionRow {
+                    path: row.get(0)?,
+                    fingerprint: row.get(1)?,
+                    protected: row.get::<_, i64>(2)? != 0,
+                    core: row.get::<_, i64>(3)? != 0,
+                    display_name: row.get(4)?,
+                })
+            },
+        );
+        match result {
+            Ok(row) => Ok(Some(row)),
+            Err(SqlError::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn list_mpq_protection(&self) -> Result<Vec<MpqProtectionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, fingerprint, protected, core, display_name FROM mpq_protection ORDER BY LOWER(path)",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(MpqProtectionRow {
+                path: row.get(0)?,
+                fingerprint: row.get(1)?,
+                protected: row.get::<_, i64>(2)? != 0,
+                core: row.get::<_, i64>(3)? != 0,
+                display_name: row.get(4)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn set_mpq_protection(&self, path: &str, fingerprint: &str, protected: bool) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE mpq_protection SET protected=?1
+            WHERE path=?2 COLLATE NOCASE AND fingerprint=?3 AND core=0
+            "#,
+            params![i64::from(protected), path, fingerprint],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_mpq_core_classification(
+        &self,
+        path: &str,
+        fingerprint: &str,
+        core: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE mpq_protection
+            SET core=?1,
+                protected=CASE WHEN ?1=1 THEN 1 ELSE protected END
+            WHERE path=?2 COLLATE NOCASE AND fingerprint=?3
+            "#,
+            params![i64::from(core), path, fingerprint],
+        )?;
+        Ok(())
+    }
+
+    pub fn move_mpq_protection(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        fingerprint: &str,
+        protected: bool,
+        core: bool,
+        display_name: Option<&str>,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM mpq_protection WHERE path=?1 COLLATE NOCASE",
+            params![old_path],
+        )?;
+        tx.execute(
+            r#"
+            INSERT OR REPLACE INTO mpq_protection(
+              path, sha256, protected, core, fingerprint, display_name
+            )
+            VALUES (?1, '', ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                new_path,
+                i64::from(protected),
+                i64::from(core),
+                fingerprint,
+                display_name,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_mpq_protection_display_name(
+        &self,
+        path: &str,
+        fingerprint: &str,
+        display_name: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE mpq_protection SET display_name=?1
+            WHERE path=?2 COLLATE NOCASE AND fingerprint=?3
+            "#,
+            params![display_name, path, fingerprint],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_mpq_backup(
+        &self,
+        repo_id: i64,
+        path: &str,
+        backup_path: &str,
+        sha256: Option<&str>,
+        fingerprint: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO mpq_backups(
+              repo_id, path, backup_path, sha256, fingerprint
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![repo_id, path, backup_path, sha256, fingerprint],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_mpq_backup(&self, repo_id: i64, path: &str) -> Result<Option<MpqBackupRow>> {
+        let result = self.conn.query_row(
+            r#"
+            SELECT repo_id, path, backup_path, sha256, fingerprint
+            FROM mpq_backups WHERE repo_id=?1 AND path=?2 COLLATE NOCASE
+            "#,
+            params![repo_id, path],
+            |row| {
+                Ok(MpqBackupRow {
+                    repo_id: row.get(0)?,
+                    path: row.get(1)?,
+                    backup_path: row.get(2)?,
+                    sha256: row.get(3)?,
+                    fingerprint: row.get(4)?,
+                })
+            },
+        );
+        match result {
+            Ok(row) => Ok(Some(row)),
+            Err(SqlError::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn remove_mpq_backup(&self, repo_id: i64, path: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM mpq_backups WHERE repo_id=?1 AND path=?2 COLLATE NOCASE",
+            params![repo_id, path],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_mpq_install_and_backup(&self, repo_id: i64, path: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM installs WHERE repo_id=?1 AND path=?2 AND kind='mpq'",
+            params![repo_id, path],
+        )?;
+        tx.execute(
+            "DELETE FROM mpq_backups WHERE repo_id=?1 AND path=?2 COLLATE NOCASE",
+            params![repo_id, path],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn add_repo_dependency(
+        &self,
+        parent_repo_id: i64,
+        child_repo_id: i64,
+        relationship: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT OR IGNORE INTO repo_dependencies(parent_repo_id, child_repo_id, relationship)
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![parent_repo_id, child_repo_id, relationship],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_repo_dependencies(&self, parent_repo_id: i64) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT child_repo_id, relationship FROM repo_dependencies
+            WHERE parent_repo_id=?1 ORDER BY child_repo_id
+            "#,
+        )?;
+        let rows = stmt.query_map(params![parent_repo_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn set_install_sha256(&self, repo_id: i64, path: &str, sha256: Option<&str>) -> Result<()> {
         self.conn.execute(
             r#"UPDATE installs SET sha256=?1 WHERE repo_id=?2 AND path=?3"#,
@@ -838,7 +1309,6 @@ impl Db {
         Ok(())
     }
 
-
     /// Update an install entry's path in-place (used for staging-area migration).
     pub fn update_install_path(&self, repo_id: i64, old_path: &str, new_path: &str) -> Result<()> {
         self.conn.execute(
@@ -848,11 +1318,40 @@ impl Db {
         Ok(())
     }
 
+    /// Atomically update one or more tracked MPQ paths, their optional backup
+    /// ownership keys, and the package-level enabled state.
+    pub fn update_mpq_enabled_paths(
+        &self,
+        repo_id: i64,
+        changes: &[(String, String)],
+        repo_enabled: bool,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (old_path, new_path) in changes {
+            tx.execute(
+                r#"UPDATE installs SET path=?3
+                   WHERE repo_id=?1 AND path=?2 COLLATE NOCASE AND kind='mpq'"#,
+                params![repo_id, old_path, new_path],
+            )?;
+            tx.execute(
+                r#"UPDATE mpq_backups SET path=?3
+                   WHERE repo_id=?1 AND path=?2 COLLATE NOCASE"#,
+                params![repo_id, old_path, new_path],
+            )?;
+        }
+        tx.execute(
+            "UPDATE repos SET enabled=?1 WHERE id=?2",
+            params![i64::from(repo_enabled), repo_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Returns all addon install paths (lowercased) currently tracked across all repos.
     pub fn all_addon_install_paths(&self) -> Result<HashSet<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT LOWER(path) FROM installs WHERE kind='addon'",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT LOWER(path) FROM installs WHERE kind='addon'")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut out = HashSet::new();
         for r in rows {

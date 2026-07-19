@@ -1,15 +1,19 @@
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
 mod anchored_overlay;
-mod diagnostics;
 #[cfg(feature = "auto-login")]
 mod auto_login;
+mod diagnostics;
 mod monitor;
-mod storage;
+mod mpq;
 pub mod panels;
 pub mod service;
 pub(crate) mod settings;
 mod single_instance;
+mod storage;
 #[allow(dead_code)]
 pub(crate) mod theme;
 pub(crate) mod tweaks;
@@ -17,18 +21,18 @@ pub(crate) mod tweaks;
 pub mod app;
 pub mod components;
 pub mod dialogs;
-pub mod update;
-pub mod types;
 pub mod message;
+pub mod types;
+pub mod update;
 
 pub use app::App;
-pub use types::*;
-pub use message::Message;
-pub use components::markdown::ImageViewer;
 pub use components::helpers::*;
+pub use components::markdown::ImageViewer;
+pub use message::Message;
+pub use types::*;
 
 use settings::{detect_auto_scale, AUTO_UI_SCALE};
-use theme::{FRIZ, NOTO, LIFECRAFT};
+use theme::{FRIZ, LIFECRAFT, NOTO};
 
 fn main() -> iced::Result {
     prefer_x11_for_file_drops_if_requested();
@@ -72,7 +76,14 @@ fn main() -> iced::Result {
     std::panic::set_hook(Box::new(move |info| {
         let location = info
             .location()
-            .map(|location| format!("{}:{}:{}", location.file(), location.line(), location.column()))
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
             .unwrap_or_else(|| "unknown".to_string());
         diagnostics::write_system(
             "ERROR",
@@ -82,17 +93,18 @@ fn main() -> iced::Result {
         default_panic_hook(info);
     }));
 
-    let window_icon = iced::window::icon::from_file_data(
-        include_bytes!("../assets/icons/128x128.png"),
-        None,
-    ).ok();
+    let window_icon =
+        iced::window::icon::from_file_data(include_bytes!("../assets/icons/128x128.png"), None)
+            .ok();
 
     iced::application(App::new, App::update, App::view)
         .title("Wuddle")
         .theme(App::theme)
         .subscription(App::subscription)
         .font(include_bytes!("../assets/fonts/LifeCraft_Font.ttf"))
-        .font(include_bytes!("../assets/fonts/FrizQuadrataStd-Regular.otf"))
+        .font(include_bytes!(
+            "../assets/fonts/FrizQuadrataStd-Regular.otf"
+        ))
         .font(include_bytes!("../assets/fonts/NotoSans-Regular.ttf"))
         .font(include_bytes!("../assets/fonts/NotoSans-Bold.ttf"))
         .default_font(default_font)
@@ -110,8 +122,7 @@ fn prefer_x11_for_file_drops_if_requested() {
     // Winit 0.30 receives file drop events on X11, but not through its Wayland
     // backend. Keep native Wayland by default; this opt-in is for users who
     // prefer drag-and-drop over native Wayland.
-    if std::env::var_os("DISPLAY").is_some()
-        && std::env::var_os("WUDDLE_USE_X11_FOR_DND").is_some()
+    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("WUDDLE_USE_X11_FOR_DND").is_some()
     {
         std::env::remove_var("WAYLAND_DISPLAY");
         std::env::remove_var("WAYLAND_SOCKET");

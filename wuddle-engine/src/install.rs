@@ -207,7 +207,7 @@ fn find_first_file_by_name(root: &Path, want: &str) -> Option<PathBuf> {
     matches.into_iter().next()
 }
 
-fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
+pub(crate) fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     if dest_dir.exists() {
         fs::remove_dir_all(dest_dir).with_context(|| format!("cleanup {:?}", dest_dir))?;
     }
@@ -246,7 +246,9 @@ fn unzip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
 
     for i in 0..archive.len() {
         let mut f = archive.by_index(i).context("zip entry")?;
-        let Some(entry_path) = f.enclosed_name() else { continue; };
+        let Some(entry_path) = f.enclosed_name() else {
+            continue;
+        };
         let outpath = dest_dir.join(entry_path);
 
         if f.is_dir() {
@@ -440,7 +442,7 @@ fn install_dir_or_symlink(src_dir: &Path, dst_dir: &Path, use_symlink: bool) -> 
     copy_dir_recursive(src_dir, dst_dir)
 }
 
-fn maybe_set_comment(path: &Path, comment: &str, enabled: bool) {
+pub(crate) fn maybe_set_comment(path: &Path, comment: &str, enabled: bool) {
     if !enabled {
         return;
     }
@@ -481,7 +483,7 @@ pub(crate) fn update_dlls_txt(wow_dir: &Path, repo_name: &str, dll_names: &[Stri
 
     let multi = dll_names.len() > 1;
     let block_start = format!("# == {} ==", repo_name);
-    let block_end   = format!("# == /{} ==", repo_name);
+    let block_end = format!("# == /{} ==", repo_name);
 
     // Track which DLLs still need inserting after scanning existing lines.
     let mut needs_insert: Vec<&String> = dll_names.iter().collect();
@@ -501,7 +503,10 @@ pub(crate) fn update_dlls_txt(wow_dir: &Path, repo_name: &str, dll_names: &[Stri
         if rest.starts_with("== ") {
             continue;
         }
-        if let Some(pos) = needs_insert.iter().position(|d| d.eq_ignore_ascii_case(rest)) {
+        if let Some(pos) = needs_insert
+            .iter()
+            .position(|d| d.eq_ignore_ascii_case(rest))
+        {
             let dll = needs_insert.remove(pos);
             // Preserve enabled/disabled state; only normalise casing.
             *line = if commented {
@@ -516,9 +521,10 @@ pub(crate) fn update_dlls_txt(wow_dir: &Path, repo_name: &str, dll_names: &[Stri
     if !needs_insert.is_empty() {
         if multi {
             // Find existing block end marker and insert before it, or append a new block.
-            if let Some(end_pos) = lines.iter().position(|l| {
-                l.trim().eq_ignore_ascii_case(block_end.trim())
-            }) {
+            if let Some(end_pos) = lines
+                .iter()
+                .position(|l| l.trim().eq_ignore_ascii_case(block_end.trim()))
+            {
                 for dll in needs_insert.iter().rev() {
                     lines.insert(end_pos, (*dll).clone());
                 }
@@ -546,16 +552,25 @@ pub(crate) fn update_dlls_txt(wow_dir: &Path, repo_name: &str, dll_names: &[Stri
         // (They may be scattered; just prepend/append markers around the last known position.)
         if let Some(first_pos) = lines.iter().position(|l| {
             let trimmed = l.trim();
-            let rest = trimmed.strip_prefix('#').map(|s| s.trim()).unwrap_or(trimmed);
+            let rest = trimmed
+                .strip_prefix('#')
+                .map(|s| s.trim())
+                .unwrap_or(trimmed);
             dll_names.iter().any(|d| d.eq_ignore_ascii_case(rest))
         }) {
             lines.insert(first_pos, block_start);
             // Find new last position after insertion.
-            let last_pos = lines.iter().rposition(|l| {
-                let trimmed = l.trim();
-                let rest = trimmed.strip_prefix('#').map(|s| s.trim()).unwrap_or(trimmed);
-                dll_names.iter().any(|d| d.eq_ignore_ascii_case(rest))
-            }).unwrap_or(first_pos);
+            let last_pos = lines
+                .iter()
+                .rposition(|l| {
+                    let trimmed = l.trim();
+                    let rest = trimmed
+                        .strip_prefix('#')
+                        .map(|s| s.trim())
+                        .unwrap_or(trimmed);
+                    dll_names.iter().any(|d| d.eq_ignore_ascii_case(rest))
+                })
+                .unwrap_or(first_pos);
             lines.insert(last_pos + 1, block_end);
         }
     }
@@ -801,7 +816,15 @@ fn scan_git_addon_dirs(
             continue;
         }
 
-        if scan_git_addon_dirs(repo, root, &subtree, &child_rel, depth + 1, candidates, deadline)? {
+        if scan_git_addon_dirs(
+            repo,
+            root,
+            &subtree,
+            &child_rel,
+            depth + 1,
+            candidates,
+            deadline,
+        )? {
             return Ok(true);
         }
     }
@@ -852,11 +875,17 @@ fn resolve_addon_names_from_stems(
     // GAM strict rule: for subfolders, matches folder name (or normalized folder name).
     if !is_root && !dir_name.is_empty() {
         // Prefer the exact TOC stem if it matches the folder name case-insensitively.
-        if let Some(matching_stem) = stems.iter().find(|name| name.eq_ignore_ascii_case(dir_name)) {
+        if let Some(matching_stem) = stems
+            .iter()
+            .find(|name| name.eq_ignore_ascii_case(dir_name))
+        {
             return vec![matching_stem.clone()];
         }
         // Also check normalized stems (e.g. Atlas-classic matches Atlas)
-        if let Some(idx) = normalized.iter().position(|name| name.eq_ignore_ascii_case(dir_name)) {
+        if let Some(idx) = normalized
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(dir_name))
+        {
             return vec![stems[idx].clone()];
         }
     }
@@ -1073,12 +1102,15 @@ pub fn link_addon_subfolder(
                     kind: "addon",
                 });
             }
-            anyhow::bail!("Source subfolder {:?} does not exist in repo and is not at destination {:?}", src, dst);
+            anyhow::bail!(
+                "Source subfolder {:?} does not exist in repo and is not at destination {:?}",
+                src,
+                dst
+            );
         }
 
-        fs::rename(&src, dst).with_context(|| {
-            format!("Failed both link and move for {:?} -> {:?}", src, dst)
-        })?;
+        fs::rename(&src, dst)
+            .with_context(|| format!("Failed both link and move for {:?} -> {:?}", src, dst))?;
     }
 
     Ok(InstallRecord {
@@ -1177,12 +1209,15 @@ mod tests {
 
         let repo = Repository::init(tmp.path()).unwrap();
         let mut index = repo.index().unwrap();
-        index.add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None).unwrap();
+        index
+            .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
         let sig = git2::Signature::now("Wuddle Test", "test@example.invalid").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
 
         let detected = detect_addons_in_tree(tmp.path());
         assert_eq!(

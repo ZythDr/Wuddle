@@ -1,6 +1,6 @@
-use iced::Task;
-use crate::{App, Message, LogLevel, Tab, ToastKind, TweakId, TweakValues};
 use crate::service;
+use crate::{App, LogLevel, Message, Tab, ToastKind, TweakId, TweakValues};
+use iced::Task;
 
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
@@ -87,14 +87,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if let Some(reason) = app.tweaks_disabled_reason() {
                 app.log(LogLevel::Error, &reason);
             } else {
-                let auto_launch_exe = app.active_profile().and_then(|profile| profile.auto_launch_exe.clone());
+                let auto_launch_exe = app
+                    .active_profile()
+                    .and_then(|profile| profile.auto_launch_exe.clone());
                 let exe_name = app
                     .tweak_client_info
                     .as_ref()
                     .map(|info| info.executable_name.clone())
                     .or(auto_launch_exe.clone())
                     .unwrap_or_else(|| "WoW.exe".to_string());
-                app.log(LogLevel::Info, &format!("Reading current tweaks from {}...", exe_name));
+                app.log(
+                    LogLevel::Info,
+                    &format!("Reading current tweaks from {}...", exe_name),
+                );
                 let wow = app.wow_dir.clone();
                 return Some(Task::perform(
                     service::read_tweaks(wow, auto_launch_exe),
@@ -113,7 +118,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.tweak_values.nameplate_dist = tv.nameplate_distance;
                     app.tweak_values.max_camera_dist = tv.max_camera_distance;
                     app.tweak_values.sound_channels = tv.sound_channels;
-                    
+
                     // Update enabled states based on what was read
                     // In the monolith it didn't seem to do this, but it makes sense to enable them if they are found.
                     // However, we'll stick to just updating values for now as per current logic.
@@ -133,28 +138,49 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if let Some(reason) = app.tweaks_disabled_reason() {
                 app.log(LogLevel::Error, &reason);
             } else {
-                let auto_launch_exe = app.active_profile().and_then(|profile| profile.auto_launch_exe.clone());
+                let auto_launch_exe = app
+                    .active_profile()
+                    .and_then(|profile| profile.auto_launch_exe.clone());
                 let exe_name = app
                     .tweak_client_info
                     .as_ref()
                     .map(|info| info.executable_name.clone())
                     .or(auto_launch_exe.clone())
                     .unwrap_or_else(|| "WoW.exe".to_string());
-                app.log(LogLevel::Info, &format!("Applying tweaks to {}...", exe_name));
+                app.log(
+                    LogLevel::Info,
+                    &format!("Applying tweaks to {}...", exe_name),
+                );
                 let wow = app.wow_dir.clone();
                 let tv = &app.tweak_values;
                 let ts = &app.tweaks;
                 let opts = crate::tweaks::TweakOptions {
-                    fov:                if ts.fov { Some(tv.fov) } else { None },
-                    farclip:            if ts.farclip { Some(tv.farclip) } else { None },
-                    frilldistance:      if ts.frilldistance { Some(tv.frilldistance) } else { None },
-                    nameplate_distance: if ts.nameplate_dist { Some(tv.nameplate_dist) } else { None },
-                    sound_channels:     if ts.sound_channels { Some(tv.sound_channels) } else { None },
-                    max_camera_distance: if ts.max_camera_dist { Some(tv.max_camera_dist) } else { None },
-                    quickloot:          ts.quickloot,
-                    sound_in_background:ts.sound_bg,
-                    large_address_aware:ts.large_address,
-                    camera_skip_fix:    ts.camera_skip,
+                    fov: if ts.fov { Some(tv.fov) } else { None },
+                    farclip: if ts.farclip { Some(tv.farclip) } else { None },
+                    frilldistance: if ts.frilldistance {
+                        Some(tv.frilldistance)
+                    } else {
+                        None
+                    },
+                    nameplate_distance: if ts.nameplate_dist {
+                        Some(tv.nameplate_dist)
+                    } else {
+                        None
+                    },
+                    sound_channels: if ts.sound_channels {
+                        Some(tv.sound_channels)
+                    } else {
+                        None
+                    },
+                    max_camera_distance: if ts.max_camera_dist {
+                        Some(tv.max_camera_dist)
+                    } else {
+                        None
+                    },
+                    quickloot: ts.quickloot,
+                    sound_in_background: ts.sound_bg,
+                    large_address_aware: ts.large_address,
+                    camera_skip_fix: ts.camera_skip,
                 };
                 return Some(Task::perform(
                     service::apply_tweaks(wow, auto_launch_exe, opts),
@@ -180,14 +206,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if let Some(reason) = app.tweaks_disabled_reason() {
                 app.log(LogLevel::Error, &reason);
             } else {
-                let auto_launch_exe = app.active_profile().and_then(|profile| profile.auto_launch_exe.clone());
+                let auto_launch_exe = app
+                    .active_profile()
+                    .and_then(|profile| profile.auto_launch_exe.clone());
                 let exe_name = app
                     .tweak_client_info
                     .as_ref()
                     .map(|info| info.executable_name.clone())
                     .or(auto_launch_exe.clone())
                     .unwrap_or_else(|| "WoW.exe".to_string());
-                app.log(LogLevel::Info, &format!("Restoring {} from backup...", exe_name));
+                app.log(
+                    LogLevel::Info,
+                    &format!("Restoring {} from backup...", exe_name),
+                );
                 let wow = app.wow_dir.clone();
                 return Some(Task::perform(
                     service::restore_tweaks(wow, auto_launch_exe),

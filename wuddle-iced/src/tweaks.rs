@@ -48,10 +48,7 @@ const CAMERA_PATCHES: [(usize, &[u8]); 5] = [
         ],
     ),
     (0x02D326, &[0xE9, 0xB1, 0x8A, 0x32, 0x00]),
-    (
-        0x02D334,
-        &[0x8B, 0x35, 0x48, 0x4E, 0x88, 0x00],
-    ),
+    (0x02D334, &[0x8B, 0x35, 0x48, 0x4E, 0x88, 0x00]),
     (
         0x355D15,
         &[
@@ -85,13 +82,19 @@ fn first_existing_game_executable(dir: &Path) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-fn resolve_target_executable(wow_dir: &Path, selected_exe: Option<&str>) -> Result<PathBuf, String> {
+fn resolve_target_executable(
+    wow_dir: &Path,
+    selected_exe: Option<&str>,
+) -> Result<PathBuf, String> {
     if let Some(exe_name) = selected_exe.map(str::trim).filter(|name| !name.is_empty()) {
         let explicit = wow_dir.join(exe_name);
         if explicit.is_file() {
             return Ok(explicit);
         }
-        return Err(format!("{} not found in the specified directory.", exe_name));
+        return Err(format!(
+            "{} not found in the specified directory.",
+            exe_name
+        ));
     }
 
     first_existing_game_executable(wow_dir)
@@ -106,7 +109,11 @@ fn backup_path(exe_path: &Path) -> Result<PathBuf, String> {
     Ok(exe_path.with_file_name(format!("{}.bak", file_name)))
 }
 
-pub fn apply_tweaks(wow_dir: &Path, selected_exe: Option<&str>, opts: &TweakOptions) -> Result<String, String> {
+pub fn apply_tweaks(
+    wow_dir: &Path,
+    selected_exe: Option<&str>,
+    opts: &TweakOptions,
+) -> Result<String, String> {
     let exe_path = resolve_target_executable(wow_dir, selected_exe)?;
     let exe_name = exe_path
         .file_name()
@@ -114,8 +121,7 @@ pub fn apply_tweaks(wow_dir: &Path, selected_exe: Option<&str>, opts: &TweakOpti
         .unwrap_or_else(|| "WoW.exe".to_string());
     let backup_path = backup_path(&exe_path)?;
     if !backup_path.exists() {
-        fs::copy(&exe_path, &backup_path)
-            .map_err(|e| format!("Failed to create backup: {e}"))?;
+        fs::copy(&exe_path, &backup_path).map_err(|e| format!("Failed to create backup: {e}"))?;
     }
 
     // Always start from the clean backup so unchecked tweaks revert to original values
@@ -153,8 +159,7 @@ pub fn apply_tweaks(wow_dir: &Path, selected_exe: Option<&str>, opts: &TweakOpti
     if let Some(val) = opts.sound_channels {
         let clamped = val.clamp(1, 999);
         let s = clamped.to_string();
-        let cstring =
-            CString::new(s).map_err(|e| format!("Invalid sound channel value: {e}"))?;
+        let cstring = CString::new(s).map_err(|e| format!("Invalid sound channel value: {e}"))?;
         let bytes = cstring.to_bytes_with_nul();
         if bytes.len() <= 4 {
             let end = SOUNDCHANNEL_OFFSET + bytes.len();
@@ -219,8 +224,7 @@ pub fn apply_tweaks(wow_dir: &Path, selected_exe: Option<&str>, opts: &TweakOpti
         applied.push("Camera skip fix");
     }
 
-    fs::write(&exe_path, &buf)
-        .map_err(|e| format!("Failed to write patched {}: {e}", exe_name))?;
+    fs::write(&exe_path, &buf).map_err(|e| format!("Failed to write patched {}: {e}", exe_name))?;
 
     if applied.is_empty() {
         Ok("No tweaks were selected.".into())
@@ -244,8 +248,7 @@ pub fn restore_backup(wow_dir: &Path, selected_exe: Option<&str>) -> Result<Stri
     if !backup_path.exists() {
         return Err(format!("No backup file ({}) found.", backup_path.display()));
     }
-    fs::copy(&backup_path, &exe_path)
-        .map_err(|e| format!("Failed to restore backup: {e}"))?;
+    fs::copy(&backup_path, &exe_path).map_err(|e| format!("Failed to restore backup: {e}"))?;
     Ok(format!("Restored {} from backup.", exe_name))
 }
 
@@ -286,8 +289,8 @@ fn read_f32(buf: &[u8], offset: usize) -> Result<f32, String> {
 pub fn read_tweaks(wow_dir: &Path, selected_exe: Option<&str>) -> Result<ReadTweakValues, String> {
     let exe_path = resolve_target_executable(wow_dir, selected_exe)?;
 
-    let buf = fs::read(&exe_path)
-        .map_err(|e| format!("Failed to read {}: {e}", exe_path.display()))?;
+    let buf =
+        fs::read(&exe_path).map_err(|e| format!("Failed to read {}: {e}", exe_path.display()))?;
 
     let fov = read_f32(&buf, FOV_OFFSET)?;
     let farclip = read_f32(&buf, FARCLIP_OFFSET)?;

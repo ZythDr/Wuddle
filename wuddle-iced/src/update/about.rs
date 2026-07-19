@@ -1,7 +1,7 @@
-use iced::Task;
-use crate::{App, Message, LogLevel, ToastKind, Tab, Dialog};
 use crate::service;
 use crate::settings::UpdateChannel;
+use crate::{App, Dialog, LogLevel, Message, Tab, ToastKind};
+use iced::Task;
 
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
@@ -9,7 +9,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.log(LogLevel::Api, "Checking for Wuddle updates...");
             return Some(Task::perform(
                 service::check_self_update_full(app.update_channel == UpdateChannel::Beta),
-                Message::CheckSelfUpdateResult
+                Message::CheckSelfUpdateResult,
             ));
         }
         Message::CheckSelfUpdateResult(result) => {
@@ -38,7 +38,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             return Some(Task::none());
         }
         Message::ApplySelfUpdate => {
-            if app.self_update_in_progress { return Some(Task::none()); }
+            if app.self_update_in_progress {
+                return Some(Task::none());
+            }
             app.self_update_in_progress = true;
             app.update_message = Some("Downloading update...".to_string());
             app.log(LogLevel::Info, "Downloading Wuddle update...");
@@ -77,14 +79,28 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             return Some(Task::none());
         }
         Message::ShowChangelog => {
-            app.dialog = Some(Dialog::Changelog { title: "Wuddle Changelog".to_string(), items: Vec::new(), loading: true });
-            return Some(Task::perform(service::fetch_changelog(), Message::ChangelogLoaded));
+            app.dialog = Some(Dialog::Changelog {
+                title: "Wuddle Changelog".to_string(),
+                items: Vec::new(),
+                loading: true,
+            });
+            return Some(Task::perform(
+                service::fetch_changelog(),
+                Message::ChangelogLoaded,
+            ));
         }
         Message::ChangelogLoaded(result) => {
-            if let Some(Dialog::Changelog { ref mut items, ref mut loading, .. }) = app.dialog {
+            if let Some(Dialog::Changelog {
+                ref mut items,
+                ref mut loading,
+                ..
+            }) = app.dialog
+            {
                 *loading = false;
                 let text = result.unwrap_or_else(|e| format!("Failed to load changelog: {}", e));
-                *items = iced::widget::markdown::Content::parse(&text).items().to_vec();
+                *items = iced::widget::markdown::Content::parse(&text)
+                    .items()
+                    .to_vec();
             }
             return Some(Task::none());
         }
@@ -106,12 +122,20 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
 }
 
 fn switch_to_stable_channel() -> bool {
-    let Ok(exe) = std::env::current_exe() else { return false; };
-    // Expect layout: <launcher_dir>/versions/<version>/<binary>
-    let Some(launcher_dir) = exe.parent().and_then(|v| v.parent()).and_then(|v| v.parent()) else {
+    let Ok(exe) = std::env::current_exe() else {
         return false;
     };
-    let Ok(entries) = std::fs::read_dir(launcher_dir.join("versions")) else { return false; };
+    // Expect layout: <launcher_dir>/versions/<version>/<binary>
+    let Some(launcher_dir) = exe
+        .parent()
+        .and_then(|v| v.parent())
+        .and_then(|v| v.parent())
+    else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(launcher_dir.join("versions")) else {
+        return false;
+    };
 
     let mut stables: Vec<String> = entries
         .flatten()
@@ -123,12 +147,16 @@ fn switch_to_stable_channel() -> bool {
         })
         .collect();
 
-    if stables.is_empty() { return false; }
+    if stables.is_empty() {
+        return false;
+    }
 
     stables.sort_by(|a, b| semver_parts(b).cmp(&semver_parts(a)));
     let best = &stables[0];
     let json = format!("{{\"current\":\"{}\"}}\n", best);
-    if std::fs::write(launcher_dir.join("current.json"), json).is_err() { return false; }
+    if std::fs::write(launcher_dir.join("current.json"), json).is_err() {
+        return false;
+    }
 
     std::process::exit(0);
 }

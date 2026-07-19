@@ -1,11 +1,11 @@
 //! Changelog dialog — shows the self-updater release notes as scrollable markdown.
 
+use crate::components::helpers::close_button;
+use crate::components::markdown::{empty_gif_cache, empty_image_cache, ImageViewer};
+use crate::{theme, Message};
 use iced::widget::{column, row, scrollable, text, Space};
 use iced::{Element, Length};
 use theme::ThemeColors;
-use crate::{Message, theme};
-use crate::components::helpers::close_button;
-use crate::components::markdown::{ImageViewer, empty_image_cache, empty_gif_cache};
 
 pub fn view<'a>(
     items: &'a [iced::widget::markdown::Item],
@@ -31,11 +31,15 @@ pub fn view<'a>(
             gif_cache: empty_gif_cache(),
             raw_base_url: "",
         };
-        scrollable(iced::widget::markdown::view_with(items, md_settings, &viewer))
-            .height(Length::Fixed(480.0))
-            .direction(theme::vscroll())
-            .style(move |t, s| theme::scrollable_style(c)(t, s))
-            .into()
+        scrollable(iced::widget::markdown::view_with(
+            items,
+            md_settings,
+            &viewer,
+        ))
+        .height(Length::Fixed(480.0))
+        .direction(theme::vscroll())
+        .style(move |t, s| theme::scrollable_style(c)(t, s))
+        .into()
     };
 
     column![
