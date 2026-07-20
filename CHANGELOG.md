@@ -5,24 +5,17 @@ All notable changes to Wuddle are documented in this file.
 ## v3.7.0
 
 ### New Features
-- **Generic MPQ Patch Management** — Install local `.MPQ`, `.zip`, and `.7z` packages through a dedicated Patches tab. Wuddle stages and validates every archive before deploying selected files to `Data/` or an appropriate locale directory.
-- **WDM Quick Add** — WoW 3.3.5a profiles can install the current locale-specific WDM dungeon-map patch, optional Caverns & Mines patch, and companion addon through a curated workflow.
-- **MPQ Discovery and Protection** — Wuddle discovers existing custom and core MPQs, protects untracked files by default, and provides a Manage MPQs dialog for classification, locking, naming, renaming, and enable/disable controls.
+- **MPQ Patch Management** — Added a dedicated Patches tab for installing and managing MPQ-based client patches.
+  - Install local `.MPQ`, `.zip`, and `.7z` packages through a staged and validated installation workflow.
+  - Detect existing custom, disabled, locale-specific, and core-client MPQs.
+  - Classify, protect, label, rename, enable, disable, and remove supported MPQs.
+  - Protect existing files by default, with conflict review, backups, rollback, and restoration when replacements are approved.
+  - Place locale-named patches in matching `Data/<locale>/` directories while defaulting generic patches to `Data/`.
+  - Install and update WDM for WoW 3.3.5a, including optional Caverns & Mines content and the companion addon.
 - **Per-Profile Tab Visibility** — Instance Settings can hide Mods, Addons, Patches, or Tweaks for profiles where those management areas are unnecessary or unsupported.
 
 ### Improvements
-- **Transactional MPQ Deployment** — MPQ installs use staging, case-insensitive collision checks, protected-target review, rollback, and restoration of displaced untracked files.
-- **Lightweight MPQ Health Checks** — Managed and protected archives use filesystem metadata fingerprints instead of repeatedly hashing multi-gigabyte MPQs during routine scans.
-- **Manual MPQ Management** — Existing custom MPQs appear in the Patches tab with clear Manual status, friendly labels, safe on-disk renaming, and `.disabled` enable/disable behavior.
-- **Curated Patch Updates** — WDM participates in normal update checks, provides an Update All path, links to its source, and reuses Wuddle's README preview.
-- **Locale-Aware Placement** — Locale tokens in MPQ filenames such as `patch-enUS-M.MPQ` select `Data/enUS/`; generic filenames default to `Data/` and remain editable before installation.
-- **Instance Settings Layout** — Launch Method now uses a compact dropdown, leaving the existing segmented controls available for profile tab visibility.
-- **Patches UI Consistency** — Patch rows, expansion controls, action menus, status badges, rescan controls, scrollbars, dialogs, and themed buttons now follow the Mods and Addons presentation more closely.
-
-### Bug Fixes
-- **Repository Load Deadlock** — Building repository rows no longer attempts a nested database lock while backfilling legacy MPQ fingerprints, preventing startup from remaining indefinitely busy.
-- **Managed MPQ Identification** — Local installations no longer expose hash-suffixed internal package identities as apparent filenames in Manage MPQs.
-- **MPQ Scan Coverage** — Core and custom archives in `Data/` and immediate locale directories are detected consistently, including disabled files and the standard WotLK archive naming patterns.
+- **Instance Settings Layout** — Launch Method now uses a compact dropdown, making the dialog easier to scan and leaving the segmented controls for selecting which management tabs are visible.
 
 ## v3.6.2
 
