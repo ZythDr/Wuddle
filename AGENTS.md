@@ -302,7 +302,7 @@ For an Iced release:
 
 1. Update the version in `wuddle-iced/Cargo.toml`.
 2. Update `wuddle-iced/Cargo.lock` through a normal Cargo build or check.
-3. Update the matching release section in `CHANGELOG.md`.
+3. Update the matching release section in `CHANGELOG.md`. Each beta release gets its own exact prerelease heading and lists only the changes introduced by that beta. Merge those prerelease notes into one stable section when the version is promoted to `main`.
 4. Update the `What's New in vX.Y.Z` section in `README.md` to describe the new release.
 5. Move the previous top-level README release notes into the collapsed `v3.x Changelog` section, following the existing newest-first format.
 6. Run the engine and frontend validation appropriate to the changes.
@@ -312,4 +312,4 @@ For an Iced release:
 
 `.github/workflows/iced-release.yml` builds Linux AppImage/tar.gz and Windows portable artifacts from eligible tags, then publishes the GitHub release.
 
-The workflow extracts release notes using the stable version heading—for example, a `v3.6.2-beta.1` tag uses the `## v3.6.2` changelog section.
+The workflow extracts release notes from the exact tag heading first—for example, `v3.7.0-beta.2` uses `## v3.7.0-beta.2`—and falls back to the stable version heading for older changelog entries.

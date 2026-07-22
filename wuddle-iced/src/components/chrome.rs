@@ -256,19 +256,27 @@ pub fn view_tab_button<'a>(app: &'a App, tab: Tab, colors: ThemeColors) -> Eleme
     if let Some(reason) = disabled_reason {
         iced::widget::tooltip(
             styled_btn,
-            container(iced::widget::text(reason).size(13).color(c.text))
-                .max_width(320)
-                .padding([3, 8])
-                .style(move |_theme| theme::tooltip_style(c)),
+            container(
+                iced::widget::text(reason)
+                    .size(theme::TOOLTIP_TEXT_SIZE)
+                    .color(c.text),
+            )
+            .max_width(320)
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(c)),
             iced::widget::tooltip::Position::Bottom,
         )
         .into()
     } else if is_icon || tab == Tab::About {
         iced::widget::tooltip(
             styled_btn,
-            container(iced::widget::text(tab.tooltip()).size(13).color(c.text))
-                .padding([3, 8])
-                .style(move |_theme| theme::tooltip_style(c)),
+            container(
+                iced::widget::text(tab.tooltip())
+                    .size(theme::TOOLTIP_TEXT_SIZE)
+                    .color(c.text),
+            )
+            .padding([3, 8])
+            .style(move |_theme| theme::tooltip_style(c)),
             iced::widget::tooltip::Position::Bottom,
         )
         .into()
@@ -357,7 +365,7 @@ pub fn view_footer<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
         };
         let tooltip_content = container(
             iced::widget::text(tooltip_detail)
-                .size(13)
+                .size(theme::TOOLTIP_TEXT_SIZE)
                 .color(colors.text),
         )
         .padding([6, 10]);

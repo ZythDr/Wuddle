@@ -4,7 +4,7 @@ use crate::service::{self, is_mod};
 use crate::theme::{self, ThemeColors};
 use crate::{Dialog, Message, Tab};
 use iced::widget::{button, canvas, column, container, text};
-use iced::{Element, Length, Theme};
+use iced::{Element, Font, Length, Theme};
 use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
@@ -21,7 +21,7 @@ pub fn tip<'a>(
     let tip_str = String::from(tip_text);
     iced::widget::tooltip(
         content,
-        container(text(tip_str).size(13).color(c.text))
+        container(text(tip_str).size(theme::TOOLTIP_TEXT_SIZE).color(c.text))
             .padding([3, 8])
             .style(move |_theme| theme::tooltip_style(c)),
         pos,
@@ -62,6 +62,33 @@ pub fn close_button<'a>(colors: ThemeColors) -> Element<'a, Message> {
             },
         })
         .into()
+}
+
+// ---------------------------------------------------------------------------
+// Shared dialog typography
+// ---------------------------------------------------------------------------
+
+/// Prominent label for a dialog field or settings section.
+pub fn dialog_field_label(
+    label: impl Into<String>,
+    colors: ThemeColors,
+) -> Element<'static, Message> {
+    text(label.into())
+        .size(16)
+        .font(Font {
+            weight: iced::font::Weight::Semibold,
+            ..Font::DEFAULT
+        })
+        .color(colors.text)
+        .into()
+}
+
+/// Supporting dialog copy and field hints.
+pub fn dialog_description(
+    description: impl Into<String>,
+    colors: ThemeColors,
+) -> Element<'static, Message> {
+    text(description.into()).size(14).color(colors.muted).into()
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +142,36 @@ pub fn ctx_menu_item<'a>(label: &str, msg: Message, colors: ThemeColors) -> Elem
         .into()
 }
 
+pub fn ctx_menu_item_disabled<'a>(label: &str, colors: ThemeColors) -> Element<'a, Message> {
+    button(text(String::from(label)).size(12))
+        .padding([6, 12])
+        .width(Length::Fill)
+        .style(move |_theme, _status| button::Style {
+            background: None,
+            text_color: iced::Color {
+                a: 0.38,
+                ..colors.muted
+            },
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        })
+        .into()
+}
+
+pub fn ctx_menu_item_disabled_with_tooltip<'a>(
+    label: &str,
+    tooltip: &str,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
+    tip(
+        ctx_menu_item_disabled(label, colors),
+        tooltip,
+        iced::widget::tooltip::Position::Left,
+        colors,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Inline context menu for a repo row
 // ---------------------------------------------------------------------------
@@ -137,6 +194,43 @@ pub fn inline_context_menu<'a>(
     let mut items: Vec<Element<Message>> = Vec::new();
 
     if repo.mode == "mpq" {
+        items.push(ctx_menu_item(
+            "Details\u{2026}",
+            Message::OpenDialog(Dialog::RepoDetails {
+                id: Some(rid),
+                name: repo.name.clone(),
+                files: Vec::new(),
+                loading: true,
+                expanded_paths: Default::default(),
+                loading_paths: Default::default(),
+                children: Default::default(),
+            }),
+            c,
+        ));
+        if let Some(entry) = repo
+            .installed_mpqs
+            .first()
+            .filter(|_| repo.installed_mpqs.len() == 1)
+        {
+            items.push(ctx_menu_item(
+                "Browse\u{2026}",
+                Message::BrowseGamePath(entry.path.clone()),
+                c,
+            ));
+            if entry.editor_unlocked {
+                items.push(ctx_menu_item(
+                    "Edit MPQ…",
+                    Message::OpenDialog(crate::mpq::component_dialog(rid, entry)),
+                    c,
+                ));
+            } else {
+                items.push(ctx_menu_item_disabled_with_tooltip(
+                    "Edit MPQ…",
+                    "Unlock this MPQ in Manage MPQs before editing it here.",
+                    c,
+                ));
+            }
+        }
         if repo
             .url
             .trim_end_matches('/')
@@ -199,6 +293,19 @@ pub fn inline_context_menu<'a>(
             c,
         ));
     }
+    items.push(ctx_menu_item(
+        "Details\u{2026}",
+        Message::OpenDialog(Dialog::RepoDetails {
+            id: Some(rid),
+            name: repo.name.clone(),
+            files: Vec::new(),
+            loading: true,
+            expanded_paths: Default::default(),
+            loading_paths: Default::default(),
+            children: Default::default(),
+        }),
+        c,
+    ));
     items.push(ctx_menu_item(
         "Reinstall / Repair",
         Message::ReinstallRepo(rid),

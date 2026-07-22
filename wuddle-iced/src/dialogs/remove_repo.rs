@@ -69,7 +69,7 @@ pub fn view<'a>(
         ]
         .align_y(iced::Alignment::Center),
         text(format!("Remove \"{}\" from Wuddle?", name))
-            .size(13)
+            .size(14)
             .color(colors.text),
         file_section,
         checkbox(rf)
@@ -81,7 +81,7 @@ pub fn view<'a>(
         } else {
             "Wuddle will stop tracking this mod. Local files will be left on disk."
         })
-        .size(12)
+        .size(14)
         .color(if rf { colors.warn } else { colors.muted }),
         row![
             Space::new().width(Length::Fill),

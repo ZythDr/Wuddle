@@ -1727,6 +1727,25 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
+        Message::BrowseGamePath(path) => {
+            app.open_menu = None;
+            let wow = app.wow_dir.clone();
+            if wow.is_empty() {
+                app.log(LogLevel::Error, "Set a WoW directory in Options first.");
+                return Some(Task::none());
+            }
+            Some(Task::perform(
+                service::open_game_path_folder(wow.into(), path),
+                Message::BrowseGamePathResult,
+            ))
+        }
+        Message::BrowseGamePathResult(result) => {
+            if let Err(error) = result {
+                app.log(LogLevel::Error, &format!("Browse failed: {error}"));
+                app.show_toast(format!("Could not open folder: {error}"), ToastKind::Error);
+            }
+            Some(Task::none())
+        }
         Message::UpdateRepo(id) => {
             app.open_menu = None;
             if app
@@ -1737,6 +1756,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 .unwrap_or(false)
             {
                 return Some(Task::done(Message::OpenWdm));
+            }
+            if app
+                .repos
+                .iter()
+                .find(|repo| repo.id == id)
+                .map(service::is_epoch_water_repo)
+                .unwrap_or(false)
+            {
+                return Some(Task::done(Message::InstallEpochWater));
             }
             if app.wow_dir.is_empty() {
                 app.log(LogLevel::Error, "Set a WoW directory in Options first.");
@@ -1847,14 +1875,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 let mut targets = Vec::new();
                 let mut names = Vec::new();
                 for plan in &app.plans {
-                    let curated_wdm = app
+                    let curated_mpq = app
                         .repos
                         .iter()
                         .find(|repo| repo.id == plan.repo_id)
-                        .map(service::is_wdm_repo)
+                        .map(service::is_curated_mpq_repo)
                         .unwrap_or(false);
                     if plan.has_update
-                        && !curated_wdm
+                        && !curated_mpq
                         && !app.ignored_update_ids.contains(&plan.repo_id)
                     {
                         targets.push(plan.repo_id);
@@ -2173,6 +2201,38 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 service::fetch_repo_preview(url),
                 move |result| Message::FetchRepoPreviewResult(preview_url, result),
             ))
+        }
+        Message::OpenRepoReadmePreview(title, url) => {
+            app.markdown_image_cache.clear();
+            app.markdown_gif_cache.clear();
+            app.dialog = Some(Dialog::Changelog {
+                title: format!("{title} — README"),
+                items: Vec::new(),
+                loading: true,
+            });
+            Some(Task::perform(
+                service::fetch_repo_preview(url),
+                Message::RepoReadmePreviewLoaded,
+            ))
+        }
+        Message::RepoReadmePreviewLoaded(result) => {
+            let loaded_items = match result {
+                Ok(preview) => {
+                    app.markdown_image_cache = preview.image_cache;
+                    app.markdown_gif_cache = preview.gif_cache;
+                    preview.readme_items
+                }
+                Err(error) => iced::widget::markdown::Content::parse(&format!(
+                    "Could not load the README preview.\n\n{error}"
+                ))
+                .items()
+                .to_vec(),
+            };
+            if let Some(Dialog::Changelog { items, loading, .. }) = app.dialog.as_mut() {
+                *items = loaded_items;
+                *loading = false;
+            }
+            Some(Task::none())
         }
         Message::FetchRepoPreviewResult(url, result) => {
             app.add_repo_preview_loading = false;

@@ -672,9 +672,13 @@ pub fn view<'a>(
     };
     let preview_toggle_btn = tooltip(
         preview_toggle_btn,
-        container(text(String::from(preview_tip)).size(13).color(c.text))
-            .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(c)),
+        container(
+            text(String::from(preview_tip))
+                .size(theme::TOOLTIP_TEXT_SIZE)
+                .color(c.text),
+        )
+        .padding([3, 8])
+        .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Top,
     )
     .gap(4.0);
@@ -683,7 +687,7 @@ pub fn view<'a>(
         copy_btn,
         container(
             text("Copy the DXVK config to clipboard")
-                .size(13)
+                .size(theme::TOOLTIP_TEXT_SIZE)
                 .color(c.text),
         )
         .padding([3, 8])
@@ -699,9 +703,13 @@ pub fn view<'a>(
     };
     let save_btn = tooltip(
         save_btn,
-        container(text(String::from(save_tip)).size(13).color(c.text))
-            .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(c)),
+        container(
+            text(String::from(save_tip))
+                .size(theme::TOOLTIP_TEXT_SIZE)
+                .color(c.text),
+        )
+        .padding([3, 8])
+        .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Top,
     )
     .gap(4.0);
@@ -772,10 +780,14 @@ fn with_tip<'a>(
     tip: &str,
     c: ThemeColors,
 ) -> Element<'a, Message> {
-    let tip_box = container(text(String::from(tip)).size(13).color(c.text))
-        .max_width(360)
-        .padding([6, 10])
-        .style(move |_t| theme::tooltip_style(c));
+    let tip_box = container(
+        text(String::from(tip))
+            .size(theme::TOOLTIP_TEXT_SIZE)
+            .color(c.text),
+    )
+    .max_width(360)
+    .padding([6, 10])
+    .style(move |_t| theme::tooltip_style(c));
     container(tooltip(content, tip_box, tooltip::Position::Bottom))
         .width(Length::Fill)
         .into()

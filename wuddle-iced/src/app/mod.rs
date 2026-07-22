@@ -24,6 +24,23 @@ use crate::theme::{self, ThemeColors, WuddleTheme, FRIZ, LIFECRAFT, NOTO};
 use crate::types::*;
 use crate::{chrono_now, chrono_now_fmt, monitor};
 
+const DIALOG_FOCUS_SCOPE_ID: &str = "wuddle_dialog_focus_scope";
+
+fn move_dialog_focus(reverse: bool) -> Task<Message> {
+    let scope_id = iced::widget::Id::new(DIALOG_FOCUS_SCOPE_ID);
+    if reverse {
+        iced::advanced::widget::operate(iced::advanced::widget::operation::scope(
+            scope_id,
+            iced::advanced::widget::operation::focusable::focus_previous::<Message>(),
+        ))
+    } else {
+        iced::advanced::widget::operate(iced::advanced::widget::operation::scope(
+            scope_id,
+            iced::advanced::widget::operation::focusable::focus_next::<Message>(),
+        ))
+    }
+}
+
 pub struct App {
     pub active_tab: Tab,
     pub wuddle_theme: WuddleTheme,
@@ -107,6 +124,8 @@ pub struct App {
     // Tweak values and compatibility status
     pub tweak_values: TweakValues,
     pub tweak_client_info: Option<service::ClientVersionInfo>,
+    pub tweak_client_info_by_profile:
+        HashMap<String, (String, Option<String>, service::ClientVersionInfo)>,
     pub tweak_client_error: Option<String>,
     pub tweak_client_checking: bool,
 
@@ -309,6 +328,7 @@ impl App {
             auto_login_account_picker_tooltip_visible: false,
             tweak_values: TweakValues::default(),
             tweak_client_info: None,
+            tweak_client_info_by_profile: HashMap::new(),
             tweak_client_error: None,
             tweak_client_checking: false,
             latest_version: None,
@@ -737,6 +757,15 @@ impl App {
                         key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                         ..
                     }) => Some(Message::CloseDialog),
+                    iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                        key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab),
+                        modifiers,
+                        ..
+                    }) => Some(if modifiers.shift() {
+                        Message::FocusPreviousDialogField
+                    } else {
+                        Message::FocusNextDialogField
+                    }),
                     _ => None,
                 },
             ));
@@ -826,7 +855,7 @@ impl App {
                 .tweak_client_info
                 .as_ref()
                 .map(|info| info.supports_legacy_1121_tweaks)
-                .unwrap_or(true)
+                .unwrap_or(false)
     }
 
     pub fn tweaks_disabled_reason(&self) -> Option<String> {
@@ -1104,6 +1133,12 @@ impl App {
             }
 
             // Dialogs
+            Message::FocusNextDialogField => {
+                return self.finish_update(move_dialog_focus(false));
+            }
+            Message::FocusPreviousDialogField => {
+                return self.finish_update(move_dialog_focus(true));
+            }
             Message::OpenDialog(mut d) => {
                 self.open_menu = None;
                 self.add_new_menu_open = false;
@@ -1111,9 +1146,11 @@ impl App {
                     &d,
                     Dialog::ManualMpq { .. }
                         | Dialog::RenameManualMpq { .. }
+                        | Dialog::EditUntrackedMpq { .. }
                         | Dialog::MpqComponent { .. }
                 ) {
                     self.mpq_ui.error = None;
+                    self.mpq_ui.detected_locale = None;
                 }
                 if let Dialog::RemoveRepo {
                     id, remove_files, ..
@@ -1133,6 +1170,21 @@ impl App {
                     Task::perform(
                         service::list_repo_installs(db, repo_id),
                         Message::RemoveRepoFilesLoaded,
+                    )
+                } else if let Dialog::RepoDetails { id: Some(id), .. } = &d {
+                    let db = self.db_path.clone();
+                    let repo_id = *id;
+                    Task::perform(
+                        service::load_repo_details(db, repo_id, PathBuf::from(&self.wow_dir)),
+                        Message::RepoDetailsLoaded,
+                    )
+                } else if matches!(
+                    d,
+                    Dialog::EditUntrackedMpq { .. } | Dialog::MpqComponent { .. }
+                ) {
+                    Task::perform(
+                        service::detect_mpq_locale(self.db_path.clone(), self.wow_dir.clone()),
+                        Message::MpqLocaleDetected,
                     )
                 } else if matches!(d, Dialog::AddRepo { .. }) {
                     let mut tasks = vec![iced::widget::operation::focus(iced::widget::Id::new(
@@ -1161,6 +1213,67 @@ impl App {
             Message::RemoveRepoFilesLoaded(result) => {
                 if let Some(Dialog::RemoveRepo { ref mut files, .. }) = self.dialog {
                     *files = result.unwrap_or_default();
+                }
+            }
+            Message::RepoDetailsLoaded(result) => {
+                if let Some(Dialog::RepoDetails { files, loading, .. }) = &mut self.dialog {
+                    *loading = false;
+                    *files = result.unwrap_or_default();
+                }
+            }
+            Message::ToggleRepoDetailsPath(path) => {
+                if let Some(Dialog::RepoDetails {
+                    expanded_paths,
+                    loading_paths,
+                    children,
+                    ..
+                }) = &mut self.dialog
+                {
+                    if expanded_paths.remove(&path) {
+                        return self.finish_update(Task::none());
+                    }
+                    if children.contains_key(&path) {
+                        expanded_paths.insert(path);
+                        return self.finish_update(Task::none());
+                    }
+                    if !loading_paths.insert(path.clone()) {
+                        return self.finish_update(Task::none());
+                    }
+                    let wow_dir = PathBuf::from(&self.wow_dir);
+                    let result_path = path.clone();
+                    return self.finish_update(Task::perform(
+                        service::load_game_directory_children(wow_dir, path),
+                        move |result| {
+                            Message::RepoDetailsChildrenLoaded(result_path.clone(), result)
+                        },
+                    ));
+                }
+            }
+            Message::RepoDetailsChildrenLoaded(path, result) => {
+                if let Some(Dialog::RepoDetails {
+                    expanded_paths,
+                    loading_paths,
+                    children,
+                    ..
+                }) = &mut self.dialog
+                {
+                    loading_paths.remove(&path);
+                    match result {
+                        Ok(entries) => {
+                            children.insert(path.clone(), entries);
+                            expanded_paths.insert(path);
+                        }
+                        Err(error) => {
+                            self.log(
+                                LogLevel::Error,
+                                &format!("Could not inspect tracked directory: {error}"),
+                            );
+                            self.show_toast(
+                                format!("Could not inspect directory: {error}"),
+                                ToastKind::Error,
+                            );
+                        }
+                    }
                 }
             }
             Message::CloseDialog => {
@@ -1489,11 +1602,12 @@ impl App {
                     Dialog::MpqComponent { .. }
                     | Dialog::ManualMpq { .. }
                     | Dialog::RenameManualMpq { .. }
+                    | Dialog::EditUntrackedMpq { .. }
                     | Dialog::RemoveWdm { .. } => (560u32, 24),
-                    Dialog::InstanceSettings { .. } => (600u32, 24),
+                    Dialog::InstanceSettings { .. } => (750u32, 24),
                     #[cfg(feature = "auto-login")]
                     Dialog::AutoLoginAccounts | Dialog::AutoLoginEditor => (640u32, 24),
-                    Dialog::Changelog { .. } => (720u32, 24),
+                    Dialog::Changelog { .. } | Dialog::RepoDetails { .. } => (720u32, 24),
                     Dialog::AvWarning { .. } => (720u32, 24),
                     Dialog::AwesomeWotlkPatchWarning
                     | Dialog::ModsWarning { .. }
@@ -1522,6 +1636,15 @@ impl App {
                         .width(Length::Fill)
                         .style(move |_theme| theme::dialog_style(c_dlg))
                         .into()
+                } else if matches!(dialog, Dialog::InstanceSettings { .. }) {
+                    container(self.view_dialog(dialog, self.theme_colors))
+                        .max_width(dialog_max_w)
+                        .max_height(760)
+                        .padding(dialog_pad)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(move |_theme| theme::dialog_style(c_dlg))
+                        .into()
                 } else {
                     container(self.view_dialog(dialog, self.theme_colors))
                         .max_width(dialog_max_w)
@@ -1544,7 +1667,9 @@ impl App {
                     | Dialog::MpqComponent { .. }
                     | Dialog::ManualMpq { .. }
                     | Dialog::RenameManualMpq { .. }
+                    | Dialog::EditUntrackedMpq { .. }
                     | Dialog::Changelog { .. }
+                    | Dialog::RepoDetails { .. }
                     | Dialog::DxvkConfig { .. }
                     | Dialog::InstanceSettings { .. }
                     | Dialog::CollectionChoice { .. }
@@ -1576,6 +1701,7 @@ impl App {
             // Only the dialog itself is opaque. The surrounding padded area is
             // left to the scrim so routine dialogs can close on a backdrop click.
             let centered_dialog = container(iced::widget::opaque(dialog_box))
+                .id(iced::widget::Id::new(DIALOG_FOCUS_SCOPE_ID))
                 .center_x(Length::Fill)
                 .center_y(Length::Fill)
                 .padding(40);
@@ -1757,6 +1883,7 @@ impl App {
             | Dialog::MpqComponent { .. }
             | Dialog::ManualMpq { .. }
             | Dialog::RenameManualMpq { .. }
+            | Dialog::EditUntrackedMpq { .. }
             | Dialog::RemoveWdm { .. } => crate::mpq::view_dialog(self, dialog, colors),
             #[cfg(feature = "auto-login")]
             Dialog::AutoLoginAccounts
@@ -1854,7 +1981,7 @@ impl App {
                                 Some(if is_collection { "Collection" } else { "Single Addon" }),
                                 |s: &'static str| Message::SetAddRepoCollectionMode(s == "Collection"),
                             )
-                            .text_size(12)
+                            .text_size(13)
                             .padding([8, 10]),
                             "Single Addon — installs the whole repo as one addon.\nCollection — lets you pick individual sub-folders to install separately. GAM does not store this selection and may expose every folder after a GAM update.",
                             iced::widget::tooltip::Position::Bottom,
@@ -1878,7 +2005,7 @@ impl App {
 
                     if self.add_repo_probe_loading {
                         return text("Scanning addon folders\u{2026}")
-                            .size(11)
+                            .size(14)
                             .color(colors.muted)
                             .into();
                     }
@@ -1898,7 +2025,7 @@ impl App {
                             n,
                             probe.addon_names.len()
                         ))
-                        .size(11)
+                        .size(14)
                         .color(colors.muted)
                         .into();
                     }
@@ -1918,9 +2045,9 @@ impl App {
                     };
 
                     row![
-                        text("Main TOC:").size(12).color(colors.text),
+                        dialog_field_label("Main TOC", colors),
                         pick_list(options, current_selection, Message::SetAddRepoPrimaryAddon)
-                            .text_size(11)
+                            .text_size(13)
                             .padding([4, 8]),
                         tip(
                             text("\u{1f6c8}").size(14).color(colors.muted),
@@ -1952,9 +2079,9 @@ impl App {
                         .or_else(|| options.first().cloned());
 
                     row![
-                        text("Release asset:").size(12).color(colors.text),
+                        dialog_field_label("Release asset", colors),
                         pick_list(options, current_selection, Message::SetAddRepoReleaseAsset)
-                            .text_size(11)
+                            .text_size(13)
                             .padding([4, 8]),
                         tip(
                             text("\u{1f6c8}").size(14).color(colors.muted),
@@ -1996,7 +2123,7 @@ impl App {
                                     is_addons,
                                     advanced: val,
                                 })),
-                            text("Mode").size(12).color(c.muted),
+                            dialog_field_label("Mode", colors),
                             iced::widget::pick_list(mode_list, picked, move |m: String| {
                                 Message::OpenDialog(Dialog::AddRepo {
                                     url: url_pl.clone(),
@@ -2005,7 +2132,7 @@ impl App {
                                     advanced: true,
                                 })
                             })
-                            .text_size(12)
+                            .text_size(13)
                             .padding([4, 8]),
                         ]
                         .spacing(6)
@@ -2133,12 +2260,12 @@ impl App {
                             if selected_count == 0 {
                                 "Remove collection"
                             } else {
-                                "Save changes"
+                                "Update"
                             }
                         } else if is_installed {
                             "Installed"
                         } else if is_addons {
-                            "Add addon"
+                            "Install"
                         } else {
                             "Add mod"
                         };
@@ -2151,7 +2278,7 @@ impl App {
                         } else if is_installed {
                             "This repository is already managed by Wuddle"
                         } else if is_addons {
-                            "Add this addon to Wuddle"
+                            "Install this addon"
                         } else {
                             "Add this mod to Wuddle"
                         };
@@ -3524,14 +3651,14 @@ impl App {
                         column![
                             // Sticky header
                             row![
-                                text(title).size(17).color(colors.title),
+                                text(title).size(18).color(colors.title),
                                 Space::new().width(Length::Fill),
                                 close_button(c_form),
                             ]
                             .align_y(iced::Alignment::Center),
-                            text(subtitle).size(12).color(colors.text_soft),
+                            dialog_description(subtitle, colors),
                             rule::horizontal(1).style(move |_t| theme::update_line_style(c_form)),
-                            text(url_label).size(12).color(colors.text),
+                            dialog_field_label(url_label, colors),
                             url_row,
                             build_collection_section(),
                             build_release_asset_section(),
@@ -3592,8 +3719,12 @@ impl App {
                                     "Quick Add · {}",
                                     self.quick_add_client_family().label()
                                 ))
-                                .size(12)
-                                .color(colors.muted)
+                                .size(16)
+                                .font(Font {
+                                    weight: iced::font::Weight::Semibold,
+                                    ..Font::DEFAULT
+                                })
+                                .color(colors.text)
                                 .into()
                             };
                             column![
@@ -3612,14 +3743,14 @@ impl App {
 
                     column![
                         row![
-                            text(title).size(17).color(colors.title),
+                            text(title).size(18).color(colors.title),
                             Space::new().width(Length::Fill),
                             close_button(c),
                         ]
                         .align_y(iced::Alignment::Center),
-                        text(subtitle).size(12).color(colors.text_soft),
+                        dialog_description(subtitle, colors),
                         rule::horizontal(1).style(move |_t| theme::update_line_style(c)),
-                        text(url_label).size(12).color(colors.text),
+                        dialog_field_label(url_label, colors),
                         url_row,
                         build_collection_section(),
                         build_release_asset_section(),
@@ -3703,6 +3834,177 @@ impl App {
                 ]
                 .spacing(12)
                 .width(Length::Fixed(700.0))
+                .into()
+            }
+            Dialog::RepoDetails {
+                name,
+                files,
+                loading,
+                expanded_paths,
+                loading_paths,
+                children,
+                ..
+            } => {
+                let file_rows = files.iter().map(|entry| {
+                    let (icon, label) = match entry.kind.as_str() {
+                        "dll" => ("\u{2699}", "DLL"),
+                        "addon" => ("\u{1f4c1}", "Addon"),
+                        "mpq" => ("\u{1f4e6}", "MPQ"),
+                        _ => ("\u{1f4c4}", "File"),
+                    };
+                    let is_expanded = expanded_paths.contains(&entry.path);
+                    let is_loading = loading_paths.contains(&entry.path);
+                    let path = entry.path.clone();
+                    let summary = row![
+                        text(if entry.is_directory {
+                            if is_expanded {
+                                "\u{25be}"
+                            } else {
+                                "\u{25b8}"
+                            }
+                        } else {
+                            " "
+                        })
+                        .size(12)
+                        .color(colors.muted),
+                        text(icon).size(13),
+                        text(&entry.path).size(12).color(colors.text),
+                        Space::new().width(Length::Fill),
+                        text(if is_loading { "Loading…" } else { label })
+                            .size(11)
+                            .color(colors.muted),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center);
+                    let summary: Element<Message> = if entry.is_directory {
+                        button(summary)
+                            .on_press(Message::ToggleRepoDetailsPath(path.clone()))
+                            .padding([5, 8])
+                            .width(Length::Fill)
+                            .style(move |_theme, status| match status {
+                                button::Status::Hovered => theme::tab_button_hovered_style(c),
+                                _ => button::Style {
+                                    background: None,
+                                    text_color: c.text,
+                                    border: iced::Border::default(),
+                                    shadow: iced::Shadow::default(),
+                                    snap: true,
+                                },
+                            })
+                            .into()
+                    } else {
+                        container(summary)
+                            .padding([5, 8])
+                            .width(Length::Fill)
+                            .into()
+                    };
+                    let browse = button(text("Browse…").size(11))
+                        .on_press(Message::BrowseGamePath(entry.path.clone()))
+                        .padding([5, 9])
+                        .style(move |_theme, status| match status {
+                            button::Status::Hovered => theme::tab_button_hovered_style(c),
+                            _ => theme::tab_button_style(c),
+                        });
+                    let mut detail = column![row![summary, browse]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center)];
+                    if is_expanded {
+                        let child_rows =
+                            children
+                                .get(&entry.path)
+                                .into_iter()
+                                .flatten()
+                                .map(|child| {
+                                    row![
+                                        Space::new().width(28),
+                                        text(if child.is_directory {
+                                            "\u{1f4c1}"
+                                        } else {
+                                            "\u{1f4c4}"
+                                        })
+                                        .size(11),
+                                        text(&child.name).size(11).color(colors.text_soft),
+                                    ]
+                                    .spacing(7)
+                                    .align_y(iced::Alignment::Center)
+                                    .into()
+                                });
+                        let children_view: Element<Message> = if children
+                            .get(&entry.path)
+                            .map(|entries| entries.is_empty())
+                            .unwrap_or(false)
+                        {
+                            container(
+                                text("This directory is empty.")
+                                    .size(11)
+                                    .color(colors.muted),
+                            )
+                            .padding([3, 36])
+                            .into()
+                        } else {
+                            column(child_rows).spacing(3).into()
+                        };
+                        detail = detail.push(children_view);
+                    }
+                    container(detail.spacing(3))
+                        .padding([3, 5])
+                        .width(Length::Fill)
+                        .style(move |_theme| theme::card_style(c))
+                        .into()
+                });
+                let body: Element<Message> = if *loading {
+                    container(
+                        text("Loading installed files\u{2026}")
+                            .size(13)
+                            .color(colors.muted),
+                    )
+                    .height(Length::Fixed(160.0))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .into()
+                } else if files.is_empty() {
+                    container(
+                        text("Wuddle has no tracked files for this project.")
+                            .size(13)
+                            .color(colors.muted),
+                    )
+                    .height(Length::Fixed(100.0))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .into()
+                } else {
+                    scrollable(column(file_rows).spacing(4))
+                        .height(Length::Fixed(300.0))
+                        .direction(theme::vscroll())
+                        .style(move |theme, status| theme::scrollable_style(c)(theme, status))
+                        .into()
+                };
+                column![
+                    row![
+                        text(format!("{} — Details", name))
+                            .size(18)
+                            .color(colors.title),
+                        Space::new().width(Length::Fill),
+                        close_button(c),
+                    ]
+                    .align_y(iced::Alignment::Center),
+                    text("Files installed and tracked by Wuddle for this project.")
+                        .size(12)
+                        .color(colors.muted),
+                    body,
+                    row![
+                        Space::new().width(Length::Fill),
+                        button(text("Close").size(13))
+                            .on_press(Message::CloseDialog)
+                            .padding([6, 12])
+                            .style(move |_theme, status| match status {
+                                button::Status::Hovered => theme::tab_button_hovered_style(c),
+                                _ => theme::tab_button_style(c),
+                            }),
+                    ],
+                ]
+                .spacing(12)
+                .width(Length::Fixed(650.0))
                 .into()
             }
             Dialog::RemoveRepo {
@@ -4053,9 +4355,9 @@ impl App {
                 #[cfg(not(feature = "auto-login"))]
                 let _ = auto_login_enabled;
                 let title_text = if *is_new {
-                    "Add Instance"
+                    "Add Profile"
                 } else {
-                    "Instance Settings"
+                    "Profile Settings"
                 };
                 let can_remove = !*is_new;
                 let is_active_profile = *profile_id == self.active_profile_id;
@@ -4085,24 +4387,19 @@ impl App {
                 .text_size(13)
                 .width(Length::Fill);
 
-                let visibility_button =
-                    |label: &'static str, enabled: bool, field: InstanceField| {
-                        let c2 = c;
-                        let btn = button(text(label).size(12))
-                            .on_press(Message::UpdateInstanceField(field))
-                            .padding([4, 10]);
-                        let element: Element<Message> = if enabled {
-                            btn.style(move |_theme, _status| theme::tab_button_active_style(c2))
-                                .into()
-                        } else {
-                            btn.style(move |_theme, status| match status {
-                                button::Status::Hovered => theme::tab_button_hovered_style(c2),
-                                _ => theme::tab_button_style(c2),
-                            })
-                            .into()
-                        };
-                        element
-                    };
+                let visibility_button = |label: &'static str,
+                                         enabled: bool,
+                                         field: InstanceField|
+                 -> Element<'static, Message> {
+                    let c2 = c;
+                    let btn = button(text(label).size(15))
+                        .on_press(Message::UpdateInstanceField(field))
+                        .padding([7, 13])
+                        .style(move |_theme: &Theme, status| {
+                            theme::choice_button_style(c2, enabled, status)
+                        });
+                    btn.into()
+                };
                 let visible_tab_buttons = row![
                     visibility_button(
                         "Mods",
@@ -4132,26 +4429,35 @@ impl App {
                 // Conditional launch method fields
                 let launch_fields: Element<Message> = match launch_method.as_str() {
                     "lutris" => column![
-                        text("Lutris target").size(13).color(colors.text),
+                        text("Lutris target")
+                            .size(16)
+                            .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
+                            .color(colors.text),
                         iced::widget::text_input("lutris:rungameid/2", lutris_target)
                             .on_input(|s| Message::UpdateInstanceField(
                                 InstanceField::LutrisTarget(s)
                             ))
                             .padding([8, 12]),
                         text("Example: lutris:rungameid/2")
-                            .size(11)
+                            .size(16)
                             .color(colors.muted),
                     ]
                     .spacing(4)
                     .into(),
                     "wine" => column![
-                        text("Wine command").size(13).color(colors.text),
+                        text("Wine command")
+                            .size(16)
+                            .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
+                            .color(colors.text),
                         iced::widget::text_input("wine", wine_command)
                             .on_input(|s| Message::UpdateInstanceField(InstanceField::WineCommand(
                                 s
                             )))
                             .padding([8, 12]),
-                        text("Wine arguments").size(13).color(colors.text),
+                        text("Wine arguments")
+                            .size(16)
+                            .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
+                            .color(colors.text),
                         iced::widget::text_input("--some-arg value", wine_args)
                             .on_input(|s| Message::UpdateInstanceField(InstanceField::WineArgs(s)))
                             .padding([8, 12]),
@@ -4159,20 +4465,26 @@ impl App {
                     .spacing(4)
                     .into(),
                     "custom" => column![
-                        text("Custom command").size(13).color(colors.text),
+                        text("Custom command")
+                            .size(16)
+                            .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
+                            .color(colors.text),
                         iced::widget::text_input("command", custom_command)
                             .on_input(|s| Message::UpdateInstanceField(
                                 InstanceField::CustomCommand(s)
                             ))
                             .padding([8, 12]),
-                        text("Custom arguments").size(13).color(colors.text),
+                        text("Custom arguments")
+                            .size(16)
+                            .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
+                            .color(colors.text),
                         iced::widget::text_input("--flag value", custom_args)
                             .on_input(|s| Message::UpdateInstanceField(InstanceField::CustomArgs(
                                 s
                             )))
                             .padding([8, 12]),
                         text("Tip: use {exe} for the game path and {autologin_args} where secure auto-login arguments should be inserted.")
-                            .size(11)
+                            .size(16)
                             .color(colors.muted),
                     ]
                     .spacing(4)
@@ -4180,7 +4492,7 @@ impl App {
                     _ => text(settings::auto_launch_description(
                         auto_launch_exe.as_deref(),
                     ))
-                    .size(12)
+                    .size(16)
                     .color(colors.muted)
                     .into(),
                 };
@@ -4189,9 +4501,9 @@ impl App {
                 let auto_login_management: Element<Message> = if *auto_login_enabled {
                     let c2 = c;
                     if !*is_new && is_active_profile {
-                        button(text("Manage Auto-Login Accounts…").size(12))
+                        button(text("Manage Auto-Login Accounts…").size(14))
                             .on_press(Message::OpenAutoLoginAccounts)
-                            .padding([6, 12])
+                            .padding([8, 14])
                             .style(move |_theme, status| match status {
                                 button::Status::Hovered => theme::tab_button_hovered_style(c2),
                                 _ => theme::tab_button_style(c2),
@@ -4199,13 +4511,13 @@ impl App {
                             .into()
                     } else {
                         let unavailable_message = if *is_new {
-                            "Save this instance before adding auto-login accounts."
+                            "Save this profile before adding auto-login accounts."
                         } else {
-                            "Switch to this instance before managing its auto-login accounts."
+                            "Switch to this profile before managing its auto-login accounts."
                         };
                         let disabled_button = button(
                             text("Manage Auto-Login Accounts…")
-                                .size(12)
+                                .size(14)
                                 .color(Color::from_rgba(
                                     colors.muted.r,
                                     colors.muted.g,
@@ -4213,7 +4525,7 @@ impl App {
                                     0.55,
                                 )),
                         )
-                        .padding([6, 12])
+                        .padding([8, 14])
                         .style(move |_theme, _status| button::Style {
                             background: Some(iced::Background::Color(Color::from_rgba(
                                 c2.tab_idle_bottom.r,
@@ -4260,24 +4572,94 @@ impl App {
                         .label("Auto-clear WDB cache on launch")
                         .on_toggle(|b| Message::UpdateInstanceField(InstanceField::ClearWdb(b))),
                 )
-                .height(32)
-                .center_y(32);
+                .height(38)
+                .center_y(38);
 
-                column![
-                    row![
-                        text(title_text).size(18).color(colors.title),
-                        Space::new().width(Length::Fill),
-                        close_button(c),
-                    ]
-                    .align_y(iced::Alignment::Center),
-                    text("Configure name, game path, and launch behavior for this instance.")
-                        .size(12)
-                        .color(colors.muted),
-                    text("Instance name").size(13).color(colors.text),
+                let footer: Element<Message> = {
+                    let mut footer_items: Vec<Element<Message>> = Vec::new();
+                    if can_remove {
+                        let c2 = c;
+                        let remove_el: Element<Message> = if is_active_profile {
+                            let dimmed_btn = button(text("Remove").size(13))
+                                .padding([6, 14])
+                                .style(move |_theme, _status| button::Style {
+                                    background: None,
+                                    text_color: iced::Color::from_rgba(1.0, 0.4, 0.4, 0.35),
+                                    border: iced::Border {
+                                        color: iced::Color::from_rgba(1.0, 0.4, 0.4, 0.25),
+                                        width: 1.0,
+                                        radius: 0.0.into(),
+                                    },
+                                    shadow: iced::Shadow::default(),
+                                    snap: true,
+                                });
+                            iced::widget::tooltip(
+                                dimmed_btn,
+                                container(
+                                    text("Cannot remove the active profile")
+                                        .size(theme::TOOLTIP_TEXT_SIZE)
+                                        .color(c2.text),
+                                )
+                                .padding([4, 8])
+                                .style(move |_theme| theme::tooltip_style(c2)),
+                                iced::widget::tooltip::Position::Top,
+                            )
+                            .into()
+                        } else {
+                            let rm_btn = button(text("Remove").size(13).color(c.bad))
+                                .on_press(Message::RemoveProfile(remove_id))
+                                .padding([6, 14])
+                                .style(move |_theme, _status| {
+                                    let mut s = theme::tab_button_style(c2);
+                                    s.border.color = c2.bad;
+                                    s
+                                });
+                            tip(
+                                rm_btn,
+                                "Delete this profile",
+                                iced::widget::tooltip::Position::Top,
+                                colors,
+                            )
+                        };
+                        footer_items.push(remove_el);
+                    }
+                    footer_items.push(Space::new().width(Length::Fill).into());
+                    footer_items.push(
+                        button(text("Cancel").size(13))
+                            .on_press(Message::CloseDialog)
+                            .padding([6, 14])
+                            .style(move |_theme, status| match status {
+                                button::Status::Hovered => theme::tab_button_hovered_style(c),
+                                _ => theme::tab_button_style(c),
+                            })
+                            .into(),
+                    );
+                    footer_items.push(tip(
+                        button(text("Save").size(13))
+                            .on_press(Message::SaveInstanceSettings)
+                            .padding([6, 14])
+                            .style(move |_theme, _status| theme::tab_button_active_style(c)),
+                        "Save profile settings",
+                        iced::widget::tooltip::Position::Top,
+                        colors,
+                    ));
+                    row(footer_items).spacing(8).into()
+                };
+
+                let settings_body = column![
+                    Space::new().height(8),
+                    text("Profile name")
+                        .size(16)
+                        .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
+                        .color(colors.text),
                     iced::widget::text_input("My WoW Install", name)
                         .on_input(|s| Message::UpdateInstanceField(InstanceField::Name(s)))
                         .padding([8, 12]),
-                    text("WoW directory or executable").size(13).color(colors.text),
+                    Space::new().height(8),
+                    text("WoW directory or executable")
+                        .size(16)
+                        .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
+                        .color(colors.text),
                     row![
                         iced::widget::text_input("/path/to/WoW or /path/to/Game.exe", wow_dir)
                             .on_input(|s| Message::UpdateInstanceField(InstanceField::WowDir(s)))
@@ -4286,9 +4668,9 @@ impl App {
                         {
                             let c2 = c;
                             tip(
-                                button(text("Folder").size(12))
+                                button(text("Folder").size(14))
                                     .on_press(Message::PickWowDirectory)
-                                    .padding([8, 12])
+                                    .padding([9, 14])
                                     .style(move |_t, s| match s {
                                         button::Status::Hovered => {
                                             theme::tab_button_hovered_style(c2)
@@ -4303,9 +4685,9 @@ impl App {
                         {
                             let c2 = c;
                             tip(
-                                button(text("Exe").size(12))
+                                button(text("Exe").size(14))
                                     .on_press(Message::PickWowExecutable)
-                                    .padding([8, 12])
+                                    .padding([9, 14])
                                     .style(move |_t, s| match s {
                                         button::Status::Hovered => {
                                             theme::tab_button_hovered_style(c2)
@@ -4320,97 +4702,54 @@ impl App {
                     ]
                     .spacing(6),
                     text("Tip: choose a folder for default Auto behavior, or choose a renamed game executable to make Auto prefer that file.")
-                        .size(11)
+                        .size(14)
                         .color(colors.muted),
+                    Space::new().height(8),
                     clear_wdb_toggle,
                     row![
                         auto_login_toggle,
                         Space::new().width(Length::Fill),
                         auto_login_management,
                     ]
-                    .height(32)
+                    .height(38)
                     .align_y(iced::Alignment::Center),
-                    text("Launch method").size(13).color(colors.text),
+                    Space::new().height(8),
+                    text("Launch method")
+                        .size(16)
+                        .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
+                        .color(colors.text),
                     launch_method_picker,
                     launch_fields,
-                    text("Visible tabs").size(13).color(colors.text),
+                    Space::new().height(8),
+                    text("Visible tabs")
+                        .size(16)
+                        .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
+                        .color(colors.text),
                     visible_tab_buttons,
                     text("Home and Wuddle's utility buttons are always available. Tweaks also requires a supported WoW 1.12 client.")
-                        .size(11)
+                        .size(14)
                         .color(colors.muted),
-                    Space::new().height(4),
-                    {
-                        let mut footer_items: Vec<Element<Message>> = Vec::new();
-                        if can_remove {
-                            let c2 = c;
-                            let remove_el: Element<Message> = if is_active_profile {
-                                let dimmed_btn = button(text("Remove").size(13))
-                                    .padding([6, 14])
-                                    .style(move |_theme, _status| button::Style {
-                                        background: None,
-                                        text_color: iced::Color::from_rgba(1.0, 0.4, 0.4, 0.35),
-                                        border: iced::Border {
-                                            color: iced::Color::from_rgba(1.0, 0.4, 0.4, 0.25),
-                                            width: 1.0,
-                                            radius: 4.0.into(),
-                                        },
-                                        shadow: iced::Shadow::default(),
-                                        snap: true,
-                                    });
-                                iced::widget::tooltip(
-                                    dimmed_btn,
-                                    container(
-                                        text("Cannot remove the active instance")
-                                            .size(13)
-                                            .color(c2.text),
-                                    )
-                                    .padding([4, 8])
-                                    .style(move |_theme| theme::tooltip_style(c2)),
-                                    iced::widget::tooltip::Position::Top,
-                                )
-                                .into()
-                            } else {
-                                let rm_btn = button(text("Remove").size(13).color(c.bad))
-                                    .on_press(Message::RemoveProfile(remove_id))
-                                    .padding([6, 14])
-                                    .style(move |_theme, _status| {
-                                        let mut s = theme::tab_button_style(c2);
-                                        s.border.color = c2.bad;
-                                        s
-                                    });
-                                tip(
-                                    rm_btn,
-                                    "Delete this instance profile",
-                                    iced::widget::tooltip::Position::Top,
-                                    colors,
-                                )
-                            };
-                            footer_items.push(remove_el);
-                        }
-                        footer_items.push(Space::new().width(Length::Fill).into());
-                        footer_items.push(
-                            button(text("Cancel").size(13))
-                                .on_press(Message::CloseDialog)
-                                .padding([6, 14])
-                                .style(move |_theme, status| match status {
-                                    button::Status::Hovered => theme::tab_button_hovered_style(c),
-                                    _ => theme::tab_button_style(c),
-                                })
-                                .into(),
-                        );
-                        footer_items.push(tip(
-                            button(text("Save").size(13))
-                                .on_press(Message::SaveInstanceSettings)
-                                .padding([6, 14])
-                                .style(move |_theme, _status| theme::tab_button_active_style(c)),
-                            "Save instance settings",
-                            iced::widget::tooltip::Position::Top,
-                            colors,
-                        ));
-                        row(footer_items).spacing(8)
-                    },
                 ]
-                .spacing(8)
+                .spacing(8);
+
+                column![
+                    row![
+                        text(title_text).size(18).color(colors.title),
+                        Space::new().width(Length::Fill),
+                        close_button(c),
+                    ]
+                    .align_y(iced::Alignment::Center),
+                    text("Configure name, game path, and launch behavior for this profile.")
+                        .size(14)
+                        .color(colors.muted),
+                    scrollable(settings_body)
+                        .height(Length::Fill)
+                        .spacing(10)
+                        .style(move |t, s| theme::scrollable_style(c)(t, s)),
+                    footer,
+                ]
+                .height(Length::Fill)
+                .spacing(10)
                 .into()
             }
             Dialog::DxvkConfig {
@@ -4543,7 +4882,7 @@ impl App {
                 let mut rows: Vec<Element<Message>> = vec![
                     row![
                         text("Multiple addon folders detected")
-                            .size(15)
+                            .size(18)
                             .color(colors.title),
                         Space::new().width(Length::Fill),
                         close_button(c),
@@ -4554,7 +4893,7 @@ impl App {
                         "\"{}\" contains {} addon folders. How should Wuddle install it?",
                         domain, count
                     ))
-                    .size(12)
+                    .size(14)
                     .color(colors.text_soft)
                     .into(),
                     rule::horizontal(1)
@@ -4594,9 +4933,15 @@ impl App {
                     column![
                         button(
                             column![
-                                text("Collection").size(13).color(colors.text),
+                                text("Collection")
+                                    .size(16)
+                                    .font(Font {
+                                        weight: iced::font::Weight::Semibold,
+                                        ..Font::DEFAULT
+                                    })
+                                    .color(colors.text),
                                 text("Install each folder as a separate tracked addon")
-                                    .size(11)
+                                    .size(14)
                                     .color(colors.text_soft),
                             ]
                             .spacing(2),
@@ -4607,9 +4952,15 @@ impl App {
                         .style(move |_t, _s| theme::tab_button_style(c)),
                         button(
                             column![
-                                text("Single addon with modules").size(13).color(colors.text),
+                                text("Single addon with modules")
+                                    .size(16)
+                                    .font(Font {
+                                        weight: iced::font::Weight::Semibold,
+                                        ..Font::DEFAULT
+                                    })
+                                    .color(colors.text),
                                 text("Clone the whole repo as one addon entry (no per-folder selection)")
-                                    .size(11)
+                                    .size(14)
                                     .color(colors.text_soft),
                             ]
                             .spacing(2),
@@ -4623,11 +4974,7 @@ impl App {
                     .into(),
                 );
 
-                container(column(rows).spacing(10))
-                    .padding([16, 20])
-                    .width(Length::Fill)
-                    .style(move |_t| theme::dialog_style(c))
-                    .into()
+                column(rows).spacing(10).width(Length::Fill).into()
             }
 
             Dialog::SelectMainAddon {
@@ -4647,7 +4994,7 @@ impl App {
 
                 let mut rows: Vec<Element<Message>> = vec![
                     row![
-                        text("Select Main TOC").size(15).color(colors.title),
+                        text("Select Main TOC").size(18).color(colors.title),
                         Space::new().width(Length::Fill),
                         close_button(c),
                     ]
@@ -4657,7 +5004,7 @@ impl App {
                         "\"{}\" contains multiple .toc files at the root. Which TOC should define the addon folder name?",
                         domain
                     ))
-                    .size(12)
+                    .size(14)
                     .color(colors.text_soft)
                     .into(),
                 ];
@@ -4715,7 +5062,7 @@ impl App {
                     rows.push(
                         row![
                             Space::new().width(Length::Fill),
-                            button(text("Install as Collection instead").size(11))
+                            button(text("Install as Collection instead").size(13))
                                 .on_press(Message::SetAddRepoCollectionMode(true))
                                 .padding([6, 12])
                                 .style(move |_t, status| {
@@ -4785,7 +5132,7 @@ impl App {
 
                 column![
                     row![
-                        text("Release Asset Selection").size(15).color(colors.title),
+                        text("Release Asset Selection").size(18).color(colors.title),
                         Space::new().width(Length::Fill),
                         close_button(c),
                     ]
@@ -4794,7 +5141,7 @@ impl App {
                         "\"{}\" publishes multiple compatible archives. Which one should Wuddle install?",
                         domain
                     ))
-                    .size(12)
+                    .size(14)
                     .color(colors.text_soft),
                     scrollable(column(scroll_rows).spacing(6)).height(Length::Shrink),
                 ]
@@ -5018,9 +5365,13 @@ impl App {
         if is_icon || tab == Tab::About {
             iced::widget::tooltip(
                 styled_btn,
-                container(text(tab.tooltip()).size(13).color(c.text))
-                    .padding([3, 8])
-                    .style(move |_theme| theme::tooltip_style(c)),
+                container(
+                    text(tab.tooltip())
+                        .size(theme::TOOLTIP_TEXT_SIZE)
+                        .color(c.text),
+                )
+                .padding([3, 8])
+                .style(move |_theme| theme::tooltip_style(c)),
                 iced::widget::tooltip::Position::Bottom,
             )
             .into()
@@ -5099,8 +5450,12 @@ impl App {
                     settings::auto_launch_description(active.auto_launch_exe.as_deref()),
                 ),
             };
-            let tooltip_content =
-                container(text(tooltip_detail).size(13).color(colors.text)).padding([6, 10]);
+            let tooltip_content = container(
+                text(tooltip_detail)
+                    .size(theme::TOOLTIP_TEXT_SIZE)
+                    .color(colors.text),
+            )
+            .padding([6, 10]);
             iced::widget::tooltip(
                 text(mode_label).size(12).color(colors.muted),
                 tooltip_content,

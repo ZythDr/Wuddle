@@ -31,6 +31,7 @@ pub struct MpqProtectionRow {
     pub fingerprint: String,
     pub protected: bool,
     pub core: bool,
+    pub editor_unlocked: bool,
     pub display_name: Option<String>,
 }
 
@@ -72,7 +73,7 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        const SCHEMA_VERSION: i32 = 14;
+        const SCHEMA_VERSION: i32 = 16;
 
         let current: i32 = self
             .conn
@@ -287,6 +288,35 @@ impl Db {
                 ALTER TABLE mpq_protection
                   ADD COLUMN display_name TEXT;
                 PRAGMA user_version = 14;
+                "#,
+            )?;
+        }
+
+        // v14 -> v15: keep the Manage MPQs editor padlock independent from
+        // collision/replacement protection semantics.
+        if current < 15 {
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE mpq_protection
+                  ADD COLUMN editor_unlocked INTEGER NOT NULL DEFAULT 0;
+                PRAGMA user_version = 15;
+                "#,
+            )?;
+        }
+
+        // v15 -> v16: Wuddle-installed MPQs are editable by default. Rows
+        // already present in mpq_protection represent an explicit user choice
+        // and are deliberately left unchanged.
+        if current < 16 {
+            self.conn.execute_batch(
+                r#"
+                INSERT OR IGNORE INTO mpq_protection(
+                  path, sha256, protected, core, fingerprint, display_name, editor_unlocked
+                )
+                SELECT path, '', 0, 0, COALESCE(file_fingerprint, ''), display_name, 1
+                FROM installs
+                WHERE kind='mpq';
+                PRAGMA user_version = 16;
                 "#,
             )?;
         }
@@ -969,6 +999,35 @@ impl Db {
         backups: &[MpqBackupRow],
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
+        // A newly managed MPQ starts unlocked. Reinstalls preserve an
+        // existing managed file's explicit editor-lock choice.
+        for install in installs {
+            tx.execute(
+                r#"
+                INSERT INTO mpq_protection(
+                  path, sha256, protected, core, fingerprint, display_name, editor_unlocked
+                ) VALUES (?1, '', 0, 0, COALESCE(?2, ''), ?3, 1)
+                ON CONFLICT(path) DO UPDATE SET
+                  fingerprint=excluded.fingerprint,
+                  display_name=excluded.display_name,
+                  protected=0,
+                  core=0,
+                  editor_unlocked=CASE
+                    WHEN EXISTS(
+                      SELECT 1 FROM installs
+                      WHERE repo_id=?4 AND kind='mpq' AND path=?1 COLLATE NOCASE
+                    ) THEN mpq_protection.editor_unlocked
+                    ELSE 1
+                  END
+                "#,
+                params![
+                    install.path,
+                    install.file_fingerprint,
+                    install.display_name,
+                    repo_id
+                ],
+            )?;
+        }
         tx.execute(
             "DELETE FROM installs WHERE repo_id=?1 AND kind='mpq'",
             params![repo_id],
@@ -1056,24 +1115,33 @@ impl Db {
         // Preserve an explicit user classification only while this is still
         // the same filesystem object. Replacements return to name detection.
         let core = matching.map(|row| row.core).unwrap_or(detected_core);
-        let protected = matching.map(|row| row.protected).unwrap_or(true) || core;
+        let protected = matching.map(|row| row.protected).unwrap_or(true);
+        let editor_unlocked = matching.map(|row| row.editor_unlocked).unwrap_or(false);
         self.conn.execute(
             r#"
-            INSERT INTO mpq_protection(path, sha256, protected, core, fingerprint)
-            VALUES (?1, '', ?2, ?3, ?4)
+            INSERT INTO mpq_protection(path, sha256, protected, core, fingerprint, editor_unlocked)
+            VALUES (?1, '', ?2, ?3, ?4, ?5)
             ON CONFLICT(path) DO UPDATE SET
               sha256='',
               protected=excluded.protected,
               core=excluded.core,
-              fingerprint=excluded.fingerprint
+              fingerprint=excluded.fingerprint,
+              editor_unlocked=excluded.editor_unlocked
             "#,
-            params![path, i64::from(protected), i64::from(core), fingerprint],
+            params![
+                path,
+                i64::from(protected),
+                i64::from(core),
+                fingerprint,
+                i64::from(editor_unlocked)
+            ],
         )?;
         Ok(MpqProtectionRow {
             path: path.to_string(),
             fingerprint: fingerprint.to_string(),
             protected,
             core,
+            editor_unlocked,
             display_name: existing.and_then(|row| row.display_name),
         })
     }
@@ -1081,7 +1149,7 @@ impl Db {
     pub fn get_mpq_protection(&self, path: &str) -> Result<Option<MpqProtectionRow>> {
         let result = self.conn.query_row(
             r#"
-            SELECT path, fingerprint, protected, core, display_name
+            SELECT path, fingerprint, protected, core, editor_unlocked, display_name
             FROM mpq_protection WHERE path=?1 COLLATE NOCASE
             "#,
             params![path],
@@ -1091,7 +1159,8 @@ impl Db {
                     fingerprint: row.get(1)?,
                     protected: row.get::<_, i64>(2)? != 0,
                     core: row.get::<_, i64>(3)? != 0,
-                    display_name: row.get(4)?,
+                    editor_unlocked: row.get::<_, i64>(4)? != 0,
+                    display_name: row.get(5)?,
                 })
             },
         );
@@ -1104,7 +1173,7 @@ impl Db {
 
     pub fn list_mpq_protection(&self) -> Result<Vec<MpqProtectionRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT path, fingerprint, protected, core, display_name FROM mpq_protection ORDER BY LOWER(path)",
+            "SELECT path, fingerprint, protected, core, editor_unlocked, display_name FROM mpq_protection ORDER BY LOWER(path)",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(MpqProtectionRow {
@@ -1112,7 +1181,8 @@ impl Db {
                 fingerprint: row.get(1)?,
                 protected: row.get::<_, i64>(2)? != 0,
                 core: row.get::<_, i64>(3)? != 0,
-                display_name: row.get(4)?,
+                editor_unlocked: row.get::<_, i64>(4)? != 0,
+                display_name: row.get(5)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1123,7 +1193,7 @@ impl Db {
         self.conn.execute(
             r#"
             UPDATE mpq_protection SET protected=?1
-            WHERE path=?2 COLLATE NOCASE AND fingerprint=?3 AND core=0
+            WHERE path=?2 COLLATE NOCASE AND fingerprint=?3
             "#,
             params![i64::from(protected), path, fingerprint],
         )?;
@@ -1139,12 +1209,90 @@ impl Db {
         self.conn.execute(
             r#"
             UPDATE mpq_protection
-            SET core=?1,
-                protected=CASE WHEN ?1=1 THEN 1 ELSE protected END
+            SET core=?1
             WHERE path=?2 COLLATE NOCASE AND fingerprint=?3
             "#,
             params![i64::from(core), path, fingerprint],
         )?;
+        Ok(())
+    }
+
+    pub fn set_mpq_editor_unlocked(
+        &self,
+        path: &str,
+        fingerprint: &str,
+        editor_unlocked: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE mpq_protection
+            SET editor_unlocked=?1
+            WHERE path=?2 COLLATE NOCASE AND fingerprint=?3
+            "#,
+            params![i64::from(editor_unlocked), path, fingerprint],
+        )?;
+        Ok(())
+    }
+
+    pub fn edit_mpq_protection_entry(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        fingerprint: &str,
+        display_name: &str,
+        protected: bool,
+        core: bool,
+        editor_unlocked: bool,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM mpq_protection WHERE path=?1 COLLATE NOCASE",
+            params![old_path],
+        )?;
+        tx.execute(
+            r#"
+            INSERT OR REPLACE INTO mpq_protection(
+              path, sha256, protected, core, fingerprint, display_name, editor_unlocked
+            ) VALUES (?1, '', ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                new_path,
+                i64::from(protected),
+                i64::from(core),
+                fingerprint,
+                display_name,
+                i64::from(editor_unlocked)
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn edit_tracked_mpq_install(
+        &self,
+        repo_id: i64,
+        old_path: &str,
+        new_path: &str,
+        display_name: &str,
+        path_changed: bool,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            r#"UPDATE installs SET path=?3, display_name=?4
+               WHERE repo_id=?1 AND path=?2 COLLATE NOCASE AND kind='mpq'"#,
+            params![repo_id, old_path, new_path, display_name],
+        )?;
+        if path_changed {
+            tx.execute(
+                "DELETE FROM mpq_backups WHERE repo_id=?1 AND path=?2 COLLATE NOCASE",
+                params![repo_id, old_path],
+            )?;
+        }
+        tx.execute(
+            "UPDATE mpq_protection SET path=?2 WHERE path=?1 COLLATE NOCASE",
+            params![old_path, new_path],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1155,6 +1303,7 @@ impl Db {
         fingerprint: &str,
         protected: bool,
         core: bool,
+        editor_unlocked: bool,
         display_name: Option<&str>,
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
@@ -1165,9 +1314,9 @@ impl Db {
         tx.execute(
             r#"
             INSERT OR REPLACE INTO mpq_protection(
-              path, sha256, protected, core, fingerprint, display_name
+              path, sha256, protected, core, fingerprint, display_name, editor_unlocked
             )
-            VALUES (?1, '', ?2, ?3, ?4, ?5)
+            VALUES (?1, '', ?2, ?3, ?4, ?5, ?6)
             "#,
             params![
                 new_path,
@@ -1175,6 +1324,7 @@ impl Db {
                 i64::from(core),
                 fingerprint,
                 display_name,
+                i64::from(editor_unlocked),
             ],
         )?;
         tx.commit()?;

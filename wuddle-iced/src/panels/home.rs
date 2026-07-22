@@ -226,9 +226,13 @@ fn tip<'a>(
     let c = colors;
     tooltip(
         content,
-        container(text(String::from(label)).size(13).color(c.text))
-            .padding([4, 8])
-            .style(move |_theme| theme::tooltip_style(c)),
+        container(
+            text(String::from(label))
+                .size(theme::TOOLTIP_TEXT_SIZE)
+                .color(c.text),
+        )
+        .padding([4, 8])
+        .style(move |_theme| theme::tooltip_style(c)),
         position,
     )
     .gap(4.0)

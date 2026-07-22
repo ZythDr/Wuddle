@@ -281,6 +281,19 @@ pub struct RepoRow {
     pub published_at_unix: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RepoDetailEntry {
+    pub path: String,
+    pub kind: String,
+    pub is_directory: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepoDetailChild {
+    pub name: String,
+    pub is_directory: bool,
+}
+
 fn parse_selected_addons(raw: Option<&str>) -> Vec<String> {
     let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
         return Vec::new();
@@ -483,13 +496,63 @@ pub struct WdmCatalog {
 }
 
 pub const WDM_PATCH_URL: &str = "https://github.com/Trimitor/WDM-patch";
+pub const EPOCH_WATER_URL: &str = "https://github.com/ZythDr/EpochWater";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CuratedMpqKind {
+    Wdm,
+    EpochWater,
+}
+
+impl CuratedMpqKind {
+    pub fn readme_label(self) -> &'static str {
+        match self {
+            Self::Wdm => "WDM",
+            Self::EpochWater => "Epoch Water",
+        }
+    }
+
+    pub fn latest_label(self) -> &'static str {
+        match self {
+            Self::Wdm => "Latest WDM release",
+            Self::EpochWater => "Latest Epoch Water source revision",
+        }
+    }
+}
+
+fn curated_mpq_kind_for_url(url: &str) -> Option<CuratedMpqKind> {
+    let url = url.trim_end_matches('/');
+    if url.eq_ignore_ascii_case(WDM_PATCH_URL) {
+        Some(CuratedMpqKind::Wdm)
+    } else if url.eq_ignore_ascii_case(EPOCH_WATER_URL) {
+        Some(CuratedMpqKind::EpochWater)
+    } else {
+        None
+    }
+}
+
+pub fn curated_mpq_kind(repo: &RepoRow) -> Option<CuratedMpqKind> {
+    (repo.mode == "mpq")
+        .then(|| curated_mpq_kind_for_url(&repo.url))
+        .flatten()
+}
+
+fn curated_mpq_kind_for_repo(repo: &Repo) -> Option<CuratedMpqKind> {
+    (repo.mode == InstallMode::Mpq)
+        .then(|| curated_mpq_kind_for_url(&repo.url))
+        .flatten()
+}
 
 pub fn is_wdm_repo(repo: &RepoRow) -> bool {
-    repo.mode == "mpq"
-        && repo
-            .url
-            .trim_end_matches('/')
-            .eq_ignore_ascii_case(WDM_PATCH_URL)
+    curated_mpq_kind(repo) == Some(CuratedMpqKind::Wdm)
+}
+
+pub fn is_epoch_water_repo(repo: &RepoRow) -> bool {
+    curated_mpq_kind(repo) == Some(CuratedMpqKind::EpochWater)
+}
+
+pub fn is_curated_mpq_repo(repo: &RepoRow) -> bool {
+    curated_mpq_kind(repo).is_some()
 }
 
 impl WdmReleaseSet {
@@ -786,6 +849,24 @@ pub async fn load_mpq_protection(
     .map_err(|error| error.to_string())?
 }
 
+pub async fn detect_mpq_locale(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let engine = open_engine(db_path.as_deref())?;
+        let detection = engine.detect_wow_locale(Path::new(&wow_dir));
+        if detection.ambiguous {
+            return Ok(None);
+        }
+        Ok(detection
+            .recommended
+            .or_else(|| (detection.candidates.len() == 1).then(|| detection.candidates[0].clone())))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 pub async fn rescan_mpqs(db_path: Option<PathBuf>, wow_dir: String) -> Result<usize, String> {
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
@@ -806,6 +887,37 @@ pub async fn change_mpq_protection(
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         eng.set_mpq_protected(Path::new(&wow_dir), &path, protected)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn set_untracked_mpq_editor_unlocked(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    editor_unlocked: bool,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_untracked_mpq_editor_unlocked(Path::new(&wow_dir), &path, editor_unlocked)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn set_tracked_mpq_editor_unlocked(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    repo_id: i64,
+    path: String,
+    editor_unlocked: bool,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_tracked_mpq_editor_unlocked(repo_id, Path::new(&wow_dir), &path, editor_unlocked)
             .map_err(|error| error.to_string())
     })
     .await
@@ -863,6 +975,33 @@ pub async fn rename_untracked_mpq(
     .map_err(|error| error.to_string())?
 }
 
+pub async fn edit_untracked_mpq(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    display_name: String,
+    file_name: String,
+    destination: wuddle_engine::mpq::MpqDestination,
+    core: bool,
+    set_xattr_comment: bool,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.edit_untracked_mpq(
+            Path::new(&wow_dir),
+            &path,
+            &display_name,
+            &file_name,
+            &destination,
+            core,
+            set_xattr_comment,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 pub async fn rename_untracked_mpq_file(
     db_path: Option<PathBuf>,
     wow_dir: String,
@@ -884,15 +1023,19 @@ pub async fn rename_mpq_component(
     repo_id: i64,
     path: String,
     display_name: String,
+    file_name: String,
+    destination: wuddle_engine::mpq::MpqDestination,
     set_xattr_comment: bool,
-) -> Result<(), String> {
+) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
-        eng.rename_mpq_display_name(
+        eng.edit_tracked_mpq(
             repo_id,
+            Path::new(&wow_dir),
             &path,
             &display_name,
-            Path::new(&wow_dir),
+            &file_name,
+            &destination,
             set_xattr_comment,
         )
         .map_err(|error| error.to_string())
@@ -1030,12 +1173,67 @@ mod wdm_recipe_tests {
     #[test]
     fn update_checks_use_the_main_wdm_patch_version_even_when_disabled() {
         let installs = [
-            ("Data/enUS/patch-enUS-N.MPQ", Some("caverns-preview")),
-            ("Data/enUS/patch-enUS-M.MPQ.disabled", Some("v1.4.0")),
+            (
+                "Data/enUS/patch-enUS-N.MPQ",
+                Some("WDM Caverns & Mines"),
+                Some("caverns-preview"),
+            ),
+            (
+                "Data/enUS/renamed-main.MPQ.disabled",
+                Some("WDM Dungeon Maps"),
+                Some("v1.4.0"),
+            ),
         ];
         assert_eq!(
             installed_wdm_main_version(installs).as_deref(),
             Some("v1.4.0")
+        );
+    }
+
+    #[test]
+    fn curated_updates_preserve_a_user_selected_target_name_and_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::open(&temp.path().join("wuddle.sqlite")).unwrap();
+        let repo_id = engine
+            .add_repo(WDM_PATCH_URL, InstallMode::Mpq, None, None)
+            .unwrap();
+        engine
+            .db()
+            .add_install_with_hash(
+                repo_id,
+                "Data/enUS/patch-enUS-X.MPQ",
+                "mpq",
+                None,
+                Some("v1.4.0"),
+            )
+            .unwrap();
+        engine
+            .db()
+            .set_install_display_name(repo_id, "Data/enUS/patch-enUS-X.MPQ", "WDM Dungeon Maps")
+            .unwrap();
+
+        assert_eq!(
+            saved_curated_mpq_target(&engine, WDM_PATCH_URL, "WDM Dungeon Maps"),
+            Some((
+                "patch-enUS-X.MPQ".to_string(),
+                wuddle_engine::mpq::MpqDestination::Locale("enUS".to_string()),
+            ))
+        );
+    }
+
+    #[test]
+    fn recognizes_the_supported_curated_mpq_sources() {
+        assert_eq!(
+            curated_mpq_kind_for_url("https://github.com/Trimitor/WDM-patch/"),
+            Some(CuratedMpqKind::Wdm)
+        );
+        assert_eq!(
+            curated_mpq_kind_for_url("https://github.com/ZythDr/EpochWater"),
+            Some(CuratedMpqKind::EpochWater)
+        );
+        assert_eq!(
+            curated_mpq_kind_for_url("https://github.com/example/other-patch"),
+            None
         );
     }
 }
@@ -1079,6 +1277,51 @@ pub async fn resolve_wdm(db_path: Option<PathBuf>, wow_dir: String) -> Result<Wd
         caverns,
         addon,
     })
+}
+
+fn saved_curated_mpq_target(
+    engine: &Engine,
+    repository_url: &str,
+    display_name: &str,
+) -> Option<(String, wuddle_engine::mpq::MpqDestination)> {
+    let repo = engine.db().list_repos().ok()?.into_iter().find(|repo| {
+        repo.mode == InstallMode::Mpq
+            && repo
+                .url
+                .trim_end_matches('/')
+                .eq_ignore_ascii_case(repository_url.trim_end_matches('/'))
+    })?;
+    let install = engine
+        .db()
+        .list_installs(repo.id)
+        .ok()?
+        .into_iter()
+        .find(|entry| {
+            entry.kind == "mpq"
+                && entry
+                    .display_name
+                    .as_deref()
+                    .map(|name| name.eq_ignore_ascii_case(display_name))
+                    .unwrap_or(false)
+        })?;
+    let enabled_path = install
+        .path
+        .strip_suffix(".disabled")
+        .unwrap_or(&install.path);
+    let path = Path::new(enabled_path);
+    let file_name = path.file_name()?.to_str()?.to_string();
+    let parts = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    let destination = if parts.len() >= 3 && parts[0].eq_ignore_ascii_case("Data") {
+        wuddle_engine::mpq::normalize_locale(parts[1])
+            .map(wuddle_engine::mpq::MpqDestination::Locale)
+            .unwrap_or(wuddle_engine::mpq::MpqDestination::DataRoot)
+    } else {
+        wuddle_engine::mpq::MpqDestination::DataRoot
+    };
+    Some((file_name, destination))
 }
 
 pub async fn install_wdm(
@@ -1155,24 +1398,34 @@ pub async fn install_wdm(
     }
 
     let destination = wuddle_engine::mpq::MpqDestination::Locale(locale.clone());
+    let main_target = saved_curated_mpq_target(&eng, WDM_PATCH_URL, "WDM Dungeon Maps");
+    let caverns_target = saved_curated_mpq_target(&eng, WDM_PATCH_URL, "WDM Caverns & Mines");
     let mut assets = vec![wuddle_engine::mpq::MpqRemoteAsset {
         asset_name: main.name.clone(),
+        target_file_name: main_target.as_ref().map(|(name, _)| name.clone()),
         download_url: main.download_url.clone(),
         size: main.size,
         sha256: main.sha256.clone(),
         display_name: "WDM Dungeon Maps".to_string(),
-        destination: destination.clone(),
+        destination: main_target
+            .as_ref()
+            .map(|(_, destination)| destination.clone())
+            .unwrap_or_else(|| destination.clone()),
         replace_unprotected: true,
         version: Some(catalog.stable.version.clone()),
     }];
     if let Some((release, asset)) = caverns {
         assets.push(wuddle_engine::mpq::MpqRemoteAsset {
             asset_name: asset.name.clone(),
+            target_file_name: caverns_target.as_ref().map(|(name, _)| name.clone()),
             download_url: asset.download_url.clone(),
             size: asset.size,
             sha256: asset.sha256.clone(),
             display_name: "WDM Caverns & Mines".to_string(),
-            destination,
+            destination: caverns_target
+                .as_ref()
+                .map(|(_, destination)| destination.clone())
+                .unwrap_or(destination),
             replace_unprotected: true,
             version: Some(release.version.clone()),
         });
@@ -1213,6 +1466,104 @@ pub async fn install_wdm(
             .map_err(|error| error.to_string())?;
     }
     Ok(mpq_repo_id)
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubSourceFile {
+    #[serde(rename = "type")]
+    kind: String,
+    name: String,
+    sha: String,
+    size: u64,
+    download_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct EpochWaterSource {
+    version: String,
+    download_url: String,
+    size: u64,
+}
+
+async fn resolve_epoch_water_source() -> Result<EpochWaterSource, String> {
+    const API_URL: &str =
+        "https://api.github.com/repos/ZythDr/EpochWater/contents/patch-W.mpq?ref=main";
+    const FALLBACK_DOWNLOAD_URL: &str =
+        "https://raw.githubusercontent.com/ZythDr/EpochWater/main/patch-W.mpq";
+
+    let mut request = Client::new()
+        .get(API_URL)
+        .header(
+            "User-Agent",
+            format!("Wuddle/{}", env!("CARGO_PKG_VERSION")),
+        )
+        .header("Accept", "application/vnd.github+json");
+    if let Some(token) = wuddle_engine::github_token() {
+        request = request.bearer_auth(token);
+    }
+    let source = request
+        .send()
+        .await
+        .map_err(|error| format!("Could not look up Epoch Water: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Could not look up Epoch Water: {error}"))?
+        .json::<GithubSourceFile>()
+        .await
+        .map_err(|error| format!("Could not read Epoch Water source metadata: {error}"))?;
+    if source.kind != "file" || !source.name.eq_ignore_ascii_case("patch-W.mpq") {
+        return Err("Epoch Water's patch-W.mpq source file was not found.".to_string());
+    }
+    if source.sha.trim().is_empty() || source.size == 0 {
+        return Err("Epoch Water's patch-W.mpq source file is invalid.".to_string());
+    }
+    Ok(EpochWaterSource {
+        version: source.sha,
+        download_url: source
+            .download_url
+            .unwrap_or_else(|| FALLBACK_DOWNLOAD_URL.to_string()),
+        size: source.size,
+    })
+}
+
+pub async fn install_epoch_water(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    options: InstallOptions,
+) -> Result<i64, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("install_epoch_water");
+    let source = resolve_epoch_water_source().await?;
+    let eng = open_engine(db_path.as_deref())?;
+    let saved_target = saved_curated_mpq_target(&eng, EPOCH_WATER_URL, "Epoch Water");
+    let assets = [wuddle_engine::mpq::MpqRemoteAsset {
+        asset_name: "patch-W.mpq".to_string(),
+        target_file_name: saved_target.as_ref().map(|(name, _)| name.clone()),
+        download_url: source.download_url,
+        size: Some(source.size),
+        // GitHub's source blob ID is not a SHA-256 checksum of the download.
+        // Keep it as the installed version and let the engine validate the MPQ.
+        sha256: None,
+        display_name: "Epoch Water".to_string(),
+        destination: saved_target
+            .map(|(_, destination)| destination)
+            .unwrap_or(wuddle_engine::mpq::MpqDestination::DataRoot),
+        replace_unprotected: true,
+        version: Some(source.version),
+    }];
+    let package = wuddle_engine::mpq::MpqRemotePackage {
+        url: EPOCH_WATER_URL.to_string(),
+        forge: "github".to_string(),
+        host: "github.com".to_string(),
+        owner: "ZythDr".to_string(),
+        name: "Epoch Water".to_string(),
+    };
+    eng.install_remote_mpq_package(
+        Path::new(&wow_dir),
+        package,
+        &assets,
+        options.set_xattr_comment,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 pub async fn remove_wdm(
@@ -1637,12 +1988,16 @@ pub async fn check_updates(
 
 async fn build_wdm_update_plan(eng: &Engine, repo: Repo) -> PlanRow {
     let installs = eng.db().list_installs(repo.id).unwrap_or_default();
-    let current = installed_wdm_main_version(
-        installs
-            .iter()
-            .filter(|entry| entry.kind == "mpq")
-            .map(|entry| (entry.path.as_str(), entry.version.as_deref())),
-    );
+    let current =
+        installed_wdm_main_version(installs.iter().filter(|entry| entry.kind == "mpq").map(
+            |entry| {
+                (
+                    entry.path.as_str(),
+                    entry.display_name.as_deref(),
+                    entry.version.as_deref(),
+                )
+            },
+        ));
     match resolve_wdm_stable(eng).await {
         Ok((stable, _)) => {
             let has_update = current.as_deref() != Some(stable.version.as_str());
@@ -1684,17 +2039,69 @@ async fn build_wdm_update_plan(eng: &Engine, repo: Repo) -> PlanRow {
     }
 }
 
+async fn build_epoch_water_update_plan(repo: Repo) -> PlanRow {
+    let current = repo.last_version.clone();
+    match resolve_epoch_water_source().await {
+        Ok(source) => {
+            let has_update = current.as_deref() != Some(source.version.as_str());
+            PlanRow {
+                repo_id: repo.id,
+                owner: repo.owner,
+                name: repo.name,
+                current,
+                latest: source.version,
+                asset_name: "patch-W.mpq".to_string(),
+                has_update,
+                repair_needed: false,
+                externally_modified: false,
+                not_modified: !has_update,
+                mode: "mpq".to_string(),
+                host: repo.host,
+                error: None,
+                previous_dll_count: 0,
+                new_dll_count: 0,
+            }
+        }
+        Err(error) => PlanRow {
+            repo_id: repo.id,
+            owner: repo.owner,
+            name: repo.name,
+            current,
+            latest: String::new(),
+            asset_name: String::new(),
+            has_update: false,
+            repair_needed: false,
+            externally_modified: false,
+            not_modified: false,
+            mode: "mpq".to_string(),
+            host: repo.host,
+            error: Some(error),
+            previous_dll_count: 0,
+            new_dll_count: 0,
+        },
+    }
+}
+
 fn installed_wdm_main_version<'a>(
-    installs: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    installs: impl IntoIterator<Item = (&'a str, Option<&'a str>, Option<&'a str>)>,
 ) -> Option<String> {
-    installs
-        .into_iter()
-        .find(|(path, _)| {
+    let mut legacy_match = None;
+    for (path, display_name, version) in installs {
+        if display_name
+            .map(|name| name.eq_ignore_ascii_case("WDM Dungeon Maps"))
+            .unwrap_or(false)
+        {
+            return version.map(str::to_string);
+        }
+        if legacy_match.is_none() {
             let path = path.to_ascii_lowercase();
             let enabled_path = path.strip_suffix(".disabled").unwrap_or(&path);
-            enabled_path.ends_with("-m.mpq")
-        })
-        .and_then(|(_, version)| version.map(str::to_string))
+            if enabled_path.ends_with("-m.mpq") {
+                legacy_match = version.map(str::to_string);
+            }
+        }
+    }
+    legacy_match
 }
 
 pub async fn check_updates_skip(
@@ -1707,22 +2114,17 @@ pub async fn check_updates_skip(
     clear_update_check_progress();
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
-        let wdm_repo = eng
+        let curated_repos = eng
             .db()
             .list_repos()
             .map_err(|error| error.to_string())?
             .into_iter()
-            .find(|repo| {
-                repo.mode == InstallMode::Mpq
-                    && repo
-                        .url
-                        .trim_end_matches('/')
-                        .eq_ignore_ascii_case(WDM_PATCH_URL)
-            });
-        // WDM needs locale-aware asset selection, so keep it out of the
-        // generic forge updater and append a purpose-built release plan below.
+            .filter_map(|repo| curated_mpq_kind_for_repo(&repo).map(|kind| (repo, kind)))
+            .collect::<Vec<_>>();
+        // Curated MPQs use their own source/release selection, so keep them out
+        // of the generic forge updater and append purpose-built plans below.
         let mut engine_skip_repo_ids = skip_repo_ids.clone();
-        if let Some(repo) = &wdm_repo {
+        for (repo, _) in &curated_repos {
             engine_skip_repo_ids.insert(repo.id);
         }
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1747,9 +2149,15 @@ pub async fn check_updates_skip(
             })
             .map_err(|e| e.to_string())?;
         let mut rows = plans.into_iter().map(PlanRow::from).collect::<Vec<_>>();
-        if let Some(repo) = wdm_repo.filter(|repo| !skip_repo_ids.contains(&repo.id)) {
+        for (repo, kind) in curated_repos
+            .into_iter()
+            .filter(|(repo, _)| !skip_repo_ids.contains(&repo.id))
+        {
             rows.retain(|plan| plan.repo_id != repo.id);
-            rows.push(runtime.block_on(build_wdm_update_plan(&eng, repo)));
+            rows.push(match kind {
+                CuratedMpqKind::Wdm => runtime.block_on(build_wdm_update_plan(&eng, repo)),
+                CuratedMpqKind::EpochWater => runtime.block_on(build_epoch_water_update_plan(repo)),
+            });
         }
         let _ = progress_forwarder.join();
         clear_update_check_progress();
@@ -2056,6 +2464,79 @@ pub async fn list_repo_installs(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+pub async fn load_repo_details(
+    db_path: Option<PathBuf>,
+    repo_id: i64,
+    wow_dir: PathBuf,
+) -> Result<Vec<RepoDetailEntry>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("load_repo_details");
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        let mut entries = eng
+            .db()
+            .list_installs(repo_id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|entry| {
+                let is_directory = wow_dir.join(&entry.path).is_dir();
+                RepoDetailEntry {
+                    path: entry.path,
+                    kind: entry.kind,
+                    is_directory,
+                }
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            left.path
+                .to_ascii_lowercase()
+                .cmp(&right.path.to_ascii_lowercase())
+        });
+        Ok(entries)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn load_game_directory_children(
+    wow_dir: PathBuf,
+    relative_path: String,
+) -> Result<Vec<RepoDetailChild>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("load_game_directory_children");
+    tokio::task::spawn_blocking(move || {
+        let relative = Path::new(&relative_path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err("The selected game path is invalid.".to_string());
+        }
+        let directory = wow_dir.join(relative);
+        if !directory.is_dir() {
+            return Err("The tracked directory could not be found.".to_string());
+        }
+        let mut children = std::fs::read_dir(directory)
+            .map_err(|error| error.to_string())?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().to_str()?.to_string();
+                let is_directory = entry.file_type().ok()?.is_dir();
+                Some(RepoDetailChild { name, is_directory })
+            })
+            .collect::<Vec<_>>();
+        children.sort_by(|left, right| {
+            right.is_directory.cmp(&left.is_directory).then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
+        });
+        Ok(children)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 pub async fn set_dll_enabled(
@@ -2493,10 +2974,23 @@ pub async fn open_repo_folder(
         }
 
         // 2. Try first valid install path (for release/manual mods)
-        if let Some(first) = installs.first() {
+        let preferred_install = installs
+            .iter()
+            .min_by_key(|entry| match entry.kind.as_str() {
+                "dll" => 0,
+                "raw" => 1,
+                "addon" => 2,
+                _ => 1,
+            });
+        if let Some(first) = preferred_install {
             let full_path = wow_dir.join(&first.path);
-            if full_path.exists() {
-                let _ = open::that(full_path);
+            let target = if full_path.is_dir() {
+                Some(full_path.as_path())
+            } else {
+                full_path.parent().filter(|parent| parent.is_dir())
+            };
+            if let Some(target) = target {
+                open::that(target).map_err(|error| error.to_string())?;
                 return Ok(());
             }
         }
@@ -2523,6 +3017,36 @@ pub async fn open_repo_folder(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+pub async fn open_game_path_folder(wow_dir: PathBuf, relative_path: String) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("open_game_path_folder");
+    tokio::task::spawn_blocking(move || {
+        let relative = std::path::Path::new(&relative_path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err("The selected game path is invalid.".to_string());
+        }
+
+        let full_path = wow_dir.join(relative);
+        let target = if full_path.is_dir() {
+            full_path
+        } else {
+            full_path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or(wow_dir)
+        };
+        if !target.is_dir() {
+            return Err("The containing game directory could not be found.".to_string());
+        }
+        open::that(target).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 pub async fn open_addon_folder(
@@ -4465,10 +4989,90 @@ const WUDDLE_RELEASE_API_LATEST: &str =
     "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
 const WUDDLE_RELEASE_API_ALL: &str =
     "https://api.github.com/repos/ZythDr/Wuddle/releases?per_page=5";
+const WUDDLE_BETA_CHANGELOG_API: &str =
+    "https://api.github.com/repos/ZythDr/Wuddle/releases?per_page=20";
 const CHANGELOG_URL: &str = "https://raw.githubusercontent.com/ZythDr/Wuddle/main/CHANGELOG.md";
+const BETA_CHANGELOG_URL: &str =
+    "https://raw.githubusercontent.com/ZythDr/Wuddle/beta/CHANGELOG.md";
 const CHANGELOG_EMBEDDED: &str = include_str!("../../CHANGELOG.md");
 
-pub async fn fetch_changelog() -> Result<String, String> {
+#[derive(Debug, Deserialize)]
+struct GhChangelogRelease {
+    tag_name: String,
+    body: Option<String>,
+    prerelease: bool,
+    draft: bool,
+}
+
+fn strip_changelog_preamble(markdown: &str) -> String {
+    let lines = markdown.lines().collect::<Vec<_>>();
+    let first_release = lines.iter().position(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("## ") && !trimmed.starts_with("### ")
+    });
+    first_release
+        .map(|index| lines[index..].join("\n"))
+        .unwrap_or_else(|| markdown.trim().to_string())
+}
+
+fn strip_matching_release_heading<'a>(body: &'a str, tag: &str) -> &'a str {
+    let trimmed = body.trim();
+    let (first_line, remainder) = trimmed.split_once('\n').unwrap_or((trimmed, ""));
+    let heading = first_line.trim().trim_start_matches('#').trim();
+    if first_line.trim_start().starts_with('#')
+        && heading
+            .to_ascii_lowercase()
+            .contains(&tag.trim().to_ascii_lowercase())
+    {
+        remainder.trim_start()
+    } else {
+        trimmed
+    }
+}
+
+fn format_beta_changelog(releases: Vec<GhChangelogRelease>) -> Option<String> {
+    let sections = releases
+        .into_iter()
+        .filter(|release| release.prerelease && !release.draft)
+        .map(|release| {
+            let tag = release.tag_name.trim();
+            let body = release
+                .body
+                .as_deref()
+                .map(str::trim)
+                .filter(|body| !body.is_empty())
+                .unwrap_or("No release notes were provided for this beta.");
+            let body = strip_matching_release_heading(body, tag);
+            format!("## {tag}\n\n{body}")
+        })
+        .collect::<Vec<_>>();
+
+    if sections.is_empty() {
+        None
+    } else {
+        Some(sections.join("\n\n---\n\n"))
+    }
+}
+
+async fn fetch_beta_changelog(client: &Client) -> Result<String, String> {
+    let mut request = client
+        .get(WUDDLE_BETA_CHANGELOG_API)
+        .header("Accept", "application/vnd.github+json");
+    if let Some(token) = wuddle_engine::github_token() {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("GitHub API error: HTTP {}", response.status()));
+    }
+    let releases = response
+        .json::<Vec<GhChangelogRelease>>()
+        .await
+        .map_err(|error| error.to_string())?;
+    format_beta_changelog(releases).ok_or_else(|| "No beta release notes found".to_string())
+}
+
+pub async fn fetch_changelog(beta_channel: bool) -> Result<String, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("fetch_changelog");
     let client = Client::builder()
         .user_agent(concat!("wuddle/", env!("CARGO_PKG_VERSION")))
@@ -4476,9 +5080,24 @@ pub async fn fetch_changelog() -> Result<String, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    match client.get(CHANGELOG_URL).send().await {
-        Ok(resp) if resp.status().is_success() => resp.text().await.map_err(|e| e.to_string()),
-        _ => Ok(CHANGELOG_EMBEDDED.to_string()),
+    if beta_channel {
+        if let Ok(changelog) = fetch_beta_changelog(&client).await {
+            return Ok(changelog);
+        }
+    }
+
+    let fallback_url = if beta_channel {
+        BETA_CHANGELOG_URL
+    } else {
+        CHANGELOG_URL
+    };
+    match client.get(fallback_url).send().await {
+        Ok(resp) if resp.status().is_success() => resp
+            .text()
+            .await
+            .map(|text| strip_changelog_preamble(&text))
+            .map_err(|e| e.to_string()),
+        _ => Ok(strip_changelog_preamble(CHANGELOG_EMBEDDED)),
     }
 }
 
@@ -4614,7 +5233,9 @@ fn is_version_newer(latest: &str, current: &str) -> bool {
 
 #[cfg(test)]
 mod self_update_version_tests {
-    use super::is_version_newer;
+    use super::{
+        format_beta_changelog, is_version_newer, strip_changelog_preamble, GhChangelogRelease,
+    };
 
     #[test]
     fn beta_sequence_is_compared() {
@@ -4627,6 +5248,47 @@ mod self_update_version_tests {
         assert!(is_version_newer("3.6.0", "3.6.0-beta.3"));
         assert!(!is_version_newer("3.6.0-beta.3", "3.6.0"));
         assert!(is_version_newer("3.6.0-rc.1", "3.6.0-beta.3"));
+    }
+
+    #[test]
+    fn beta_changelog_contains_only_published_prereleases() {
+        let changelog = format_beta_changelog(vec![
+            GhChangelogRelease {
+                tag_name: "v3.7.0-beta.2".to_string(),
+                body: Some("## v3.7.0-beta.2\n\nBeta two changes".to_string()),
+                prerelease: true,
+                draft: false,
+            },
+            GhChangelogRelease {
+                tag_name: "v3.7.0".to_string(),
+                body: Some("Stable changes".to_string()),
+                prerelease: false,
+                draft: false,
+            },
+            GhChangelogRelease {
+                tag_name: "v3.8.0-beta.1".to_string(),
+                body: Some("Unpublished changes".to_string()),
+                prerelease: true,
+                draft: true,
+            },
+        ])
+        .unwrap();
+
+        assert!(changelog.contains("## v3.7.0-beta.2"));
+        assert!(changelog.contains("Beta two changes"));
+        assert_eq!(changelog.matches("v3.7.0-beta.2").count(), 1);
+        assert!(!changelog.contains("Stable changes"));
+        assert!(!changelog.contains("Unpublished changes"));
+    }
+
+    #[test]
+    fn changelog_document_preamble_is_not_rendered_inside_the_dialog() {
+        let markdown = "# Changelog\n\nAll notable changes are documented here.\n\n## v3.7.0\n\n### New Features\n\n- A feature";
+        let visible = strip_changelog_preamble(markdown);
+
+        assert!(visible.starts_with("## v3.7.0"));
+        assert!(!visible.contains("# Changelog\n"));
+        assert!(!visible.contains("All notable changes"));
     }
 
     #[test]

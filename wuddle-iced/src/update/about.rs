@@ -79,13 +79,18 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             return Some(Task::none());
         }
         Message::ShowChangelog => {
+            let beta_channel = app.update_channel == UpdateChannel::Beta;
             app.dialog = Some(Dialog::Changelog {
-                title: "Wuddle Changelog".to_string(),
+                title: if beta_channel {
+                    "Wuddle Beta Changelog".to_string()
+                } else {
+                    "Wuddle Changelog".to_string()
+                },
                 items: Vec::new(),
                 loading: true,
             });
             return Some(Task::perform(
-                service::fetch_changelog(),
+                service::fetch_changelog(beta_channel),
                 Message::ChangelogLoaded,
             ));
         }
@@ -111,7 +116,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             return Some(Task::none());
         }
         Message::SwitchToStableChannel => {
-            app.log(LogLevel::Info, "Switching to stable (Tauri) channel...");
+            app.log(LogLevel::Info, "Switching to the stable channel...");
             if !switch_to_stable_channel() {
                 let _ = open::that("https://github.com/ZythDr/Wuddle/releases");
             }

@@ -22,7 +22,11 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     ));
     header_btns.push(btn_tip(
         "Changelog",
-        "View Wuddle changelog in-app",
+        if app.update_channel == UpdateChannel::Beta {
+            "View Wuddle beta release notes in-app"
+        } else {
+            "View Wuddle changelog in-app"
+        },
         Message::ShowChangelog,
         c,
     ));
@@ -195,11 +199,15 @@ fn latest_version_row<'a>(
         snap: true,
     });
 
-    let channel_tip = "Release channel — Beta runs this Iced v3 frontend and receives pre-release builds. Selecting Stable will restart Wuddle and launch the last stable Tauri release via the launcher.";
-    let tip_box = container(text(String::from(channel_tip)).size(13).color(c.text))
-        .max_width(300)
-        .padding([6, 10])
-        .style(move |_t| crate::theme::tooltip_style(c));
+    let channel_tip = "Release channel — Beta receives Wuddle's latest in-development builds sooner, but they have had less testing and are more likely to contain bugs. Stable receives fully released versions.";
+    let tip_box = container(
+        text(String::from(channel_tip))
+            .size(theme::TOOLTIP_TEXT_SIZE)
+            .color(c.text),
+    )
+    .max_width(300)
+    .padding([6, 10])
+    .style(move |_t| crate::theme::tooltip_style(c));
 
     let channel_picker = pick_list(
         &[UpdateChannel::Stable, UpdateChannel::Beta][..],
@@ -318,7 +326,7 @@ fn open_on_github_btn<'a>(url: &str, colors: ThemeColors) -> Element<'a, Message
         btn,
         container(
             text("Open the Wuddle repository on GitHub")
-                .size(13)
+                .size(theme::TOOLTIP_TEXT_SIZE)
                 .color(c.text),
         )
         .padding([3, 8])
@@ -362,7 +370,7 @@ fn btn_disabled<'a>(label: &str, tip: &str, colors: ThemeColors) -> Element<'a, 
         });
     tooltip(
         btn_container,
-        container(text(tip_str).size(13).color(c.text))
+        container(text(tip_str).size(theme::TOOLTIP_TEXT_SIZE).color(c.text))
             .max_width(300)
             .padding([3, 8])
             .style(move |_theme| crate::theme::tooltip_style(c)),
@@ -383,7 +391,7 @@ fn btn_tip<'a>(label: &str, tip: &str, msg: Message, colors: ThemeColors) -> Ele
         });
     tooltip(
         btn,
-        container(text(tip_str).size(13).color(c.text))
+        container(text(tip_str).size(theme::TOOLTIP_TEXT_SIZE).color(c.text))
             .padding([3, 8])
             .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Bottom,

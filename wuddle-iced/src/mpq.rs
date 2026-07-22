@@ -9,7 +9,9 @@ use iced::widget::{
 use iced::{Element, Length, Task};
 
 use crate::app::App;
-use crate::components::helpers::{badge_tag, tip};
+use crate::components::helpers::{
+    badge_tag, close_button, dialog_description, dialog_field_label, tip,
+};
 use crate::message::Message;
 use crate::service;
 use crate::theme::{self, ThemeColors};
@@ -62,11 +64,11 @@ pub struct UiState {
     pub target_previews: Vec<wuddle_engine::mpq::MpqTargetPreview>,
     pub targets_reviewed: bool,
     pub protection: Vec<wuddle_engine::mpq::MpqProtectionEntry>,
+    pub detected_locale: Option<String>,
     manage_order: Vec<String>,
     manage_core_keys: Vec<String>,
     manage_managed_order: Vec<(i64, String)>,
     manage_snapshot_initialized: bool,
-    pub editing_classifications: bool,
     pub catalog: Option<service::WdmCatalog>,
     pub wdm_locale: Option<String>,
     pub wdm_caverns: bool,
@@ -139,12 +141,109 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         .iter()
                         .any(|plan| plan.repo_id == repo.id && plan.has_update)
             });
-            if has_wdm_update {
-                Some(Task::done(Message::OpenWdm))
-            } else {
-                app.show_toast("No curated patch updates are available.", ToastKind::Info);
-                Some(Task::none())
+            let has_epoch_water_update = app.repos.iter().any(|repo| {
+                service::is_epoch_water_repo(repo)
+                    && app
+                        .plans
+                        .iter()
+                        .any(|plan| plan.repo_id == repo.id && plan.has_update)
+            });
+            match (has_wdm_update, has_epoch_water_update) {
+                (false, false) => {
+                    app.show_toast("No curated patch updates are available.", ToastKind::Info);
+                    Some(Task::none())
+                }
+                (true, false) => Some(Task::done(Message::OpenWdm)),
+                (false, true) => Some(Task::done(Message::InstallEpochWater)),
+                // WDM update choices need its configuration dialog. Keep that
+                // deliberate choice in front when both curated patches update;
+                // Epoch Water remains available through its row update button.
+                (true, true) => Some(Task::done(Message::OpenWdm)),
             }
+        }
+        Message::InstallEpochWater => {
+            if app.wow_dir.is_empty() {
+                app.show_toast(
+                    "Set a WoW directory before installing Epoch Water.",
+                    ToastKind::Error,
+                );
+                return Some(Task::none());
+            }
+            app.mpq_ui.busy = true;
+            app.mpq_ui.error = None;
+            Some(Task::perform(
+                service::install_epoch_water(
+                    app.db_path.clone(),
+                    app.wow_dir.clone(),
+                    app.install_options(),
+                ),
+                Message::EpochWaterInstalled,
+            ))
+        }
+        Message::EpochWaterInstalled(result) => {
+            app.mpq_ui.busy = false;
+            match result {
+                Ok(_) => {
+                    if matches!(app.dialog, Some(Dialog::MpqAdd)) {
+                        app.dialog = None;
+                    }
+                    app.log(LogLevel::Info, "Epoch Water installed successfully.");
+                    app.show_toast("Epoch Water installed successfully.", ToastKind::Success);
+                    Some(crate::update::repos::refresh_repos_task(app))
+                }
+                Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!("Epoch Water install failed: {error}"),
+                    );
+                    if matches!(app.dialog, Some(Dialog::MpqAdd)) {
+                        app.mpq_ui.error = Some(error);
+                    } else {
+                        app.show_toast(
+                            format!("Epoch Water install failed: {error}"),
+                            ToastKind::Error,
+                        );
+                    }
+                    Some(Task::none())
+                }
+            }
+        }
+        Message::OpenEpochWaterReadme => {
+            app.markdown_image_cache.clear();
+            app.markdown_gif_cache.clear();
+            app.dialog = Some(Dialog::Changelog {
+                title: "Epoch Water — README".to_string(),
+                items: Vec::new(),
+                loading: true,
+            });
+            Some(Task::perform(
+                service::fetch_repo_preview(service::EPOCH_WATER_URL.to_string()),
+                Message::EpochWaterReadmeLoaded,
+            ))
+        }
+        Message::EpochWaterReadmeLoaded(result) => {
+            let loaded_items = match result {
+                Ok(preview) => {
+                    app.markdown_image_cache = preview.image_cache;
+                    app.markdown_gif_cache = preview.gif_cache;
+                    preview.readme_items
+                }
+                Err(error) => iced::widget::markdown::Content::parse(&format!(
+                    "Could not load the Epoch Water README.\n\n{error}"
+                ))
+                .items()
+                .to_vec(),
+            };
+            if let Some(Dialog::Changelog {
+                items: dialog_items,
+                loading,
+                ..
+            }) = app.dialog.as_mut()
+            {
+                *loading = false;
+                *dialog_items = loaded_items;
+            }
+            Some(Task::none())
         }
         Message::OpenMpqInstall => {
             app.mpq_ui = UiState::default();
@@ -314,6 +413,17 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if app.mpq_ui.busy {
                 return Some(Task::none());
             }
+            if matches!(app.dialog.as_ref(), Some(Dialog::ProtectedMpqs))
+                && app
+                    .repos
+                    .iter()
+                    .find(|repo| repo.id == repo_id)
+                    .and_then(|repo| repo.installed_mpqs.iter().find(|entry| entry.path == path))
+                    .map(|entry| !entry.editor_unlocked)
+                    .unwrap_or(true)
+            {
+                return Some(Task::none());
+            }
             app.mpq_ui.busy = true;
             Some(Task::perform(
                 service::set_mpq_enabled(
@@ -350,9 +460,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::OpenMpqProtection => {
             app.open_menu = None;
             app.dialog = Some(Dialog::ProtectedMpqs);
-            app.mpq_ui.editing_classifications = false;
             app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
+            app.mpq_ui.detected_locale = None;
             app.mpq_ui.manage_order.clear();
             app.mpq_ui.manage_core_keys.clear();
             let mut managed_order = app
@@ -375,10 +485,29 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 .map(|(_, repo_id, path)| (repo_id, path))
                 .collect();
             app.mpq_ui.manage_snapshot_initialized = false;
-            Some(Task::perform(
-                service::load_mpq_protection(app.db_path.clone(), app.wow_dir.clone()),
-                Message::MpqProtectionLoaded,
-            ))
+            Some(Task::batch([
+                Task::perform(
+                    service::load_mpq_protection(app.db_path.clone(), app.wow_dir.clone()),
+                    Message::MpqProtectionLoaded,
+                ),
+                Task::perform(
+                    service::detect_mpq_locale(app.db_path.clone(), app.wow_dir.clone()),
+                    Message::MpqLocaleDetected,
+                ),
+            ]))
+        }
+        Message::MpqLocaleDetected(result) => {
+            match result {
+                Ok(locale) => app.mpq_ui.detected_locale = locale,
+                Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!("MPQ locale detection failed: {error}"),
+                    );
+                    app.mpq_ui.detected_locale = None;
+                }
+            }
+            Some(Task::none())
         }
         Message::MpqProtectionLoaded(result) => {
             app.mpq_ui.busy = false;
@@ -422,38 +551,46 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
-        Message::SetMpqProtected(path, protected) => {
+        Message::SetUntrackedMpqEditorUnlocked(path, editor_unlocked) => {
             app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
             Some(Task::perform(
-                service::change_mpq_protection(
+                service::set_untracked_mpq_editor_unlocked(
                     app.db_path.clone(),
                     app.wow_dir.clone(),
                     path,
-                    protected,
+                    editor_unlocked,
                 ),
                 Message::MpqProtectionChanged,
             ))
         }
-        Message::ToggleMpqClassificationEditing(editing) => {
-            app.mpq_ui.editing_classifications = editing;
-            Some(Task::none())
-        }
-        Message::SetMpqCoreClassification(path, core) => {
+        Message::SetTrackedMpqEditorUnlocked(repo_id, path, editor_unlocked) => {
             app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
             Some(Task::perform(
-                service::change_mpq_classification(
+                service::set_tracked_mpq_editor_unlocked(
                     app.db_path.clone(),
                     app.wow_dir.clone(),
+                    repo_id,
                     path,
-                    core,
+                    editor_unlocked,
                 ),
                 Message::MpqProtectionChanged,
             ))
         }
         Message::ToggleUntrackedMpqEnabled(path, enabled) => {
             if app.mpq_ui.busy {
+                return Some(Task::none());
+            }
+            if matches!(app.dialog.as_ref(), Some(Dialog::ProtectedMpqs))
+                && app
+                    .mpq_ui
+                    .protection
+                    .iter()
+                    .find(|entry| entry.path == path)
+                    .map(|entry| !entry.editor_unlocked)
+                    .unwrap_or(true)
+            {
                 return Some(Task::none());
             }
             app.mpq_ui.busy = true;
@@ -474,10 +611,88 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 app.mpq_ui.error = Some(error);
                 return Some(Task::none());
             }
+            Some(Task::batch([
+                Task::perform(
+                    service::load_mpq_protection(app.db_path.clone(), app.wow_dir.clone()),
+                    Message::MpqProtectionLoaded,
+                ),
+                crate::update::repos::refresh_repos_task(app),
+            ]))
+        }
+        Message::SetMpqEditorDisplayName(value) => {
+            if let Some(Dialog::EditUntrackedMpq {
+                edited_display_name,
+                ..
+            }) = app.dialog.as_mut()
+            {
+                *edited_display_name = value;
+            }
+            Some(Task::none())
+        }
+        Message::SetMpqEditorFileName(value) => {
+            if let Some(Dialog::EditUntrackedMpq {
+                edited_file_name, ..
+            }) = app.dialog.as_mut()
+            {
+                *edited_file_name = value;
+            }
+            Some(Task::none())
+        }
+        Message::SetMpqEditorDestination(destination) => {
+            if let Some(Dialog::EditUntrackedMpq {
+                edited_destination, ..
+            }) = app.dialog.as_mut()
+            {
+                *edited_destination = destination;
+            }
+            Some(Task::none())
+        }
+        Message::SetMpqEditorCore(core) => {
+            if let Some(Dialog::EditUntrackedMpq { edited_core, .. }) = app.dialog.as_mut() {
+                *edited_core = core;
+            }
+            Some(Task::none())
+        }
+        Message::SaveMpqEditor => {
+            let Some(Dialog::EditUntrackedMpq {
+                path,
+                edited_display_name,
+                edited_file_name,
+                edited_destination,
+                edited_core,
+                ..
+            }) = app.dialog.as_ref()
+            else {
+                return Some(Task::none());
+            };
+            app.mpq_ui.busy = true;
+            app.mpq_ui.error = None;
             Some(Task::perform(
-                service::load_mpq_protection(app.db_path.clone(), app.wow_dir.clone()),
-                Message::MpqProtectionLoaded,
+                service::edit_untracked_mpq(
+                    app.db_path.clone(),
+                    app.wow_dir.clone(),
+                    path.clone(),
+                    edited_display_name.clone(),
+                    edited_file_name.clone(),
+                    edited_destination.clone(),
+                    *edited_core,
+                    app.opt_xattr,
+                ),
+                Message::MpqEditorSaved,
             ))
+        }
+        Message::MpqEditorSaved(result) => {
+            app.mpq_ui.busy = false;
+            match result {
+                Ok(_) => {
+                    app.show_toast("MPQ settings updated.", ToastKind::Success);
+                    Some(Task::done(Message::OpenMpqProtection))
+                }
+                Err(error) => {
+                    app.mpq_ui.error = Some(error);
+                    Some(Task::none())
+                }
+            }
         }
         Message::SetManualMpqDisplayName(value) => {
             if let Some(Dialog::ManualMpq {
@@ -604,11 +819,31 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
+        Message::SetMpqComponentFileName(value) => {
+            if let Some(Dialog::MpqComponent {
+                edited_file_name, ..
+            }) = app.dialog.as_mut()
+            {
+                *edited_file_name = value;
+            }
+            Some(Task::none())
+        }
+        Message::SetMpqComponentDestination(destination) => {
+            if let Some(Dialog::MpqComponent {
+                edited_destination, ..
+            }) = app.dialog.as_mut()
+            {
+                *edited_destination = destination;
+            }
+            Some(Task::none())
+        }
         Message::SaveMpqComponentDisplayName => {
             let Some(Dialog::MpqComponent {
                 repo_id,
                 path,
                 edited_display_name,
+                edited_file_name,
+                edited_destination,
                 ..
             }) = app.dialog.as_ref()
             else {
@@ -623,6 +858,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     *repo_id,
                     path.clone(),
                     edited_display_name.clone(),
+                    edited_file_name.clone(),
+                    edited_destination.clone(),
                     app.opt_xattr,
                 ),
                 Message::MpqComponentDisplayNameSaved,
@@ -631,9 +868,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::MpqComponentDisplayNameSaved(result) => {
             app.mpq_ui.busy = false;
             match result {
-                Ok(()) => {
+                Ok(_) => {
                     app.dialog = None;
-                    app.show_toast("MPQ label updated.", ToastKind::Success);
+                    app.show_toast("MPQ settings updated.", ToastKind::Success);
                     Some(crate::update::repos::refresh_repos_task(app))
                 }
                 Err(error) => {
@@ -893,21 +1130,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
 fn heading<'a>(title: &'a str, subtitle: &'a str, colors: ThemeColors) -> Element<'a, Message> {
     column![
         row![
-            text(title).size(22).color(colors.title),
+            text(title).size(18).color(colors.title),
             Space::new().width(Length::Fill),
-            button(text("\u{2715}").size(14).color(colors.bad))
-                .on_press(Message::CloseDialog)
-                .padding([2, 6])
-                .style(move |_theme, _status| button::Style {
-                    background: None,
-                    text_color: colors.bad,
-                    border: iced::Border::default(),
-                    shadow: iced::Shadow::default(),
-                    snap: true,
-                }),
+            close_button(colors),
         ]
         .align_y(iced::Alignment::Center),
-        text(subtitle).size(13).color(colors.muted),
+        dialog_description(subtitle, colors),
     ]
     .spacing(4)
     .into()
@@ -927,9 +1155,39 @@ fn error_view(error: Option<&str>, colors: ThemeColors) -> Element<'_, Message> 
 fn secondary_button_style(colors: ThemeColors, status: button::Status) -> button::Style {
     match status {
         button::Status::Hovered => theme::tab_button_hovered_style(colors),
-        button::Status::Pressed => theme::tab_button_active_style(colors),
-        _ => theme::tab_button_style(colors),
+        button::Status::Disabled => {
+            let mut style = theme::tab_button_style(colors);
+            style.text_color.a = 0.38;
+            if let Some(iced::Background::Color(mut background)) = style.background {
+                background.a *= 0.35;
+                style.background = Some(iced::Background::Color(background));
+            }
+            style.border.color.a *= 0.35;
+            style
+        }
+        button::Status::Pressed | button::Status::Active => theme::tab_button_style(colors),
     }
+}
+
+fn installed_badge() -> Element<'static, Message> {
+    container(
+        text("Installed")
+            .size(12)
+            .color(iced::Color::from_rgb8(0x34, 0xd3, 0x99)),
+    )
+    .padding([4, 10])
+    .style(move |_theme| container::Style {
+        background: Some(iced::Background::Color(iced::Color::from_rgba8(
+            0x10, 0xb9, 0x81, 0.15,
+        ))),
+        border: iced::Border {
+            color: iced::Color::from_rgba8(0x10, 0xb9, 0x81, 0.4),
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 fn view_add(app: &App, colors: ThemeColors) -> Element<'_, Message> {
@@ -945,6 +1203,8 @@ fn view_add(app: &App, colors: ThemeColors) -> Element<'_, Message> {
     };
 
     let quick_add: Element<Message> = if supports_wdm {
+        let wdm_installed = app.repos.iter().any(service::is_wdm_repo);
+        let epoch_water_installed = app.repos.iter().any(service::is_epoch_water_repo);
         let title = button(iced::widget::rich_text::<(), _, _, _>([
             iced::widget::span("WDM")
                 .underline(true)
@@ -964,6 +1224,11 @@ fn view_add(app: &App, colors: ThemeColors) -> Element<'_, Message> {
             shadow: iced::Shadow::default(),
             snap: true,
         });
+        let wdm_readme = crate::components::presets::quick_add_readme_button(
+            "WDM",
+            "https://github.com/Trimitor/WDM-patch",
+            colors,
+        );
         let tags = row![
             badge_tag(
                 "Recommended",
@@ -975,17 +1240,29 @@ fn view_add(app: &App, colors: ThemeColors) -> Element<'_, Message> {
                 iced::Color::from_rgb8(0x93, 0xc5, 0xfd),
                 iced::Color::from_rgb8(0x3b, 0x82, 0xf6),
             ),
-            badge_tag(
-                "WoW 3.3.5a",
-                iced::Color::from_rgb8(0xfd, 0xe6, 0x8a),
-                iced::Color::from_rgb8(0xfa, 0xcc, 0x15),
-            ),
         ]
         .spacing(4)
         .align_y(iced::Alignment::Center);
-        container(
+        let wdm_button = button(
+            text(if app.mpq_ui.busy {
+                "Working..."
+            } else if wdm_installed {
+                "Configure"
+            } else {
+                "Install"
+            })
+            .size(12),
+        )
+        .padding([4, 14])
+        .style(move |_theme, _status| theme::tab_button_active_style(colors));
+        let wdm_button: Element<Message> = if app.mpq_ui.busy {
+            wdm_button.into()
+        } else {
+            wdm_button.on_press(Message::OpenWdm).into()
+        };
+        let wdm_card = container(
             column![
-                row![title, tags]
+                row![title, wdm_readme, tags]
                     .spacing(8)
                     .align_y(iced::Alignment::Center),
                 text("Adds dungeon maps to the 3.3.5 client, with an optional Caverns & Mines patch and companion addon.")
@@ -993,18 +1270,80 @@ fn view_add(app: &App, colors: ThemeColors) -> Element<'_, Message> {
                     .color(colors.title),
                 row![
                     Space::new().width(Length::Fill),
-                    button(text("Configure").size(12))
-                        .on_press(Message::OpenWdm)
-                        .padding([4, 14])
-                        .style(move |_theme, _status| theme::tab_button_active_style(colors)),
+                    wdm_button,
                 ],
             ]
             .spacing(6),
         )
         .padding([10, 14])
         .width(Length::Fill)
-        .style(move |_theme| theme::card_style(colors))
-        .into()
+        .style(move |_theme| theme::card_style(colors));
+
+        let epoch_title = button(iced::widget::rich_text::<(), _, _, _>([
+            iced::widget::span("Epoch Water")
+                .underline(true)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..Default::default()
+                })
+                .color(colors.link)
+                .size(22.0_f32),
+        ]))
+        .on_press(Message::OpenUrl(service::EPOCH_WATER_URL.to_string()))
+        .padding(0)
+        .style(move |_theme, _status| button::Style {
+            background: None,
+            text_color: colors.link,
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        });
+        let epoch_readme = crate::components::presets::quick_add_readme_button(
+            "Epoch Water",
+            service::EPOCH_WATER_URL,
+            colors,
+        );
+        let epoch_tags = row![badge_tag(
+            "MPQ",
+            iced::Color::from_rgb8(0x93, 0xc5, 0xfd),
+            iced::Color::from_rgb8(0x3b, 0x82, 0xf6),
+        )]
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
+        let epoch_button = button(
+            text(if app.mpq_ui.busy {
+                "Working..."
+            } else {
+                "Install"
+            })
+            .size(12),
+        )
+        .padding([4, 14])
+        .style(move |_theme, _status| theme::tab_button_active_style(colors));
+        let epoch_button: Element<Message> = if epoch_water_installed {
+            installed_badge()
+        } else if app.mpq_ui.busy {
+            epoch_button.into()
+        } else {
+            epoch_button.on_press(Message::InstallEpochWater).into()
+        };
+        let epoch_card = container(
+            column![
+                row![epoch_title, epoch_readme, epoch_tags]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                text("Replaces the default water texture with Project Epoch's water.")
+                    .size(16)
+                    .color(colors.title),
+                row![Space::new().width(Length::Fill), epoch_button],
+            ]
+            .spacing(6),
+        )
+        .padding([10, 14])
+        .width(Length::Fill)
+        .style(move |_theme| theme::card_style(colors));
+
+        column![wdm_card, epoch_card].spacing(8).into()
     } else {
         container(
             text("No curated MPQ packages are available for the detected client.")
@@ -1017,56 +1356,45 @@ fn view_add(app: &App, colors: ThemeColors) -> Element<'_, Message> {
         .into()
     };
 
-    let close = button(text("\u{2715}").size(14).color(colors.bad))
-        .on_press(Message::CloseDialog)
-        .padding([2, 6])
-        .style(move |_theme, _status| button::Style {
-            background: None,
-            text_color: colors.bad,
-            border: iced::Border::default(),
-            shadow: iced::Shadow::default(),
-            snap: true,
-        });
-
     column![
         row![
-            text("Add an MPQ patch").size(17).color(colors.title),
+            text("Add an MPQ patch").size(18).color(colors.title),
             Space::new().width(Length::Fill),
-            close,
+            close_button(colors),
         ]
         .align_y(iced::Alignment::Center),
-        text("Quick-add a curated patch or install an MPQ package from your computer.")
-            .size(12)
-            .color(colors.text_soft),
+        dialog_description(
+            "Quick-add a curated patch or install an MPQ package from your computer.",
+            colors,
+        ),
         rule::horizontal(1).style(move |_theme| theme::update_line_style(colors)),
-        text("MPQ URL").size(12).color(colors.text),
+        dialog_field_label("MPQ URL", colors),
         text_input(
             "(e.g. https://example.com/patch-name.mpq)",
             &app.mpq_ui.direct_url,
         )
         .on_input(Message::SetMpqDirectUrl)
         .padding([8, 12]),
-        text("Direct downloads are not enabled yet; download hosted files in your browser and use Local Installation.")
-            .size(11)
-            .color(colors.muted),
-        text(quick_add_label)
-            .size(12)
-            .color(colors.muted),
+        dialog_description(
+            "Direct downloads are not enabled yet; download hosted files in your browser and use Local Installation.",
+            colors,
+        ),
+        dialog_field_label(quick_add_label, colors),
         quick_add,
         rule::horizontal(1).style(move |_theme| theme::update_line_style(colors)),
         row![
-            button(text("Local Installation..."))
+            button(text("Local Installation...").size(13))
                 .on_press(Message::OpenMpqInstall)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, status| secondary_button_style(colors, status)),
-            button(text("Manage MPQs..."))
+            button(text("Manage MPQs...").size(13))
                 .on_press(Message::OpenMpqProtection)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, status| secondary_button_style(colors, status)),
             Space::new().width(Length::Fill),
-            button(text("Close"))
+            button(text("Close").size(13))
                 .on_press(Message::CloseDialog)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, status| secondary_button_style(colors, status)),
         ]
         .spacing(8),
@@ -1130,14 +1458,14 @@ fn view_install(app: &App, colors: ThemeColors) -> Element<'_, Message> {
                 .color(colors.muted),
                 row![
                     column![
-                        text("Friendly name").size(12).color(colors.muted),
+                        dialog_field_label("Friendly name", colors),
                         text_input("Required label", &selection.display_name)
                             .on_input(move |value| Message::SetMpqDisplayName(index, value))
                     ]
                     .spacing(3)
                     .width(Length::Fill),
                     column![
-                        text("On-disk filename").size(12).color(colors.muted),
+                        dialog_field_label("On-disk filename", colors),
                         text_input("patch-name.MPQ", &selection.file_name)
                             .on_input(move |value| Message::SetMpqFileName(index, value))
                     ]
@@ -1146,7 +1474,7 @@ fn view_install(app: &App, colors: ThemeColors) -> Element<'_, Message> {
                 ]
                 .spacing(10),
                 row![
-                    text("Destination").size(12).color(colors.muted),
+                    dialog_field_label("Destination", colors),
                     pick_list(
                         destinations,
                         Some(selection.destination.clone()),
@@ -1186,14 +1514,17 @@ fn view_install(app: &App, colors: ThemeColors) -> Element<'_, Message> {
             }
             true
         });
-    let install = button(text(if app.mpq_ui.busy {
-        "Working..."
-    } else if app.mpq_ui.targets_reviewed {
-        "Confirm install"
-    } else {
-        "Review installation"
-    }))
-    .padding([7, 16])
+    let install = button(
+        text(if app.mpq_ui.busy {
+            "Working..."
+        } else if app.mpq_ui.targets_reviewed {
+            "Confirm install"
+        } else {
+            "Review installation"
+        })
+        .size(13),
+    )
+    .padding([6, 14])
     .style(move |_theme, _status| theme::tab_button_active_style(colors));
     let install: Element<Message> = if !app.mpq_ui.busy
         && !app.mpq_ui.selections.is_empty()
@@ -1211,7 +1542,8 @@ fn view_install(app: &App, colors: ThemeColors) -> Element<'_, Message> {
     } else {
         Space::new().height(0).into()
     };
-    let mut content = column![
+    let mut content =
+        column![
         heading(
             "Install local MPQ",
             "MPQs are inspected in staging. Nothing reaches Data/ until you confirm every file.",
@@ -1220,34 +1552,32 @@ fn view_install(app: &App, colors: ThemeColors) -> Element<'_, Message> {
         row![
             text(source_label).size(13).color(colors.text),
             Space::new().width(Length::Fill),
-            button(text("Choose MPQ / ZIP / 7z...").size(12))
+            button(text("Choose MPQ / ZIP / 7z...").size(13))
                 .on_press(Message::PickMpqSource)
-                .padding([6, 10])
+                .padding([6, 14])
                 .style(move |_theme, status| secondary_button_style(colors, status)),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
-        text("You can also drop a supported file onto this dialog.")
-            .size(12)
-            .color(colors.muted),
+        dialog_description("You can also drop a supported file onto this dialog.", colors),
         error_view(app.mpq_ui.error.as_deref(), colors),
         inspected_files,
         row![
-            button(text("Manage MPQs...").size(12))
+            button(text("Manage MPQs...").size(13))
                 .on_press(Message::OpenMpqProtection)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, status| secondary_button_style(colors, status)),
             Space::new().width(Length::Fill),
-            button(text("Back"))
+            button(text("Back").size(13))
                 .on_press(Message::OpenMpqAdd)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, status| secondary_button_style(colors, status)),
             install,
         ]
         .spacing(8),
     ]
-    .spacing(12)
-    .width(Length::Fill);
+        .spacing(12)
+        .width(Length::Fill);
     if has_inspection {
         content = content.height(Length::Fill);
     }
@@ -1262,6 +1592,79 @@ fn editable_mpq_file_name(file_name: &str) -> String {
         .unwrap_or_else(|| file_name.to_string())
 }
 
+fn mpq_destination_from_path(path: &str) -> wuddle_engine::mpq::MpqDestination {
+    let parts = path.split('/').collect::<Vec<_>>();
+    if parts.len() >= 3 && parts[0].eq_ignore_ascii_case("Data") {
+        if let Some(locale) = wuddle_engine::mpq::normalize_locale(parts[1]) {
+            return wuddle_engine::mpq::MpqDestination::Locale(locale);
+        }
+    }
+    wuddle_engine::mpq::MpqDestination::DataRoot
+}
+
+fn edit_destination_options(
+    app: &App,
+    current: &wuddle_engine::mpq::MpqDestination,
+) -> Vec<wuddle_engine::mpq::MpqDestination> {
+    let mut destinations = vec![wuddle_engine::mpq::MpqDestination::DataRoot];
+    if let Some(locale) = app
+        .mpq_ui
+        .detected_locale
+        .as_deref()
+        .and_then(wuddle_engine::mpq::normalize_locale)
+    {
+        destinations.push(wuddle_engine::mpq::MpqDestination::Locale(locale));
+    } else if !destinations.contains(current) {
+        // With no reliable locale detection, retain the file's existing
+        // location rather than offering every unrelated WoW locale.
+        destinations.push(current.clone());
+    }
+    destinations
+}
+
+pub fn component_dialog(repo_id: i64, entry: &wuddle_engine::mpq::MpqInstalledFile) -> Dialog {
+    let file_name = std::path::Path::new(&entry.path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(editable_mpq_file_name)
+        .unwrap_or_else(|| "patch.MPQ".to_string());
+    let destination = mpq_destination_from_path(&entry.path);
+    Dialog::MpqComponent {
+        repo_id,
+        path: entry.path.clone(),
+        display_name: entry.display_name.clone(),
+        edited_display_name: entry.display_name.clone(),
+        file_name: file_name.clone(),
+        edited_file_name: file_name,
+        destination: destination.clone(),
+        edited_destination: destination,
+        status: entry.status,
+    }
+}
+
+pub fn untracked_component_dialog(entry: &wuddle_engine::mpq::MpqProtectionEntry) -> Dialog {
+    let visible_name = entry
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&entry.file_name)
+        .to_string();
+    let file_name = editable_mpq_file_name(&entry.file_name);
+    let destination = mpq_destination_from_path(&entry.path);
+    Dialog::EditUntrackedMpq {
+        path: entry.path.clone(),
+        display_name: visible_name.clone(),
+        edited_display_name: visible_name,
+        file_name: file_name.clone(),
+        edited_file_name: file_name,
+        destination: destination.clone(),
+        edited_destination: destination,
+        core: entry.core,
+        edited_core: entry.core,
+    }
+}
+
 fn manage_section<'a>(
     title: &'a str,
     subtitle: &'a str,
@@ -1269,15 +1672,15 @@ fn manage_section<'a>(
     colors: ThemeColors,
 ) -> Element<'a, Message> {
     let body: Element<Message> = if entries.is_empty() {
-        container(text("None detected.").size(12).color(colors.muted))
+        container(text("None detected.").size(14).color(colors.muted))
             .padding([6, 10])
             .into()
     } else {
         column(entries).spacing(6).into()
     };
     column![
-        text(title).size(15).color(colors.title),
-        text(subtitle).size(11).color(colors.muted),
+        dialog_field_label(title, colors),
+        dialog_description(subtitle, colors),
         body,
     ]
     .spacing(4)
@@ -1289,43 +1692,11 @@ fn view_untracked_manage_entry<'a>(
     entry: &'a wuddle_engine::mpq::MpqProtectionEntry,
     colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let classification_path = entry.path.clone();
-    let protection_path = entry.path.clone();
     let enabled_path = entry.path.clone();
-    let selected = if entry.core {
-        MpqClassification::CoreClient
-    } else {
-        MpqClassification::Custom
-    };
-    let classification: Element<Message> = if app.mpq_ui.editing_classifications && !app.mpq_ui.busy
-    {
-        pick_list(
-            [MpqClassification::CoreClient, MpqClassification::Custom],
-            Some(selected),
-            move |value| {
-                Message::SetMpqCoreClassification(
-                    classification_path.clone(),
-                    value == MpqClassification::CoreClient,
-                )
-            },
-        )
-        .width(150)
-        .text_size(12)
-        .into()
-    } else {
-        container(text(selected.to_string()).size(12).color(colors.muted))
-            .width(150)
-            .padding([7, 10])
-            .style(move |_theme| theme::card_style(colors))
-            .into()
-    };
-
-    let lock_color = if entry.protected {
-        colors.warn
-    } else {
-        colors.good
-    };
-    let lock_button = button(protection_icon(entry.protected, lock_color))
+    let locked = !entry.editor_unlocked;
+    let lock_color = if locked { colors.warn } else { colors.good };
+    let lock_action = Message::SetUntrackedMpqEditorUnlocked(entry.path.clone(), locked);
+    let lock_button = button(protection_icon(locked, lock_color))
         .padding([4, 6])
         .style(move |_theme, status| button::Style {
             background: match status {
@@ -1340,36 +1711,29 @@ fn view_untracked_manage_entry<'a>(
             shadow: iced::Shadow::default(),
             snap: true,
         });
-    let lock_button: Element<Message> =
-        if app.mpq_ui.editing_classifications && !app.mpq_ui.busy && !entry.core {
-            lock_button
-                .on_press(Message::SetMpqProtected(protection_path, !entry.protected))
-                .into()
-        } else {
-            lock_button.into()
-        };
-    let lock_tip = if entry.core {
-        "Core client files stay locked until reclassified as Custom MPQ."
-    } else if entry.protected {
-        "Protected: Wuddle cannot replace, remove, disable, or rename this MPQ."
+    let lock_button: Element<Message> = if app.mpq_ui.busy {
+        lock_button.into()
     } else {
-        "Unlocked: Wuddle may modify this MPQ when explicitly requested."
+        lock_button.on_press(lock_action).into()
+    };
+    let lock_tip = if entry.core {
+        "Unlock this core file to enable its Edit button without changing its classification."
+    } else if locked {
+        "Unlock this MPQ to enable its Edit button."
+    } else {
+        "Lock this MPQ to disable its Edit button."
     };
 
-    let enabled = checkbox(entry.enabled).size(30);
-    let enabled: Element<Message> = if app.mpq_ui.editing_classifications
-        && !app.mpq_ui.busy
-        && !entry.core
-        && !entry.protected
-    {
+    let enabled = checkbox(entry.enabled).size(27);
+    let enabled: Element<Message> = if !app.mpq_ui.busy && !locked {
         enabled
             .on_toggle(move |value| Message::ToggleUntrackedMpqEnabled(enabled_path.clone(), value))
             .into()
     } else {
         enabled.into()
     };
-    let enabled_tip = if entry.core || entry.protected {
-        "Reclassify this as Custom MPQ and unlock it before changing its enabled state."
+    let enabled_tip = if locked {
+        "Unlock this MPQ before changing its enabled state."
     } else if entry.enabled {
         "Disable this MPQ by appending .disabled to its filename."
     } else {
@@ -1383,58 +1747,26 @@ fn view_untracked_manage_entry<'a>(
         .filter(|name| !name.is_empty())
         .unwrap_or(&entry.file_name)
         .to_string();
-    let name_dialog = Dialog::ManualMpq {
-        path: entry.path.clone(),
-        display_name: visible_name.clone(),
-        edited_display_name: visible_name.clone(),
-    };
-    let name_button = button(text(visible_name).size(14).color(colors.title))
-        .on_press(Message::OpenDialog(name_dialog))
-        .padding(0)
-        .style(move |_theme, _status| button::Style {
-            background: None,
-            text_color: colors.title,
-            border: iced::Border::default(),
-            shadow: iced::Shadow::default(),
-            snap: true,
-        });
-
-    let file_name = editable_mpq_file_name(&entry.file_name);
-    let rename_dialog = Dialog::RenameManualMpq {
-        path: entry.path.clone(),
-        file_name: file_name.clone(),
-        edited_file_name: file_name,
-        return_to_manage: true,
-    };
-    let rename_button = button(text("Rename file…").size(11))
+    let edit_dialog = untracked_component_dialog(entry);
+    let edit_button = button(text("Edit").size(12))
         .padding([5, 9])
         .style(move |_theme, status| secondary_button_style(colors, status));
-    let rename_button: Element<Message> = if app.mpq_ui.editing_classifications
-        && !app.mpq_ui.busy
-        && !entry.core
-        && !entry.protected
-    {
-        rename_button
-            .on_press(Message::OpenDialog(rename_dialog))
+    let edit_button: Element<Message> = if !app.mpq_ui.busy && !locked {
+        edit_button
+            .on_press(Message::OpenDialog(edit_dialog))
             .into()
     } else {
-        rename_button.into()
+        edit_button.into()
     };
 
     container(
         row![
             column![
-                tip(
-                    name_button,
-                    "Set a friendly name for this MPQ.",
-                    iced::widget::tooltip::Position::Top,
-                    colors
-                ),
+                text(visible_name).size(14).color(colors.title),
                 text(&entry.path).size(11).color(colors.muted),
             ]
             .spacing(2),
             Space::new().width(Length::Fill),
-            classification,
             tip(
                 lock_button,
                 lock_tip,
@@ -1442,8 +1774,12 @@ fn view_untracked_manage_entry<'a>(
                 colors
             ),
             tip(
-                rename_button,
-                "Unlock this custom MPQ and enable editing before renaming its file.",
+                edit_button,
+                if locked {
+                    "Unlock this MPQ before editing it."
+                } else {
+                    "Edit this MPQ's friendly name, filename, and classification."
+                },
                 iced::widget::tooltip::Position::Top,
                 colors
             ),
@@ -1469,25 +1805,45 @@ fn view_managed_manage_entry<'a>(
     entry: &'a wuddle_engine::mpq::MpqInstalledFile,
     colors: ThemeColors,
 ) -> Element<'a, Message> {
-    let dialog = Dialog::MpqComponent {
-        repo_id: repo.id,
-        path: entry.path.clone(),
-        display_name: entry.display_name.clone(),
-        edited_display_name: entry.display_name.clone(),
-        status: entry.status,
-    };
-    let name = button(text(&entry.display_name).size(14).color(colors.title))
-        .on_press(Message::OpenDialog(dialog))
-        .padding(0)
-        .style(move |_theme, _status| button::Style {
-            background: None,
-            text_color: colors.title,
+    let dialog = component_dialog(repo.id, entry);
+    let locked = !entry.editor_unlocked;
+    let lock_color = if locked { colors.warn } else { colors.good };
+    let lock_button = button(protection_icon(locked, lock_color))
+        .padding([4, 6])
+        .style(move |_theme, status| button::Style {
+            background: match status {
+                button::Status::Hovered => Some(iced::Background::Color(iced::Color {
+                    a: 0.12,
+                    ..lock_color
+                })),
+                _ => None,
+            },
+            text_color: lock_color,
             border: iced::Border::default(),
             shadow: iced::Shadow::default(),
             snap: true,
         });
-    let enabled = checkbox(entry.enabled).size(30);
-    let enabled: Element<Message> = if app.mpq_ui.busy {
+    let lock_button: Element<Message> = if app.mpq_ui.busy {
+        lock_button.into()
+    } else {
+        lock_button
+            .on_press(Message::SetTrackedMpqEditorUnlocked(
+                repo.id,
+                entry.path.clone(),
+                locked,
+            ))
+            .into()
+    };
+    let edit_button = button(text("Edit").size(12))
+        .padding([5, 9])
+        .style(move |_theme, status| secondary_button_style(colors, status));
+    let edit_button: Element<Message> = if !app.mpq_ui.busy && !locked {
+        edit_button.on_press(Message::OpenDialog(dialog)).into()
+    } else {
+        edit_button.into()
+    };
+    let enabled = checkbox(entry.enabled).size(27);
+    let enabled: Element<Message> = if app.mpq_ui.busy || locked {
         enabled.into()
     } else {
         let path = entry.path.clone();
@@ -1498,7 +1854,7 @@ fn view_managed_manage_entry<'a>(
     container(
         row![
             column![
-                name,
+                text(&entry.display_name).size(14).color(colors.title),
                 text(
                     if repo.forge == "local" && repo.owner == "local" && repo.url.is_empty() {
                         format!("Local installation • {}", entry.path)
@@ -1511,17 +1867,31 @@ fn view_managed_manage_entry<'a>(
             ]
             .spacing(2),
             Space::new().width(Length::Fill),
-            badge_tag(
-                "Wuddle managed",
-                colors.link,
-                iced::Color {
-                    a: 0.35,
-                    ..colors.link
+            tip(
+                lock_button,
+                if locked {
+                    "Unlock this MPQ to enable its Edit button."
+                } else {
+                    "Lock this MPQ to disable its Edit button."
                 },
+                iced::widget::tooltip::Position::Top,
+                colors
+            ),
+            tip(
+                edit_button,
+                if locked {
+                    "Unlock this MPQ before editing it."
+                } else {
+                    "Edit this MPQ's friendly name."
+                },
+                iced::widget::tooltip::Position::Top,
+                colors
             ),
             tip(
                 enabled,
-                if entry.enabled {
+                if locked {
+                    "Unlock this MPQ before changing its enabled state."
+                } else if entry.enabled {
                     "Disable this managed MPQ."
                 } else {
                     "Enable this managed MPQ."
@@ -1591,15 +1961,15 @@ fn view_protection(app: &App, colors: ThemeColors) -> Element<'_, Message> {
 
     let sections = column![
         manage_section(
-            "Custom and manual MPQs",
-            "Detected archives that are not owned by a Wuddle package.",
-            custom_entries,
-            colors,
-        ),
-        manage_section(
             "Wuddle-installed MPQs",
             "Tracked local and curated packages, including WDM.",
             managed_entries,
+            colors,
+        ),
+        manage_section(
+            "Custom and manual MPQs",
+            "Detected archives that are not owned by a Wuddle package.",
+            custom_entries,
             colors,
         ),
         manage_section(
@@ -1617,18 +1987,10 @@ fn view_protection(app: &App, colors: ThemeColors) -> Element<'_, Message> {
             "Review every MPQ in Data/ and its locale directories.",
             colors,
         ),
-        checkbox(app.mpq_ui.editing_classifications)
-            .label("Edit MPQ classifications, protection, and enabled states")
-            .on_toggle(Message::ToggleMpqClassificationEditing),
-        if app.mpq_ui.editing_classifications {
-            text("Caution: reclassifying or unprotecting a stock client archive allows Wuddle to replace it. Changed files return to the safe detected default.")
-                .size(12)
-                .color(colors.warn)
-        } else {
-            text("Enable editing to change a detected classification, protection, or enabled state.")
-                .size(12)
-                .color(colors.muted)
-        },
+        dialog_description(
+            "Use the padlock to control whether a patch's Edit button is available. Classification and enabled state are independent.",
+            colors,
+        ),
         error_view(app.mpq_ui.error.as_deref(), colors),
         scrollable(
             container(sections)
@@ -1646,14 +2008,14 @@ fn view_protection(app: &App, colors: ThemeColors) -> Element<'_, Message> {
             theme::scrollable_style(colors)(iced_theme, status)
         }),
         row![
-            button(text("+ Add MPQ..."))
+            button(text("+ Add MPQ...").size(13))
                 .on_press(Message::OpenMpqAdd)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, status| secondary_button_style(colors, status)),
             Space::new().width(Length::Fill),
-            button(text("Close"))
+            button(text("Close").size(13))
                 .on_press(Message::CloseDialog)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, status| secondary_button_style(colors, status)),
         ],
     ]
@@ -1685,12 +2047,15 @@ fn view_wdm(app: &App, colors: ThemeColors) -> Element<'_, Message> {
             catalog.stable.version, optional, catalog.addon.version
         )
     });
-    let install = button(text(if app.mpq_ui.busy {
-        "Working..."
-    } else {
-        "Install WDM"
-    }))
-    .padding([7, 16])
+    let install = button(
+        text(if app.mpq_ui.busy {
+            "Working..."
+        } else {
+            "Install WDM"
+        })
+        .size(13),
+    )
+    .padding([6, 14])
     .style(move |_theme, _status| theme::tab_button_active_style(colors));
     let install: Element<Message> = if !app.mpq_ui.busy
         && app.mpq_ui.catalog.is_some()
@@ -1707,11 +2072,12 @@ fn view_wdm(app: &App, colors: ThemeColors) -> Element<'_, Message> {
             "Curated for an exactly detected WoW 3.3.5a build 12340 client.",
             colors,
         ),
-        text("Wuddle checks curated WDM releases alongside mods and addons; updates are installed deliberately through this dialog.")
-            .size(13)
-            .color(colors.muted),
+        dialog_description(
+            "Wuddle checks curated WDM releases alongside mods and addons; updates are installed deliberately through this dialog.",
+            colors,
+        ),
         row![
-            text("Client locale").size(13).color(colors.text),
+            dialog_field_label("Client locale", colors),
             pick_list(locales, app.mpq_ui.wdm_locale.clone(), Message::SetWdmLocale),
         ]
         .spacing(10)
@@ -1730,14 +2096,14 @@ fn view_wdm(app: &App, colors: ThemeColors) -> Element<'_, Message> {
         } else {
             "The companion addon improves the main patch experience and can be updated normally through Wuddle."
         })
-        .size(12)
+        .size(14)
         .color(colors.muted),
         error_view(app.mpq_ui.error.as_deref(), colors),
         row![
             Space::new().width(Length::Fill),
-            button(text("Cancel"))
+            button(text("Cancel").size(13))
                 .on_press(Message::CloseDialog)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, status| secondary_button_style(colors, status)),
             install,
         ]
@@ -1757,6 +2123,9 @@ fn view_component<'a>(
         path,
         display_name,
         edited_display_name,
+        file_name,
+        edited_file_name,
+        edited_destination,
         status,
         ..
     } = dialog
@@ -1764,25 +2133,45 @@ fn view_component<'a>(
         return Space::new().into();
     };
     let force_modified = *status == wuddle_engine::mpq::MpqFileStatus::Modified;
+    let destinations = edit_destination_options(app, edited_destination);
+    let valid = !edited_display_name.trim().is_empty()
+        && !edited_file_name.trim().is_empty()
+        && edited_file_name
+            .trim()
+            .to_ascii_lowercase()
+            .ends_with(".mpq");
     column![
-        heading(
-            "Manage MPQ",
-            "The friendly name is Wuddle metadata; it does not rename the deployed archive.",
-            colors,
-        ),
-        text(path).size(12).color(colors.muted),
+        heading("Edit MPQ", "Edit this Wuddle-installed patch.", colors),
+        text(path).size(11).color(colors.muted),
+        dialog_field_label("Friendly name", colors),
         text_input(display_name, edited_display_name)
             .on_input(Message::SetMpqComponentDisplayName),
+        dialog_field_label("Filename on disk", colors),
+        text_input(file_name, edited_file_name).on_input(Message::SetMpqComponentFileName),
+        dialog_field_label("Location", colors),
+        pick_list(
+            destinations,
+            Some(edited_destination.clone()),
+            Message::SetMpqComponentDestination,
+        ),
+        dialog_field_label("Classification", colors),
+        container(text("Wuddle-installed MPQ").size(13).color(colors.text))
+            .padding([7, 10])
+            .style(move |_theme| theme::card_style(colors)),
+        dialog_description(
+            "Wuddle keeps package ownership, update tracking, and backup metadata attached when this file is renamed or moved.",
+            colors,
+        ),
         text(format!("Status: {}", status.label()))
             .size(12)
             .color(if force_modified { colors.warn } else { colors.text }),
         if force_modified {
             text("This file changed outside Wuddle. Removing it requires explicit confirmation; otherwise Wuddle keeps and protects it.")
-                .size(12)
+                .size(14)
                 .color(colors.warn)
         } else {
-            text("Removing this component also restores any untracked file it replaced from Wuddle's MPQ backup.")
-                .size(12)
+            text("Remove MPQ removes only this component and restores any file it replaced. Other bundled patches and companion addons remain; use Remove package from the patch row's menu to remove a complete bundle.")
+                .size(14)
                 .color(colors.muted)
         },
         error_view(app.mpq_ui.error.as_deref(), colors),
@@ -1790,31 +2179,131 @@ fn view_component<'a>(
             button(text(if force_modified {
                 "Delete modified MPQ"
             } else {
-                "Remove MPQ"
-            }))
+                "Remove this MPQ"
+            }).size(13))
             .on_press(Message::RemoveMpqComponent(force_modified))
-            .padding([7, 14])
+            .padding([6, 14])
             .style(move |_theme, _status| theme::btn_danger_style(colors)),
             Space::new().width(Length::Fill),
             if force_modified {
-                button(text("Keep and protect"))
+                button(text("Keep and protect").size(13))
                     .on_press(Message::KeepModifiedMpqProtected)
-                    .padding([7, 14])
+                    .padding([6, 14])
                     .style(move |_theme, status| secondary_button_style(colors, status))
             } else {
-                button(text("Cancel"))
+                button(text("Cancel").size(13))
                     .on_press(Message::CloseDialog)
-                    .padding([7, 14])
+                    .padding([6, 14])
                     .style(move |_theme, status| secondary_button_style(colors, status))
             },
-            button(text("Save label"))
-                .on_press(Message::SaveMpqComponentDisplayName)
-                .padding([7, 14])
-                .style(move |_theme, _status| theme::tab_button_active_style(colors)),
+            if valid && !app.mpq_ui.busy {
+                button(text("Save changes").size(13))
+                    .on_press(Message::SaveMpqComponentDisplayName)
+                    .padding([6, 14])
+                    .style(move |_theme, _status| theme::tab_button_active_style(colors))
+            } else {
+                button(text("Save changes").size(13))
+                    .padding([6, 14])
+                    .style(move |_theme, status| secondary_button_style(colors, status))
+            },
         ]
         .spacing(8),
     ]
     .spacing(12)
+    .width(Length::Fill)
+    .into()
+}
+
+fn view_edit_untracked_mpq<'a>(
+    app: &'a App,
+    dialog: &'a Dialog,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
+    let Dialog::EditUntrackedMpq {
+        path,
+        display_name,
+        edited_display_name,
+        file_name,
+        edited_file_name,
+        edited_destination,
+        edited_core,
+        ..
+    } = dialog
+    else {
+        return Space::new().into();
+    };
+    let classifications = vec![MpqClassification::Custom, MpqClassification::CoreClient];
+    let destinations = edit_destination_options(app, edited_destination);
+    let selected = if *edited_core {
+        MpqClassification::CoreClient
+    } else {
+        MpqClassification::Custom
+    };
+    let edited_file = edited_file_name.trim();
+    let valid = !edited_display_name.trim().is_empty()
+        && !edited_file.is_empty()
+        && edited_file.to_ascii_lowercase().ends_with(".mpq");
+    let save = button(
+        text(if app.mpq_ui.busy {
+            "Saving…"
+        } else {
+            "Save changes"
+        })
+        .size(13),
+    )
+    .padding([6, 14])
+    .style(move |_theme, _status| theme::tab_button_active_style(colors));
+    let save: Element<Message> = if valid && !app.mpq_ui.busy {
+        save.on_press(Message::SaveMpqEditor).into()
+    } else {
+        save.into()
+    };
+
+    column![
+        heading(
+            "Edit MPQ",
+            "Change this patch's display details, on-disk filename, and classification.",
+            colors,
+        ),
+        text(path).size(11).color(colors.muted),
+        dialog_field_label("Friendly name", colors),
+        text_input(display_name, edited_display_name)
+            .on_input(Message::SetMpqEditorDisplayName),
+        dialog_field_label("Filename on disk", colors),
+        text_input(file_name, edited_file_name).on_input(Message::SetMpqEditorFileName),
+        dialog_field_label("Location", colors),
+        pick_list(
+            destinations,
+            Some(edited_destination.clone()),
+            Message::SetMpqEditorDestination,
+        ),
+        dialog_field_label("Classification", colors),
+        pick_list(classifications, Some(selected), |classification| {
+            Message::SetMpqEditorCore(classification == MpqClassification::CoreClient)
+        }),
+        text(if *edited_core {
+            "This file remains classified as a core client file. Locking is controlled separately from Manage MPQs."
+        } else {
+            "Custom MPQs remain unlocked until you lock them from Manage MPQs."
+        })
+        .size(14)
+        .color(if *edited_core { colors.warn } else { colors.muted }),
+        dialog_description(
+            "Use a plain filename ending in .MPQ. Existing files and reserved core filenames cannot be overwritten.",
+            colors,
+        ),
+        error_view(app.mpq_ui.error.as_deref(), colors),
+        row![
+            Space::new().width(Length::Fill),
+            button(text("Cancel").size(13))
+                .on_press(Message::OpenMpqProtection)
+                .padding([6, 14])
+                .style(move |_theme, status| secondary_button_style(colors, status)),
+            save,
+        ]
+        .spacing(8),
+    ]
+    .spacing(10)
     .width(Length::Fill)
     .into()
 }
@@ -1832,8 +2321,8 @@ fn view_manual_component<'a>(
     else {
         return Space::new().into();
     };
-    let save = button(text("Save label"))
-        .padding([7, 14])
+    let save = button(text("Save label").size(13))
+        .padding([6, 14])
         .style(move |_theme, _status| theme::tab_button_active_style(colors));
     let save: Element<Message> = if !app.mpq_ui.busy && !edited_display_name.trim().is_empty() {
         save.on_press(Message::SaveManualMpqDisplayName).into()
@@ -1847,13 +2336,14 @@ fn view_manual_component<'a>(
             colors,
         ),
         text(path).size(12).color(colors.muted),
+        dialog_field_label("Friendly name", colors),
         text_input(display_name, edited_display_name).on_input(Message::SetManualMpqDisplayName),
         error_view(app.mpq_ui.error.as_deref(), colors),
         row![
             Space::new().width(Length::Fill),
-            button(text("Cancel"))
+            button(text("Cancel").size(13))
                 .on_press(Message::CloseDialog)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, status| secondary_button_style(colors, status)),
             save,
         ]
@@ -1880,12 +2370,15 @@ fn view_rename_manual_mpq<'a>(
     };
     let edited = edited_file_name.trim();
     let valid = !edited.is_empty() && edited.to_ascii_lowercase().ends_with(".mpq");
-    let save = button(text(if app.mpq_ui.busy {
-        "Renaming…"
-    } else {
-        "Rename file"
-    }))
-    .padding([7, 14])
+    let save = button(
+        text(if app.mpq_ui.busy {
+            "Renaming…"
+        } else {
+            "Rename file"
+        })
+        .size(13),
+    )
+    .padding([6, 14])
     .style(move |_theme, _status| theme::tab_button_active_style(colors));
     let save: Element<Message> = if valid && !app.mpq_ui.busy && edited != file_name {
         save.on_press(Message::SaveManualMpqFileName).into()
@@ -1900,16 +2393,18 @@ fn view_rename_manual_mpq<'a>(
             colors,
         ),
         text(path).size(12).color(colors.muted),
+        dialog_field_label("Filename on disk", colors),
         text_input(file_name, edited_file_name).on_input(Message::SetManualMpqFileName),
-        text("Use a plain filename ending in .MPQ. Core-client names and existing files cannot be overwritten.")
-            .size(12)
-            .color(colors.muted),
+        dialog_description(
+            "Use a plain filename ending in .MPQ. Core-client names and existing files cannot be overwritten.",
+            colors,
+        ),
         error_view(app.mpq_ui.error.as_deref(), colors),
         row![
             Space::new().width(Length::Fill),
-            button(text("Cancel"))
+            button(text("Cancel").size(13))
                 .on_press(Message::CloseDialog)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, status| secondary_button_style(colors, status)),
             save,
         ]
@@ -1937,19 +2432,20 @@ fn view_remove_wdm<'a>(
         checkbox(*remove_addon)
             .label("Also remove the WDM companion addon")
             .on_toggle(Message::ToggleRemoveWdmAddon),
-        text("This addon is offered here only because the WDM wizard installed it. Independently installed companions are never linked or removed.")
-            .size(12)
-            .color(colors.muted),
+        dialog_description(
+            "This addon is offered here only because the WDM wizard installed it. Independently installed companions are never linked or removed.",
+            colors,
+        ),
         error_view(app.mpq_ui.error.as_deref(), colors),
         row![
             Space::new().width(Length::Fill),
-            button(text("Cancel"))
+            button(text("Cancel").size(13))
                 .on_press(Message::CloseDialog)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, status| secondary_button_style(colors, status)),
-            button(text("Remove"))
+            button(text("Remove").size(13))
                 .on_press(Message::ConfirmRemoveWdm)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, _status| theme::btn_danger_style(colors)),
         ]
         .spacing(8),
@@ -1972,6 +2468,7 @@ pub fn view_dialog<'a>(
         Dialog::MpqComponent { .. } => view_component(app, dialog, colors),
         Dialog::ManualMpq { .. } => view_manual_component(app, dialog, colors),
         Dialog::RenameManualMpq { .. } => view_rename_manual_mpq(app, dialog, colors),
+        Dialog::EditUntrackedMpq { .. } => view_edit_untracked_mpq(app, dialog, colors),
         Dialog::RemoveWdm { .. } => view_remove_wdm(app, dialog, colors),
         _ => Space::new().into(),
     }

@@ -273,14 +273,19 @@ jobs:
       - name: Extract changelog section
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          CHANGELOG_VERSION="${VERSION%%-*}"
-          python3 - "${CHANGELOG_VERSION}" << 'PYEOF' > dist/RELEASE_BODY.md
+          STABLE_VERSION="${VERSION%%-*}"
+          python3 - "${VERSION}" "${STABLE_VERSION}" << 'PYEOF' > dist/RELEASE_BODY.md
           import sys, re
           version = sys.argv[1]
+          stable_version = sys.argv[2]
           with open('CHANGELOG.md') as f:
               text = f.read()
-          pattern = r'## v' + re.escape(version) + r'[^\n]*\n(.*?)(?=\n## v|\Z)'
-          m = re.search(pattern, text, re.DOTALL)
+          def section(candidate):
+              pattern = r'^## v' + re.escape(candidate) + r'\s*$\n(.*?)(?=^## v|\Z)'
+              return re.search(pattern, text, re.DOTALL | re.MULTILINE)
+          m = section(version)
+          if not m and stable_version != version:
+              m = section(stable_version)
           if m:
               sys.stdout.write(m.group(1).strip() + '\n')
           else:

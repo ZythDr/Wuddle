@@ -5,7 +5,7 @@ use iced::widget::{
 use iced::{Element, Length};
 
 use crate::anchored_overlay::AnchoredOverlay;
-use crate::components::helpers::ctx_menu_item;
+use crate::components::helpers::{ctx_menu_item, ctx_menu_item_disabled_with_tooltip};
 use crate::service::is_mod;
 use crate::service::RepoRow;
 use crate::theme::name_font;
@@ -552,7 +552,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
                 let tip_str = tip_text;
                 let label: Element<Message> = tooltip(
                     text(api_label).size(12).color(api_color),
-                    container(text(tip_str).size(12).color(c2.text))
+                    container(text(tip_str).size(theme::TOOLTIP_TEXT_SIZE).color(c2.text))
                         .padding([4, 8])
                         .style(move |_theme| crate::theme::tooltip_style(c2)),
                     tooltip::Position::Bottom,
@@ -1022,7 +1022,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
         app.repos
             .iter()
             .filter(|repo| {
-                crate::service::is_wdm_repo(repo)
+                crate::service::is_curated_mpq_repo(repo)
                     && app
                         .plans
                         .iter()
@@ -1033,7 +1033,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
         app.repos
             .iter()
             .filter(|r| {
-                !crate::service::is_wdm_repo(r)
+                !crate::service::is_curated_mpq_repo(r)
                     && app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
                     && !app.ignored_update_ids.contains(&r.id)
             })
@@ -1075,7 +1075,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
 
     let footer: Element<Message> = if is_patches_tab {
         row![
-            text("Generic MPQs remain manual; curated WDM releases are checked for updates.")
+            text("Generic MPQs remain manual; curated patches are checked for updates.")
                 .size(12)
                 .color(colors.warn),
             Space::new().width(Length::Fill),
@@ -1257,11 +1257,6 @@ fn manual_mpq_row<'a>(
     let c = colors;
     let enabled_path = entry.path.clone();
     let display_name = manual_mpq_name(entry);
-    let name_dialog = Dialog::ManualMpq {
-        path: entry.path.clone(),
-        display_name: display_name.clone(),
-        edited_display_name: display_name.clone(),
-    };
     let badge = container(text("MPQ").size(10).color(c.link))
         .padding([1, 5])
         .style(move |_theme| container::Style {
@@ -1273,19 +1268,9 @@ fn manual_mpq_row<'a>(
             },
             ..Default::default()
         });
-    let enabled = checkbox(entry.enabled);
-    let enabled: Element<Message> = if !entry.protected && !entry.core {
-        enabled
-            .on_toggle(move |value| Message::ToggleUntrackedMpqEnabled(enabled_path.clone(), value))
-            .into()
-    } else {
-        tip(
-            enabled,
-            "Unlock this MPQ in Manage MPQs before changing its enabled state.",
-            tooltip::Position::Top,
-            colors,
-        )
-    };
+    let enabled: Element<Message> = checkbox(entry.enabled)
+        .on_toggle(move |value| Message::ToggleUntrackedMpqEnabled(enabled_path.clone(), value))
+        .into();
     let manual_status = tip(
         mpq_named_status_badge("Manual", colors.muted),
         "Wuddle detected this MPQ, but does not recognize its installation source because Wuddle did not install it.",
@@ -1294,21 +1279,39 @@ fn manual_mpq_row<'a>(
     );
     let menu_key = format!("manual-mpq:{}", entry.path);
     let is_menu_open = app.open_menu.as_deref() == Some(menu_key.as_str());
-    let disk_name = entry
-        .file_name
-        .strip_suffix(".disabled")
-        .unwrap_or(&entry.file_name)
-        .to_string();
     let mut menu_items: Vec<Element<Message>> = Vec::new();
-    if !entry.core && !entry.protected {
-        menu_items.push(ctx_menu_item(
-            "Rename file…",
-            Message::OpenDialog(Dialog::RenameManualMpq {
+    menu_items.push(ctx_menu_item(
+        "Details\u{2026}",
+        Message::OpenDialog(crate::Dialog::RepoDetails {
+            id: None,
+            name: display_name.clone(),
+            files: vec![crate::service::RepoDetailEntry {
                 path: entry.path.clone(),
-                file_name: disk_name.clone(),
-                edited_file_name: disk_name,
-                return_to_manage: false,
-            }),
+                kind: "mpq".to_string(),
+                is_directory: false,
+            }],
+            loading: false,
+            expanded_paths: Default::default(),
+            loading_paths: Default::default(),
+            children: Default::default(),
+        }),
+        c,
+    ));
+    menu_items.push(ctx_menu_item(
+        "Browse\u{2026}",
+        Message::BrowseGamePath(entry.path.clone()),
+        c,
+    ));
+    if entry.editor_unlocked {
+        menu_items.push(ctx_menu_item(
+            "Edit MPQ…",
+            Message::OpenDialog(crate::mpq::untracked_component_dialog(entry)),
+            c,
+        ));
+    } else {
+        menu_items.push(ctx_menu_item_disabled_with_tooltip(
+            "Edit MPQ…",
+            "Unlock this MPQ in Manage MPQs before editing it here.",
             c,
         ));
     }
@@ -1322,21 +1325,10 @@ fn manual_mpq_row<'a>(
         name_cell_slot(
             column![
                 row![
-                    button(
-                        text(display_name)
-                            .size(19)
-                            .font(name_font(colors))
-                            .color(c.title)
-                    )
-                    .on_press(Message::OpenDialog(name_dialog))
-                    .padding(0)
-                    .style(move |_theme, _status| button::Style {
-                        background: None,
-                        text_color: c.title,
-                        border: iced::Border::default(),
-                        shadow: iced::Shadow::default(),
-                        snap: true,
-                    }),
+                    text(display_name)
+                        .size(19)
+                        .font(name_font(colors))
+                        .color(c.title),
                     Space::new().width(7),
                     badge,
                 ]
@@ -1366,15 +1358,13 @@ fn mpq_parent_row<'a>(
     colors: ThemeColors,
 ) -> Element<'a, Message> {
     let c = colors;
-    let is_wdm = crate::service::is_wdm_repo(repo);
-    // WDM is the first curated MPQ source with a locale-aware updater. Future
-    // curated online patch types can opt into the same two-button treatment.
-    let supports_online_updates = is_wdm;
+    let curated_kind = crate::service::curated_mpq_kind(repo);
+    let supports_online_updates = curated_kind.is_some();
     let plan = app.plans.iter().find(|plan| plan.repo_id == repo.id);
     let has_update = supports_online_updates && plan.map(|plan| plan.has_update).unwrap_or(false);
     let multiple = repo.installed_mpqs.len() > 1;
     let expanded = app.expanded_repo_ids.contains(&repo.id);
-    let title = if is_wdm || multiple {
+    let title = if supports_online_updates || multiple {
         repo.name.clone()
     } else {
         repo.installed_mpqs
@@ -1401,7 +1391,7 @@ fn mpq_parent_row<'a>(
             },
             ..Default::default()
         });
-    let title_element: Element<Message> = if is_wdm {
+    let title_element: Element<Message> = if supports_online_updates {
         button(iced::widget::rich_text::<(), _, _, _>([
             iced::widget::span(title)
                 .underline(true)
@@ -1419,32 +1409,6 @@ fn mpq_parent_row<'a>(
             snap: true,
         })
         .into()
-    } else if !multiple {
-        if let Some(entry) = repo.installed_mpqs.first() {
-            button(text(title).size(19).font(name_font(colors)).color(c.title))
-                .on_press(Message::OpenDialog(Dialog::MpqComponent {
-                    repo_id: repo.id,
-                    path: entry.path.clone(),
-                    display_name: entry.display_name.clone(),
-                    edited_display_name: entry.display_name.clone(),
-                    status: entry.status,
-                }))
-                .padding(0)
-                .style(move |_theme, _status| button::Style {
-                    background: None,
-                    text_color: c.title,
-                    border: iced::Border::default(),
-                    shadow: iced::Shadow::default(),
-                    snap: true,
-                })
-                .into()
-        } else {
-            text(title)
-                .size(19)
-                .font(name_font(colors))
-                .color(c.title)
-                .into()
-        }
     } else {
         text(title)
             .size(19)
@@ -1474,7 +1438,7 @@ fn mpq_parent_row<'a>(
         title_items.push(Space::new().width(7).into());
     }
     title_items.push(badge.into());
-    if is_wdm {
+    if let Some(kind) = curated_kind {
         let help_handle =
             iced::widget::svg::Handle::from_memory(include_bytes!("../../assets/icons/help.svg"));
         let help_icon =
@@ -1487,7 +1451,10 @@ fn mpq_parent_row<'a>(
         title_items.push(Space::new().width(6).into());
         title_items.push(tip(
             button(help_icon)
-                .on_press(Message::OpenWdmReadme)
+                .on_press(match kind {
+                    crate::service::CuratedMpqKind::Wdm => Message::OpenWdmReadme,
+                    crate::service::CuratedMpqKind::EpochWater => Message::OpenEpochWaterReadme,
+                })
                 .padding(0)
                 .style(move |_theme, _status| button::Style {
                     background: None,
@@ -1496,7 +1463,7 @@ fn mpq_parent_row<'a>(
                     shadow: iced::Shadow::default(),
                     snap: true,
                 }),
-            "Preview the WDM README",
+            &format!("Preview the {} README", kind.readme_label()),
             tooltip::Position::Top,
             colors,
         ));
@@ -1544,7 +1511,10 @@ fn mpq_parent_row<'a>(
         tip(
             mpq_named_status_badge("Update available", colors.warn),
             &format!(
-                "Latest WDM release: {}",
+                "{}: {}",
+                curated_kind
+                    .map(|kind| kind.latest_label())
+                    .unwrap_or("Latest curated patch"),
                 plan.map(|plan| plan.latest.as_str()).unwrap_or("unknown")
             ),
             tooltip::Position::Top,
@@ -1552,7 +1522,7 @@ fn mpq_parent_row<'a>(
         )
     } else if let Some(error) = plan
         .and_then(|plan| plan.error.as_deref())
-        .filter(|_| is_wdm)
+        .filter(|_| supports_online_updates)
     {
         tip(
             mpq_named_status_badge("Check failed", colors.bad),
@@ -1599,24 +1569,28 @@ fn mpq_child_row<'a>(
     colors: ThemeColors,
 ) -> Element<'a, Message> {
     let c = colors;
-    let dialog = Dialog::MpqComponent {
-        repo_id,
-        path: entry.path.clone(),
-        display_name: entry.display_name.clone(),
-        edited_display_name: entry.display_name.clone(),
-        status: entry.status,
-    };
+    let dialog = crate::mpq::component_dialog(repo_id, entry);
     let menu_key = format!("mpq-component:{repo_id}:{}", entry.path);
     let is_menu_open = app.open_menu.as_deref() == Some(menu_key.as_str());
-    let menu_content = container(column![ctx_menu_item(
-        "Manage…",
-        Message::OpenDialog(dialog),
+    let edit_item = if entry.editor_unlocked {
+        ctx_menu_item("Edit MPQ…", Message::OpenDialog(dialog), c)
+    } else {
+        ctx_menu_item_disabled_with_tooltip(
+            "Edit MPQ…",
+            "Unlock this MPQ in Manage MPQs before editing it here.",
+            c,
+        )
+    };
+    let browse_item = ctx_menu_item(
+        "Browse\u{2026}",
+        Message::BrowseGamePath(entry.path.clone()),
         c,
-    )])
-    .padding(6)
-    .width(180)
-    .style(move |_theme| theme::context_menu_style(c))
-    .into();
+    );
+    let menu_content = container(column![browse_item, edit_item])
+        .padding(6)
+        .width(180)
+        .style(move |_theme| theme::context_menu_style(c))
+        .into();
     let row_content = row![
         name_cell_slot(
             row![
@@ -2322,9 +2296,8 @@ fn name_cell_with_expand<'a>(
             expand_chevron_icon(is_expanded, colors),
             Space::new().width(14).into(),
             badge.into(),
-            // Help button for WeirdUtils parent row
-            if is_weird_utils_item(&repo.url, &repo.name)
-                || is_weird_utils_item(&repo.url, "weirdutils.dll")
+            // README preview for the complete multi-DLL project. This is a
+            // read-only action and must not enter the Add Mod workflow.
             {
                 let help_bytes = include_bytes!("../../assets/icons/help.svg");
                 let help_handle = iced::widget::svg::Handle::from_memory(help_bytes);
@@ -2337,12 +2310,10 @@ fn name_cell_with_expand<'a>(
                         });
 
                 let help_btn: Element<Message> = button(help_icon)
-                    .on_press(Message::OpenDialog(Dialog::AddRepo {
-                        url: repo.url.clone(),
-                        mode: repo.mode.clone(),
-                        is_addons: false,
-                        advanced: false,
-                    }))
+                    .on_press(Message::OpenRepoReadmePreview(
+                        repo.name.clone(),
+                        repo.url.clone(),
+                    ))
                     .padding(0)
                     .style(move |_theme, _status| button::Style {
                         background: None,
@@ -2352,9 +2323,12 @@ fn name_cell_with_expand<'a>(
                         snap: true,
                     })
                     .into();
-                row![Space::new().width(8), help_btn].into()
-            } else {
-                Space::new().width(0).into()
+                tip(
+                    row![Space::new().width(8), help_btn],
+                    &format!("Preview the {} README", repo.name),
+                    tooltip::Position::Top,
+                    colors,
+                )
             },
         ];
         if show_dxvk_badge {
@@ -2524,7 +2498,7 @@ fn status_badge<'a>(
         };
         tooltip(
             badge,
-            text(tip).size(13).color(c.text),
+            text(tip).size(theme::TOOLTIP_TEXT_SIZE).color(c.text),
             tooltip::Position::Top,
         )
         .style(move |_theme| container::Style {
@@ -2564,7 +2538,9 @@ fn status_badge<'a>(
         } else {
             tooltip(
                 badge,
-                text(tip_lines.join("\n")).size(13).color(c.text),
+                text(tip_lines.join("\n"))
+                    .size(theme::TOOLTIP_TEXT_SIZE)
+                    .color(c.text),
                 tooltip::Position::Top,
             )
             .style(move |_theme| container::Style {
@@ -2706,7 +2682,7 @@ fn tip<'a>(
     let tip_str = String::from(tip_text);
     tooltip(
         content,
-        container(text(tip_str).size(13).color(c.text))
+        container(text(tip_str).size(theme::TOOLTIP_TEXT_SIZE).color(c.text))
             .padding([3, 8])
             .style(move |_theme| theme::tooltip_style(c)),
         pos,

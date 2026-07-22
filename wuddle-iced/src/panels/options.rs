@@ -11,11 +11,11 @@ use crate::{App, Dialog, Message};
 pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     let c = colors;
 
-    // --- Instances section ---
+    // --- Profiles section ---
     let instances_head = row![
         column![
-            text("Instances").size(18).color(colors.title),
-            text("Each instance has its own tracked mod/addon list. Click a card to edit details.")
+            text("Profiles").size(18).color(colors.title),
+            text("Each profile has its own tracked mod/addon list. Click a card to switch profiles, or use its cogwheel to edit it.")
                 .size(12)
                 .color(colors.muted),
         ]
@@ -24,7 +24,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
         tip(
             {
                 let c2 = c;
-                button(text("+ Add Instance").size(13))
+                button(text("+ Add Profile").size(13))
                     .on_press(Message::OpenDialog(Dialog::InstanceSettings {
                         is_new: true,
                         profile_id: String::new(),
@@ -49,7 +49,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                         _ => theme::tab_button_style(c2),
                     })
             },
-            "Create a new WoW instance profile",
+            "Create a new WoW profile",
             tooltip::Position::Bottom,
             colors,
         ),
@@ -62,19 +62,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
         .map(|p| {
             let c2 = c;
             let is_active = p.id == app.active_profile_id;
-
-            button(
-                container(text(&p.name).size(14).color(if is_active {
-                    colors.primary_text
-                } else {
-                    colors.text
-                }))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-            )
-            .on_press(Message::OpenDialog(Dialog::InstanceSettings {
+            let edit_dialog = Dialog::InstanceSettings {
                 is_new: false,
                 profile_id: p.id.clone(),
                 name: p.name.clone(),
@@ -91,35 +79,53 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 wine_args: p.wine_args.clone(),
                 custom_command: p.custom_command.clone(),
                 custom_args: p.custom_args.clone(),
-            }))
+            };
+            let switch_card = button(
+                container(text(&p.name).size(14).color(if is_active {
+                    colors.title
+                } else {
+                    colors.muted
+                }))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+            )
+            .on_press(Message::SwitchProfile(p.id.clone()))
             .padding([0, 12])
             .width(Length::Fill)
             .height(40)
-            .style(move |_theme, status| {
-                if is_active {
-                    return theme::tab_button_active_style(c2);
-                }
+            .style(move |_theme, status| theme::choice_button_style(c2, is_active, status));
 
-                let base = theme::card_style(c2);
-                match status {
-                    button::Status::Hovered => button::Style {
-                        background: Some(iced::Background::Color(iced::Color::from_rgba(
-                            1.0, 1.0, 1.0, 0.06,
-                        ))),
-                        text_color: c2.text,
-                        border: base.border,
-                        shadow: base.shadow,
+            let edit_button = tip(
+                button(text("\u{2699}").size(17))
+                    .on_press(Message::OpenDialog(edit_dialog))
+                    .padding([3, 6])
+                    .style(move |_theme, status| button::Style {
+                        background: None,
+                        text_color: match status {
+                            button::Status::Hovered => c2.title,
+                            _ => c2.muted,
+                        },
+                        border: iced::Border::default(),
+                        shadow: iced::Shadow::default(),
                         snap: true,
-                    },
-                    _ => button::Style {
-                        background: base.background,
-                        text_color: c2.text,
-                        border: base.border,
-                        shadow: base.shadow,
-                        snap: true,
-                    },
-                }
-            })
+                    }),
+                "Edit this profile",
+                tooltip::Position::Top,
+                colors,
+            );
+
+            stack![
+                switch_card,
+                container(row![Space::new().width(Length::Fill), edit_button])
+                    .width(Length::Fill)
+                    .height(40)
+                    .align_y(iced::Alignment::Center)
+                    .padding([0, 6]),
+            ]
+            .width(Length::Fill)
+            .height(40)
             .into()
         })
         .collect();
@@ -229,9 +235,13 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                         shadow: iced::Shadow::default(),
                         snap: true,
                     }),
-                container(text(t.label()).size(13).color(c2.text))
-                    .padding([3, 8])
-                    .style(move |_| theme::tooltip_style(c2)),
+                container(
+                    text(t.label())
+                        .size(theme::TOOLTIP_TEXT_SIZE)
+                        .color(c2.text),
+                )
+                .padding([3, 8])
+                .style(move |_| theme::tooltip_style(c2)),
                 tooltip::Position::Bottom,
             )
             .gap(4.0)
@@ -256,9 +266,13 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                             theme::tab_button_style(c2)
                         }
                     }),
-                container(text(mode.tooltip()).size(13).color(c2.text))
-                    .padding([3, 8])
-                    .style(move |_| theme::tooltip_style(c2)),
+                container(
+                    text(mode.tooltip())
+                        .size(theme::TOOLTIP_TEXT_SIZE)
+                        .color(c2.text),
+                )
+                .padding([3, 8])
+                .style(move |_| theme::tooltip_style(c2)),
                 tooltip::Position::Bottom,
             )
             .gap(4.0)
@@ -312,7 +326,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                                 button::Status::Hovered => theme::tab_button_hovered_style(c2),
                                 _ => theme::tab_button_style(c2),
                             }),
-                        container(text("Opens GitHub in your browser so you can create or manage a token.").size(13).color(c.text))
+                        container(text("Opens GitHub in your browser so you can create or manage a token.").size(theme::TOOLTIP_TEXT_SIZE).color(c.text))
                             .padding([3, 8])
                             .style(move |_theme| theme::tooltip_style(c2)),
                         tooltip::Position::Bottom,
@@ -439,7 +453,7 @@ fn tip<'a>(
     let tip_str = String::from(tip_text);
     tooltip(
         content,
-        container(text(tip_str).size(13).color(c.text))
+        container(text(tip_str).size(theme::TOOLTIP_TEXT_SIZE).color(c.text))
             .padding([3, 8])
             .style(move |_theme| theme::tooltip_style(c)),
         pos,

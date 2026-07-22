@@ -7,7 +7,7 @@ use wuddle_engine::auto_login::{
     AccountDetails, AccountId, AccountRef, AutoLoginService, CredentialInput, SecretText,
 };
 
-use crate::components::helpers::close_button;
+use crate::components::helpers::{close_button, dialog_field_label};
 use crate::theme::{self, ThemeColors};
 use crate::{App, Dialog, LogLevel, Message, ToastKind};
 
@@ -506,7 +506,7 @@ pub fn account_picker<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Mess
     let selector_tooltip: Element<'a, Message> = if app.auto_login_account_picker_tooltip_visible {
         container(
             text("Select account for auto-login. Requires 'Awesome WotLK'.")
-                .size(13)
+                .size(theme::TOOLTIP_TEXT_SIZE)
                 .color(c.text),
         )
         .padding([6, 10])
@@ -557,9 +557,13 @@ pub fn account_picker<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Mess
                 snap: true,
             },
         }),
-        container(text("Manage auto-login accounts").size(13).color(c.text))
-            .padding([6, 10])
-            .style(move |_theme| theme::tooltip_style(c)),
+        container(
+            text("Manage auto-login accounts")
+                .size(theme::TOOLTIP_TEXT_SIZE)
+                .color(c.text),
+        )
+        .padding([6, 10])
+        .style(move |_theme| theme::tooltip_style(c)),
         iced::widget::tooltip::Position::Top,
     );
     row![account_selector, manage_accounts,]
@@ -615,8 +619,8 @@ fn accounts_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
     }
     if rows.is_empty() {
         rows.push(
-            text("No auto-login accounts saved for this instance.")
-                .size(13)
+            text("No auto-login accounts saved for this profile.")
+                .size(14)
                 .color(colors.muted)
                 .into(),
         );
@@ -630,17 +634,17 @@ fn accounts_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
         ]
         .align_y(iced::Alignment::Center),
         text("Credentials are stored in your system vault. They are passed to the game as command-line arguments and may be readable by same-user or administrator tools while the game runs.")
-            .size(12)
+            .size(14)
             .color(colors.warn),
         text("This requires Awesome WotLK or another compatible client modification. Only use it where the server permits modified clients.")
-            .size(12)
+            .size(14)
             .color(colors.muted),
         scrollable(column(rows).spacing(6)).height(Length::Shrink),
         row![
             Space::new().width(Length::Fill),
             button(text("Add Account").size(13))
                 .on_press(Message::AddAutoLoginAccount)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, _| theme::tab_button_active_style(c)),
         ],
     ]
@@ -657,7 +661,7 @@ fn editor_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> 
                 close_button(colors),
             ],
             text("Loading from secure storage…")
-                .size(13)
+                .size(14)
                 .color(colors.muted),
         ]
         .spacing(12)
@@ -671,7 +675,7 @@ fn editor_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> 
     };
     let warning: Element<Message> = if app.auto_login_warning_acknowledged {
         text("No terminal window is opened. The credential is still visible in the game process command line to sufficiently privileged local tools.")
-            .size(11)
+            .size(14)
             .color(colors.warn)
             .into()
     } else {
@@ -688,7 +692,7 @@ fn editor_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> 
         })
         .size(13),
     )
-    .padding([7, 14]);
+    .padding([6, 14]);
     let save = if app.auto_login_ui.saving {
         save
     } else {
@@ -708,24 +712,24 @@ fn editor_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> 
             close_button(colors),
         ]
         .align_y(iced::Alignment::Center),
-        text("Account label").size(13).color(colors.text),
+        dialog_field_label("Account label", colors),
         text_input("Main account", &editor.label)
             .on_input(Message::SetAutoLoginLabel)
             .padding([8, 12]),
-        text("Login").size(13).color(colors.text),
+        dialog_field_label("Login", colors),
         text_input("Account name or email", editor.login.expose())
             .on_input(|value| Message::SetAutoLoginLogin(SecretText::new(value)))
             .padding([8, 12]),
-        text("Password").size(13).color(colors.text),
+        dialog_field_label("Password", colors),
         text_input(password_hint, editor.password.expose())
             .secure(true)
             .on_input(|value| Message::SetAutoLoginPassword(SecretText::new(value)))
             .padding([8, 12]),
-        text("Realmlist (optional)").size(13).color(colors.text),
+        dialog_field_label("Realmlist (optional)", colors),
         text_input("logon.example.com", editor.realmlist.expose())
             .on_input(|value| Message::SetAutoLoginRealmlist(SecretText::new(value)))
             .padding([8, 12]),
-        text("Realm name (optional)").size(13).color(colors.text),
+        dialog_field_label("Realm name (optional)", colors),
         text_input("Realm Name", editor.realm_name.expose())
             .on_input(|value| Message::SetAutoLoginRealmName(SecretText::new(value)))
             .padding([8, 12]),
@@ -748,17 +752,17 @@ fn delete_dialog<'a>(label: &'a str, colors: ThemeColors) -> Element<'a, Message
         text(format!(
             "Remove ‘{label}’ from secure storage? This cannot be undone."
         ))
-        .size(13)
+        .size(14)
         .color(colors.text),
         row![
             Space::new().width(Length::Fill),
             button(text("Cancel").size(13))
                 .on_press(Message::OpenAutoLoginAccounts)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, _| theme::tab_button_style(c)),
             button(text("Remove").size(13))
                 .on_press(Message::ConfirmDeleteAutoLoginAccount)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, _| theme::btn_danger_style(c)),
         ]
         .spacing(8),

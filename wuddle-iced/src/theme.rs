@@ -10,6 +10,8 @@ use iced::{Border, Color, Font, Gradient, Radians, Shadow, Theme, Vector};
 pub const LIFECRAFT: Font = Font::with_name("LifeCraft");
 pub const FRIZ: Font = Font::with_name("Friz Quadrata Std");
 pub const NOTO: Font = Font::with_name("Noto Sans");
+/// Shared text size for every hover tooltip in Wuddle.
+pub const TOOLTIP_TEXT_SIZE: f32 = 15.0;
 
 /// Wuddle's 5 custom themes, ported from the CSS variables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,6 +399,59 @@ pub fn tab_button_hovered_style(colors: ThemeColors) -> button::Style {
         text_color: colors.text,
         border: Border {
             color: colors.btn_border,
+            width: 1.0,
+            radius: Radius::new(0.0),
+        },
+        shadow: Shadow::default(),
+        snap: true,
+    }
+}
+
+/// Compact outlined selector used for persistent choices rather than primary
+/// actions. Selected values receive a restrained theme tint; inactive values
+/// remain deliberately quieter until hovered.
+pub fn choice_button_style(
+    colors: ThemeColors,
+    selected: bool,
+    status: button::Status,
+) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered);
+    let accent = if hovered {
+        colors.title
+    } else {
+        colors.primary
+    };
+    button::Style {
+        background: if selected {
+            Some(iced::Background::Color(Color {
+                a: if hovered { 0.18 } else { 0.10 },
+                ..colors.primary
+            }))
+        } else if hovered {
+            Some(iced::Background::Color(Color {
+                a: 0.07,
+                ..colors.primary
+            }))
+        } else {
+            None
+        },
+        text_color: if selected || hovered {
+            colors.title
+        } else {
+            Color {
+                a: 0.62,
+                ..colors.muted
+            }
+        },
+        border: Border {
+            color: if selected {
+                Color { a: 0.72, ..accent }
+            } else {
+                Color {
+                    a: if hovered { 0.55 } else { 0.28 },
+                    ..colors.btn_border
+                }
+            },
             width: 1.0,
             radius: Radius::new(0.0),
         },

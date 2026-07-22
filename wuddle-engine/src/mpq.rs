@@ -166,6 +166,8 @@ pub struct MpqInstalledFile {
     pub sha256: String,
     pub version: Option<String>,
     pub enabled: bool,
+    pub protected: bool,
+    pub editor_unlocked: bool,
     pub status: MpqFileStatus,
 }
 
@@ -198,6 +200,9 @@ pub struct MpqRemotePackage {
 #[derive(Debug, Clone)]
 pub struct MpqRemoteAsset {
     pub asset_name: String,
+    /// Optional user-selected deployment name. The upstream asset keeps its
+    /// canonical name in staging while the committed MPQ preserves this name.
+    pub target_file_name: Option<String>,
     pub download_url: String,
     pub size: Option<u64>,
     pub sha256: Option<String>,
@@ -217,6 +222,7 @@ pub struct MpqProtectionEntry {
     pub fingerprint: String,
     pub protected: bool,
     pub core: bool,
+    pub editor_unlocked: bool,
     pub enabled: bool,
 }
 
@@ -947,6 +953,7 @@ pub(crate) fn scan_existing_mpqs(wow_dir: &Path) -> MpqResult<Vec<MpqProtectionE
             fingerprint: metadata_fingerprint(&metadata),
             protected: true,
             core: is_reserved_core_filename(&classified_name),
+            editor_unlocked: false,
             enabled,
         });
     }
@@ -1113,6 +1120,7 @@ impl crate::Engine {
                     .upsert_mpq_protection(&entry.path, &entry.fingerprint, entry.core)?;
             entry.protected = state.protected;
             entry.core = state.core;
+            entry.editor_unlocked = state.editor_unlocked;
             entry.display_name = state.display_name;
             out.push(entry);
         }
@@ -1172,6 +1180,121 @@ impl crate::Engine {
         Ok(())
     }
 
+    /// Explicitly unlock a detected core/custom MPQ for editing without
+    /// changing how the archive is classified.
+    pub fn unlock_untracked_mpq_for_editing(
+        &self,
+        wow_dir: &Path,
+        manifest_path: &str,
+    ) -> Result<()> {
+        let entry = self
+            .list_mpq_protection(wow_dir)?
+            .into_iter()
+            .find(|entry| entry.path.eq_ignore_ascii_case(manifest_path))
+            .ok_or_else(|| anyhow::anyhow!("The selected MPQ is no longer present"))?;
+        self.db()
+            .set_mpq_editor_unlocked(&entry.path, &entry.fingerprint, true)?;
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.mpq",
+            "unlocked an untracked MPQ for editing; path omitted".to_string(),
+        );
+        Ok(())
+    }
+
+    pub fn set_untracked_mpq_editor_unlocked(
+        &self,
+        wow_dir: &Path,
+        manifest_path: &str,
+        editor_unlocked: bool,
+    ) -> Result<()> {
+        let entry = self
+            .list_mpq_protection(wow_dir)?
+            .into_iter()
+            .find(|entry| entry.path.eq_ignore_ascii_case(manifest_path))
+            .ok_or_else(|| anyhow::anyhow!("The selected MPQ is no longer present"))?;
+        self.db()
+            .set_mpq_editor_unlocked(&entry.path, &entry.fingerprint, editor_unlocked)?;
+        Ok(())
+    }
+
+    pub fn set_tracked_mpq_protected(
+        &self,
+        repo_id: i64,
+        wow_dir: &Path,
+        manifest_path: &str,
+        protected: bool,
+    ) -> Result<()> {
+        let entry = self
+            .db()
+            .list_installs(repo_id)?
+            .into_iter()
+            .find(|entry| entry.kind == "mpq" && entry.path.eq_ignore_ascii_case(manifest_path))
+            .ok_or_else(|| anyhow::anyhow!("Tracked MPQ not found"))?;
+        let target = Self::resolve_install_path(&entry.path, Some(wow_dir))
+            .ok_or_else(|| anyhow::anyhow!("Could not resolve the tracked MPQ path"))?;
+        let actual = Self::find_actual_case(&target).unwrap_or(target);
+        let metadata = fs::symlink_metadata(&actual)
+            .map_err(|_| MpqError::Filesystem("reading tracked MPQ metadata"))?;
+        if !metadata.is_file() {
+            anyhow::bail!("The selected MPQ is no longer present");
+        }
+        let fingerprint = metadata_fingerprint(&metadata);
+        self.db()
+            .upsert_mpq_protection(&entry.path, &fingerprint, false)?;
+        self.db()
+            .set_mpq_protection(&entry.path, &fingerprint, protected)?;
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.mpq",
+            format!("changed tracked MPQ protection: protected={protected}; path omitted"),
+        );
+        Ok(())
+    }
+
+    pub fn set_tracked_mpq_editor_unlocked(
+        &self,
+        repo_id: i64,
+        wow_dir: &Path,
+        manifest_path: &str,
+        editor_unlocked: bool,
+    ) -> Result<()> {
+        let entry = self
+            .db()
+            .list_installs(repo_id)?
+            .into_iter()
+            .find(|entry| entry.kind == "mpq" && entry.path.eq_ignore_ascii_case(manifest_path))
+            .ok_or_else(|| anyhow::anyhow!("Tracked MPQ not found"))?;
+        let target = Self::resolve_install_path(&entry.path, Some(wow_dir))
+            .ok_or_else(|| anyhow::anyhow!("Could not resolve the tracked MPQ path"))?;
+        let actual = Self::find_actual_case(&target).unwrap_or(target);
+        let metadata = fs::symlink_metadata(&actual)
+            .map_err(|_| MpqError::Filesystem("reading tracked MPQ metadata"))?;
+        let fingerprint = metadata_fingerprint(&metadata);
+        self.db()
+            .upsert_mpq_protection(&entry.path, &fingerprint, false)?;
+        self.db()
+            .set_mpq_editor_unlocked(&entry.path, &fingerprint, editor_unlocked)?;
+        Ok(())
+    }
+
+    fn tracked_mpq_editor_unlocked(&self, wow_dir: &Path, manifest_path: &str) -> Result<bool> {
+        let Some(target) = Self::resolve_install_path(manifest_path, Some(wow_dir)) else {
+            return Ok(false);
+        };
+        let actual = Self::find_actual_case(&target).unwrap_or(target);
+        let Ok(metadata) = fs::symlink_metadata(actual) else {
+            return Ok(false);
+        };
+        let fingerprint = metadata_fingerprint(&metadata);
+        Ok(self
+            .db()
+            .get_mpq_protection(manifest_path)?
+            .filter(|row| row.fingerprint == fingerprint)
+            .map(|row| row.editor_unlocked)
+            .unwrap_or(false))
+    }
+
     pub fn rename_untracked_mpq_display_name(
         &self,
         wow_dir: &Path,
@@ -1205,8 +1328,8 @@ impl crate::Engine {
     }
 
     /// Enable or disable an MPQ that exists in the game directory but is not
-    /// tracked as part of a Wuddle package. Protected and core files must be
-    /// deliberately reclassified/unlocked before their filenames may change.
+    /// tracked as part of a Wuddle package. The protection padlock gates the
+    /// editor; enabled state remains an independent quick toggle.
     pub fn set_untracked_mpq_enabled(
         &self,
         wow_dir: &Path,
@@ -1218,12 +1341,6 @@ impl crate::Engine {
             .into_iter()
             .find(|entry| entry.path.eq_ignore_ascii_case(manifest_path))
             .ok_or_else(|| anyhow::anyhow!("The selected MPQ is no longer present"))?;
-        if entry.core {
-            anyhow::bail!("Core game MPQs must be reclassified before they can be disabled");
-        }
-        if entry.protected {
-            anyhow::bail!("Unlock this MPQ before changing its enabled state");
-        }
         if entry.enabled == enabled {
             return Ok(());
         }
@@ -1269,6 +1386,7 @@ impl crate::Engine {
             &fingerprint,
             entry.protected,
             entry.core,
+            entry.editor_unlocked,
             entry.display_name.as_deref(),
         ) {
             let _ = fs::rename(&desired, &current);
@@ -1352,6 +1470,7 @@ impl crate::Engine {
             &fingerprint,
             entry.protected,
             entry.core,
+            entry.editor_unlocked,
             entry.display_name.as_deref(),
         ) {
             let _ = fs::rename(&desired, &current);
@@ -1361,6 +1480,247 @@ impl crate::Engine {
             diagnostics::DiagnosticLevel::Debug,
             "engine.mpq",
             "renamed an untracked custom MPQ; paths omitted".to_string(),
+        );
+        Ok(new_manifest)
+    }
+
+    /// Apply the editable properties of an unlocked, untracked MPQ as one
+    /// filesystem/database operation. Classification and protection remain
+    /// independent: saving never locks or unlocks the archive.
+    pub fn edit_untracked_mpq(
+        &self,
+        wow_dir: &Path,
+        manifest_path: &str,
+        display_name: &str,
+        new_file_name: &str,
+        destination: &MpqDestination,
+        core: bool,
+        set_xattr_comment: bool,
+    ) -> Result<String> {
+        let display_name = display_name.trim();
+        if display_name.is_empty()
+            || display_name.chars().count() > 120
+            || display_name.chars().any(char::is_control)
+        {
+            anyhow::bail!("MPQ friendly name must be 1–120 printable characters");
+        }
+        let new_file_name = new_file_name.trim();
+        if core {
+            validate_target_file_name_syntax(new_file_name)?;
+        } else {
+            validate_target_file_name(new_file_name)?;
+        }
+
+        let entry = self
+            .list_mpq_protection(wow_dir)?
+            .into_iter()
+            .find(|entry| entry.path.eq_ignore_ascii_case(manifest_path))
+            .ok_or_else(|| anyhow::anyhow!("The selected MPQ is no longer present"))?;
+        if !entry.editor_unlocked {
+            anyhow::bail!("Unlock this MPQ before editing it");
+        }
+
+        let stored_file_name = if entry.enabled {
+            new_file_name.to_string()
+        } else {
+            format!("{new_file_name}{DISABLED_SUFFIX}")
+        };
+        let desired = target_path(wow_dir, destination, &stored_file_name)?;
+        let new_manifest = normalize_relative_path(
+            desired
+                .strip_prefix(wow_dir)
+                .map_err(|_| MpqError::Filesystem("resolving the MPQ destination"))?,
+        )?;
+        if self.db().find_mpq_install_owner(&new_manifest)?.is_some() {
+            anyhow::bail!(MpqError::ManagedTarget(stored_file_name));
+        }
+        let current = Self::resolve_install_path(&entry.path, Some(wow_dir))
+            .and_then(|path| Self::find_actual_case(&path).or(Some(path)))
+            .ok_or_else(|| anyhow::anyhow!("Could not resolve the selected MPQ"))?;
+        if !current.is_file() {
+            anyhow::bail!("The selected MPQ is no longer present");
+        }
+        let path_changed = !entry.path.eq_ignore_ascii_case(&new_manifest)
+            || current.file_name() != desired.file_name();
+        if path_changed {
+            if let Some(existing) = desired
+                .parent()
+                .and_then(|parent| find_case_insensitive_child(parent, &stored_file_name))
+            {
+                if existing != current {
+                    anyhow::bail!(MpqError::ToggleCollision(stored_file_name));
+                }
+            }
+            if let Some(parent) = desired.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(&current, &desired)
+                .map_err(|_| MpqError::Filesystem("renaming a custom MPQ"))?;
+        }
+
+        let committed_path = if path_changed { &desired } else { &current };
+        let fingerprint = match fs::symlink_metadata(committed_path) {
+            Ok(metadata) => metadata_fingerprint(&metadata),
+            Err(_) => {
+                if path_changed {
+                    let _ = fs::rename(&desired, &current);
+                }
+                return Err(MpqError::Filesystem("reading edited MPQ metadata").into());
+            }
+        };
+        if let Err(error) = self.db().edit_mpq_protection_entry(
+            &entry.path,
+            &new_manifest,
+            &fingerprint,
+            display_name,
+            entry.protected,
+            core,
+            entry.editor_unlocked,
+        ) {
+            if path_changed {
+                let _ = fs::rename(&desired, &current);
+            }
+            return Err(error);
+        }
+        set_friendly_comment(committed_path, display_name, set_xattr_comment);
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.mpq",
+            "edited an untracked MPQ; values omitted".to_string(),
+        );
+        Ok(new_manifest)
+    }
+
+    /// Rename or move an unlocked Wuddle-installed MPQ while retaining its
+    /// package ownership, backup association, display metadata, and update
+    /// tracking.
+    pub fn edit_tracked_mpq(
+        &self,
+        repo_id: i64,
+        wow_dir: &Path,
+        manifest_path: &str,
+        display_name: &str,
+        new_file_name: &str,
+        destination: &MpqDestination,
+        set_xattr_comment: bool,
+    ) -> Result<String> {
+        let display_name = display_name.trim();
+        if display_name.is_empty()
+            || display_name.chars().count() > 120
+            || display_name.chars().any(char::is_control)
+        {
+            anyhow::bail!("MPQ friendly name must be 1–120 printable characters");
+        }
+        let new_file_name = new_file_name.trim();
+        validate_target_file_name(new_file_name)?;
+        let entry = self
+            .db()
+            .list_installs(repo_id)?
+            .into_iter()
+            .find(|entry| entry.kind == "mpq" && entry.path.eq_ignore_ascii_case(manifest_path))
+            .ok_or_else(|| anyhow::anyhow!("Tracked MPQ not found"))?;
+        if !self.tracked_mpq_editor_unlocked(wow_dir, &entry.path)? {
+            anyhow::bail!("Unlock this MPQ before editing it");
+        }
+
+        let stored_file_name = if is_disabled_manifest_path(&entry.path) {
+            format!("{new_file_name}{DISABLED_SUFFIX}")
+        } else {
+            new_file_name.to_string()
+        };
+        let desired = target_path(wow_dir, destination, &stored_file_name)?;
+        let new_manifest = normalize_relative_path(
+            desired
+                .strip_prefix(wow_dir)
+                .map_err(|_| MpqError::Filesystem("resolving the MPQ destination"))?,
+        )?;
+        if self
+            .db()
+            .list_installs(repo_id)?
+            .into_iter()
+            .any(|install| {
+                install.kind == "mpq"
+                    && !install.path.eq_ignore_ascii_case(&entry.path)
+                    && install.path.eq_ignore_ascii_case(&new_manifest)
+            })
+        {
+            anyhow::bail!(MpqError::ManagedTarget(stored_file_name));
+        }
+        if self
+            .db()
+            .find_mpq_install_owner(&new_manifest)?
+            .is_some_and(|owner| owner != repo_id)
+        {
+            anyhow::bail!(MpqError::ManagedTarget(stored_file_name));
+        }
+        let current = Self::resolve_install_path(&entry.path, Some(wow_dir))
+            .and_then(|path| Self::find_actual_case(&path).or(Some(path)))
+            .ok_or_else(|| anyhow::anyhow!("Could not resolve the tracked MPQ path"))?;
+        if !current.is_file() {
+            anyhow::bail!("The selected MPQ is no longer present");
+        }
+        let path_changed = !entry.path.eq_ignore_ascii_case(&new_manifest)
+            || current.file_name() != desired.file_name();
+        let displaced_backup = if path_changed {
+            self.db()
+                .get_mpq_backup(repo_id, &entry.path)?
+                .and_then(|backup| Self::resolve_install_path(&backup.backup_path, Some(wow_dir)))
+                .filter(|path| path.is_file())
+        } else {
+            None
+        };
+        if path_changed {
+            if let Some(existing) = desired
+                .parent()
+                .and_then(|parent| find_case_insensitive_child(parent, &stored_file_name))
+            {
+                if existing != current {
+                    anyhow::bail!(MpqError::ToggleCollision(stored_file_name));
+                }
+            }
+            if let Some(parent) = desired.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(&current, &desired)
+                .map_err(|_| MpqError::Filesystem("moving a tracked MPQ"))?;
+        }
+
+        let restored_backup = if let Some(backup_path) = displaced_backup.as_ref() {
+            if let Err(error) = fs::rename(backup_path, &current) {
+                let _ = fs::rename(&desired, &current);
+                return Err(error.into());
+            }
+            true
+        } else {
+            false
+        };
+
+        if let Err(error) = self.db().edit_tracked_mpq_install(
+            repo_id,
+            &entry.path,
+            &new_manifest,
+            display_name,
+            path_changed,
+        ) {
+            if restored_backup {
+                if let Some(backup_path) = displaced_backup.as_ref() {
+                    let _ = fs::rename(&current, backup_path);
+                }
+            }
+            if path_changed {
+                let _ = fs::rename(&desired, &current);
+            }
+            return Err(error);
+        }
+        set_friendly_comment(
+            if path_changed { &desired } else { &current },
+            display_name,
+            set_xattr_comment,
+        );
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.mpq",
+            "edited a tracked MPQ; values omitted".to_string(),
         );
         Ok(new_manifest)
     }
@@ -1503,6 +1863,11 @@ impl crate::Engine {
 
         for asset in assets {
             validate_target_file_name(&asset.asset_name)?;
+            let target_file_name = asset
+                .target_file_name
+                .as_deref()
+                .unwrap_or(&asset.asset_name);
+            validate_target_file_name(target_file_name)?;
             let url = Url::parse(&asset.download_url)?;
             if url.scheme() != "https" {
                 anyhow::bail!("Remote MPQ downloads must use HTTPS");
@@ -1522,7 +1887,7 @@ impl crate::Engine {
             selections.push(MpqInstallSelection {
                 source_key: asset.asset_name.clone(),
                 display_name: asset.display_name.clone(),
-                file_name: asset.asset_name.clone(),
+                file_name: target_file_name.to_string(),
                 destination: asset.destination.clone(),
                 replace_unprotected: asset.replace_unprotected,
                 version: asset.version.clone(),
@@ -1876,6 +2241,9 @@ impl crate::Engine {
             .into_iter()
             .find(|entry| entry.kind == "mpq" && entry.path == manifest_path)
             .ok_or_else(|| anyhow::anyhow!("Tracked MPQ not found"))?;
+        if !self.tracked_mpq_editor_unlocked(wow_dir, &entry.path)? {
+            anyhow::bail!("Unlock this MPQ before editing it");
+        }
         self.db()
             .set_install_display_name(repo_id, &entry.path, display_name)?;
         if let Some(path) = Self::resolve_install_path(&entry.path, Some(wow_dir)) {
@@ -1923,6 +2291,25 @@ impl crate::Engine {
                 }
                 None => MpqFileStatus::Missing,
             };
+            let protection_state = Self::resolve_install_path(&entry.path, Some(wow_dir))
+                .and_then(|path| Self::find_actual_case(&path).or(Some(path)))
+                .and_then(|path| fs::symlink_metadata(path).ok())
+                .map(|metadata| metadata_fingerprint(&metadata))
+                .and_then(|fingerprint| {
+                    self.db()
+                        .get_mpq_protection(&entry.path)
+                        .ok()
+                        .flatten()
+                        .filter(|row| row.fingerprint == fingerprint)
+                });
+            let protected = protection_state
+                .as_ref()
+                .map(|row| row.protected)
+                .unwrap_or(false);
+            let editor_unlocked = protection_state
+                .as_ref()
+                .map(|row| row.editor_unlocked)
+                .unwrap_or(false);
             files.push(MpqInstalledFile {
                 display_name: entry.display_name.clone().unwrap_or_else(|| {
                     Path::new(&entry.path)
@@ -1935,6 +2322,8 @@ impl crate::Engine {
                 sha256: entry.sha256.unwrap_or_default(),
                 version: entry.version,
                 enabled,
+                protected,
+                editor_unlocked,
                 status,
             });
         }
@@ -2205,6 +2594,9 @@ impl crate::Engine {
             .into_iter()
             .find(|entry| entry.kind == "mpq" && entry.path.eq_ignore_ascii_case(manifest_path))
             .ok_or_else(|| anyhow::anyhow!("Tracked MPQ not found"))?;
+        if !self.tracked_mpq_editor_unlocked(wow_dir, &entry.path)? {
+            anyhow::bail!("Unlock this MPQ before removing it");
+        }
         let target = Self::resolve_install_path(&entry.path, Some(wow_dir))
             .ok_or_else(|| anyhow::anyhow!("Could not resolve the tracked MPQ path"))?;
         let actual = Self::find_actual_case(&target).unwrap_or(target.clone());
@@ -2567,7 +2959,7 @@ mod tests {
     }
 
     #[test]
-    fn untracked_custom_mpq_can_be_disabled_only_after_unlocking() {
+    fn untracked_mpq_enabled_state_is_independent_from_editor_lock() {
         let temp = tempfile::tempdir().unwrap();
         let wow = temp.path().join("wow");
         fs::create_dir_all(wow.join("Data")).unwrap();
@@ -2582,13 +2974,6 @@ mod tests {
         engine
             .rename_untracked_mpq_display_name(&wow, &initial[0].path, "My manual patch", false)
             .unwrap();
-        assert!(engine
-            .set_untracked_mpq_enabled(&wow, &initial[0].path, false)
-            .is_err());
-
-        engine
-            .set_mpq_protected(&wow, &initial[0].path, false)
-            .unwrap();
         engine
             .set_untracked_mpq_enabled(&wow, &initial[0].path, false)
             .unwrap();
@@ -2598,7 +2983,7 @@ mod tests {
         let disabled = engine.list_mpq_protection(&wow).unwrap();
         assert_eq!(disabled.len(), 1);
         assert!(!disabled[0].enabled);
-        assert!(!disabled[0].protected);
+        assert!(disabled[0].protected);
         assert_eq!(disabled[0].display_name.as_deref(), Some("My manual patch"));
         engine
             .set_untracked_mpq_enabled(&wow, &disabled[0].path, true)
@@ -2640,6 +3025,108 @@ mod tests {
         assert_eq!(entries[0].display_name.as_deref(), Some("HD models"));
         assert!(!entries[0].protected);
         assert!(!entries[0].core);
+    }
+
+    #[test]
+    fn mpq_editor_updates_properties_without_changing_the_lock_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let wow = temp.path().join("wow");
+        fs::create_dir_all(wow.join("Data")).unwrap();
+        write_valid_mpq(&wow.join("Data/patch-Manual.MPQ"));
+        let engine = crate::Engine::open(&temp.path().join("profile.sqlite3")).unwrap();
+
+        let initial = engine.list_mpq_protection(&wow).unwrap();
+        engine
+            .unlock_untracked_mpq_for_editing(&wow, &initial[0].path)
+            .unwrap();
+        let renamed = engine
+            .edit_untracked_mpq(
+                &wow,
+                &initial[0].path,
+                "Base game archive",
+                "common.MPQ",
+                &MpqDestination::DataRoot,
+                true,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(renamed, "Data/common.MPQ");
+        let edited = engine.list_mpq_protection(&wow).unwrap();
+        assert_eq!(edited[0].display_name.as_deref(), Some("Base game archive"));
+        assert!(edited[0].core);
+        assert!(edited[0].protected);
+        assert!(edited[0].editor_unlocked);
+        assert!(wow.join("Data/common.MPQ").is_file());
+    }
+
+    #[test]
+    fn unlocking_a_core_mpq_preserves_its_classification() {
+        let temp = tempfile::tempdir().unwrap();
+        let wow = temp.path().join("wow");
+        fs::create_dir_all(wow.join("Data")).unwrap();
+        write_valid_mpq(&wow.join("Data/common.MPQ"));
+        let engine = crate::Engine::open(&temp.path().join("profile.sqlite3")).unwrap();
+
+        let initial = engine.list_mpq_protection(&wow).unwrap();
+        engine
+            .unlock_untracked_mpq_for_editing(&wow, &initial[0].path)
+            .unwrap();
+        let unlocked = engine.list_mpq_protection(&wow).unwrap();
+        assert!(unlocked[0].core);
+        assert!(unlocked[0].protected);
+        assert!(unlocked[0].editor_unlocked);
+        engine
+            .set_untracked_mpq_editor_unlocked(&wow, &unlocked[0].path, false)
+            .unwrap();
+        let relocked = engine.list_mpq_protection(&wow).unwrap();
+        assert!(relocked[0].core);
+        assert!(relocked[0].protected);
+        assert!(!relocked[0].editor_unlocked);
+    }
+
+    #[test]
+    fn tracked_editor_moves_the_file_without_losing_package_ownership() {
+        let temp = tempfile::tempdir().unwrap();
+        let wow = temp.path().join("wow");
+        fs::create_dir_all(wow.join("Data/enUS")).unwrap();
+        let source = temp.path().join("source.MPQ");
+        write_valid_mpq(&source);
+        let engine = crate::Engine::open(&temp.path().join("profile.sqlite3")).unwrap();
+        let selection = MpqInstallSelection {
+            source_key: "source.MPQ".to_string(),
+            display_name: "Original name".to_string(),
+            file_name: "patch-X.MPQ".to_string(),
+            destination: MpqDestination::DataRoot,
+            replace_unprotected: false,
+            version: None,
+        };
+        let repo_id = engine
+            .install_local_mpq_package(&wow, &source, &[selection], false)
+            .unwrap();
+        engine
+            .set_tracked_mpq_editor_unlocked(repo_id, &wow, "Data/patch-X.MPQ", true)
+            .unwrap();
+
+        let path = engine
+            .edit_tracked_mpq(
+                repo_id,
+                &wow,
+                "Data/patch-X.MPQ",
+                "Moved patch",
+                "patch-enUS-X.MPQ",
+                &MpqDestination::Locale("enUS".to_string()),
+                false,
+            )
+            .unwrap();
+        assert_eq!(path, "Data/enUS/patch-enUS-X.MPQ");
+        assert!(!wow.join("Data/patch-X.MPQ").exists());
+        assert!(wow.join(&path).is_file());
+        let installed = engine.list_installed_mpqs(repo_id, &wow).unwrap();
+        assert_eq!(installed[0].path, path);
+        assert_eq!(installed[0].display_name, "Moved patch");
+        engine.remove_mpq_package(repo_id, &wow, false).unwrap();
+        assert!(!wow.join("Data/enUS/patch-enUS-X.MPQ").exists());
     }
 
     #[test]
@@ -2738,6 +3225,7 @@ mod tests {
         assert_eq!(installed.len(), 1);
         assert_eq!(installed[0].display_name, "My Map Patch");
         assert_eq!(installed[0].status, MpqFileStatus::Installed);
+        assert!(installed[0].editor_unlocked);
 
         fs::write(
             wow.join("Data/enUS/patch-enUS-X.MPQ"),
@@ -2757,6 +3245,12 @@ mod tests {
         assert!(engine
             .install_local_mpq_package(&wow, &source, &[selection], false)
             .is_err());
+        engine
+            .set_tracked_mpq_protected(repo_id, &wow, "Data/enUS/patch-enUS-X.MPQ", false)
+            .unwrap();
+        engine
+            .set_tracked_mpq_editor_unlocked(repo_id, &wow, "Data/enUS/patch-enUS-X.MPQ", true)
+            .unwrap();
         engine
             .remove_mpq_component(repo_id, "Data/enUS/patch-enUS-X.MPQ", &wow, true)
             .unwrap();
@@ -2842,6 +3336,54 @@ mod tests {
         assert_ne!(fs::read(&existing).unwrap(), original);
         engine.remove_mpq_package(repo_id, &wow, false).unwrap();
         assert_eq!(fs::read(&existing).unwrap(), original);
+    }
+
+    #[test]
+    fn moving_a_replacement_restores_the_displaced_file_at_its_original_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let wow = temp.path().join("wow");
+        fs::create_dir_all(wow.join("Data/enUS")).unwrap();
+        let existing = wow.join("Data/patch-Custom.MPQ");
+        write_valid_mpq_variant(&existing, 2);
+        let original = fs::read(&existing).unwrap();
+        let source = temp.path().join("replacement.MPQ");
+        write_valid_mpq_variant(&source, 3);
+        let engine = crate::Engine::open(&temp.path().join("profile.sqlite3")).unwrap();
+        engine.list_mpq_protection(&wow).unwrap();
+        engine
+            .set_mpq_protected(&wow, "Data/patch-Custom.MPQ", false)
+            .unwrap();
+        let selection = MpqInstallSelection {
+            source_key: "replacement.MPQ".to_string(),
+            display_name: "Replacement".to_string(),
+            file_name: "patch-Custom.MPQ".to_string(),
+            destination: MpqDestination::DataRoot,
+            replace_unprotected: true,
+            version: None,
+        };
+        let repo_id = engine
+            .install_local_mpq_package(&wow, &source, &[selection], false)
+            .unwrap();
+        engine
+            .set_tracked_mpq_editor_unlocked(repo_id, &wow, "Data/patch-Custom.MPQ", true)
+            .unwrap();
+
+        engine
+            .edit_tracked_mpq(
+                repo_id,
+                &wow,
+                "Data/patch-Custom.MPQ",
+                "Moved replacement",
+                "patch-enUS-X.MPQ",
+                &MpqDestination::Locale("enUS".to_string()),
+                false,
+            )
+            .unwrap();
+        assert_eq!(fs::read(&existing).unwrap(), original);
+        assert!(wow.join("Data/enUS/patch-enUS-X.MPQ").is_file());
+        engine.remove_mpq_package(repo_id, &wow, false).unwrap();
+        assert_eq!(fs::read(&existing).unwrap(), original);
+        assert!(!wow.join("Data/enUS/patch-enUS-X.MPQ").exists());
     }
 
     #[test]

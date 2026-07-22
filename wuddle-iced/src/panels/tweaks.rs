@@ -387,7 +387,7 @@ fn tip<'a>(
     let tip_str = String::from(tip_text);
     tooltip(
         content,
-        container(text(tip_str).size(13).color(c.text))
+        container(text(tip_str).size(theme::TOOLTIP_TEXT_SIZE).color(c.text))
             .padding([3, 8])
             .style(move |_theme| theme::tooltip_style(c)),
         pos,

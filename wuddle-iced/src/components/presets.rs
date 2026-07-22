@@ -225,6 +225,40 @@ pub fn is_av_false_positive(url: &str) -> bool {
 // Rendering
 // ---------------------------------------------------------------------------
 
+pub fn quick_add_readme_button(
+    name: &str,
+    url: &str,
+    colors: ThemeColors,
+) -> Element<'static, Message> {
+    let help_handle =
+        iced::widget::svg::Handle::from_memory(include_bytes!("../../assets/icons/help.svg"));
+    let help_icon =
+        iced::widget::svg(help_handle)
+            .width(20)
+            .height(20)
+            .style(move |_theme, _status| iced::widget::svg::Style {
+                color: Some(colors.muted),
+            });
+    tip(
+        button(help_icon)
+            .on_press(Message::OpenRepoReadmePreview(
+                name.to_string(),
+                url.to_string(),
+            ))
+            .padding(1)
+            .style(move |_theme, _status| button::Style {
+                background: None,
+                text_color: colors.muted,
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+                snap: true,
+            }),
+        &format!("Preview the {name} README"),
+        iced::widget::tooltip::Position::Top,
+        colors,
+    )
+}
+
 /// Build the Quick Add preset card list (shown when URL input is empty in mods dialog).
 pub fn build_quick_add_presets<'a>(
     repos: &[RepoRow],
@@ -325,6 +359,7 @@ pub fn build_quick_add_presets<'a>(
             }
 
             let tags_row = row(tags).spacing(4).align_y(iced::Alignment::Center);
+            let readme_button = quick_add_readme_button(preset.name, preset.url, colors);
 
             // Description + notes + optional warning
             let mut desc_col: Vec<Element<Message>> =
@@ -402,7 +437,7 @@ pub fn build_quick_add_presets<'a>(
             };
 
             let card_content = column![
-                row![title_btn, tags_row]
+                row![title_btn, readme_button, tags_row]
                     .spacing(8)
                     .align_y(iced::Alignment::Center),
                 column(desc_col).spacing(3),

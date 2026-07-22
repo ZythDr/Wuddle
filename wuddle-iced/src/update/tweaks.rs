@@ -4,7 +4,27 @@ use iced::Task;
 
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
-        Message::DetectTweakClientResult(result) => {
+        Message::DetectTweakClientResult {
+            profile_id,
+            wow_dir,
+            auto_launch_exe,
+            result,
+        } => {
+            if let Ok(info) = &result {
+                app.tweak_client_info_by_profile.insert(
+                    profile_id.clone(),
+                    (wow_dir.clone(), auto_launch_exe.clone(), info.clone()),
+                );
+            }
+            let current_auto_launch_exe = app
+                .active_profile()
+                .and_then(|profile| profile.auto_launch_exe.clone());
+            if profile_id != app.active_profile_id
+                || wow_dir != app.wow_dir
+                || auto_launch_exe != current_auto_launch_exe
+            {
+                return Some(Task::none());
+            }
             app.tweak_client_checking = false;
             match result {
                 Ok(info) => {

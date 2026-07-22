@@ -2,7 +2,34 @@
 
 All notable changes to Wuddle are documented in this file.
 
-## v3.7.0
+## v3.7.0-beta.2
+
+### New Features
+- **Curated Epoch Water Patch** — Added Project Epoch's water replacement to MPQ Quick Add, with README previews and update support.
+- **Project Details** — Mods, addons, and patches now have a shared Details dialog for reviewing installed files, expanding folders, and browsing their locations.
+
+### Improvements
+- **Expanded MPQ Management**
+  - Custom MPQs now appear in the Patches tab and can be labelled, renamed, moved, classified, protected, enabled, or disabled.
+  - Curated patch updates preserve filenames and locations chosen through Wuddle.
+  - Improved Quick Add statuses, README access, menus, browsing, and management controls.
+- **Friendlier Profile Management**
+  - Profile cards now switch profiles when clicked, with a separate cogwheel for editing.
+  - Replaced user-facing "Instance" wording with the clearer "Profile."
+  - Redesigned Profile Settings with larger text, clearer spacing, keyboard tab navigation, and pinned headers and action buttons around a scrollable settings area.
+  - Cached client detection prevents incompatible tabs from briefly appearing while switching profiles.
+- **Clearer, More Consistent Dialogs**
+  - Standardized field labels, descriptions, footer buttons, close buttons, and hover tooltips across Wuddle.
+  - Addon installation now uses clearer Install and Update button wording.
+  - README buttons consistently open a read-only preview without entering an installation flow.
+- **Channel-Aware Changelogs** — The About page now shows stable notes on Stable and individual prerelease notes on Beta, with clearer Beta risk guidance and duplicate headings removed.
+
+### Bug Fixes
+- **Safe Profile Removal** — Removing a profile now closes its editor immediately, preventing an accidental Save from recreating it.
+- **Curated Patch Updates** — Renaming WDM or Epoch Water files through Wuddle no longer creates false update notifications or loses the custom filename during updates.
+- **Browse and README Actions** — Browse now opens the relevant installed files or folder instead of an unrelated companion, and Awesome WotLK's README button no longer triggers an addon-folder installation prompt.
+
+## v3.7.0-beta.1
 
 ### New Features
 - **MPQ Patch Management** — Added a dedicated Patches tab for installing and managing MPQ-based client patches.

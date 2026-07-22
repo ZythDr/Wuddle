@@ -16,14 +16,32 @@ fn schedule_tweak_client_detection(app: &mut App) -> Option<Task<Message>> {
     let auto_launch_exe = app
         .active_profile()
         .and_then(|profile| profile.auto_launch_exe.clone());
+    let profile_id = app.active_profile_id.clone();
+    let wow_dir = app.wow_dir.clone();
+
+    if let Some((cached_dir, cached_exe, cached_info)) =
+        app.tweak_client_info_by_profile.get(&profile_id)
+    {
+        if cached_dir == &wow_dir && cached_exe == &auto_launch_exe {
+            app.tweak_client_info = Some(cached_info.clone());
+            app.tweak_client_error = None;
+            app.tweak_client_checking = false;
+            return None;
+        }
+    }
 
     app.tweak_client_info = None;
     app.tweak_client_error = None;
     app.tweak_client_checking = true;
 
     Some(Task::perform(
-        service::detect_tweak_client(app.wow_dir.clone(), auto_launch_exe),
-        Message::DetectTweakClientResult,
+        service::detect_tweak_client(wow_dir.clone(), auto_launch_exe.clone()),
+        move |result| Message::DetectTweakClientResult {
+            profile_id: profile_id.clone(),
+            wow_dir: wow_dir.clone(),
+            auto_launch_exe: auto_launch_exe.clone(),
+            result,
+        },
     ))
 }
 
@@ -238,6 +256,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 custom_args,
             }) = app.dialog.take()
             {
+                if !is_new
+                    && !app
+                        .profiles
+                        .iter()
+                        .any(|profile| profile.id == dialog_profile_id)
+                {
+                    app.log(
+                        LogLevel::Error,
+                        "Ignored an attempt to save a profile that no longer exists.",
+                    );
+                    app.show_toast("That profile has already been removed.", ToastKind::Warn);
+                    return Some(Task::none());
+                }
                 let was_new = is_new;
                 let profile_name = if name.trim().is_empty() {
                     String::from("Default")
@@ -324,10 +355,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     crate::diagnostics::register_private_path(&dir, "<GAME_PATH>");
                 }
                 app.save_settings();
-                app.log(
-                    LogLevel::Info,
-                    &format!("Instance profile saved: {}", profile_name),
-                );
+                app.log(LogLevel::Info, &format!("Profile saved: {}", profile_name));
 
                 if was_new && !dir.trim().is_empty() {
                     if let Ok(db_path) = settings::profile_db_path(&profile_id) {
@@ -427,6 +455,17 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 app.log(LogLevel::Error, "Cannot remove the active profile.");
                 return Some(Task::none());
             }
+            if matches!(
+                app.dialog.as_ref(),
+                Some(Dialog::InstanceSettings {
+                    profile_id: dialog_profile_id,
+                    ..
+                }) if dialog_profile_id == &profile_id
+            ) {
+                // Close the editor immediately. Keeping its populated fields alive
+                // would allow a stale Save action to recreate the removed profile.
+                app.dialog = None;
+            }
             let db_path = settings::profile_db_path(&profile_id).unwrap_or_default();
             #[cfg(feature = "auto-login")]
             let auto_login_accounts = app
@@ -477,6 +516,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.mods_warning_dismissed_profile_ids.remove(&pid);
             app.patches_warning_dismissed_profile_ids.remove(&pid);
             app.ignored_update_ids_by_profile.remove(&pid);
+            app.tweak_client_info_by_profile.remove(&pid);
             if let Some(e) = err {
                 app.log(LogLevel::Error, &e);
                 app.show_toast(

@@ -30,7 +30,34 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.7.0
+### What's New in v3.7.0-beta.2
+
+#### New Features
+- **Curated Epoch Water Patch** — Added Project Epoch's water replacement to MPQ Quick Add, with README previews and update support.
+- **Project Details** — Mods, addons, and patches now share a Details dialog for reviewing installed files and browsing their locations.
+
+#### Improvements
+- **Expanded MPQ Management**
+  - Manage custom MPQs directly from the Patches tab, including names, locations, classifications, protection, and enabled states.
+  - Curated patch updates preserve filenames and locations chosen through Wuddle.
+  - Improved Quick Add statuses, README access, menus, browsing, and management controls.
+- **Friendlier Profile Management**
+  - Profile cards now switch profiles when clicked, with a separate cogwheel for editing.
+  - Replaced user-facing "Instance" wording with the clearer "Profile."
+  - Redesigned Profile Settings for improved readability, keyboard navigation, and smaller screens.
+  - Cached client detection prevents incompatible tabs from briefly appearing while switching profiles.
+- **Clearer, More Consistent Dialogs** — Standardized labels, descriptions, buttons, close controls, tooltips, and read-only README previews across Wuddle.
+- **Channel-Aware Changelogs** — The About page now shows stable notes on Stable and individual prerelease notes on Beta, with clearer Beta guidance and duplicate headings removed.
+
+#### Bug Fixes
+- **Safe Profile Removal** — Removing a profile now closes its editor immediately, preventing an accidental Save from recreating it.
+- **Curated Patch Updates** — Renaming WDM or Epoch Water files no longer creates false update notifications or loses the custom filename during updates.
+- **Browse and README Actions** — Browse now opens the relevant installed location, and Awesome WotLK's README button no longer triggers an addon-folder installation prompt.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.7.0-beta.1
 
 #### New Features
 - **MPQ Patch Management** — Added a dedicated Patches tab for installing and managing MPQ-based client patches.
@@ -44,9 +71,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 
 #### Improvements
 - **Instance Settings Layout** — Launch Method now uses a compact dropdown, making the dialog easier to scan and leaving the segmented controls for selecting which management tabs are visible.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.6.2
 
