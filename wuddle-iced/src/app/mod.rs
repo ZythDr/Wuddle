@@ -669,15 +669,67 @@ impl App {
     }
 
     pub fn busy_tooltip(&self) -> String {
-        match self.busy_summary() {
-            Some(summary) => match self.busy_started_at {
-                Some(started_at) => {
-                    format!("Busy: {} ({}s)", summary, started_at.elapsed().as_secs())
-                }
-                None => format!("Busy: {}", summary),
-            },
-            None => "Idle".to_string(),
+        let Some(summary) = self.busy_summary() else {
+            return "Idle".to_string();
+        };
+
+        let mut lines = vec![format!("Working: {summary}")];
+
+        if self.checking_updates {
+            let active = service::active_update_check_progress();
+            for progress in active.iter().take(3) {
+                let stage = match progress.stage {
+                    wuddle_engine::UpdateCheckProgressStage::Started => {
+                        "starting the update check"
+                    }
+                    wuddle_engine::UpdateCheckProgressStage::InspectingInstallation => {
+                        "preparing the repository check"
+                    }
+                    wuddle_engine::UpdateCheckProgressStage::CheckingGitRemote => {
+                        "checking the Git remote"
+                    }
+                    wuddle_engine::UpdateCheckProgressStage::FetchingRelease => {
+                        "fetching release information"
+                    }
+                    wuddle_engine::UpdateCheckProgressStage::SelectingRelease => {
+                        "selecting a release"
+                    }
+                    wuddle_engine::UpdateCheckProgressStage::VerifyingFiles => {
+                        "verifying installed files"
+                    }
+                    wuddle_engine::UpdateCheckProgressStage::Finished => {
+                        "finishing the update check"
+                    }
+                };
+                lines.push(format!("{}: {stage}", progress.name));
+            }
+            if active.len() > 3 {
+                lines.push(format!("…and {} more repositories", active.len() - 3));
+            }
+        } else if self.loading {
+            if let Some(progress) = service::latest_rescan_progress() {
+                lines.push(format!("{}: {}", progress.stage, progress.detail));
+            }
+        } else if !self.updating_repo_ids.is_empty() {
+            let mut names = self
+                .updating_repo_ids
+                .iter()
+                .filter_map(|repo_id| self.repos.iter().find(|repo| repo.id == *repo_id))
+                .map(|repo| repo.name.as_str())
+                .take(3)
+                .collect::<Vec<_>>();
+            names.sort_unstable_by_key(|name| name.to_ascii_lowercase());
+            if !names.is_empty() {
+                lines.push(format!("Repositories: {}", names.join(", ")));
+            }
         }
+
+        if let Some(started_at) = self.busy_started_at {
+            lines.push(String::new());
+            lines.push(format!("Elapsed: {}s", started_at.elapsed().as_secs()));
+        }
+
+        lines.join("\n")
     }
 
     fn sync_busy_tracking(&mut self) {
@@ -5268,13 +5320,23 @@ impl App {
         let spinner_el: Element<Message> = if self.is_busy() {
             let tick = self.spinner_tick;
             let primary = colors.primary;
-            canvas(SpinnerCanvas {
-                tick,
-                color: primary,
-            })
-            .width(26)
-            .height(26)
-            .into()
+            tip(
+                mouse_area(
+                    container(
+                        canvas(SpinnerCanvas {
+                            tick,
+                            color: primary,
+                        })
+                        .width(26)
+                        .height(26),
+                    )
+                    .width(26)
+                    .height(26),
+                ),
+                &self.busy_tooltip(),
+                iced::widget::tooltip::Position::Bottom,
+                colors,
+            )
         } else {
             Space::new().width(26).height(26).into()
         };

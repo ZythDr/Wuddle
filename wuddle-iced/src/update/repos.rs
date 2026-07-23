@@ -15,7 +15,7 @@ fn update_check_stage_description(stage: wuddle_engine::UpdateCheckProgressStage
     match stage {
         wuddle_engine::UpdateCheckProgressStage::Started => "starting the update check",
         wuddle_engine::UpdateCheckProgressStage::InspectingInstallation => {
-            "inspecting the local installation"
+            "preparing the repository check"
         }
         wuddle_engine::UpdateCheckProgressStage::CheckingGitRemote => {
             "checking the Git repository remote"

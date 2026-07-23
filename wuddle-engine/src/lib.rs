@@ -1191,160 +1191,6 @@ impl Engine {
         Ok(false)
     }
 
-    fn is_mod_mode(mode: &InstallMode) -> bool {
-        matches!(
-            mode,
-            InstallMode::Dll
-                | InstallMode::Mixed
-                | InstallMode::Mpq
-                | InstallMode::Raw
-                | InstallMode::Auto
-        )
-    }
-
-    /// Check whether any tracked file for this repo was modified externally.
-    /// Returns `true` on the first hash mismatch. Skips addon dirs and entries
-    /// without a stored hash (pre-migration installs).
-    fn check_files_modified(&self, repo: &Repo, wow_dir: Option<&Path>) -> bool {
-        let wow_dir = match wow_dir {
-            Some(p) => p,
-            None => {
-                diagnostics::emit(
-                    diagnostics::DiagnosticLevel::Debug,
-                    "engine.update_check",
-                    format!(
-                        "repo_id={}; stage=file_verification_skipped; reason=no_game_directory",
-                        repo.id
-                    ),
-                );
-                return false;
-            }
-        };
-        let entries = match self.db().list_installs(repo.id) {
-            Ok(v) => v,
-            Err(_) => {
-                diagnostics::emit(
-                    diagnostics::DiagnosticLevel::Debug,
-                    "engine.update_check",
-                    format!(
-                        "repo_id={}; stage=file_verification_skipped; reason=install_inventory_unavailable",
-                        repo.id
-                    ),
-                );
-                return false;
-            }
-        };
-        diagnostics::emit(
-            diagnostics::DiagnosticLevel::Debug,
-            "engine.update_check",
-            format!(
-                "repo_id={}; stage=file_verification_started; tracked_entry_count={}",
-                repo.id,
-                entries.len()
-            ),
-        );
-        let verification_started = Instant::now();
-        let mut verified_files = 0usize;
-        for (entry_index, e) in entries.into_iter().enumerate() {
-            let stored = match e.sha256.as_deref() {
-                Some(h) if !h.is_empty() => h,
-                _ => continue,
-            };
-            if e.kind == "addon" {
-                continue;
-            }
-            diagnostics::emit(
-                diagnostics::DiagnosticLevel::Trace,
-                "engine.update_check",
-                format!(
-                    "repo_id={}; stage=file_probe_started; entry_index={}; kind={}; path omitted",
-                    repo.id, entry_index, e.kind
-                ),
-            );
-            let full = match Self::resolve_install_path(&e.path, Some(wow_dir)) {
-                Some(p) => p,
-                None => continue,
-            };
-            if !full.is_file() {
-                diagnostics::emit(
-                    diagnostics::DiagnosticLevel::Trace,
-                    "engine.update_check",
-                    format!(
-                        "repo_id={}; stage=file_probe_finished; entry_index={}; outcome=missing_or_not_regular",
-                        repo.id, entry_index
-                    ),
-                );
-                continue;
-            }
-            verified_files += 1;
-            let file_size = full.metadata().ok().map(|metadata| metadata.len());
-            diagnostics::emit(
-                diagnostics::DiagnosticLevel::Trace,
-                "engine.update_check",
-                format!(
-                    "repo_id={}; stage=file_hash_started; entry_index={}; kind={}; size_bytes={}; path omitted",
-                    repo.id,
-                    entry_index,
-                    e.kind,
-                    file_size
-                        .map(|size| size.to_string())
-                        .unwrap_or_else(|| "unknown".to_string())
-                ),
-            );
-            let hash_started = Instant::now();
-            match util::sha256_file_hex(&full) {
-                Ok(ref actual) if actual != stored => {
-                    diagnostics::emit(
-                        diagnostics::DiagnosticLevel::Debug,
-                        "engine.update_check",
-                        format!(
-                            "repo_id={}; stage=file_hash_finished; entry_index={}; elapsed_ms={}; outcome=modified",
-                            repo.id,
-                            entry_index,
-                            hash_started.elapsed().as_millis()
-                        ),
-                    );
-                    return true;
-                }
-                Ok(_) => {
-                    diagnostics::emit(
-                        diagnostics::DiagnosticLevel::Trace,
-                        "engine.update_check",
-                        format!(
-                            "repo_id={}; stage=file_hash_finished; entry_index={}; elapsed_ms={}; outcome=unchanged",
-                            repo.id,
-                            entry_index,
-                            hash_started.elapsed().as_millis()
-                        ),
-                    );
-                }
-                Err(_) => {
-                    diagnostics::emit(
-                        diagnostics::DiagnosticLevel::Debug,
-                        "engine.update_check",
-                        format!(
-                            "repo_id={}; stage=file_hash_finished; entry_index={}; elapsed_ms={}; outcome=unreadable; error detail omitted",
-                            repo.id,
-                            entry_index,
-                            hash_started.elapsed().as_millis()
-                        ),
-                    );
-                }
-            }
-        }
-        diagnostics::emit(
-            diagnostics::DiagnosticLevel::Debug,
-            "engine.update_check",
-            format!(
-                "repo_id={}; stage=file_verification_finished; verified_file_count={}; elapsed_ms={}; outcome=unchanged",
-                repo.id,
-                verified_files,
-                verification_started.elapsed().as_millis()
-            ),
-        );
-        false
-    }
-
     fn addon_git_worktree_matches_repo(worktree: &Path, repo: &Repo) -> bool {
         let Ok(git_repo) = Repository::open(worktree) else {
             return false;
@@ -2073,19 +1919,20 @@ impl Engine {
                     needing_repair.len()
                 ),
             );
-            // Use batched check (parallel with limited burst) to build repair plans efficiently.
-            let plans = self
-                .check_updates_batched(&needing_repair, Some(wow_dir), CheckMode::Force, None)
-                .await?;
-            for plan in plans {
-                if plan.repair_needed {
-                    diagnostics::emit(
-                        diagnostics::DiagnosticLevel::Trace,
-                        "engine.repair",
-                        format!("authoritative repair: repo_id={}", plan.repo_id),
-                    );
-                    let opts = InstallOptions::default();
-                    let _ = self.apply_one(&plan, wow_dir, None, opts).await;
+            // The missing-file decision was made explicitly above. Force a
+            // staged reinstall rather than putting filesystem probes back into
+            // the routine update-check path.
+            for repo in needing_repair {
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Trace,
+                    "engine.repair",
+                    format!("authoritative repair: repo_id={}", repo.id),
+                );
+                if self
+                    .reinstall_repo(repo.id, wow_dir, None, InstallOptions::default())
+                    .await
+                    .is_ok()
+                {
                     fixed += 1;
                 }
             }
@@ -2293,10 +2140,8 @@ impl Engine {
             .as_ref()
             .map(|h| h.short_oid.clone())
             .or_else(|| Self::normalized_current_version(r));
-        let missing_targets = self.has_missing_targets(r.id, Some(wow_dir))?;
         let installed_matches = local.as_ref().map(|h| h.oid == remote.oid).unwrap_or(false);
-        let needs_sync = !installed_matches || missing_targets;
-        let repair_needed = missing_targets && current.is_some();
+        let needs_sync = !installed_matches;
 
         Ok(UpdatePlan {
             repo_id: r.id,
@@ -2318,7 +2163,7 @@ impl Engine {
             },
             asset_size: None,
             asset_sha256: None,
-            repair_needed,
+            repair_needed: false,
             externally_modified: false,
             not_modified: false,
             applied: false,
@@ -2433,10 +2278,8 @@ impl Engine {
             .as_ref()
             .map(|h| h.short_oid.clone())
             .or_else(|| Self::normalized_current_version(r));
-        let missing_targets = self.has_missing_targets(r.id, Some(wow_dir))?;
         let installed_matches = local.as_ref().map(|h| h.oid == remote.oid).unwrap_or(false);
-        let needs_sync = !installed_matches || missing_targets;
-        let repair_needed = missing_targets && current.is_some();
+        let needs_sync = !installed_matches;
 
         Ok(UpdatePlan {
             repo_id: r.id,
@@ -2454,7 +2297,7 @@ impl Engine {
             asset_url: if needs_sync { url } else { "".to_string() },
             asset_size: None,
             asset_sha256: None,
-            repair_needed,
+            repair_needed: false,
             externally_modified: false,
             not_modified: false,
             applied: false,
@@ -2469,15 +2312,14 @@ impl Engine {
     fn build_direct_archive_plan_for_repo(
         &self,
         r: &Repo,
-        wow_dir: Option<&Path>,
+        _wow_dir: Option<&Path>,
         force_download: bool,
     ) -> Result<UpdatePlan> {
         let direct = direct::parse_archive_url(&r.url)?;
         let asset_id = direct.url_hash.clone();
         let installed_matches =
             Self::installed_matches(r, "direct", &asset_id, &direct.asset_name, None);
-        let missing_targets = self.has_missing_targets(r.id, wow_dir)?;
-        let needs_download = force_download || !installed_matches || missing_targets;
+        let needs_download = force_download || !installed_matches;
 
         Ok(UpdatePlan {
             repo_id: r.id,
@@ -2499,7 +2341,7 @@ impl Engine {
             },
             asset_size: None,
             asset_sha256: None,
-            repair_needed: missing_targets && installed_matches && !force_download,
+            repair_needed: false,
             externally_modified: false,
             not_modified: !needs_download,
             applied: false,
@@ -2556,7 +2398,12 @@ impl Engine {
             return self.build_git_addon_plan_for_repo_async(r, wow_dir).await;
         }
 
-        let missing_targets = self.has_missing_targets(r.id, wow_dir)?;
+        // Routine update planning is deliberately DB/network-only. Filesystem
+        // probes and full-file hashing can be held indefinitely by Windows
+        // filesystem filters (notably antivirus scanning), which used to keep
+        // the entire update batch and UI busy forever. Explicit Rescan/Repair
+        // remains responsible for detecting and repairing missing local files.
+        let missing_targets = false;
         let det = detect_repo(&r.url)?;
         let now = Self::now_unix();
 
@@ -2677,16 +2524,7 @@ impl Engine {
                 let mut p = Self::blank_plan(r);
                 p.not_modified = true;
                 p.repair_needed = can_repair;
-                p.externally_modified = if Self::is_mod_mode(&r.mode) {
-                    Self::send_update_progress(
-                        progress_tx,
-                        r,
-                        UpdateCheckProgressStage::VerifyingFiles,
-                    );
-                    self.check_files_modified(r, wow_dir)
-                } else {
-                    false
-                };
+                p.externally_modified = false;
                 p.asset_id = r.installed_asset_id.clone().unwrap_or_default();
                 p.asset_name = r.installed_asset_name.clone().unwrap_or_default();
                 p.asset_size = r.installed_asset_size.and_then(|n| u64::try_from(n).ok());
@@ -2881,16 +2719,7 @@ impl Engine {
             asset_size: asset.size,
             asset_sha256: asset.sha256.clone(),
             repair_needed,
-            externally_modified: if Self::is_mod_mode(&r.mode) {
-                Self::send_update_progress(
-                    progress_tx,
-                    r,
-                    UpdateCheckProgressStage::VerifyingFiles,
-                );
-                self.check_files_modified(r, wow_dir)
-            } else {
-                false
-            },
+            externally_modified: false,
             not_modified: false,
             applied: false,
             error: None,
@@ -6202,6 +6031,48 @@ mod tests {
         let dll_path = tmp.path().join("mod.dll");
         fs::write(&dll_path, b"MZ").unwrap();
         Engine::validate_downloaded_asset(&dll_path, &plan_for_asset("mod.dll", Some(2))).unwrap();
+    }
+
+    #[test]
+    fn routine_direct_update_plan_does_not_require_local_file_probes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let repo_id = engine
+            .add_direct_archive_url("https://example.com/SuperWoW.zip")
+            .unwrap();
+        let repo = engine.db().get_repo(repo_id).unwrap();
+        let initial = engine
+            .build_direct_archive_plan_for_repo(&repo, Some(tmp.path()), false)
+            .unwrap();
+
+        engine
+            .db()
+            .set_installed_asset_state(
+                repo_id,
+                Some(&initial.install_version),
+                Some(&initial.asset_id),
+                Some(&initial.asset_name),
+                None,
+                Some(&repo.url),
+                Some(1),
+            )
+            .unwrap();
+        engine
+            .db()
+            .add_install(
+                repo_id,
+                "a path that must not be inspected/SuperWoW.dll",
+                "dll",
+                Some(&initial.install_version),
+            )
+            .unwrap();
+
+        let repo = engine.db().get_repo(repo_id).unwrap();
+        let plan = engine
+            .build_direct_archive_plan_for_repo(&repo, Some(tmp.path()), false)
+            .unwrap();
+        assert!(plan.asset_url.is_empty());
+        assert!(!plan.repair_needed);
     }
 
     // ── parse_github_reset_epoch ─────────────────────────────────────────────

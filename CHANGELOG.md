@@ -2,6 +2,16 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.7.0-beta.5
+
+### Fixes & Improvements
+
+- **More Reliable Update Checks**
+  - Prevented local file and antivirus scanning from indefinitely blocking update checks.
+  - Added a 30-second timeout and disabled further checks until restart after a timeout.
+  - Kept missing-file detection within the explicit Rescan/Repair workflow.
+- **Clearer Busy Indicator** — Hovering the spinner now explains what Wuddle is working on, including repository progress and elapsed time.
+
 ## v3.7.0-beta.4
 
 ### Improvements

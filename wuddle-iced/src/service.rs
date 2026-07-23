@@ -9,6 +9,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -567,6 +568,8 @@ impl WdmReleaseSet {
 
 static UPDATE_CHECK_PROGRESS: OnceLock<Mutex<HashMap<i64, wuddle_engine::UpdateCheckProgress>>> =
     OnceLock::new();
+static UPDATE_CHECKS_BLOCKED_FOR_SESSION: AtomicBool = AtomicBool::new(false);
+const UPDATE_CHECK_DEADLINE: Duration = Duration::from_secs(30);
 
 fn update_check_progress_slot() -> &'static Mutex<HashMap<i64, wuddle_engine::UpdateCheckProgress>>
 {
@@ -574,6 +577,9 @@ fn update_check_progress_slot() -> &'static Mutex<HashMap<i64, wuddle_engine::Up
 }
 
 fn set_update_check_progress(progress: wuddle_engine::UpdateCheckProgress) {
+    if UPDATE_CHECKS_BLOCKED_FOR_SESSION.load(Ordering::Acquire) {
+        return;
+    }
     crate::diagnostics::trace(
         "update_check",
         format!(
@@ -2164,8 +2170,14 @@ pub async fn check_updates_skip(
     skip_repo_ids: std::collections::HashSet<i64>,
 ) -> Result<Vec<PlanRow>, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("check_updates_skip");
+    if UPDATE_CHECKS_BLOCKED_FOR_SESSION.load(Ordering::Acquire) {
+        return Err(
+            "Update checks are disabled for this Wuddle session because a previous check timed out. Restart Wuddle before trying again."
+                .to_string(),
+        );
+    }
     clear_update_check_progress();
-    tokio::task::spawn_blocking(move || {
+    let worker = tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let curated_repos = eng
             .db()
@@ -2241,12 +2253,34 @@ pub async fn check_updates_skip(
             });
             rows.push(row);
         }
+        // A timed-out Tokio blocking task cannot be forcibly cancelled. Do not
+        // let dropping this short-lived runtime wait forever for such a worker;
+        // the outer session deadline and circuit breaker handle the remainder.
+        runtime.shutdown_timeout(Duration::from_secs(1));
         let _ = progress_forwarder.join();
         clear_update_check_progress();
         Ok(rows)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    });
+
+    match tokio::time::timeout(UPDATE_CHECK_DEADLINE, worker).await {
+        Ok(result) => result.map_err(|error| error.to_string())?,
+        Err(_) => {
+            UPDATE_CHECKS_BLOCKED_FOR_SESSION.store(true, Ordering::Release);
+            clear_update_check_progress();
+            crate::diagnostics::write_system(
+                "ERROR",
+                "update_check",
+                &format!(
+                    "Update check deadline exceeded after {}s; further checks are blocked until restart.",
+                    UPDATE_CHECK_DEADLINE.as_secs()
+                ),
+            );
+            Err(format!(
+                "Update checking timed out after {} seconds. Further checks are disabled for this Wuddle session to prevent repeated stalls. Restart Wuddle before trying again.",
+                UPDATE_CHECK_DEADLINE.as_secs()
+            ))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

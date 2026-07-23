@@ -30,7 +30,19 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.7.0-beta.4
+### What's New in v3.7.0-beta.5
+
+#### Fixes & Improvements
+- **More Reliable Update Checks**
+  - Prevented local file and antivirus scanning from indefinitely blocking update checks.
+  - Added a 30-second timeout and disabled further checks until restart after a timeout.
+  - Kept missing-file detection within the explicit Rescan/Repair workflow.
+- **Clearer Busy Indicator** — Hovering the spinner now explains what Wuddle is working on, including repository progress and elapsed time.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.7.0-beta.4
 
 #### Improvements
 - **Conserve GitHub API** — Added an optional setting for reducing anonymous GitHub API usage.
@@ -47,9 +59,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 #### Bug Fixes
 - **Reliable Shutdown** — Closing Wuddle now reliably terminates blocked background work on Windows and Linux, preventing invisible processes from blocking future launches.
 - **Update Check Stability** — Duplicate update checks are ignored, preventing overlapping operations after waking from sleep or repeatedly pressing the update button.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.7.0-beta.3
 
