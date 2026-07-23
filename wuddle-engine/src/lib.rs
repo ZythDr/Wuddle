@@ -513,6 +513,28 @@ pub fn github_token() -> Option<String> {
 }
 
 impl Engine {
+    /// Return a still-active stored GitHub rate limit, clearing an expired one.
+    ///
+    /// Keep the read and delete in separate lock scopes. In Rust 2021 an
+    /// `if let` scrutinee temporary can remain alive for the body of the
+    /// statement; attempting to lock `self.db` again there would deadlock the
+    /// update checker on an expired persisted rate-limit record.
+    fn active_stored_github_rate_limit(&self, host: &str, now: i64) -> Result<Option<i64>> {
+        let reset_epoch = {
+            let db = self.db();
+            db.get_rate_limit(host)?
+        };
+
+        match reset_epoch {
+            Some(reset_epoch) if now < reset_epoch => Ok(Some(reset_epoch)),
+            Some(_) => {
+                let _ = self.db().clear_rate_limit(host);
+                Ok(None)
+            }
+            None => Ok(None),
+        }
+    }
+
     fn send_update_progress(
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<UpdateCheckProgress>>,
         repo: &Repo,
@@ -2410,11 +2432,8 @@ impl Engine {
         if det.kind == ForgeKind::GitHub {
             if Self::has_github_token() {
                 let _ = self.db().clear_rate_limit(&r.host);
-            } else if let Some(reset_epoch) = self.db().get_rate_limit(&r.host)? {
-                if now < reset_epoch {
-                    return Ok(Self::rate_limited_plan(r, reset_epoch));
-                }
-                let _ = self.db().clear_rate_limit(&r.host);
+            } else if let Some(reset_epoch) = self.active_stored_github_rate_limit(&r.host, now)? {
+                return Ok(Self::rate_limited_plan(r, reset_epoch));
             }
         }
 
@@ -4867,6 +4886,47 @@ mod tests {
             new_dll_count: 0,
             is_manual: false,
         }
+    }
+
+    #[test]
+    fn expired_stored_github_rate_limit_is_cleared_without_relocking_the_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::open(&temp.path().join("wuddle.sqlite")).unwrap();
+        let now = 1_750_000_000;
+
+        engine.db().set_rate_limit("github.com", now - 1).unwrap();
+
+        assert_eq!(
+            engine
+                .active_stored_github_rate_limit("github.com", now)
+                .unwrap(),
+            None
+        );
+        assert_eq!(engine.db().get_rate_limit("github.com").unwrap(), None);
+    }
+
+    #[test]
+    fn active_stored_github_rate_limit_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::open(&temp.path().join("wuddle.sqlite")).unwrap();
+        let now = 1_750_000_000;
+        let reset_epoch = now + 600;
+
+        engine
+            .db()
+            .set_rate_limit("github.com", reset_epoch)
+            .unwrap();
+
+        assert_eq!(
+            engine
+                .active_stored_github_rate_limit("github.com", now)
+                .unwrap(),
+            Some(reset_epoch)
+        );
+        assert_eq!(
+            engine.db().get_rate_limit("github.com").unwrap(),
+            Some(reset_epoch)
+        );
     }
 
     fn create_local_git_addon_repo(path: &Path, addon_names: &[&str]) -> String {

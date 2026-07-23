@@ -25,6 +25,72 @@ pub enum UiScaleMode {
     Larger,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct WindowGeometry {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+}
+
+impl WindowGeometry {
+    const MIN_WIDTH: u32 = 640;
+    const MIN_HEIGHT: u32 = 480;
+    const MAX_DIMENSION: u32 = 16_384;
+    const MAX_ABSOLUTE_POSITION: i32 = 100_000;
+
+    pub fn initial_size(self) -> Option<(f32, f32)> {
+        let width = self.width?;
+        let height = self.height?;
+        if (Self::MIN_WIDTH..=Self::MAX_DIMENSION).contains(&width)
+            && (Self::MIN_HEIGHT..=Self::MAX_DIMENSION).contains(&height)
+        {
+            Some((width as f32, height as f32))
+        } else {
+            None
+        }
+    }
+
+    pub fn initial_position(self) -> Option<(f32, f32)> {
+        let x = self.x?;
+        let y = self.y?;
+        if x.unsigned_abs() <= Self::MAX_ABSOLUTE_POSITION as u32
+            && y.unsigned_abs() <= Self::MAX_ABSOLUTE_POSITION as u32
+        {
+            Some((x as f32, y as f32))
+        } else {
+            None
+        }
+    }
+
+    pub fn remember_size(&mut self, width: f32, height: f32) {
+        if width.is_finite() && height.is_finite() {
+            let width = width.round().clamp(0.0, u32::MAX as f32) as u32;
+            let height = height.round().clamp(0.0, u32::MAX as f32) as u32;
+            if (Self::MIN_WIDTH..=Self::MAX_DIMENSION).contains(&width)
+                && (Self::MIN_HEIGHT..=Self::MAX_DIMENSION).contains(&height)
+            {
+                self.width = Some(width);
+                self.height = Some(height);
+            }
+        }
+    }
+
+    pub fn remember_position(&mut self, x: f32, y: f32) {
+        if x.is_finite() && y.is_finite() {
+            let x = x.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32;
+            let y = y.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32;
+            if x.unsigned_abs() <= Self::MAX_ABSOLUTE_POSITION as u32
+                && y.unsigned_abs() <= Self::MAX_ABSOLUTE_POSITION as u32
+            {
+                self.x = Some(x);
+                self.y = Some(y);
+            }
+        }
+    }
+}
+
 impl UiScaleMode {
     pub const ALL: &[UiScaleMode] = &[
         UiScaleMode::Auto,
@@ -163,6 +229,7 @@ pub struct AppSettings {
     pub opt_xattr: bool,
     pub opt_clock12: bool,
     pub opt_friz_font: bool,
+    pub remember_window_geometry: bool,
     pub log_wrap: bool,
     pub log_autoscroll: bool,
     pub verbose_diagnostics: bool,
@@ -176,6 +243,7 @@ pub struct AppSettings {
     pub ui_scale_mode: UiScaleMode,
     pub migrated_from_tauri: bool,
     pub auto_login_warning_acknowledged: bool,
+    pub window_geometry: WindowGeometry,
 }
 
 impl Default for AppSettings {
@@ -191,6 +259,7 @@ impl Default for AppSettings {
             opt_xattr: true,
             opt_clock12: false,
             opt_friz_font: false,
+            remember_window_geometry: true,
             log_wrap: false,
             log_autoscroll: true,
             verbose_diagnostics: false,
@@ -204,6 +273,7 @@ impl Default for AppSettings {
             ui_scale_mode: UiScaleMode::Auto,
             migrated_from_tauri: false,
             auto_login_warning_acknowledged: false,
+            window_geometry: WindowGeometry::default(),
         }
     }
 }
@@ -815,6 +885,30 @@ mod tests {
         assert!(settings.profiles[0].show_addons_tab);
         assert!(settings.profiles[0].show_patches_tab);
         assert!(settings.profiles[0].show_tweaks_tab);
+        assert!(settings.remember_window_geometry);
+        assert_eq!(settings.window_geometry, WindowGeometry::default());
+    }
+
+    #[test]
+    fn window_geometry_round_trips_and_rejects_unreasonable_values() {
+        let mut geometry = WindowGeometry::default();
+        geometry.remember_size(1280.4, 719.6);
+        geometry.remember_position(-1440.2, 120.7);
+        assert_eq!(geometry.initial_size(), Some((1280.0, 720.0)));
+        assert_eq!(geometry.initial_position(), Some((-1440.0, 121.0)));
+
+        let encoded = serde_json::to_string(&geometry).unwrap();
+        let decoded: WindowGeometry = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, geometry);
+
+        let unreasonable = WindowGeometry {
+            width: Some(20),
+            height: Some(40_000),
+            x: Some(200_000),
+            y: Some(0),
+        };
+        assert_eq!(unreasonable.initial_size(), None);
+        assert_eq!(unreasonable.initial_position(), None);
     }
 
     #[test]

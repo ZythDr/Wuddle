@@ -2,6 +2,21 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.7.0-beta.6
+
+### Improvements
+
+- **Window Position Memory**
+  - Added an optional setting to remember Wuddle’s window size and position across restarts.
+- **Improved Platform Integration**
+  - Added proper Windows executable icons, metadata, and application identity.
+  - Improved Wuddle’s icon identification on Linux desktops and Wayland.
+
+### Bug Fixes
+
+- **Update Check Deadlock** — Fixed an expired GitHub rate-limit record potentially leaving Wuddle permanently stuck checking for updates.
+- **Linux Update Restart** — Fixed Wuddle closing without restarting after installing an AppImage update.
+
 ## v3.7.0-beta.5
 
 ### Fixes & Improvements

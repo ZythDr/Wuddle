@@ -208,6 +208,14 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 .label("Desktop notifications for updates")
                 .on_toggle(Message::ToggleDesktopNotify),
             tip(
+                checkbox(app.remember_window_geometry)
+                    .label("Remember window size and position")
+                    .on_toggle(Message::ToggleRememberWindowGeometry),
+                "Restores Wuddle's previous window size and position after restarting.\n\nOn Wayland, the desktop compositor may choose the window position.",
+                tooltip::Position::Top,
+                colors,
+            ),
+            tip(
                 checkbox(app.opt_symlinks)
                     .label("Use symlink installs when possible")
                     .on_toggle(Message::ToggleSymlinks),

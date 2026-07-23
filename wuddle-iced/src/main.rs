@@ -11,6 +11,7 @@ mod github_api;
 mod monitor;
 mod mpq;
 pub mod panels;
+mod platform_identity;
 pub mod service;
 pub(crate) mod settings;
 mod single_instance;
@@ -37,6 +38,7 @@ use theme::{FRIZ, LIFECRAFT, NOTO};
 
 fn main() -> iced::Result {
     prefer_x11_for_file_drops_if_requested();
+    platform_identity::initialize();
 
     #[cfg(target_os = "windows")]
     if let Err(error) = storage::initialize() {
@@ -51,6 +53,9 @@ fn main() -> iced::Result {
             .show();
         return Ok(());
     }
+
+    #[cfg(target_os = "linux")]
+    single_instance::wait_for_restart_parent();
 
     // Detect monitor resolution before iced starts
     let auto_scale = detect_auto_scale();
@@ -98,6 +103,29 @@ fn main() -> iced::Result {
         iced::window::icon::from_file_data(include_bytes!("../assets/icons/128x128.png"), None)
             .ok();
 
+    let mut window_settings = iced::window::Settings {
+        size: iced::Size::new(1100.0, 850.0),
+        icon: window_icon,
+        // Route title-bar closes through `Message::RequestExit` so settings
+        // are saved and the Windows hard-exit watchdog can terminate any
+        // blocked background work after the window disappears.
+        exit_on_close_request: false,
+        ..Default::default()
+    };
+    if saved.remember_window_geometry {
+        if let Some((width, height)) = saved.window_geometry.initial_size() {
+            window_settings.size = iced::Size::new(width, height);
+        }
+        if let Some((x, y)) = saved.window_geometry.initial_position() {
+            window_settings.position = iced::window::Position::Specific(iced::Point::new(x, y));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        window_settings.platform_specific.application_id =
+            platform_identity::LINUX_APPLICATION_ID.to_string();
+    }
+
     iced::application(App::new, App::update, App::view)
         .title("Wuddle")
         .theme(App::theme)
@@ -109,15 +137,7 @@ fn main() -> iced::Result {
         .font(include_bytes!("../assets/fonts/NotoSans-Regular.ttf"))
         .font(include_bytes!("../assets/fonts/NotoSans-Bold.ttf"))
         .default_font(default_font)
-        .window(iced::window::Settings {
-            size: iced::Size::new(1100.0, 850.0),
-            icon: window_icon,
-            // Route title-bar closes through `Message::RequestExit` so settings
-            // are saved and the Windows hard-exit watchdog can terminate any
-            // blocked background work after the window disappears.
-            exit_on_close_request: false,
-            ..Default::default()
-        })
+        .window(window_settings)
         .scale_factor(|app| app.ui_scale)
         .run()
 }

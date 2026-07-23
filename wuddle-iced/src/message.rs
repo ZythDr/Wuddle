@@ -30,6 +30,7 @@ pub enum Message {
     ToggleXattr(bool),
     ToggleClock12(bool),
     ToggleFrizFont(bool),
+    ToggleRememberWindowGeometry(bool),
     SetUiScaleMode(settings::UiScaleMode),
     SetGithubTokenInput(String),
 
@@ -65,6 +66,8 @@ pub enum Message {
     TogglePatchesWarningDoNotShow(bool),
     AcceptPatchesWarning,
     RequestExit,
+    WindowMoved(iced::Point),
+    WindowResized(iced::Size),
     ConsumeDialogClick,
 
     // MPQ patch management

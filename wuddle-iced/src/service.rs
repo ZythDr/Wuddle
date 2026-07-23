@@ -5705,6 +5705,10 @@ pub fn restart_app() -> Result<(), String> {
         let appimage_path =
             is_appimage().ok_or_else(|| "Not running as AppImage; cannot restart.".to_string())?;
         Command::new(&appimage_path)
+            .env(
+                crate::single_instance::RESTART_PARENT_PID_ENV,
+                std::process::id().to_string(),
+            )
             .spawn()
             .map_err(|e| format!("Failed to relaunch: {e}"))?;
         std::thread::spawn(|| {

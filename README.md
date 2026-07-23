@@ -30,7 +30,23 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.7.0-beta.5
+### What's New in v3.7.0-beta.6
+
+#### Improvements
+- **Window Position Memory**
+  - Added an optional setting to remember Wuddle’s window size and position across restarts.
+- **Improved Platform Integration**
+  - Added proper Windows executable icons, metadata, and application identity.
+  - Improved Wuddle’s icon identification on Linux desktops and Wayland.
+
+#### Bug Fixes
+- **Update Check Deadlock** — Fixed an expired GitHub rate-limit record potentially leaving Wuddle permanently stuck checking for updates.
+- **Linux Update Restart** — Fixed Wuddle closing without restarting after installing an AppImage update.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.7.0-beta.5
 
 #### Fixes & Improvements
 - **More Reliable Update Checks**
@@ -38,9 +54,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
   - Added a 30-second timeout and disabled further checks until restart after a timeout.
   - Kept missing-file detection within the explicit Rescan/Repair workflow.
 - **Clearer Busy Indicator** — Hovering the spinner now explains what Wuddle is working on, including repository progress and elapsed time.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.7.0-beta.4
 

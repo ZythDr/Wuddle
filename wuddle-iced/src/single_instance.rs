@@ -12,11 +12,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 const LOCK_FILE_NAME: &str = "wuddle-single-instance";
+#[cfg(target_os = "linux")]
+pub(crate) const RESTART_PARENT_PID_ENV: &str = "WUDDLE_RESTART_PARENT_PID";
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const STARTUP_RETRIES: usize = 10;
 const RETRY_DELAY: Duration = Duration::from_millis(50);
+#[cfg(target_os = "linux")]
+const RESTART_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
+const RESTART_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 static PRIMARY_INSTANCE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static FOCUS_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -24,6 +32,34 @@ static FOCUS_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub enum AcquireResult {
     Primary(SingleInstanceGuard),
     ExistingInstanceActivated,
+}
+
+/// During an AppImage self-update, wait for the process that launched this
+/// replacement to exit before taking part in single-instance coordination.
+///
+/// Without this handoff, the replacement can see the old process, ask it to
+/// focus, and exit just before the old process shuts down—leaving no Wuddle
+/// process running after an otherwise successful update.
+#[cfg(target_os = "linux")]
+pub(crate) fn wait_for_restart_parent() {
+    let Some(raw_pid) = std::env::var_os(RESTART_PARENT_PID_ENV) else {
+        return;
+    };
+    std::env::remove_var(RESTART_PARENT_PID_ENV);
+
+    let Some(parent_pid) = raw_pid
+        .to_str()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|pid| *pid != std::process::id())
+    else {
+        return;
+    };
+
+    let parent_process = PathBuf::from(format!("/proc/{parent_pid}"));
+    let deadline = Instant::now() + RESTART_HANDOFF_TIMEOUT;
+    while parent_process.exists() && Instant::now() < deadline {
+        thread::sleep(RESTART_HANDOFF_POLL_INTERVAL);
+    }
 }
 
 /// Holds the primary-instance marker and activation listener for this process.
@@ -247,5 +283,17 @@ mod tests {
         drop(guard);
         assert!(!lock_path.exists());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restart_handoff_returns_immediately_for_an_absent_parent() {
+        std::env::set_var(RESTART_PARENT_PID_ENV, u32::MAX.to_string());
+        let started = Instant::now();
+
+        wait_for_restart_parent();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(std::env::var_os(RESTART_PARENT_PID_ENV).is_none());
     }
 }

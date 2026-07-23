@@ -223,6 +223,15 @@ pub fn toast_animation_tick(app: &mut App) -> Task<Message> {
 
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
+        Message::WindowMoved(position) => {
+            app.window_geometry
+                .remember_position(position.x, position.y);
+            Some(Task::none())
+        }
+        Message::WindowResized(size) => {
+            app.window_geometry.remember_size(size.width, size.height);
+            Some(Task::none())
+        }
         Message::OpenUrl(url) => Some(open_url(app, url)),
         Message::OpenDirectory(path) => Some(open_directory(app, path)),
         Message::CopyToClipboard(text) => Some(copy_to_clipboard_handler(app, text)),

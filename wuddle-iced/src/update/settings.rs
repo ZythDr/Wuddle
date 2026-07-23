@@ -148,6 +148,18 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             );
             Some(Task::none())
         }
+        Message::ToggleRememberWindowGeometry(b) => {
+            app.remember_window_geometry = b;
+            app.save_settings();
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "Remember window size and position: {}.",
+                    if b { "enabled" } else { "disabled" }
+                ),
+            );
+            Some(Task::none())
+        }
         Message::SetUiScaleMode(mode) => {
             app.ui_scale_mode = mode;
             app.ui_scale = resolve_ui_scale(mode);
@@ -576,6 +588,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             let theme = WuddleTheme::from_key(&s.theme);
             app.wuddle_theme = theme;
             app.opt_friz_font = s.opt_friz_font;
+            app.remember_window_geometry = s.remember_window_geometry;
             let mut colors = theme.colors();
             colors.body_font = app.body_font();
             app.theme_colors = colors;
@@ -589,6 +602,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.opt_clock12 = s.opt_clock12;
             app.migrated_from_tauri = s.migrated_from_tauri;
             app.auto_login_warning_acknowledged = s.auto_login_warning_acknowledged;
+            app.window_geometry = s.window_geometry;
 
             app.log_wrap = s.log_wrap;
             app.log_autoscroll = s.log_autoscroll;

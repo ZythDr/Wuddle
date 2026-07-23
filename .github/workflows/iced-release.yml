@@ -108,14 +108,7 @@ jobs:
             "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage"
           chmod +x linuxdeploy.AppImage linuxdeploy-plugin-appimage.AppImage
 
-          cat > wuddle.desktop << 'DESKTOP'
-          [Desktop Entry]
-          Name=Wuddle
-          Exec=wuddle
-          Icon=wuddle
-          Type=Application
-          Categories=Utility;
-          DESKTOP
+          cp wuddle-iced/assets/wuddle.desktop wuddle.desktop
 
           # linuxdeploy infers the icon name from the filename, so it must
           # be named wuddle.png to match the Icon= entry in the desktop file.

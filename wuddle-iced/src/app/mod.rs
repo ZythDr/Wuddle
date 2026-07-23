@@ -59,6 +59,7 @@ pub struct App {
     pub opt_xattr: bool,
     pub opt_clock12: bool,
     pub opt_friz_font: bool,
+    pub remember_window_geometry: bool,
 
     // GitHub auth
     pub github_token_input: String,
@@ -221,6 +222,7 @@ pub struct App {
     pub ui_scale: f32,
     pub ui_scale_mode: settings::UiScaleMode,
     pub migrated_from_tauri: bool,
+    pub window_geometry: settings::WindowGeometry,
     pub markdown_image_cache: HashMap<String, iced::widget::image::Handle>,
     pub markdown_gif_cache: HashMap<String, std::sync::Arc<iced_gif::Frames>>,
     pub theme_colors: ThemeColors,
@@ -266,6 +268,7 @@ impl App {
             opt_xattr: true,
             opt_clock12: false,
             opt_friz_font: false,
+            remember_window_geometry: true,
             github_token_input: String::new(),
             github_token_storage_error,
             tweaks: TweakState::default(),
@@ -395,6 +398,7 @@ impl App {
             ui_scale: *crate::AUTO_UI_SCALE.get().unwrap_or(&1.0),
             ui_scale_mode: settings::UiScaleMode::Auto,
             migrated_from_tauri: false,
+            window_geometry: settings::WindowGeometry::default(),
             markdown_image_cache: HashMap::new(),
             markdown_gif_cache: HashMap::new(),
         };
@@ -553,6 +557,7 @@ impl App {
             opt_xattr: self.opt_xattr,
             opt_clock12: self.opt_clock12,
             opt_friz_font: self.opt_friz_font,
+            remember_window_geometry: self.remember_window_geometry,
             log_wrap: self.log_wrap,
             log_autoscroll: self.log_autoscroll,
             verbose_diagnostics: self.verbose_diagnostics,
@@ -582,6 +587,7 @@ impl App {
             ui_scale_mode: self.ui_scale_mode,
             migrated_from_tauri: self.migrated_from_tauri,
             auto_login_warning_acknowledged: self.auto_login_warning_acknowledged,
+            window_geometry: self.window_geometry,
         };
         settings::save_settings(&s)
     }
@@ -874,6 +880,12 @@ impl App {
             |event, _status, _window| match event {
                 iced::Event::Window(iced::window::Event::CloseRequested) => {
                     Some(Message::RequestExit)
+                }
+                iced::Event::Window(iced::window::Event::Moved(position)) => {
+                    Some(Message::WindowMoved(position))
+                }
+                iced::Event::Window(iced::window::Event::Resized(size)) => {
+                    Some(Message::WindowResized(size))
                 }
                 iced::Event::Window(iced::window::Event::FileHovered(path)) => {
                     Some(Message::LocalArchiveHovered(path))
@@ -1460,6 +1472,7 @@ impl App {
                 return self.finish_update(iced::window::latest().and_then(iced::window::close));
             }
             Message::ConsumeDialogClick => {}
+            Message::WindowMoved(_) | Message::WindowResized(_) => {}
 
             // Context menu
             Message::ToggleMenu(id) => {
