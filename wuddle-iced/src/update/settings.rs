@@ -71,6 +71,18 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             );
             Some(Task::none())
         }
+        Message::ToggleConserveGithubApi(b) => {
+            app.opt_conserve_github_api = b;
+            app.save_settings();
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "GitHub API conservation: {}.",
+                    if b { "enabled" } else { "disabled" }
+                ),
+            );
+            Some(Task::none())
+        }
         Message::SetAutoCheckMinutes(s) => {
             if let Ok(n) = s.parse::<u32>() {
                 app.auto_check_minutes = n.max(1);
@@ -381,6 +393,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if pid != app.active_profile_id {
                 if let Some(p) = app.profiles.iter().find(|p| p.id == pid).cloned() {
                     let pname = p.name.clone();
+                    if app.last_infrequent_check_unix > 0 {
+                        app.last_infrequent_check_unix_by_profile.insert(
+                            app.active_profile_id.clone(),
+                            app.last_infrequent_check_unix,
+                        );
+                    }
                     app.ignored_update_ids_by_profile.insert(
                         app.active_profile_id.clone(),
                         app.ignored_update_ids.clone(),
@@ -413,7 +431,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.infrequent_repo_ids.clear();
                     app.updating_repo_ids.clear();
                     app.open_menu = None;
-                    app.last_infrequent_check_unix = 0;
+                    app.last_infrequent_check_unix = app
+                        .last_infrequent_check_unix_by_profile
+                        .get(&pid)
+                        .copied()
+                        .unwrap_or(0);
                     if app.active_tab == crate::Tab::Mods
                         && !app
                             .mods_warning_dismissed_profile_ids
@@ -517,6 +539,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.patches_warning_dismissed_profile_ids.remove(&pid);
             app.ignored_update_ids_by_profile.remove(&pid);
             app.tweak_client_info_by_profile.remove(&pid);
+            app.last_infrequent_check_unix_by_profile.remove(&pid);
             if let Some(e) = err {
                 app.log(LogLevel::Error, &e);
                 app.show_toast(
@@ -559,6 +582,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.active_profile_id = s.active_profile_id.clone();
 
             app.opt_auto_check = s.opt_auto_check;
+            app.opt_conserve_github_api = s.opt_conserve_github_api;
             app.opt_desktop_notify = s.opt_desktop_notify;
             app.opt_symlinks = s.opt_symlinks;
             app.opt_xattr = s.opt_xattr;

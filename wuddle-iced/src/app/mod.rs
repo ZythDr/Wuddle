@@ -53,6 +53,7 @@ pub struct App {
 
     // Options checkboxes
     pub opt_auto_check: bool,
+    pub opt_conserve_github_api: bool,
     pub opt_desktop_notify: bool,
     pub opt_symlinks: bool,
     pub opt_xattr: bool,
@@ -111,9 +112,9 @@ pub struct App {
     pub current_rescan_snapshot: Option<String>,
     pub current_rescan_started_at: Option<Instant>,
     pub last_rescan_warning_secs: Option<u64>,
-    pub current_update_check_snapshot: Option<String>,
-    pub current_update_check_started_at: Option<Instant>,
-    pub last_update_check_warning_secs: Option<u64>,
+    pub update_check_stage_by_repo: HashMap<i64, wuddle_engine::UpdateCheckProgressStage>,
+    pub update_check_stage_started_at_by_repo: HashMap<i64, Instant>,
+    pub update_check_last_warning_secs_by_repo: HashMap<i64, u64>,
     pub local_archive_hover_path: Option<PathBuf>,
     pub busy_started_at: Option<Instant>,
     pub busy_state_snapshot: Option<String>,
@@ -143,6 +144,8 @@ pub struct App {
     pub auto_check_minutes: u32,
     /// Tracks when infrequent repos were last checked (wall-clock unix seconds).
     pub last_infrequent_check_unix: i64,
+    /// Per-profile copy of the infrequent check timer, retained across profile switches.
+    pub last_infrequent_check_unix_by_profile: HashMap<String, i64>,
     /// Repos considered infrequently updated (last release > 3 days ago, no pending update).
     pub infrequent_repo_ids: std::collections::HashSet<i64>,
 
@@ -257,6 +260,7 @@ impl App {
             sort_key: SortKey::default(),
             sort_dir: SortDir::default(),
             opt_auto_check: false,
+            opt_conserve_github_api: true,
             opt_desktop_notify: false,
             opt_symlinks: false,
             opt_xattr: true,
@@ -317,9 +321,9 @@ impl App {
             current_rescan_snapshot: None,
             current_rescan_started_at: None,
             last_rescan_warning_secs: None,
-            current_update_check_snapshot: None,
-            current_update_check_started_at: None,
-            last_update_check_warning_secs: None,
+            update_check_stage_by_repo: HashMap::new(),
+            update_check_stage_started_at_by_repo: HashMap::new(),
+            update_check_last_warning_secs_by_repo: HashMap::new(),
             local_archive_hover_path: None,
             busy_started_at: None,
             busy_state_snapshot: None,
@@ -341,6 +345,7 @@ impl App {
             autocheck_done: false,
             auto_check_minutes: 60,
             last_infrequent_check_unix: 0,
+            last_infrequent_check_unix_by_profile: HashMap::new(),
             infrequent_repo_ids: std::collections::HashSet::new(),
             profiles: vec![settings::ProfileConfig::default()],
             #[cfg(feature = "auto-login")]
@@ -441,7 +446,10 @@ impl App {
                 .reset_epoch
                 .unwrap_or_else(|| crate::update::repos::now_unix() + 3_600),
         });
-        let message = format!("{context} {} Click to open Options.", notice.message);
+        let message = format!(
+            "{context}\n\n{}\n\nClick to open GitHub Token settings.",
+            notice.message
+        );
         self.log(LogLevel::Api, &message);
         let notice_already_visible = self
             .toasts
@@ -493,16 +501,19 @@ impl App {
         on_click: Option<Message>,
     ) {
         self.toast_counter += 1;
-        // ~5 seconds at 80ms per tick = 63 ticks
+        // Lifetime advances on the ~60 FPS toast clock. Warnings and errors
+        // receive extra reading time, and hovering resets and pauses it.
         let ttl = match kind {
-            ToastKind::Error => 100, // ~8 seconds
-            _ => 63,
+            ToastKind::Warn | ToastKind::Error => TOAST_EXTENDED_TICKS,
+            _ => TOAST_DEFAULT_TICKS,
         };
         self.toasts.push(Toast {
             id: self.toast_counter,
             message: message.into(),
             kind,
             ttl,
+            initial_ttl: ttl,
+            hovered: false,
             on_click,
             animation: ToastAnimation::Entering(0),
         });
@@ -536,6 +547,7 @@ impl App {
             theme: self.wuddle_theme.key().to_string(),
             active_profile_id: self.active_profile_id.clone(),
             opt_auto_check: self.opt_auto_check,
+            opt_conserve_github_api: self.opt_conserve_github_api,
             opt_desktop_notify: self.opt_desktop_notify,
             opt_symlinks: self.opt_symlinks,
             opt_xattr: self.opt_xattr,
@@ -733,20 +745,16 @@ impl App {
             );
         }
 
-        if self.is_busy() || !self.toasts.is_empty() || self.collection_marquee_hovered {
+        if self.is_busy() || self.collection_marquee_hovered {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(80))
                     .map(|_| Message::SpinnerTick),
             );
         }
 
-        if self
-            .toasts
-            .iter()
-            .any(|toast| toast.animation.is_animating())
-        {
+        if !self.toasts.is_empty() {
             subs.push(
-                iced::time::every(std::time::Duration::from_millis(16))
+                iced::time::every(std::time::Duration::from_millis(TOAST_FRAME_MILLIS))
                     .map(|_| Message::ToastAnimationTick),
             );
         }
@@ -1039,6 +1047,7 @@ impl App {
             }
 
             Message::ToggleAutoCheck(_)
+            | Message::ToggleConserveGithubApi(_)
             | Message::SetAutoCheckMinutes(_)
             | Message::ToggleDesktopNotify(_)
             | Message::ToggleSymlinks(_)
@@ -1810,6 +1819,7 @@ impl App {
                         ..c.card
                     };
                     let id = t.id;
+                    let lifetime_remaining = t.lifetime_remaining();
 
                     let dismiss_btn = button(
                         text("\u{2715}").size(12).color(muted_color), // \u{2715}
@@ -1849,27 +1859,59 @@ impl App {
                             .align_y(iced::Alignment::Center);
 
                     let accent_color = accent;
-                    let toast_card = container(toast_row)
-                        .padding([8, 12])
-                        .width(Length::Fill)
-                        .style(move |_theme| container::Style {
-                            background: Some(iced::Background::Color(card_color)),
-                            border: iced::Border {
-                                radius: 4.0.into(),
-                                width: 1.0,
-                                color: accent_color,
-                            },
-                            shadow: iced::Shadow {
-                                color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.35 * visibility),
-                                offset: iced::Vector::new(0.0, 4.0),
-                                blur_radius: 12.0,
-                            },
-                            text_color: None,
-                            snap: true,
-                        });
+                    let timer_accent = accent;
+                    let timer_background = Color {
+                        a: c.muted.a * 0.18 * visibility,
+                        ..c.muted
+                    };
+                    let timer_bar = canvas(ToastTimerCanvas {
+                        progress: lifetime_remaining,
+                        bar_color: timer_accent,
+                        background_color: timer_background,
+                    })
+                    .width(Length::Fill)
+                    .height(2);
+                    // Reserve exactly the card's one-pixel border. This keeps
+                    // the timer visually flush while the rounded outer stroke
+                    // remains above it rather than being painted over.
+                    let timer = container(timer_bar)
+                        .padding(iced::Padding {
+                            top: 0.0,
+                            right: 1.0,
+                            bottom: 1.0,
+                            left: 1.0,
+                        })
+                        .width(Length::Fill);
 
-                    let dismissible =
-                        mouse_area(toast_card).on_right_press(Message::DismissToast(id));
+                    let toast_content = column![
+                        container(toast_row).padding([8, 12]).width(Length::Fill),
+                        timer,
+                    ]
+                    .spacing(0);
+
+                    let toast_card =
+                        container(toast_content)
+                            .width(Length::Fill)
+                            .style(move |_theme| container::Style {
+                                background: Some(iced::Background::Color(card_color)),
+                                border: iced::Border {
+                                    radius: 4.0.into(),
+                                    width: 1.0,
+                                    color: accent_color,
+                                },
+                                shadow: iced::Shadow {
+                                    color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.35 * visibility),
+                                    offset: iced::Vector::new(0.0, 4.0),
+                                    blur_radius: 12.0,
+                                },
+                                text_color: None,
+                                snap: true,
+                            });
+
+                    let dismissible = mouse_area(toast_card)
+                        .on_enter(Message::ToastHovered(id, true))
+                        .on_exit(Message::ToastHovered(id, false))
+                        .on_right_press(Message::DismissToast(id));
                     float(dismissible)
                         .translate(move |_bounds, _viewport| {
                             iced::Vector::new(0.0, (1.0 - visibility) * 14.0)

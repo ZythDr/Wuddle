@@ -1125,7 +1125,9 @@ fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: ThemeColors) -> Element<
     let update_ignored = app.ignored_update_ids.contains(&repo.id);
     let is_multi_dll = repo.installed_dlls.len() > 1;
     let is_expanded = app.expanded_repo_ids.contains(&repo.id);
-    let is_infrequent = app.infrequent_repo_ids.contains(&repo.id);
+    let is_infrequent = app.opt_auto_check
+        && app.opt_conserve_github_api
+        && app.infrequent_repo_ids.contains(&repo.id);
     let name_col = name_cell_with_expand(repo, is_multi_dll, is_expanded, is_infrequent, colors);
     let menu_key = format!("repo:{}", repo.id);
     let is_menu_open = app.open_menu.as_deref() == Some(menu_key.as_str());
@@ -1943,7 +1945,9 @@ fn addon_collection_parent_row<'a>(
     let latest_str = plan.map(|p| p.latest.clone()).unwrap_or_default();
     let enabled = repo.enabled;
     let update_ignored = app.ignored_update_ids.contains(&repo.id);
-    let is_infrequent = app.infrequent_repo_ids.contains(&repo.id);
+    let is_infrequent = app.opt_auto_check
+        && app.opt_conserve_github_api
+        && app.infrequent_repo_ids.contains(&repo.id);
     let rid = repo.id;
 
     let name_col = addon_collection_name_cell(
@@ -2142,7 +2146,9 @@ fn addon_row<'a>(
         .or_else(|| repo.installed_branch.clone())
         .unwrap_or_else(|| "default".to_string());
     let update_ignored = app.ignored_update_ids.contains(&repo.id);
-    let is_infrequent = app.infrequent_repo_ids.contains(&repo.id);
+    let is_infrequent = app.opt_auto_check
+        && app.opt_conserve_github_api
+        && app.infrequent_repo_ids.contains(&repo.id);
     let name_col = addon_name_cell(
         repo,
         addon_name.clone(),

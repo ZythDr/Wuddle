@@ -2,6 +2,26 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.7.0-beta.4
+
+### Improvements
+
+- **Conserve GitHub API** — Added an optional setting for reducing anonymous GitHub API usage.
+  - Infrequently updated projects follow a longer update schedule.
+  - Their status now persists across profile switches.
+  - The setting automatically becomes inactive when unnecessary.
+- **Improved Diagnostics** — Verbose logs now record privacy-safe update-check stages, timings, outcomes, and file-verification progress.
+  - Parallel repository checks are tracked independently.
+  - Exported summaries include the active operation when diagnostics are created.
+- **Improved Notifications** — Added a smooth lifetime indicator to notifications.
+  - Hovering pauses and resets the timer.
+  - Lengthy tooltips and API-limit warnings are formatted for easier reading.
+
+### Bug Fixes
+
+- **Reliable Shutdown** — Closing Wuddle now reliably terminates blocked background work on Windows and Linux, preventing invisible processes from blocking future launches.
+- **Update Check Stability** — Duplicate update checks are ignored, preventing overlapping operations after waking from sleep or repeatedly pressing the update button.
+
 ## v3.7.0-beta.3
 
 ### Improvements

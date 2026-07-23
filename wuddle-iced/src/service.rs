@@ -6,6 +6,7 @@ use iced;
 use pelite::{FileMap, PeFile};
 use reqwest::Client;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
@@ -564,37 +565,88 @@ impl WdmReleaseSet {
     }
 }
 
-static UPDATE_CHECK_PROGRESS: OnceLock<Mutex<Option<wuddle_engine::UpdateCheckProgress>>> =
+static UPDATE_CHECK_PROGRESS: OnceLock<Mutex<HashMap<i64, wuddle_engine::UpdateCheckProgress>>> =
     OnceLock::new();
 
-fn update_check_progress_slot() -> &'static Mutex<Option<wuddle_engine::UpdateCheckProgress>> {
-    UPDATE_CHECK_PROGRESS.get_or_init(|| Mutex::new(None))
+fn update_check_progress_slot() -> &'static Mutex<HashMap<i64, wuddle_engine::UpdateCheckProgress>>
+{
+    UPDATE_CHECK_PROGRESS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn set_update_check_progress(progress: Option<wuddle_engine::UpdateCheckProgress>) {
-    if let Some(progress) = &progress {
-        crate::diagnostics::trace(
-            "update_check",
-            format!(
-                "progress: stage={:?}; mode={}; repository identity omitted",
-                progress.stage, progress.mode
-            ),
-        );
-    }
+fn set_update_check_progress(progress: wuddle_engine::UpdateCheckProgress) {
+    crate::diagnostics::trace(
+        "update_check",
+        format!(
+            "progress: repo_id={}; stage={:?}; mode={}; repository identity omitted",
+            progress.repo_id, progress.stage, progress.mode
+        ),
+    );
     if let Ok(mut slot) = update_check_progress_slot().lock() {
-        *slot = progress;
+        if progress.stage == wuddle_engine::UpdateCheckProgressStage::Finished {
+            slot.remove(&progress.repo_id);
+        } else {
+            slot.insert(progress.repo_id, progress);
+        }
     }
 }
 
-pub fn latest_update_check_progress() -> Option<wuddle_engine::UpdateCheckProgress> {
+pub fn active_update_check_progress() -> Vec<wuddle_engine::UpdateCheckProgress> {
     update_check_progress_slot()
         .lock()
-        .ok()
-        .and_then(|slot| slot.clone())
+        .map(|slot| {
+            let mut progress = slot.values().cloned().collect::<Vec<_>>();
+            progress.sort_by_key(|item| item.repo_id);
+            progress
+        })
+        .unwrap_or_default()
 }
 
 pub fn clear_update_check_progress() {
-    set_update_check_progress(None);
+    if let Ok(mut slot) = update_check_progress_slot().lock() {
+        slot.clear();
+    }
+}
+
+#[cfg(test)]
+mod update_check_progress_tests {
+    use super::*;
+    use wuddle_engine::{UpdateCheckProgress, UpdateCheckProgressStage};
+
+    fn progress(repo_id: i64, stage: UpdateCheckProgressStage) -> UpdateCheckProgress {
+        UpdateCheckProgress {
+            repo_id,
+            owner: format!("owner-{repo_id}"),
+            name: format!("repo-{repo_id}"),
+            mode: "auto".to_string(),
+            stage,
+        }
+    }
+
+    #[test]
+    fn parallel_repository_progress_is_retained_and_finished_independently() {
+        clear_update_check_progress();
+        set_update_check_progress(progress(11, UpdateCheckProgressStage::FetchingRelease));
+        set_update_check_progress(progress(22, UpdateCheckProgressStage::VerifyingFiles));
+
+        let active = active_update_check_progress();
+        assert_eq!(
+            active
+                .iter()
+                .map(|item| (item.repo_id, item.stage))
+                .collect::<Vec<_>>(),
+            vec![
+                (11, UpdateCheckProgressStage::FetchingRelease),
+                (22, UpdateCheckProgressStage::VerifyingFiles),
+            ]
+        );
+
+        set_update_check_progress(progress(11, UpdateCheckProgressStage::Finished));
+        let active = active_update_check_progress();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].repo_id, 22);
+        assert_eq!(active[0].stage, UpdateCheckProgressStage::VerifyingFiles);
+        clear_update_check_progress();
+    }
 }
 
 fn first_existing_game_executable(dir: &Path) -> Option<PathBuf> {
@@ -2131,7 +2183,7 @@ pub async fn check_updates_skip(
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let progress_forwarder = std::thread::spawn(move || {
             while let Some(progress) = progress_rx.blocking_recv() {
-                set_update_check_progress(Some(progress));
+                set_update_check_progress(progress);
             }
         });
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2155,10 +2207,39 @@ pub async fn check_updates_skip(
             .filter(|(repo, _)| !skip_repo_ids.contains(&repo.id))
         {
             rows.retain(|plan| plan.repo_id != repo.id);
-            rows.push(match kind {
+            set_update_check_progress(wuddle_engine::UpdateCheckProgress {
+                repo_id: repo.id,
+                owner: repo.owner.clone(),
+                name: repo.name.clone(),
+                mode: repo.mode.as_str().to_string(),
+                stage: wuddle_engine::UpdateCheckProgressStage::FetchingRelease,
+            });
+            let curated_started = Instant::now();
+            let row = match kind {
                 CuratedMpqKind::Wdm => runtime.block_on(build_wdm_update_plan(&eng, repo)),
                 CuratedMpqKind::EpochWater => runtime.block_on(build_epoch_water_update_plan(repo)),
+            };
+            crate::diagnostics::debug(
+                "update_check",
+                format!(
+                    "curated update check: repo_id={}; elapsed_ms={}; outcome={}",
+                    row.repo_id,
+                    curated_started.elapsed().as_millis(),
+                    if row.error.is_some() {
+                        "error"
+                    } else {
+                        "completed"
+                    }
+                ),
+            );
+            set_update_check_progress(wuddle_engine::UpdateCheckProgress {
+                repo_id: row.repo_id,
+                owner: row.owner.clone(),
+                name: row.name.clone(),
+                mode: row.mode.clone(),
+                stage: wuddle_engine::UpdateCheckProgressStage::Finished,
             });
+            rows.push(row);
         }
         let _ = progress_forwarder.join();
         clear_update_check_progress();

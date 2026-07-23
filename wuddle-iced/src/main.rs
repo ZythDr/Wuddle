@@ -112,6 +112,10 @@ fn main() -> iced::Result {
         .window(iced::window::Settings {
             size: iced::Size::new(1100.0, 850.0),
             icon: window_icon,
+            // Route title-bar closes through `Message::RequestExit` so settings
+            // are saved and the Windows hard-exit watchdog can terminate any
+            // blocked background work after the window disappears.
+            exit_on_close_request: false,
             ..Default::default()
         })
         .scale_factor(|app| app.ui_scale)

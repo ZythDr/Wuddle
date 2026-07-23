@@ -11,6 +11,26 @@ use wuddle_engine;
 
 pub const INFREQUENT_CHECK_INTERVAL_SECS: i64 = 4 * 3600;
 
+fn update_check_stage_description(stage: wuddle_engine::UpdateCheckProgressStage) -> &'static str {
+    match stage {
+        wuddle_engine::UpdateCheckProgressStage::Started => "starting the update check",
+        wuddle_engine::UpdateCheckProgressStage::InspectingInstallation => {
+            "inspecting the local installation"
+        }
+        wuddle_engine::UpdateCheckProgressStage::CheckingGitRemote => {
+            "checking the Git repository remote"
+        }
+        wuddle_engine::UpdateCheckProgressStage::FetchingRelease => {
+            "fetching remote release metadata"
+        }
+        wuddle_engine::UpdateCheckProgressStage::SelectingRelease => {
+            "selecting the release and assets"
+        }
+        wuddle_engine::UpdateCheckProgressStage::VerifyingFiles => "verifying installed files",
+        wuddle_engine::UpdateCheckProgressStage::Finished => "finishing the update check",
+    }
+}
+
 pub fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -106,6 +126,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     let mod_count = repos.iter().filter(|r| service::is_mod(r)).count();
                     let addon_count = count - mod_count;
                     app.repos = repos;
+                    // published_at_unix is persisted in each profile database. Rebuild
+                    // this derived UI state immediately instead of waiting for another
+                    // network update check after a profile switch or application restart.
+                    recompute_infrequent_ids(app);
                     app.log(
                         LogLevel::Info,
                         &format!(
@@ -207,63 +231,89 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(refresh_repos_task_inner(app, true))
         }
         Message::CheckUpdates => {
+            if app.checking_updates {
+                app.log(
+                    LogLevel::Info,
+                    "An update check is already in progress; ignoring the duplicate request.",
+                );
+                return Some(Task::none());
+            }
             app.log(LogLevel::Info, "Checking for updates...");
             app.checking_updates = true;
             Some(check_updates_task(app))
         }
         Message::PollUpdateCheckProgress => {
-            let progress = service::latest_update_check_progress();
-            let snapshot = progress
-                .as_ref()
-                .map(|p| format!("{:?}|{}/{}|{}", p.stage, p.owner, p.name, p.mode));
+            let active = service::active_update_check_progress();
+            let active_ids = active
+                .iter()
+                .map(|progress| progress.repo_id)
+                .collect::<HashSet<_>>();
+            let now = std::time::Instant::now();
+            let mut log_entries = Vec::new();
 
-            if snapshot != app.current_update_check_snapshot {
-                app.current_update_check_snapshot = snapshot;
-                if let Some(progress) = progress {
-                    match progress.stage {
-                        wuddle_engine::UpdateCheckProgressStage::Started => {
-                            app.current_update_check_started_at = Some(std::time::Instant::now());
-                            app.last_update_check_warning_secs = None;
-                            app.log(
-                                LogLevel::Api,
-                                &format!(
-                                    "Checking {}/{} ({})...",
-                                    progress.owner, progress.name, progress.mode
-                                ),
-                            );
-                        }
-                        wuddle_engine::UpdateCheckProgressStage::Finished => {
-                            app.current_update_check_started_at = None;
-                            app.last_update_check_warning_secs = None;
-                            app.log(
-                                LogLevel::Api,
-                                &format!("Finished checking {}/{}.", progress.owner, progress.name),
-                            );
-                        }
-                    }
+            for progress in active {
+                let stage_changed = app
+                    .update_check_stage_by_repo
+                    .get(&progress.repo_id)
+                    .copied()
+                    != Some(progress.stage);
+                if stage_changed {
+                    app.update_check_stage_by_repo
+                        .insert(progress.repo_id, progress.stage);
+                    app.update_check_stage_started_at_by_repo
+                        .insert(progress.repo_id, now);
+                    app.update_check_last_warning_secs_by_repo
+                        .remove(&progress.repo_id);
+                    log_entries.push((
+                        LogLevel::Api,
+                        format!(
+                            "Update check for {}/{}: {}.",
+                            progress.owner,
+                            progress.name,
+                            update_check_stage_description(progress.stage)
+                        ),
+                    ));
+                    continue;
                 }
-            } else if let Some(progress) = progress {
-                if progress.stage == wuddle_engine::UpdateCheckProgressStage::Started {
-                    if let Some(started_at) = app.current_update_check_started_at {
-                        let elapsed = started_at.elapsed().as_secs();
-                        let should_warn = elapsed >= 10
-                            && app
-                                .last_update_check_warning_secs
-                                .map_or(true, |last| elapsed >= last + 10);
-                        if should_warn {
-                            app.last_update_check_warning_secs = Some(elapsed);
-                            app.log(
-                                LogLevel::Error,
-                                &format!(
-                                    "Still checking {}/{} after {}s.",
-                                    progress.owner, progress.name, elapsed
-                                ),
-                            );
-                        }
-                    }
+
+                let Some(started_at) = app
+                    .update_check_stage_started_at_by_repo
+                    .get(&progress.repo_id)
+                    .copied()
+                else {
+                    continue;
+                };
+                let elapsed = started_at.elapsed().as_secs();
+                let should_warn = elapsed >= 10
+                    && app
+                        .update_check_last_warning_secs_by_repo
+                        .get(&progress.repo_id)
+                        .map_or(true, |last| elapsed >= *last + 10);
+                if should_warn {
+                    app.update_check_last_warning_secs_by_repo
+                        .insert(progress.repo_id, elapsed);
+                    log_entries.push((
+                        LogLevel::Error,
+                        format!(
+                            "Still {} for {}/{} after {}s.",
+                            update_check_stage_description(progress.stage),
+                            progress.owner,
+                            progress.name,
+                            elapsed
+                        ),
+                    ));
                 }
             }
 
+            app.update_check_stage_by_repo
+                .retain(|repo_id, _| active_ids.contains(repo_id));
+            app.update_check_stage_started_at_by_repo
+                .retain(|repo_id, _| active_ids.contains(repo_id));
+            app.update_check_last_warning_secs_by_repo
+                .retain(|repo_id, _| active_ids.contains(repo_id));
+            for (level, message) in log_entries {
+                app.log(level, &message);
+            }
             Some(Task::none())
         }
         Message::GithubRateTick => {
@@ -278,9 +328,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             // if false, it was a silent post-update refresh — skip toasts/notifications.
             let is_explicit_check = app.checking_updates;
             app.checking_updates = false;
-            app.current_update_check_snapshot = None;
-            app.current_update_check_started_at = None;
-            app.last_update_check_warning_secs = None;
+            app.update_check_stage_by_repo.clear();
+            app.update_check_stage_started_at_by_repo.clear();
+            app.update_check_last_warning_secs_by_repo.clear();
             service::clear_update_check_progress();
             match result {
                 Ok(mut plans) => {
@@ -370,6 +420,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
 
                     if was_full_check || app.last_infrequent_check_unix == 0 {
                         app.last_infrequent_check_unix = now;
+                    }
+                    if app.last_infrequent_check_unix > 0 {
+                        app.last_infrequent_check_unix_by_profile.insert(
+                            app.active_profile_id.clone(),
+                            app.last_infrequent_check_unix,
+                        );
                     }
 
                     app.plans = plans;
@@ -2833,7 +2889,10 @@ pub fn check_updates_task(app: &mut App) -> Task<Message> {
     } else {
         Some(app.wow_dir.clone())
     };
-    let skip = if wuddle_engine::github_token().is_none() {
+    let skip = if app.opt_auto_check
+        && app.opt_conserve_github_api
+        && wuddle_engine::github_token().is_none()
+    {
         let s = infrequent_skip_ids(&app.repos, &app.plans, app.last_infrequent_check_unix);
         if !s.is_empty() {
             // Only log skipping in background or if manually triggered without token

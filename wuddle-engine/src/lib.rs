@@ -204,11 +204,17 @@ pub enum CheckMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateCheckProgressStage {
     Started,
+    InspectingInstallation,
+    CheckingGitRemote,
+    FetchingRelease,
+    SelectingRelease,
+    VerifyingFiles,
     Finished,
 }
 
 #[derive(Debug, Clone)]
 pub struct UpdateCheckProgress {
+    pub repo_id: i64,
     pub owner: String,
     pub name: String,
     pub mode: String,
@@ -514,6 +520,7 @@ impl Engine {
     ) {
         if let Some(tx) = progress_tx {
             let _ = tx.send(UpdateCheckProgress {
+                repo_id: repo.id,
                 owner: repo.owner.clone(),
                 name: repo.name.clone(),
                 mode: repo.mode.as_str().to_string(),
@@ -1198,16 +1205,47 @@ impl Engine {
     /// Check whether any tracked file for this repo was modified externally.
     /// Returns `true` on the first hash mismatch. Skips addon dirs and entries
     /// without a stored hash (pre-migration installs).
-    fn check_files_modified(&self, repo_id: i64, wow_dir: Option<&Path>) -> bool {
+    fn check_files_modified(&self, repo: &Repo, wow_dir: Option<&Path>) -> bool {
         let wow_dir = match wow_dir {
             Some(p) => p,
-            None => return false,
+            None => {
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Debug,
+                    "engine.update_check",
+                    format!(
+                        "repo_id={}; stage=file_verification_skipped; reason=no_game_directory",
+                        repo.id
+                    ),
+                );
+                return false;
+            }
         };
-        let entries = match self.db().list_installs(repo_id) {
+        let entries = match self.db().list_installs(repo.id) {
             Ok(v) => v,
-            Err(_) => return false,
+            Err(_) => {
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Debug,
+                    "engine.update_check",
+                    format!(
+                        "repo_id={}; stage=file_verification_skipped; reason=install_inventory_unavailable",
+                        repo.id
+                    ),
+                );
+                return false;
+            }
         };
-        for e in entries {
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.update_check",
+            format!(
+                "repo_id={}; stage=file_verification_started; tracked_entry_count={}",
+                repo.id,
+                entries.len()
+            ),
+        );
+        let verification_started = Instant::now();
+        let mut verified_files = 0usize;
+        for (entry_index, e) in entries.into_iter().enumerate() {
             let stored = match e.sha256.as_deref() {
                 Some(h) if !h.is_empty() => h,
                 _ => continue,
@@ -1215,18 +1253,95 @@ impl Engine {
             if e.kind == "addon" {
                 continue;
             }
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Trace,
+                "engine.update_check",
+                format!(
+                    "repo_id={}; stage=file_probe_started; entry_index={}; kind={}; path omitted",
+                    repo.id, entry_index, e.kind
+                ),
+            );
             let full = match Self::resolve_install_path(&e.path, Some(wow_dir)) {
                 Some(p) => p,
                 None => continue,
             };
             if !full.is_file() {
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Trace,
+                    "engine.update_check",
+                    format!(
+                        "repo_id={}; stage=file_probe_finished; entry_index={}; outcome=missing_or_not_regular",
+                        repo.id, entry_index
+                    ),
+                );
                 continue;
             }
+            verified_files += 1;
+            let file_size = full.metadata().ok().map(|metadata| metadata.len());
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Trace,
+                "engine.update_check",
+                format!(
+                    "repo_id={}; stage=file_hash_started; entry_index={}; kind={}; size_bytes={}; path omitted",
+                    repo.id,
+                    entry_index,
+                    e.kind,
+                    file_size
+                        .map(|size| size.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                ),
+            );
+            let hash_started = Instant::now();
             match util::sha256_file_hex(&full) {
-                Ok(ref actual) if actual != stored => return true,
-                _ => {}
+                Ok(ref actual) if actual != stored => {
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Debug,
+                        "engine.update_check",
+                        format!(
+                            "repo_id={}; stage=file_hash_finished; entry_index={}; elapsed_ms={}; outcome=modified",
+                            repo.id,
+                            entry_index,
+                            hash_started.elapsed().as_millis()
+                        ),
+                    );
+                    return true;
+                }
+                Ok(_) => {
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Trace,
+                        "engine.update_check",
+                        format!(
+                            "repo_id={}; stage=file_hash_finished; entry_index={}; elapsed_ms={}; outcome=unchanged",
+                            repo.id,
+                            entry_index,
+                            hash_started.elapsed().as_millis()
+                        ),
+                    );
+                }
+                Err(_) => {
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Debug,
+                        "engine.update_check",
+                        format!(
+                            "repo_id={}; stage=file_hash_finished; entry_index={}; elapsed_ms={}; outcome=unreadable; error detail omitted",
+                            repo.id,
+                            entry_index,
+                            hash_started.elapsed().as_millis()
+                        ),
+                    );
+                }
             }
         }
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.update_check",
+            format!(
+                "repo_id={}; stage=file_verification_finished; verified_file_count={}; elapsed_ms={}; outcome=unchanged",
+                repo.id,
+                verified_files,
+                verification_started.elapsed().as_millis()
+            ),
+        );
         false
     }
 
@@ -2402,7 +2517,13 @@ impl Engine {
         use_cached_etag: bool,
         wow_dir: Option<&Path>,
         check_mode: CheckMode,
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<UpdateCheckProgress>>,
     ) -> Result<UpdatePlan> {
+        Self::send_update_progress(
+            progress_tx,
+            r,
+            UpdateCheckProgressStage::InspectingInstallation,
+        );
         if !r.enabled {
             return Ok(Self::blank_plan(r));
         }
@@ -2431,6 +2552,7 @@ impl Engine {
         }
 
         if matches!(r.mode, InstallMode::AddonGit) {
+            Self::send_update_progress(progress_tx, r, UpdateCheckProgressStage::CheckingGitRemote);
             return self.build_git_addon_plan_for_repo_async(r, wow_dir).await;
         }
 
@@ -2457,6 +2579,8 @@ impl Engine {
         let mut attempted_uncached = !use_cached_etag;
 
         let rel = loop {
+            Self::send_update_progress(progress_tx, r, UpdateCheckProgressStage::FetchingRelease);
+            let remote_started = Instant::now();
             let (new_etag, rel_opt, not_modified) = match tokio::time::timeout(
                 REMOTE_CHECK_TIMEOUT,
                 forge::latest_release(&self.client, &det, etag),
@@ -2466,6 +2590,20 @@ impl Engine {
                 Ok(Ok(v)) => v,
                 Ok(Err(e)) => {
                     let msg = e.to_string();
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Debug,
+                        "engine.update_check",
+                        format!(
+                            "repo_id={}; stage=release_request_finished; elapsed_ms={}; outcome=error; error_category={}",
+                            r.id,
+                            remote_started.elapsed().as_millis(),
+                            if Self::parse_github_reset_epoch(&msg).is_some() {
+                                "rate_limit"
+                            } else {
+                                "request"
+                            }
+                        ),
+                    );
                     if det.kind == ForgeKind::GitHub {
                         if let Some(reset_epoch) = Self::parse_github_reset_epoch(&msg) {
                             let _ = self.db().set_rate_limit(&r.host, reset_epoch);
@@ -2477,6 +2615,15 @@ impl Engine {
                     return Ok(p);
                 }
                 Err(_) => {
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Debug,
+                        "engine.update_check",
+                        format!(
+                            "repo_id={}; stage=release_request_finished; elapsed_ms={}; outcome=timeout",
+                            r.id,
+                            remote_started.elapsed().as_millis()
+                        ),
+                    );
                     let mut p = Self::blank_plan(r);
                     p.error = Some(format!(
                         "Release check timed out after {}s for {}.",
@@ -2486,6 +2633,21 @@ impl Engine {
                     return Ok(p);
                 }
             };
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Debug,
+                "engine.update_check",
+                format!(
+                    "repo_id={}; stage=release_request_finished; elapsed_ms={}; outcome={}",
+                    r.id,
+                    remote_started.elapsed().as_millis(),
+                    if not_modified {
+                        "not_modified"
+                    } else {
+                        "release_received"
+                    }
+                ),
+            );
+            Self::send_update_progress(progress_tx, r, UpdateCheckProgressStage::SelectingRelease);
 
             if let Some(ref et) = new_etag {
                 let _ = self.db().update_etag(r.id, Some(et.as_str()));
@@ -2516,7 +2678,12 @@ impl Engine {
                 p.not_modified = true;
                 p.repair_needed = can_repair;
                 p.externally_modified = if Self::is_mod_mode(&r.mode) {
-                    self.check_files_modified(r.id, wow_dir)
+                    Self::send_update_progress(
+                        progress_tx,
+                        r,
+                        UpdateCheckProgressStage::VerifyingFiles,
+                    );
+                    self.check_files_modified(r, wow_dir)
                 } else {
                     false
                 };
@@ -2553,10 +2720,49 @@ impl Engine {
         let (target_rel, latest_tag_for_display) = if let Some(ref pin) = r.pinned_version {
             if rel.tag != *pin {
                 // Fetch the pinned release from the full list.
+                Self::send_update_progress(
+                    progress_tx,
+                    r,
+                    UpdateCheckProgressStage::FetchingRelease,
+                );
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Debug,
+                    "engine.update_check",
+                    format!("repo_id={}; stage=pinned_release_request_started", r.id),
+                );
+                let pinned_started = Instant::now();
                 let pinned = match forge::list_releases(&self.client, &det).await {
-                    Ok(all) => all.into_iter().find(|r| r.tag == *pin),
-                    Err(_) => None,
+                    Ok(all) => {
+                        diagnostics::emit(
+                            diagnostics::DiagnosticLevel::Debug,
+                            "engine.update_check",
+                            format!(
+                                "repo_id={}; stage=pinned_release_request_finished; elapsed_ms={}; outcome=completed; release_count={}",
+                                r.id,
+                                pinned_started.elapsed().as_millis(),
+                                all.len()
+                            ),
+                        );
+                        all.into_iter().find(|r| r.tag == *pin)
+                    }
+                    Err(_) => {
+                        diagnostics::emit(
+                            diagnostics::DiagnosticLevel::Debug,
+                            "engine.update_check",
+                            format!(
+                                "repo_id={}; stage=pinned_release_request_finished; elapsed_ms={}; outcome=error; error detail omitted",
+                                r.id,
+                                pinned_started.elapsed().as_millis()
+                            ),
+                        );
+                        None
+                    }
                 };
+                Self::send_update_progress(
+                    progress_tx,
+                    r,
+                    UpdateCheckProgressStage::SelectingRelease,
+                );
                 match pinned {
                     Some(pinned_rel) => {
                         // latest_tag_for_display = actual latest so UI shows "update available"
@@ -2676,7 +2882,12 @@ impl Engine {
             asset_sha256: asset.sha256.clone(),
             repair_needed,
             externally_modified: if Self::is_mod_mode(&r.mode) {
-                self.check_files_modified(r.id, wow_dir)
+                Self::send_update_progress(
+                    progress_tx,
+                    r,
+                    UpdateCheckProgressStage::VerifyingFiles,
+                );
+                self.check_files_modified(r, wow_dir)
             } else {
                 false
             },
@@ -2695,6 +2906,24 @@ impl Engine {
         self.check_updates_with_wow(None, CheckMode::Force).await
     }
 
+    async fn check_one_update_plan(
+        &self,
+        repo: &Repo,
+        wow_dir: Option<&Path>,
+        check_mode: CheckMode,
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<UpdateCheckProgress>>,
+    ) -> Result<UpdatePlan> {
+        Self::send_update_progress(progress_tx, repo, UpdateCheckProgressStage::Started);
+        let result = self
+            .build_update_plan_for_repo(repo, true, wow_dir, check_mode, progress_tx)
+            .await
+            .with_context(|| format!("checking updates for '{}'", repo.name));
+        // Publish the terminal event before returning so one slow peer cannot
+        // make completed repositories appear stuck in a parallel batch.
+        Self::send_update_progress(progress_tx, repo, UpdateCheckProgressStage::Finished);
+        result
+    }
+
     fn check_updates_parallel<'a>(
         &'a self,
         repos: &'a [Repo],
@@ -2705,23 +2934,10 @@ impl Engine {
         Box::pin(async move {
             match repos {
                 [] => Ok(Vec::new()),
-                [repo] => {
-                    Self::send_update_progress(
-                        progress_tx,
-                        repo,
-                        UpdateCheckProgressStage::Started,
-                    );
-                    let plan = self
-                        .build_update_plan_for_repo(repo, true, wow_dir, check_mode)
-                        .await
-                        .with_context(|| format!("checking updates for '{}'", repo.name))?;
-                    Self::send_update_progress(
-                        progress_tx,
-                        repo,
-                        UpdateCheckProgressStage::Finished,
-                    );
-                    Ok(vec![plan])
-                }
+                [repo] => Ok(vec![
+                    self.check_one_update_plan(repo, wow_dir, check_mode, progress_tx)
+                        .await?,
+                ]),
                 _ => {
                     let mid = repos.len() / 2;
                     let (left, right) = repos.split_at(mid);
@@ -2758,62 +2974,39 @@ impl Engine {
         // Keep release API checks bounded to avoid bursty rate-limit pressure.
         for chunk in repos.chunks(4) {
             match chunk {
-                [r1] => {
-                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Started);
-                    plans.push(
-                        self.build_update_plan_for_repo(r1, true, wow_dir, check_mode)
-                            .await
-                            .with_context(|| format!("checking updates for '{}'", r1.name))?,
-                    );
-                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Finished);
-                }
+                [r1] => plans.push(
+                    self.check_one_update_plan(r1, wow_dir, check_mode, progress_tx)
+                        .await?,
+                ),
                 [r1, r2] => {
-                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Started);
-                    Self::send_update_progress(progress_tx, r2, UpdateCheckProgressStage::Started);
                     let (p1, p2) = tokio::join!(
-                        self.build_update_plan_for_repo(r1, true, wow_dir, check_mode),
-                        self.build_update_plan_for_repo(r2, true, wow_dir, check_mode)
+                        self.check_one_update_plan(r1, wow_dir, check_mode, progress_tx),
+                        self.check_one_update_plan(r2, wow_dir, check_mode, progress_tx)
                     );
-                    plans.push(p1.with_context(|| format!("checking updates for '{}'", r1.name))?);
-                    plans.push(p2.with_context(|| format!("checking updates for '{}'", r2.name))?);
-                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Finished);
-                    Self::send_update_progress(progress_tx, r2, UpdateCheckProgressStage::Finished);
+                    plans.push(p1?);
+                    plans.push(p2?);
                 }
                 [r1, r2, r3] => {
-                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Started);
-                    Self::send_update_progress(progress_tx, r2, UpdateCheckProgressStage::Started);
-                    Self::send_update_progress(progress_tx, r3, UpdateCheckProgressStage::Started);
                     let (p1, p2, p3) = tokio::join!(
-                        self.build_update_plan_for_repo(r1, true, wow_dir, check_mode),
-                        self.build_update_plan_for_repo(r2, true, wow_dir, check_mode),
-                        self.build_update_plan_for_repo(r3, true, wow_dir, check_mode)
+                        self.check_one_update_plan(r1, wow_dir, check_mode, progress_tx),
+                        self.check_one_update_plan(r2, wow_dir, check_mode, progress_tx),
+                        self.check_one_update_plan(r3, wow_dir, check_mode, progress_tx)
                     );
-                    plans.push(p1.with_context(|| format!("checking updates for '{}'", r1.name))?);
-                    plans.push(p2.with_context(|| format!("checking updates for '{}'", r2.name))?);
-                    plans.push(p3.with_context(|| format!("checking updates for '{}'", r3.name))?);
-                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Finished);
-                    Self::send_update_progress(progress_tx, r2, UpdateCheckProgressStage::Finished);
-                    Self::send_update_progress(progress_tx, r3, UpdateCheckProgressStage::Finished);
+                    plans.push(p1?);
+                    plans.push(p2?);
+                    plans.push(p3?);
                 }
                 [r1, r2, r3, r4] => {
-                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Started);
-                    Self::send_update_progress(progress_tx, r2, UpdateCheckProgressStage::Started);
-                    Self::send_update_progress(progress_tx, r3, UpdateCheckProgressStage::Started);
-                    Self::send_update_progress(progress_tx, r4, UpdateCheckProgressStage::Started);
                     let (p1, p2, p3, p4) = tokio::join!(
-                        self.build_update_plan_for_repo(r1, true, wow_dir, check_mode),
-                        self.build_update_plan_for_repo(r2, true, wow_dir, check_mode),
-                        self.build_update_plan_for_repo(r3, true, wow_dir, check_mode),
-                        self.build_update_plan_for_repo(r4, true, wow_dir, check_mode)
+                        self.check_one_update_plan(r1, wow_dir, check_mode, progress_tx),
+                        self.check_one_update_plan(r2, wow_dir, check_mode, progress_tx),
+                        self.check_one_update_plan(r3, wow_dir, check_mode, progress_tx),
+                        self.check_one_update_plan(r4, wow_dir, check_mode, progress_tx)
                     );
-                    plans.push(p1.with_context(|| format!("checking updates for '{}'", r1.name))?);
-                    plans.push(p2.with_context(|| format!("checking updates for '{}'", r2.name))?);
-                    plans.push(p3.with_context(|| format!("checking updates for '{}'", r3.name))?);
-                    plans.push(p4.with_context(|| format!("checking updates for '{}'", r4.name))?);
-                    Self::send_update_progress(progress_tx, r1, UpdateCheckProgressStage::Finished);
-                    Self::send_update_progress(progress_tx, r2, UpdateCheckProgressStage::Finished);
-                    Self::send_update_progress(progress_tx, r3, UpdateCheckProgressStage::Finished);
-                    Self::send_update_progress(progress_tx, r4, UpdateCheckProgressStage::Finished);
+                    plans.push(p1?);
+                    plans.push(p2?);
+                    plans.push(p3?);
+                    plans.push(p4?);
                 }
                 _ => unreachable!("chunk size is bounded to 4"),
             }
@@ -3917,7 +4110,7 @@ impl Engine {
 
         for r in repos {
             let mut plan = self
-                .build_update_plan_for_repo(&r, true, Some(wow_dir), CheckMode::Force)
+                .build_update_plan_for_repo(&r, true, Some(wow_dir), CheckMode::Force, None)
                 .await?;
             if r.enabled && !plan.asset_url.is_empty() && !plan.externally_modified {
                 match self.apply_one(&plan, wow_dir, raw_dest, opts).await {
@@ -3950,7 +4143,7 @@ impl Engine {
         );
         let repo = self.db().get_repo(repo_id)?;
         let mut plan = self
-            .build_update_plan_for_repo(&repo, true, Some(wow_dir), CheckMode::Force)
+            .build_update_plan_for_repo(&repo, true, Some(wow_dir), CheckMode::Force, None)
             .await?;
 
         if let Some(err) = plan.error.clone() {

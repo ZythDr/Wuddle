@@ -157,6 +157,7 @@ pub struct AppSettings {
     pub theme: String,
     pub active_profile_id: String,
     pub opt_auto_check: bool,
+    pub opt_conserve_github_api: bool,
     pub opt_desktop_notify: bool,
     pub opt_symlinks: bool,
     pub opt_xattr: bool,
@@ -184,6 +185,7 @@ impl Default for AppSettings {
             theme: String::from("cata"),
             active_profile_id: String::from("default"),
             opt_auto_check: false,
+            opt_conserve_github_api: true,
             opt_desktop_notify: false,
             opt_symlinks: false,
             opt_xattr: true,
@@ -800,6 +802,7 @@ mod tests {
     fn legacy_settings_default_to_manual_login() {
         let settings: AppSettings = serde_json::from_str("{}").unwrap();
         assert!(!settings.verbose_diagnostics);
+        assert!(settings.opt_conserve_github_api);
         assert!(!settings.auto_login_warning_acknowledged);
         assert!(!settings.profiles[0].auto_login_enabled);
         assert!(settings.profiles[0].auto_login_accounts.is_empty());

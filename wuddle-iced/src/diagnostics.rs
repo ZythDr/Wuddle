@@ -240,6 +240,17 @@ pub fn build_summary(app: &crate::App) -> String {
         .filter(|repo| crate::service::is_mod(repo))
         .count();
     let addons = app.repos.len().saturating_sub(mods);
+    let busy_state = app.busy_summary().unwrap_or_else(|| "idle".to_string());
+    let active_update_progress = crate::service::active_update_check_progress();
+    let active_update_stages = if active_update_progress.is_empty() {
+        "none".to_string()
+    } else {
+        active_update_progress
+            .iter()
+            .map(|progress| format!("{}:{:?}", progress.repo_id, progress.stage))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     format!(
         concat!(
             "Wuddle diagnostic summary\n",
@@ -258,8 +269,13 @@ pub fn build_summary(app: &crate::App) -> String {
             "active_launch_method={}\n",
             "active_auto_login_enabled={}\n",
             "automatic_update_checks={}\n",
+            "conserve_github_api={}\n",
+            "github_authenticated={}\n",
             "symlink_installs={}\n",
-            "xattr_comments={}\n"
+            "xattr_comments={}\n",
+            "busy_state={}\n",
+            "active_update_check_count={}\n",
+            "active_update_check_stages={}\n"
         ),
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
@@ -276,8 +292,13 @@ pub fn build_summary(app: &crate::App) -> String {
         launch_method,
         auto_login_enabled,
         app.opt_auto_check,
+        app.opt_conserve_github_api,
+        wuddle_engine::github_token().is_some(),
         app.opt_symlinks,
         app.opt_xattr,
+        busy_state,
+        active_update_progress.len(),
+        active_update_stages,
     )
 }
 

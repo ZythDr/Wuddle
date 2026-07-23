@@ -149,23 +149,61 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     );
 
     // --- Behavior section ---
+    let interval_input = text_input("60", &app.auto_check_minutes.to_string())
+        .width(60)
+        .padding([4, 8]);
+    let interval_input = if app.opt_auto_check {
+        interval_input.on_input(Message::SetAutoCheckMinutes)
+    } else {
+        interval_input
+    };
+
+    let github_token_active = wuddle_engine::github_token().is_some();
+    let api_conservation_available = app.opt_auto_check && !github_token_active;
+    let conserve_api_toggle = checkbox(app.opt_conserve_github_api).label("Conserve GitHub API");
+    let conserve_api_toggle = if api_conservation_available {
+        conserve_api_toggle.on_toggle(Message::ToggleConserveGithubApi)
+    } else {
+        conserve_api_toggle
+    };
+    let conserve_api_tooltip = if !app.opt_auto_check {
+        "Unavailable because automatic update checks are disabled.\n\nReduces anonymous GitHub API usage.\nInfrequently updated projects are checked only when scheduled, even during Check for updates.\nIndividual project actions are unaffected."
+    } else if github_token_active {
+        "Unavailable because a GitHub token is active.\n\nAuthenticated requests have a much larger API allowance, so Wuddle does not throttle infrequently updated projects."
+    } else {
+        "Reduces anonymous GitHub API usage.\nInfrequently updated projects are checked only when scheduled, even during Check for updates.\n\nIndividual project actions are unaffected."
+    };
+    let child_padding = iced::Padding {
+        top: 0.0,
+        right: 0.0,
+        bottom: 0.0,
+        left: 28.0,
+    };
+
     let behavior_section = settings_card_fill(
         column![
             text("Behavior").size(18).color(colors.title),
             checkbox(app.opt_auto_check)
                 .label("Automatically check for updates")
                 .on_toggle(Message::ToggleAutoCheck),
-            row![
-                text("Interval (minutes):").size(12).color(
-                    if app.opt_auto_check { colors.text } else { colors.muted }
-                ),
-                text_input("60", &app.auto_check_minutes.to_string())
-                    .on_input(Message::SetAutoCheckMinutes)
-                    .width(60)
-                    .padding([4, 8]),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
+            container(
+                row![
+                    text("Interval (minutes):").size(12).color(
+                        if app.opt_auto_check { colors.text } else { colors.muted }
+                    ),
+                    interval_input,
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+            )
+            .padding(child_padding),
+            container(tip(
+                conserve_api_toggle,
+                conserve_api_tooltip,
+                tooltip::Position::Top,
+                colors,
+            ))
+            .padding(child_padding),
             checkbox(app.opt_desktop_notify)
                 .label("Desktop notifications for updates")
                 .on_toggle(Message::ToggleDesktopNotify),
@@ -173,7 +211,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 checkbox(app.opt_symlinks)
                     .label("Use symlink installs when possible")
                     .on_toggle(Message::ToggleSymlinks),
-                "Applies to DLL and other non-addon_git installs only. Addons installed from the Addons tab use addon_git and follow GAM-compatible unpack behavior instead.",
+                "Applies to DLL and other non-addon_git installs only.\n\nAddons installed from the Addons tab use addon_git and follow GAM-compatible unpack behavior instead.",
                 tooltip::Position::Top,
                 colors,
             ),

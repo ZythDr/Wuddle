@@ -23,6 +23,7 @@ pub enum Message {
 
     // Options toggles
     ToggleAutoCheck(bool),
+    ToggleConserveGithubApi(bool),
     SetAutoCheckMinutes(String),
     ToggleDesktopNotify(bool),
     ToggleSymlinks(bool),
@@ -50,6 +51,7 @@ pub enum Message {
 
     // Toast notifications
     DismissToast(usize),
+    ToastHovered(usize, bool),
     ToastAnimationTick,
     OpenGithubTokenOptions,
 

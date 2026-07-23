@@ -30,7 +30,28 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.7.0-beta.3
+### What's New in v3.7.0-beta.4
+
+#### Improvements
+- **Conserve GitHub API** — Added an optional setting for reducing anonymous GitHub API usage.
+  - Infrequently updated projects follow a longer update schedule.
+  - Their status now persists across profile switches.
+  - The setting automatically becomes inactive when unnecessary.
+- **Improved Diagnostics** — Verbose logs now record privacy-safe update-check stages, timings, outcomes, and file-verification progress.
+  - Parallel repository checks are tracked independently.
+  - Exported summaries include the active operation when diagnostics are created.
+- **Improved Notifications** — Added a smooth lifetime indicator to notifications.
+  - Hovering pauses and resets the timer.
+  - Lengthy tooltips and API-limit warnings are formatted for easier reading.
+
+#### Bug Fixes
+- **Reliable Shutdown** — Closing Wuddle now reliably terminates blocked background work on Windows and Linux, preventing invisible processes from blocking future launches.
+- **Update Check Stability** — Duplicate update checks are ignored, preventing overlapping operations after waking from sleep or repeatedly pressing the update button.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.7.0-beta.3
 
 #### Improvements
 - **Clearer GitHub API Limit Feedback**
@@ -43,9 +64,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 
 #### Bug Fixes
 - **Profile Database Recovery** — Fixed migration errors that could prevent affected profiles from loading or installing mods and patches. Partially migrated beta databases now repair themselves automatically without losing tracked projects or installed-file records.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.7.0-beta.2
 

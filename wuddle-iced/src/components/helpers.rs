@@ -625,6 +625,59 @@ pub struct SpinnerCanvas {
     pub color: iced::Color,
 }
 
+/// A thin toast lifetime indicator clipped to the lower rounded corners of its
+/// notification card. Regular progress bars draw above their parent border,
+/// which makes a flush timer appear to square off the card.
+pub struct ToastTimerCanvas {
+    pub progress: f32,
+    pub bar_color: iced::Color,
+    pub background_color: iced::Color,
+}
+
+impl<Message> canvas::Program<Message> for ToastTimerCanvas {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let lower_radius = iced::border::Radius {
+            top_left: 0.0,
+            top_right: 0.0,
+            bottom_right: 4.0,
+            bottom_left: 4.0,
+        };
+        let full =
+            canvas::Path::rounded_rectangle(iced::Point::ORIGIN, bounds.size(), lower_radius);
+        frame.fill(&full, self.background_color);
+
+        let active_width = bounds.width * self.progress.clamp(0.0, 1.0);
+        if active_width > 0.0 {
+            let active_radius = iced::border::Radius {
+                bottom_right: if active_width >= bounds.width {
+                    4.0
+                } else {
+                    0.0
+                },
+                ..lower_radius
+            };
+            let active = canvas::Path::rounded_rectangle(
+                iced::Point::ORIGIN,
+                iced::Size::new(active_width, bounds.height),
+                active_radius,
+            );
+            frame.fill(&active, self.bar_color);
+        }
+
+        vec![frame.into_geometry()]
+    }
+}
+
 /// A single-line label that gently scrolls only while it is hovered and the
 /// estimated text width exceeds the available space. Used by the collection
 /// tree, where folder names are frequently longer than the narrow sidebar.
