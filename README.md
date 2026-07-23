@@ -30,7 +30,24 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.7.0-beta.2
+### What's New in v3.7.0-beta.3
+
+#### Improvements
+- **Clearer GitHub API Limit Feedback**
+  - Wuddle now explains when GitHub's anonymous hourly limit has been reached and approximately when it resets.
+  - Notifications link directly to GitHub Token settings and consistently cover previews, updates, Quick Add, curated patches, and other GitHub operations.
+  - Invalid or expired token errors now provide clearer guidance.
+- **Consistent Settings Icons**
+  - Replaced platform-rendered cogwheel emoji with a bundled SVG across profile editing, Auto-Login, configuration actions, and file details.
+  - Added theme-aware idle and hover colors with consistent sizing across UI scales while keeping the main Options icon visually distinct.
+
+#### Bug Fixes
+- **Profile Database Recovery** — Fixed migration errors that could prevent affected profiles from loading or installing mods and patches. Partially migrated beta databases now repair themselves automatically without losing tracked projects or installed-file records.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.7.0-beta.2
 
 #### New Features
 - **Curated Epoch Water Patch** — Added Project Epoch's water replacement to MPQ Quick Add, with README previews and update support.
@@ -53,9 +70,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **Safe Profile Removal** — Removing a profile now closes its editor immediately, preventing an accidental Save from recreating it.
 - **Curated Patch Updates** — Renaming WDM or Epoch Water files no longer creates false update notifications or loses the custom filename during updates.
 - **Browse and README Actions** — Browse now opens the relevant installed location, and Awesome WotLK's README button no longer triggers an addon-folder installation prompt.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.7.0-beta.1
 

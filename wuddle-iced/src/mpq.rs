@@ -196,9 +196,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         LogLevel::Error,
                         &format!("Epoch Water install failed: {error}"),
                     );
+                    let rate_limited =
+                        app.show_github_rate_limit("Epoch Water could not be installed.", &error);
+                    let error = crate::github_api::user_facing_error(&error);
                     if matches!(app.dialog, Some(Dialog::MpqAdd)) {
                         app.mpq_ui.error = Some(error);
-                    } else {
+                    } else if !rate_limited {
                         app.show_toast(
                             format!("Epoch Water install failed: {error}"),
                             ToastKind::Error,
@@ -228,11 +231,18 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.markdown_gif_cache = preview.gif_cache;
                     preview.readme_items
                 }
-                Err(error) => iced::widget::markdown::Content::parse(&format!(
-                    "Could not load the Epoch Water README.\n\n{error}"
-                ))
-                .items()
-                .to_vec(),
+                Err(error) => {
+                    app.show_github_rate_limit(
+                        "The Epoch Water README could not be loaded.",
+                        &error,
+                    );
+                    iced::widget::markdown::Content::parse(&format!(
+                        "Could not load the Epoch Water README.\n\n{}",
+                        crate::github_api::user_facing_error(&error)
+                    ))
+                    .items()
+                    .to_vec()
+                }
             };
             if let Some(Dialog::Changelog {
                 items: dialog_items,
@@ -980,7 +990,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.mpq_ui.catalog = Some(catalog);
                     app.mpq_ui.error = None;
                 }
-                Err(error) => app.mpq_ui.error = Some(error),
+                Err(error) => {
+                    app.show_github_rate_limit("WDM information could not be loaded.", &error);
+                    app.mpq_ui.error = Some(crate::github_api::user_facing_error(&error));
+                }
             }
             Some(Task::none())
         }
@@ -1039,7 +1052,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     Some(crate::update::repos::refresh_repos_task(app))
                 }
                 Err(error) => {
-                    app.mpq_ui.error = Some(error);
+                    app.show_github_rate_limit("WDM could not be installed.", &error);
+                    app.mpq_ui.error = Some(crate::github_api::user_facing_error(&error));
                     Some(Task::none())
                 }
             }
@@ -1106,11 +1120,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.markdown_gif_cache = preview.gif_cache;
                     preview.readme_items
                 }
-                Err(error) => iced::widget::markdown::Content::parse(&format!(
-                    "Could not load the WDM README.\n\n{error}"
-                ))
-                .items()
-                .to_vec(),
+                Err(error) => {
+                    app.show_github_rate_limit("The WDM README could not be loaded.", &error);
+                    iced::widget::markdown::Content::parse(&format!(
+                        "Could not load the WDM README.\n\n{}",
+                        crate::github_api::user_facing_error(&error)
+                    ))
+                    .items()
+                    .to_vec()
+                }
             };
             if let Some(Dialog::Changelog {
                 items: dialog_items,

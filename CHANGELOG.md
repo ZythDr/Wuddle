@@ -2,6 +2,24 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.7.0-beta.3
+
+### Improvements
+- **Clearer GitHub API Limit Feedback**
+  - Wuddle now explains when GitHub's anonymous 60-request hourly limit has been reached and approximately when it resets.
+  - Rate-limit notifications link directly to GitHub Token settings and appear consistently for README previews, updates, Quick Add, curated patches, and other GitHub operations.
+  - Invalid or expired token errors now provide clearer guidance.
+- **Consistent Settings Icons**
+  - Replaced platform-rendered cogwheel emoji with a bundled SVG across profile editing, Auto-Login, configuration actions, and file details.
+  - Added theme-aware idle and hover colors with consistent sizing across UI scales.
+  - Kept secondary settings controls visually distinct from the main Options icon.
+
+### Bug Fixes
+- **Profile Database Recovery**
+  - Fixed `duplicate column name: fingerprint` errors preventing affected profiles from loading or installing mods and patches.
+  - Partially migrated beta databases now repair themselves without losing tracked repositories or installed-file records.
+  - Database initialization and migrations are serialized to prevent simultaneous operations from applying the same schema change twice.
+
 ## v3.7.0-beta.2
 
 ### New Features

@@ -7,6 +7,7 @@ mod anchored_overlay;
 #[cfg(feature = "auto-login")]
 mod auto_login;
 mod diagnostics;
+mod github_api;
 mod monitor;
 mod mpq;
 pub mod panels;

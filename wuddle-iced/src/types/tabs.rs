@@ -38,9 +38,10 @@ impl Tab {
 
     pub fn icon_label(self) -> &'static str {
         match self {
-            Tab::Options => "\u{2699}", // ⚙
-            Tab::Logs => "\u{2630}",    // ☰
-            Tab::About => "\u{24D8}",   // ⓘ
+            // Options uses its dedicated vector icon in every rendered tab bar.
+            Tab::Options => "",
+            Tab::Logs => "\u{2630}",  // ☰
+            Tab::About => "\u{24D8}", // ⓘ
             _ => "",
         }
     }

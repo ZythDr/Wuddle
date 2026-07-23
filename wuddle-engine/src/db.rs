@@ -1,9 +1,13 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, Error as SqlError, ErrorCode};
 use std::collections::HashSet;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::model::{InstallMode, Repo};
+
+const SCHEMA_VERSION: i32 = 16;
+static DB_OPEN_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone)]
 pub struct InstallEntry {
@@ -58,6 +62,12 @@ pub struct Db {
 
 impl Db {
     pub fn open(path: &std::path::Path) -> Result<Self> {
+        // Frontend services use separate short-lived Engine connections. Keep
+        // connection initialization and migration serialized within this process
+        // as journal-mode setup itself can otherwise race on a brand-new DB.
+        let _open_guard = DB_OPEN_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let conn = Connection::open(path).context("open sqlite db")?;
         conn.busy_timeout(Duration::from_millis(8000))?;
         conn.execute_batch(
@@ -73,8 +83,33 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        const SCHEMA_VERSION: i32 = 16;
+        // Avoid taking a write lock during the normal already-current startup.
+        // migrate_locked reads the version again after acquiring the lock.
+        let current: i32 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if current >= SCHEMA_VERSION {
+            return Ok(());
+        }
 
+        // Engine operations open short-lived connections independently. Acquire
+        // the migration write lock before reading user_version so two operations
+        // cannot both decide that the same ALTER TABLE is still required.
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = self.migrate_locked();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    fn migrate_locked(&self) -> Result<()> {
         let current: i32 = self
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -140,15 +175,21 @@ impl Db {
 
         // v1 → v2: add sha256 column to installs for file integrity checking.
         if current < 2 {
-            self.conn
-                .execute_batch("ALTER TABLE installs ADD COLUMN sha256 TEXT")?;
+            let cols = self.existing_install_columns()?;
+            if !cols.contains("sha256") {
+                self.conn
+                    .execute_batch("ALTER TABLE installs ADD COLUMN sha256 TEXT")?;
+            }
             self.conn.execute_batch("PRAGMA user_version = 2")?;
         }
 
         // v2 → v3: add published_at_unix for adaptive update frequency.
         if current < 3 {
-            self.conn
-                .execute_batch("ALTER TABLE repos ADD COLUMN published_at_unix INTEGER")?;
+            let cols = self.existing_repo_columns()?;
+            if !cols.contains("published_at_unix") {
+                self.conn
+                    .execute_batch("ALTER TABLE repos ADD COLUMN published_at_unix INTEGER")?;
+            }
             self.conn.execute_batch("PRAGMA user_version = 3")?;
         }
 
@@ -257,51 +298,54 @@ impl Db {
         // scans. The legacy sha256 column remains for compatibility with
         // development databases created while MPQ support was in progress.
         if current < 12 {
-            self.conn.execute_batch(
-                r#"
-                ALTER TABLE mpq_protection
-                  ADD COLUMN fingerprint TEXT NOT NULL DEFAULT '';
-                PRAGMA user_version = 12;
-                "#,
-            )?;
+            let cols = self.existing_mpq_protection_columns()?;
+            if !cols.contains("fingerprint") {
+                self.conn.execute_batch(
+                    "ALTER TABLE mpq_protection \
+                     ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''",
+                )?;
+            }
+            self.conn.execute_batch("PRAGMA user_version = 12")?;
         }
 
         // v12 -> v13: make routine status and restored-backup checks use the
         // same metadata-only identity as untracked MPQ discovery.
         if current < 13 {
-            self.conn.execute_batch(
-                r#"
-                ALTER TABLE installs
-                  ADD COLUMN file_fingerprint TEXT;
-                ALTER TABLE mpq_backups
-                  ADD COLUMN fingerprint TEXT;
-                PRAGMA user_version = 13;
-                "#,
-            )?;
+            let install_cols = self.existing_install_columns()?;
+            if !install_cols.contains("file_fingerprint") {
+                self.conn
+                    .execute_batch("ALTER TABLE installs ADD COLUMN file_fingerprint TEXT")?;
+            }
+            let backup_cols = self.existing_mpq_backup_columns()?;
+            if !backup_cols.contains("fingerprint") {
+                self.conn
+                    .execute_batch("ALTER TABLE mpq_backups ADD COLUMN fingerprint TEXT")?;
+            }
+            self.conn.execute_batch("PRAGMA user_version = 13")?;
         }
 
         // v13 -> v14: allow untracked/manual MPQs to carry the same kind of
         // persistent friendly label as Wuddle-installed MPQs.
         if current < 14 {
-            self.conn.execute_batch(
-                r#"
-                ALTER TABLE mpq_protection
-                  ADD COLUMN display_name TEXT;
-                PRAGMA user_version = 14;
-                "#,
-            )?;
+            let cols = self.existing_mpq_protection_columns()?;
+            if !cols.contains("display_name") {
+                self.conn
+                    .execute_batch("ALTER TABLE mpq_protection ADD COLUMN display_name TEXT")?;
+            }
+            self.conn.execute_batch("PRAGMA user_version = 14")?;
         }
 
         // v14 -> v15: keep the Manage MPQs editor padlock independent from
         // collision/replacement protection semantics.
         if current < 15 {
-            self.conn.execute_batch(
-                r#"
-                ALTER TABLE mpq_protection
-                  ADD COLUMN editor_unlocked INTEGER NOT NULL DEFAULT 0;
-                PRAGMA user_version = 15;
-                "#,
-            )?;
+            let cols = self.existing_mpq_protection_columns()?;
+            if !cols.contains("editor_unlocked") {
+                self.conn.execute_batch(
+                    "ALTER TABLE mpq_protection \
+                     ADD COLUMN editor_unlocked INTEGER NOT NULL DEFAULT 0",
+                )?;
+            }
+            self.conn.execute_batch("PRAGMA user_version = 15")?;
         }
 
         // v15 -> v16: Wuddle-installed MPQs are editable by default. Rows
@@ -425,6 +469,22 @@ impl Db {
 
     fn existing_install_columns(&self) -> Result<HashSet<String>> {
         let mut stmt = self.conn.prepare("PRAGMA table_info(installs)")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(names.into_iter().collect())
+    }
+
+    fn existing_mpq_protection_columns(&self) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(mpq_protection)")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(names.into_iter().collect())
+    }
+
+    fn existing_mpq_backup_columns(&self) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(mpq_backups)")?;
         let names = stmt
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1571,5 +1631,88 @@ impl Db {
         self.conn
             .execute("DELETE FROM rate_limits WHERE host=?1", params![host])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Db;
+    use rusqlite::{params, Connection};
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn repairs_schema_version_behind_existing_mpq_columns() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("partial-migration.sqlite");
+
+        {
+            let db = Db::open(&path).unwrap();
+            db.conn
+                .execute(
+                    r#"
+                    INSERT INTO repos(url, forge, host, owner, name, mode)
+                    VALUES (?1, 'github', 'github.com', 'example', 'mod', 'auto')
+                    "#,
+                    params!["https://github.com/example/mod"],
+                )
+                .unwrap();
+            let repo_id = db.conn.last_insert_rowid();
+            db.conn
+                .execute(
+                    "INSERT INTO installs(repo_id, path, kind) VALUES (?1, ?2, 'dll')",
+                    params![repo_id, "d3d9.dll"],
+                )
+                .unwrap();
+
+            // Reproduce the affected beta profile: the ALTER TABLE completed,
+            // but user_version still says that the migration is pending.
+            db.conn.execute_batch("PRAGMA user_version = 11").unwrap();
+        }
+
+        let repaired = Db::open(&path).unwrap();
+        let version: i32 = repaired
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let repo_count: i64 = repaired
+            .conn
+            .query_row("SELECT COUNT(*) FROM repos", [], |row| row.get(0))
+            .unwrap();
+        let install_count: i64 = repaired
+            .conn
+            .query_row("SELECT COUNT(*) FROM installs", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(version, 16);
+        assert_eq!(repo_count, 1);
+        assert_eq!(install_count, 1);
+    }
+
+    #[test]
+    fn concurrent_opens_serialize_migrations() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("concurrent-migration.sqlite");
+        let barrier = Arc::new(Barrier::new(4));
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Db::open(&path).map(|_| ())
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+
+        let conn = Connection::open(path).unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 16);
     }
 }

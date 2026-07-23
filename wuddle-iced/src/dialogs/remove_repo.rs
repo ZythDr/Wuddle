@@ -20,7 +20,7 @@ pub fn view<'a>(
         .iter()
         .map(|(path, kind)| {
             let icon = match kind.as_str() {
-                "dll" => "\u{2699}",    // ⚙
+                "dll" => "DLL",
                 "addon" => "\u{1f4c1}", // 📁
                 _ => "\u{1f4c4}",       // 📄
             };

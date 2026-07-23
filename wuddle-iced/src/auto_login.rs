@@ -2,7 +2,7 @@ use iced::widget::{
     button, checkbox, column, container, mouse_area, pick_list, row, scrollable, text, text_input,
     Space,
 };
-use iced::{Color, Element, Length, Task};
+use iced::{Element, Length, Task};
 use wuddle_engine::auto_login::{
     AccountDetails, AccountId, AccountRef, AutoLoginService, CredentialInput, SecretText,
 };
@@ -529,34 +529,29 @@ pub fn account_picker<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Mess
         iced::widget::tooltip::Position::Top,
     )
     .padding(0);
+    let idle_cog = crate::dim_icon_color(c.muted);
     let manage_accounts = iced::widget::tooltip(
-        button(
-            container(text("⚙").size(20))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-        )
-        .on_press(Message::OpenAutoLoginAccounts)
-        .padding(0)
-        .width(30)
-        .height(30)
-        .style(move |_theme, status| match status {
-            button::Status::Hovered | button::Status::Pressed => button::Style {
-                background: None,
-                text_color: c.primary_text,
-                border: iced::Border::default(),
-                shadow: iced::Shadow::default(),
-                snap: true,
-            },
-            _ => button::Style {
-                background: None,
-                text_color: Color { a: 0.62, ..c.text },
-                border: iced::Border::default(),
-                shadow: iced::Shadow::default(),
-                snap: true,
-            },
-        }),
+        button(crate::cogwheel_button_icon(30.0, idle_cog, c.primary_text))
+            .on_press(Message::OpenAutoLoginAccounts)
+            .padding(0)
+            .width(30)
+            .height(30)
+            .style(move |_theme, status| match status {
+                button::Status::Hovered | button::Status::Pressed => button::Style {
+                    background: None,
+                    text_color: c.primary_text,
+                    border: iced::Border::default(),
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                },
+                _ => button::Style {
+                    background: None,
+                    text_color: idle_cog,
+                    border: iced::Border::default(),
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                },
+            }),
         container(
             text("Manage auto-login accounts")
                 .size(theme::TOOLTIP_TEXT_SIZE)

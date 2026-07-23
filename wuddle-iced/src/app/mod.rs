@@ -427,6 +427,32 @@ impl App {
         self.push_toast(message, kind, None);
     }
 
+    /// Show consistent, actionable feedback for any GitHub operation blocked
+    /// by the API quota. Returns true when `error` was a rate-limit failure.
+    pub fn show_github_rate_limit(&mut self, context: &str, error: &str) -> bool {
+        let Some(notice) = crate::github_api::rate_limit_notice(error) else {
+            return false;
+        };
+        let has_token = wuddle_engine::github_token().is_some();
+        self.github_rate_info = Some(service::GitHubRateInfo {
+            limit: if has_token { 5_000 } else { 60 },
+            remaining: 0,
+            reset_epoch: notice
+                .reset_epoch
+                .unwrap_or_else(|| crate::update::repos::now_unix() + 3_600),
+        });
+        let message = format!("{context} {} Click to open Options.", notice.message);
+        self.log(LogLevel::Api, &message);
+        let notice_already_visible = self
+            .toasts
+            .iter()
+            .any(|toast| toast.message.contains(&notice.message));
+        if !notice_already_visible {
+            self.show_toast_with_action(message, ToastKind::Warn, Message::OpenGithubTokenOptions);
+        }
+        true
+    }
+
     pub fn reset_add_repo_state(&mut self) {
         self.add_repo_url_debounce_generation =
             self.add_repo_url_debounce_generation.wrapping_add(1);
@@ -942,6 +968,15 @@ impl App {
         }
 
         match message {
+            Message::OpenGithubTokenOptions => {
+                self.dialog = None;
+                self.active_tab = Tab::Options;
+                self.log(
+                    LogLevel::Info,
+                    "Opened GitHub token options from a rate-limit notice.",
+                );
+                return Task::none();
+            }
             Message::SetTab(tab) => {
                 if !self.profile_tab_enabled(tab) {
                     return Task::none();
@@ -3846,11 +3881,11 @@ impl App {
                 ..
             } => {
                 let file_rows = files.iter().map(|entry| {
-                    let (icon, label) = match entry.kind.as_str() {
-                        "dll" => ("\u{2699}", "DLL"),
-                        "addon" => ("\u{1f4c1}", "Addon"),
-                        "mpq" => ("\u{1f4e6}", "MPQ"),
-                        _ => ("\u{1f4c4}", "File"),
+                    let (icon, label): (Element<Message>, &str) = match entry.kind.as_str() {
+                        "dll" => (cogwheel_icon(13.0, colors.muted, colors.muted), "DLL"),
+                        "addon" => (text("\u{1f4c1}").size(13).into(), "Addon"),
+                        "mpq" => (text("\u{1f4e6}").size(13).into(), "MPQ"),
+                        _ => (text("\u{1f4c4}").size(13).into(), "File"),
                     };
                     let is_expanded = expanded_paths.contains(&entry.path);
                     let is_loading = loading_paths.contains(&entry.path);
@@ -3867,7 +3902,7 @@ impl App {
                         })
                         .size(12)
                         .color(colors.muted),
-                        text(icon).size(13),
+                        icon,
                         text(&entry.path).size(12).color(colors.text),
                         Space::new().width(Length::Fill),
                         text(if is_loading { "Loading…" } else { label })
@@ -4025,15 +4060,19 @@ impl App {
                 let file_rows: Vec<Element<Message>> = files
                     .iter()
                     .map(|(path, kind)| {
-                        let icon = match kind.as_str() {
-                            "dll" => "\u{2699}",    // \u{2699}
-                            "addon" => "\u{1f4c1}", // \u{1f4c1}
-                            _ => "\u{1f4c4}",       // \u{1f4c4}
-                        };
                         let color = if rf { colors.warn } else { colors.text_soft };
-                        container(text(format!("{} {}", icon, path)).size(12).color(color))
-                            .padding([2, 6])
-                            .into()
+                        let icon: Element<Message> = match kind.as_str() {
+                            "dll" => cogwheel_icon(12.0, color, color),
+                            "addon" => text("\u{1f4c1}").size(12).color(color).into(),
+                            _ => text("\u{1f4c4}").size(12).color(color).into(),
+                        };
+                        container(
+                            row![icon, text(path).size(12).color(color)]
+                                .spacing(6)
+                                .align_y(iced::Alignment::Center),
+                        )
+                        .padding([2, 6])
+                        .into()
                     })
                     .collect();
 
@@ -4144,15 +4183,15 @@ impl App {
                 let file_rows: Vec<Element<Message>> = files
                     .iter()
                     .map(|(path, kind)| {
-                        let icon = match kind.as_str() {
-                            "dll" => "\u{2699}",
-                            "addon" => "\u{1f4c1}",
-                            _ => "\u{1f4c4}",
+                        let icon: Element<Message> = match kind.as_str() {
+                            "dll" => cogwheel_icon(12.0, colors.warn, colors.warn),
+                            "addon" => text("\u{1f4c1}").size(12).color(colors.warn).into(),
+                            _ => text("\u{1f4c4}").size(12).color(colors.warn).into(),
                         };
                         container(
-                            text(format!("{} {}", icon, path))
-                                .size(12)
-                                .color(colors.warn),
+                            row![icon, text(path).size(12).color(colors.warn)]
+                                .spacing(6)
+                                .align_y(iced::Alignment::Center),
                         )
                         .padding([2, 6])
                         .into()

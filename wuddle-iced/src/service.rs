@@ -1504,8 +1504,9 @@ async fn resolve_epoch_water_source() -> Result<EpochWaterSource, String> {
     let source = request
         .send()
         .await
-        .map_err(|error| format!("Could not look up Epoch Water: {error}"))?
-        .error_for_status()
+        .map_err(|error| format!("Could not look up Epoch Water: {error}"))?;
+    let source = crate::github_api::checked_response(source)
+        .await
         .map_err(|error| format!("Could not look up Epoch Water: {error}"))?
         .json::<GithubSourceFile>()
         .await
@@ -4315,7 +4316,7 @@ async fn fetch_files(
     owner: &str,
     repo: &str,
     scheme: &str,
-) -> Vec<RepoFileEntry> {
+) -> Result<Vec<RepoFileEntry>, String> {
     match forge {
         "github" => {
             let url = format!("https://api.github.com/repos/{}/{}/contents/", owner, repo);
@@ -4325,20 +4326,20 @@ async fn fetch_files(
             if let Some(token) = wuddle_engine::github_token() {
                 req = req.bearer_auth(token);
             }
-            match req.send().await {
-                Ok(r) if r.status().is_success() => r
-                    .json::<Vec<ContentEntry>>()
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|e| RepoFileEntry {
-                        is_dir: e.kind == "dir",
-                        path: e.name.clone(),
-                        name: e.name,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            }
+            let response = req.send().await.map_err(|error| error.to_string())?;
+            let entries = crate::github_api::checked_response(response)
+                .await?
+                .json::<Vec<ContentEntry>>()
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|e| RepoFileEntry {
+                    is_dir: e.kind == "dir",
+                    path: e.name.clone(),
+                    name: e.name,
+                })
+                .collect();
+            Ok(entries)
         }
         "gitlab" => {
             let encoded = format!("{}/{}", owner, repo).replace('/', "%2F");
@@ -4346,7 +4347,7 @@ async fn fetch_files(
                 "https://gitlab.com/api/v4/projects/{}/repository/tree?per_page=50",
                 encoded
             );
-            match client.get(&url).send().await {
+            Ok(match client.get(&url).send().await {
                 Ok(r) if r.status().is_success() => r
                     .json::<Vec<ContentEntry>>()
                     .await
@@ -4359,14 +4360,14 @@ async fn fetch_files(
                     })
                     .collect(),
                 _ => Vec::new(),
-            }
+            })
         }
         _ => {
             let url = format!(
                 "{}://{}/api/v1/repos/{}/{}/contents/",
                 scheme, host, owner, repo
             );
-            match client.get(&url).send().await {
+            Ok(match client.get(&url).send().await {
                 Ok(r) if r.status().is_success() => r
                     .json::<Vec<ContentEntry>>()
                     .await
@@ -4379,7 +4380,7 @@ async fn fetch_files(
                     })
                     .collect(),
                 _ => Vec::new(),
-            }
+            })
         }
     }
 }
@@ -4410,20 +4411,19 @@ pub async fn fetch_dir_contents(
             if let Some(token) = wuddle_engine::github_token() {
                 req = req.bearer_auth(token);
             }
-            match req.send().await {
-                Ok(r) if r.status().is_success() => r
-                    .json::<Vec<ContentEntry>>()
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|e| RepoFileEntry {
-                        is_dir: e.kind == "dir",
-                        path: format!("{}/{}", dir_path, e.name),
-                        name: e.name,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            }
+            let response = req.send().await.map_err(|error| error.to_string())?;
+            crate::github_api::checked_response(response)
+                .await?
+                .json::<Vec<ContentEntry>>()
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|e| RepoFileEntry {
+                    is_dir: e.kind == "dir",
+                    path: format!("{}/{}", dir_path, e.name),
+                    name: e.name,
+                })
+                .collect()
         }
         "gitlab" => {
             let encoded = format!("{}/{}", fi.owner, fi.repo).replace('/', "%2F");
@@ -4521,10 +4521,9 @@ async fn fetch_github_preview(
     if let Some(token) = wuddle_engine::github_token() {
         req = req.bearer_auth(token);
     }
-    let info: GhRepoInfo = req
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
+    let info_response = req.send().await.map_err(|e| e.to_string())?;
+    let info: GhRepoInfo = crate::github_api::checked_response(info_response)
+        .await?
         .json()
         .await
         .map_err(|e| e.to_string())?;
@@ -4537,8 +4536,13 @@ async fn fetch_github_preview(
         readme_req = readme_req.bearer_auth(token);
     }
     let readme_text = match readme_req.send().await {
-        Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
-        _ => String::new(),
+        Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => String::new(),
+        Ok(response) => crate::github_api::checked_response(response)
+            .await?
+            .text()
+            .await
+            .map_err(|error| error.to_string())?,
+        Err(error) => return Err(error.to_string()),
     };
 
     let raw_base = format!("https://raw.githubusercontent.com/{}/{}/HEAD/", owner, repo);
@@ -4549,7 +4553,7 @@ async fn fetch_github_preview(
     let image_urls: Vec<String> = md_content.images().iter().cloned().collect();
     let (image_cache, gif_cache) = fetch_images(client, &image_urls, &raw_base).await;
 
-    let files = fetch_files(client, "github", "github.com", owner, repo, "https").await;
+    let files = fetch_files(client, "github", "github.com", owner, repo, "https").await?;
 
     let license = info.license.and_then(|l| l.spdx_id).unwrap_or_default();
     let license = if license == "NOASSERTION" || license.is_empty() {
@@ -4618,7 +4622,7 @@ async fn fetch_gitlab_preview(
     let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
     let image_urls: Vec<String> = md_content.images().iter().cloned().collect();
     let (image_cache, gif_cache) = fetch_images(client, &image_urls, &raw_base).await;
-    let files = fetch_files(client, "gitlab", "gitlab.com", owner, repo, "https").await;
+    let files = fetch_files(client, "gitlab", "gitlab.com", owner, repo, "https").await?;
 
     Ok(RepoPreviewInfo {
         name: info.name.unwrap_or_else(|| repo.to_string()),
@@ -4690,7 +4694,7 @@ async fn fetch_gitea_preview(
     let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
     let image_urls: Vec<String> = md_content.images().iter().cloned().collect();
     let (image_cache, gif_cache) = fetch_images(client, &image_urls, &raw_base).await;
-    let files = fetch_files(client, "gitea", host, owner, repo, scheme).await;
+    let files = fetch_files(client, "gitea", host, owner, repo, scheme).await?;
 
     Ok(RepoPreviewInfo {
         name: info.name.unwrap_or_else(|| repo.to_string()),
@@ -4867,14 +4871,15 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
             if let Some(token) = wuddle_engine::github_token() {
                 req = req.bearer_auth(token);
             }
-            let releases: Vec<GhRelease> =
-                tokio::time::timeout(std::time::Duration::from_secs(15), req.send())
-                    .await
-                    .map_err(|_| "Timed out fetching releases".to_string())?
-                    .map_err(|e| e.to_string())?
-                    .json()
-                    .await
-                    .map_err(|e| e.to_string())?;
+            let response = tokio::time::timeout(std::time::Duration::from_secs(15), req.send())
+                .await
+                .map_err(|_| "Timed out fetching releases".to_string())?
+                .map_err(|e| e.to_string())?;
+            let releases: Vec<GhRelease> = crate::github_api::checked_response(response)
+                .await?
+                .json()
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(releases
                 .into_iter()
                 .map(|r| {
@@ -5062,10 +5067,8 @@ async fn fetch_beta_changelog(client: &Client) -> Result<String, String> {
         request = request.bearer_auth(token);
     }
     let response = request.send().await.map_err(|error| error.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("GitHub API error: HTTP {}", response.status()));
-    }
-    let releases = response
+    let releases = crate::github_api::checked_response(response)
+        .await?
         .json::<Vec<GhChangelogRelease>>()
         .await
         .map_err(|error| error.to_string())?;
@@ -5324,9 +5327,7 @@ async fn fetch_release_full(beta_channel: bool) -> Result<GhReleaseFull, String>
     .map_err(|_| "Timed out fetching release".to_string())?
     .map_err(|e| e.to_string())?;
 
-    if !resp.status().is_success() {
-        return Err(format!("GitHub API error: HTTP {}", resp.status()));
-    }
+    let resp = crate::github_api::checked_response(resp).await?;
 
     if beta_channel {
         let releases: Vec<GhReleaseFull> = resp.json().await.map_err(|e| e.to_string())?;

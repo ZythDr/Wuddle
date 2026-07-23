@@ -3,7 +3,7 @@
 use crate::service::{self, is_mod};
 use crate::theme::{self, ThemeColors};
 use crate::{Dialog, Message, Tab};
-use iced::widget::{button, canvas, column, container, text};
+use iced::widget::{button, canvas, column, container, row, text};
 use iced::{Element, Font, Length, Theme};
 use std::sync::OnceLock;
 
@@ -140,6 +140,108 @@ pub fn ctx_menu_item<'a>(label: &str, msg: Message, colors: ThemeColors) -> Elem
             },
         })
         .into()
+}
+
+/// Platform-independent cogwheel rendered from Wuddle's bundled SVG asset.
+pub fn dim_icon_color(color: iced::Color) -> iced::Color {
+    const FACTOR: f32 = 0.72;
+    iced::Color {
+        r: color.r * FACTOR,
+        g: color.g * FACTOR,
+        b: color.b * FACTOR,
+        a: 1.0,
+    }
+}
+
+pub fn cogwheel_icon<'a>(
+    size: f32,
+    idle_color: iced::Color,
+    hovered_color: iced::Color,
+) -> Element<'a, Message> {
+    iced::widget::svg(iced::widget::svg::Handle::from_memory(include_bytes!(
+        "../../assets/icons/settings.svg"
+    )))
+    .width(size)
+    .height(size)
+    .style(move |_theme, status| iced::widget::svg::Style {
+        color: Some(match status {
+            iced::widget::svg::Status::Hovered => hovered_color,
+            iced::widget::svg::Status::Idle => idle_color,
+        }),
+    })
+    .into()
+}
+
+/// Cogwheel whose SVG hitbox fills a button while its visible path remains
+/// inset. Hovering any part of the button therefore highlights the icon.
+pub fn cogwheel_button_icon<'a>(
+    hitbox_size: f32,
+    idle_color: iced::Color,
+    hovered_color: iced::Color,
+) -> Element<'a, Message> {
+    static PADDED_SETTINGS_SVG: OnceLock<&'static [u8]> = OnceLock::new();
+    let padded_svg = *PADDED_SETTINGS_SVG.get_or_init(|| {
+        let bytes = include_str!("../../assets/icons/settings.svg")
+            .replacen("viewBox=\"0 0 24 24\"", "viewBox=\"-6 -6 36 36\"", 1)
+            .into_bytes()
+            .into_boxed_slice();
+        Box::leak(bytes)
+    });
+    iced::widget::svg(iced::widget::svg::Handle::from_memory(padded_svg))
+        .width(hitbox_size)
+        .height(hitbox_size)
+        .style(move |_theme, status| iced::widget::svg::Style {
+            color: Some(match status {
+                iced::widget::svg::Status::Hovered => hovered_color,
+                iced::widget::svg::Status::Idle => idle_color,
+            }),
+        })
+        .into()
+}
+
+pub fn cogwheel_label<'a>(
+    label: &'a str,
+    icon_size: f32,
+    text_size: u32,
+    color: iced::Color,
+) -> Element<'a, Message> {
+    row![
+        cogwheel_icon(icon_size, dim_icon_color(color), color),
+        text(label).size(text_size).color(color),
+    ]
+    .spacing(4)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+pub fn ctx_menu_item_with_cog<'a>(
+    label: &'a str,
+    msg: Message,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
+    let c = colors;
+    button(
+        row![
+            cogwheel_icon(13.0, dim_icon_color(c.text), c.title),
+            text(label).size(12),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center),
+    )
+    .on_press(msg)
+    .padding([6, 12])
+    .width(Length::Fill)
+    .style(move |_theme, status| match status {
+        button::Status::Hovered => theme::tab_button_hovered_style(c),
+        _ => button::Style {
+            background: None,
+            text_color: c.text,
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        },
+    })
+    .into()
 }
 
 pub fn ctx_menu_item_disabled<'a>(label: &str, colors: ThemeColors) -> Element<'a, Message> {
@@ -336,15 +438,15 @@ pub fn inline_context_menu<'a>(
         items.push(ctx_menu_item("Browse\u{2026}", Message::BrowseRepo(rid), c));
     }
     if crate::panels::projects::is_dxvk_repo(&repo.name) {
-        items.push(ctx_menu_item(
-            "\u{2699} Configure DXVK\u{2026}",
+        items.push(ctx_menu_item_with_cog(
+            "Configure DXVK\u{2026}",
             Message::OpenDxvkConfig,
             c,
         ));
     }
     if crate::panels::projects::is_wow_optimize_repo(&repo.name) {
-        items.push(ctx_menu_item(
-            "⚙ Configure wow-optimize",
+        items.push(ctx_menu_item_with_cog(
+            "Configure wow-optimize",
             Message::LaunchWowOptimize,
             c,
         ));

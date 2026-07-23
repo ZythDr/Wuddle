@@ -2335,7 +2335,7 @@ fn name_cell_with_expand<'a>(
             let c2 = c;
             title_items.push(Space::new().width(6).into());
             title_items.push(
-                button(text("\u{2699} DXVK conf").size(10).color(c2.link))
+                button(crate::cogwheel_label("DXVK conf", 10.0, 10, c2.link))
                     .on_press(Message::OpenDxvkConfig)
                     .padding([2, 6])
                     .style(move |_t, status| dxvk_badge_style(status, c2))
@@ -2346,7 +2346,7 @@ fn name_cell_with_expand<'a>(
             let c2 = c;
             title_items.push(Space::new().width(6).into());
             title_items.push(
-                button(text("⚙ Configure").size(10).color(c2.link))
+                button(crate::cogwheel_label("Configure", 10.0, 10, c2.link))
                     .on_press(Message::LaunchWowOptimize)
                     .padding([2, 6])
                     .style(move |_t, status| dxvk_badge_style(status, c2))
@@ -2357,12 +2357,12 @@ fn name_cell_with_expand<'a>(
     } else if show_dxvk_badge || show_wow_optimize_badge {
         // Non-multi-DLL mod: show its companion action next to the title.
         let c2 = c;
-        let (label, message, color) = if show_dxvk_badge {
-            ("\u{2699} DXVK conf", Message::OpenDxvkConfig, c2.link)
+        let (label, message) = if show_dxvk_badge {
+            ("DXVK conf", Message::OpenDxvkConfig)
         } else {
-            ("⚙ Configure", Message::LaunchWowOptimize, c2.link)
+            ("Configure", Message::LaunchWowOptimize)
         };
-        let dxvk_badge = button(text(label).size(10).color(color))
+        let dxvk_badge = button(crate::cogwheel_label(label, 10.0, 10, c2.link))
             .on_press(message)
             .padding([2, 6])
             .style(move |_t, status| dxvk_badge_style(status, c2));
@@ -2734,7 +2734,7 @@ pub fn is_awesome_wotlk_repo(name: &str) -> bool {
     name.eq_ignore_ascii_case("awesome_wotlk") || name.eq_ignore_ascii_case("awesome wotlk")
 }
 
-/// Button style for the ⚙ DXVK conf badge, shared across multi-DLL and single-DLL rows.
+/// Button style for configuration badges shared across multi-DLL and single-DLL rows.
 fn dxvk_badge_style(status: button::Status, c: crate::theme::ThemeColors) -> button::Style {
     let alpha = if matches!(status, button::Status::Hovered) {
         0.18

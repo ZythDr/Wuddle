@@ -32,7 +32,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 }
                 Err(e) => {
                     app.log(LogLevel::Error, &format!("Version check failed: {}", e));
-                    app.show_toast(format!("Version check failed: {}", e), ToastKind::Error);
+                    if !app.show_github_rate_limit("Wuddle's update check could not finish.", &e) {
+                        app.show_toast(format!("Version check failed: {}", e), ToastKind::Error);
+                    }
                 }
             }
             return Some(Task::none());
@@ -95,6 +97,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             ));
         }
         Message::ChangelogLoaded(result) => {
+            let text = match result {
+                Ok(text) => text,
+                Err(error) => {
+                    app.show_github_rate_limit("The changelog could not be refreshed.", &error);
+                    format!(
+                        "Failed to load changelog: {}",
+                        crate::github_api::user_facing_error(&error)
+                    )
+                }
+            };
             if let Some(Dialog::Changelog {
                 ref mut items,
                 ref mut loading,
@@ -102,7 +114,6 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }) = app.dialog
             {
                 *loading = false;
-                let text = result.unwrap_or_else(|e| format!("Failed to load changelog: {}", e));
                 *items = iced::widget::markdown::Content::parse(&text)
                     .items()
                     .to_vec();

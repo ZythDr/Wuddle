@@ -98,19 +98,25 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
             .style(move |_theme, status| theme::choice_button_style(c2, is_active, status));
 
             let edit_button = tip(
-                button(text("\u{2699}").size(17))
-                    .on_press(Message::OpenDialog(edit_dialog))
-                    .padding([3, 6])
-                    .style(move |_theme, status| button::Style {
-                        background: None,
-                        text_color: match status {
-                            button::Status::Hovered => c2.title,
-                            _ => c2.muted,
-                        },
-                        border: iced::Border::default(),
-                        shadow: iced::Shadow::default(),
-                        snap: true,
-                    }),
+                button(crate::cogwheel_button_icon(
+                    26.0,
+                    crate::dim_icon_color(c2.muted),
+                    c2.title,
+                ))
+                .on_press(Message::OpenDialog(edit_dialog))
+                .width(26)
+                .height(26)
+                .padding(0)
+                .style(move |_theme, status| button::Style {
+                    background: None,
+                    text_color: match status {
+                        button::Status::Hovered => c2.title,
+                        _ => c2.muted,
+                    },
+                    border: iced::Border::default(),
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                }),
                 "Edit this profile",
                 tooltip::Position::Top,
                 colors,

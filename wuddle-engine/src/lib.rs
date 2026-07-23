@@ -467,7 +467,7 @@ struct AddonInstallConflict {
 static GITHUB_TOKEN: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 static RE_GITHUB_RESET: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"reset (\d+)").unwrap());
+    LazyLock::new(|| regex::Regex::new(r"(?:reset |GITHUB_RATE_LIMIT:)(\d+)").unwrap());
 
 const REMOTE_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -1003,11 +1003,10 @@ impl Engine {
         github_token().is_some()
     }
 
-    fn rate_limited_plan(r: &Repo, reset_epoch: i64) -> UpdatePlan {
-        let mut p = Self::blank_plan(r);
+    fn rate_limited_plan(repo: &Repo, reset_epoch: i64) -> UpdatePlan {
+        let mut p = Self::blank_plan(repo);
         p.error = Some(format!(
-            "GitHub API rate-limited for {} until unix {}. Add a GitHub token in Wuddle settings to raise limits.",
-            r.host, reset_epoch
+            "GITHUB_RATE_LIMIT:{reset_epoch}:GitHub's anonymous API limit of 60 requests per hour has been reached. Add a GitHub token in Options to raise the limit to 5,000 requests per hour."
         ));
         p
     }
@@ -6018,6 +6017,10 @@ mod tests {
     fn reset_epoch_extracted() {
         assert_eq!(
             Engine::parse_github_reset_epoch("rate limit: reset 1234567890"),
+            Some(1234567890)
+        );
+        assert_eq!(
+            Engine::parse_github_reset_epoch("GITHUB_RATE_LIMIT:1234567890:quota exhausted"),
             Some(1234567890)
         );
     }

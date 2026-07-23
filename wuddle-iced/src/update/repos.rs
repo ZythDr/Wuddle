@@ -284,6 +284,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             service::clear_update_check_progress();
             match result {
                 Ok(mut plans) => {
+                    let rate_limit_error = plans
+                        .iter()
+                        .filter_map(|plan| plan.error.as_deref())
+                        .find(|error| crate::github_api::rate_limit_notice(error).is_some())
+                        .map(str::to_string);
                     let update_count = plans
                         .iter()
                         .filter(|p| p.has_update && !app.ignored_update_ids.contains(&p.repo_id))
@@ -314,13 +319,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             // Suppress -16 (GIT_EAUTH): deleted/private repos the user
                             // has acknowledged; they generate noise on every check.
                             if !is_silenced_git_error(err) {
+                                let user_error = crate::github_api::user_facing_error(err);
                                 app.log(
                                     LogLevel::Error,
                                     &format!(
                                         "{}/{} - {}",
                                         p.owner,
                                         p.name,
-                                        simplify_git_error(err)
+                                        simplify_git_error(&user_error)
                                     ),
                                 );
                             }
@@ -328,7 +334,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     }
 
                     if is_explicit_check {
-                        if update_count > 0 {
+                        if let Some(error) = rate_limit_error.as_deref() {
+                            app.show_github_rate_limit(
+                                "Some GitHub update checks could not finish.",
+                                error,
+                            );
+                        } else if update_count > 0 {
                             app.show_toast(
                                 format!(
                                     "{} update{} available.",
@@ -643,8 +654,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 }
                 Err(e) => {
                     app.log(LogLevel::Error, &format!("Add repo failed: {}", e));
-                    app.show_toast(format!("Add repo failed: {}", e), ToastKind::Error);
-                    app.error = Some(e);
+                    let rate_limited =
+                        app.show_github_rate_limit("The repository could not be added.", &e);
+                    let error = crate::github_api::user_facing_error(&e);
+                    if !rate_limited {
+                        app.show_toast(format!("Add repo failed: {}", error), ToastKind::Error);
+                    }
+                    app.error = Some(error);
                 }
             }
             Some(Task::none())
@@ -1660,6 +1676,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 LogLevel::Error,
                 &format!("Fetch versions failed for '{}': {}", name, e),
             );
+            app.show_github_rate_limit("Versions could not be loaded.", &e);
             Some(Task::none())
         }
         Message::SetPinnedVersion(id, version) => {
@@ -1820,7 +1837,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Ok(None) => app.log(LogLevel::Info, "Already up to date."),
                 Err(e) => {
                     app.log(LogLevel::Error, &format!("Update failed: {}", e));
-                    app.show_toast(format!("Update failed: {}", e), ToastKind::Error);
+                    if !app.show_github_rate_limit("The update could not be downloaded.", &e) {
+                        app.show_toast(format!("Update failed: {}", e), ToastKind::Error);
+                    }
                 }
             }
             return Some(refresh_repos_task(app));
@@ -1916,10 +1935,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Ok(results) => {
                     let mut applied = 0;
                     let mut errors = 0;
+                    let mut rate_limit_error = None;
                     for r in results {
                         let name = format!("{}/{}", r.owner, r.name);
                         if let Some(e) = r.error {
                             errors += 1;
+                            if rate_limit_error.is_none()
+                                && crate::github_api::rate_limit_notice(&e).is_some()
+                            {
+                                rate_limit_error = Some(e.clone());
+                            }
                             app.log(
                                 LogLevel::Error,
                                 &format!("{} update failed: {}", name, simplify_git_error(&e)),
@@ -1931,7 +1956,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             app.plans.retain(|p| p.repo_id != r.repo_id);
                         }
                     }
-                    if errors > 0 {
+                    if let Some(error) = rate_limit_error.as_deref() {
+                        app.show_github_rate_limit("Some updates could not be downloaded.", error);
+                    } else if errors > 0 {
                         app.show_toast(
                             format!("Update all partial: {} OK, {} failed.", applied, errors),
                             ToastKind::Warn,
@@ -1947,7 +1974,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 }
                 Err(e) => {
                     app.log(LogLevel::Error, &format!("Update all failed: {}", e));
-                    app.show_toast(format!("Update all failed: {}", e), ToastKind::Error);
+                    if !app.show_github_rate_limit("Updates could not be downloaded.", &e) {
+                        app.show_toast(format!("Update all failed: {}", e), ToastKind::Error);
+                    }
                 }
             }
             Some(Task::none())
@@ -2222,11 +2251,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.markdown_gif_cache = preview.gif_cache;
                     preview.readme_items
                 }
-                Err(error) => iced::widget::markdown::Content::parse(&format!(
-                    "Could not load the README preview.\n\n{error}"
-                ))
-                .items()
-                .to_vec(),
+                Err(error) => {
+                    app.show_github_rate_limit("The README preview could not be loaded.", &error);
+                    iced::widget::markdown::Content::parse(&format!(
+                        "Could not load the README preview.\n\n{}",
+                        crate::github_api::user_facing_error(&error)
+                    ))
+                    .items()
+                    .to_vec()
+                }
             };
             if let Some(Dialog::Changelog { items, loading, .. }) = app.dialog.as_mut() {
                 *items = loaded_items;
@@ -2303,8 +2336,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     tasks.extend(prefetch_tasks);
                     return Some(Task::batch(tasks));
                 }
-                Err(_) => {
+                Err(error) => {
                     app.add_repo_preview = None;
+                    app.show_github_rate_limit(
+                        "The repository preview could not be loaded.",
+                        &error,
+                    );
                     if matches!(app.dialog, Some(Dialog::AddRepo { .. })) {
                         return Some(delayed_add_repo_url_refocus_task());
                     }
@@ -2353,6 +2390,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         LogLevel::Error,
                         &format!("Failed to fetch release assets: {}", e),
                     );
+                    app.show_github_rate_limit("Release assets could not be loaded.", &e);
                 }
             }
             Some(Task::none())
@@ -2395,10 +2433,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Message::FetchDirContentsResult,
         )),
         Message::FetchDirContentsResult(result) => {
-            if let Ok((dir_path, entries)) = result {
-                let mut sorted = entries;
-                sorted.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
-                app.add_repo_dir_contents.insert(dir_path, sorted);
+            match result {
+                Ok((dir_path, entries)) => {
+                    let mut sorted = entries;
+                    sorted.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+                    app.add_repo_dir_contents.insert(dir_path, sorted);
+                }
+                Err(error) => {
+                    app.show_github_rate_limit("Repository files could not be loaded.", &error);
+                }
             }
             if matches!(app.dialog, Some(Dialog::AddRepo { .. })) {
                 return Some(delayed_add_repo_url_refocus_task());
@@ -2446,6 +2489,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Err(e) => {
                     app.add_repo_show_releases = false;
                     app.log(LogLevel::Error, &format!("Failed to fetch releases: {}", e));
+                    app.show_github_rate_limit("Release notes could not be loaded.", &e);
                     if let Some(Dialog::Changelog {
                         ref mut loading, ..
                     }) = app.dialog

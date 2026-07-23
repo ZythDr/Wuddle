@@ -51,6 +51,7 @@ pub enum Message {
     // Toast notifications
     DismissToast(usize),
     ToastAnimationTick,
+    OpenGithubTokenOptions,
 
     // Dialogs
     OpenDialog(Dialog),
