@@ -109,7 +109,7 @@ pub fn monitor_rects() -> Vec<MonitorRect> {
             1
         }
 
-        let mut monitors = Vec::new();
+        let mut monitors: Vec<MonitorRect> = Vec::new();
         EnumDisplayMonitors(
             0,
             std::ptr::null(),

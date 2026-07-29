@@ -322,9 +322,13 @@ jobs:
       - name: Build Wuddle (Iced) and launcher
         run: |
           cargo test --locked --manifest-path wuddle-iced/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --manifest-path wuddle-launcher/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release --manifest-path wuddle-iced/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release --manifest-path wuddle-launcher/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Show sccache stats
         shell: pwsh
