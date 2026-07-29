@@ -214,7 +214,7 @@ jobs:
           chmod +x dist/wuddle-bin
           mkdir -p dist/share/applications dist/share/icons/hicolor/128x128/apps
           cp wuddle-iced/assets/wuddle.desktop dist/share/applications/wuddle.desktop
-          cp assets/icons/128x128.png dist/share/icons/hicolor/128x128/apps/wuddle.png
+          cp wuddle-iced/assets/icons/128x128.png dist/share/icons/hicolor/128x128/apps/wuddle.png
 
           cat > dist/wuddle << 'LAUNCH'
           #!/usr/bin/env bash
