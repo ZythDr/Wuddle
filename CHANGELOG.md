@@ -2,6 +2,138 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.7.0-beta.7
+
+This release completes a codebase-wide security, reliability, and data-integrity audit covering 75 documented findings.
+
+### Security & Privacy
+
+- **Safer Network Boundaries**
+  - GitHub credentials are attached only to exact trusted GitHub hosts and are never forwarded to lookalike hosts or unsafe redirects.
+  - README images require credential-free standard HTTPS, public network destinations, and revalidation after every redirect, preventing private-network and metadata-service requests.
+  - External README links are limited to safe credential-free web URLs; local files, custom protocols, embedded credentials, and unsafe schemes are blocked.
+- **Bounded Downloads and Image Previews**
+  - Release assets, curated MPQs, README images, and self-update packages now stream with strict size limits instead of buffering unbounded responses in memory.
+  - README images are checked for excessive dimensions, animation frames, and decoded memory use before rendering.
+  - Redirects, declared sizes, actual streamed sizes, signatures, and available SHA-256 metadata are validated before downloaded files are trusted.
+- **Hardened Archive Handling**
+  - ZIP and 7z packages now share one preflight policy covering traversal, links, reparse points, unsafe names, duplicate or case-colliding paths, excessive nesting, file counts, expanded sizes, and compression ratios.
+  - An unsafe archive is rejected before extraction begins, and incomplete staging directories are removed after failure.
+- **Safer Release Assets and Repository URLs**
+  - Primary and secondary release assets must use safe cross-platform filenames and pass the same host, size, signature, digest, and cache-integrity checks.
+  - HTTP repository and direct-download URLs cannot contain or retain embedded credentials. Stored legacy URLs are sanitized without altering ordinary SSH identities needed by Git repositories.
+  - Git failures report privacy-safe host and error categories instead of exposing credentials, signed URLs, private remotes, or local paths.
+- **Credential Storage and Authentication**
+  - Linux portable installations now use Secret Service rather than a plaintext token file.
+  - Legacy plaintext GitHub tokens are removed only after a verified vault write and readback; failed migration leaves the original available for recovery without activating it.
+  - GitHub authentication distinguishes validated, rejected, temporarily unverifiable, and merely stored credentials, and late validation results cannot overwrite a newer token state.
+  - GitHub-token and Auto-Login credential mutations are serialized so a timed-out or superseded operation cannot commit later.
+- **Diagnostic Privacy**
+  - Diagnostic directories and exported files now receive restrictive Unix permissions.
+  - Export sanitation removes credentials, private paths, complete remotes, URL details, settings, and account information while retaining safe project labels needed to identify a failing operation.
+- **Dependency and Release Supply-Chain Updates**
+  - Updated advised Git, TLS, QUIC, concurrency, notification, and Wayland parser dependencies.
+  - Release workflow actions and Linux packaging tools are pinned and verified rather than fetched from mutable references.
+
+### Profile, Settings & Workflow Safety
+
+- **Strict Profile Isolation**
+  - Repository loads, update checks, installs, conflicts, removals, toggles, repairs, previews, pickers, and MPQ operations carry their originating profile and operation generation.
+  - Late or superseded results are discarded before they can change another profile, reopen an old dialog, or start follow-up work against the wrong database or WoW directory.
+  - Switching profiles invalidates profile-specific dialogs and work without allowing an older Profile A result to become valid after switching A → B → A.
+- **Recoverable Settings**
+  - Settings are written through a synchronized same-directory temporary file and atomically replaced.
+  - Wuddle retains a known-good backup, preserves damaged settings for recovery, restores valid backups when possible, and reports load or save failures instead of silently resetting.
+- **Retry-Safe Profile and Account Removal**
+  - New profiles use persistent, non-reusable identifiers so recreating a similarly named profile cannot reconnect to an old database.
+  - Profile deletion uses a durable retry state and removes the complete SQLite database family only after vault and filesystem cleanup succeed.
+  - Auto-Login account deletion similarly records pending cleanup before changing the system vault and resumes interrupted work safely at startup.
+- **Serialized Profile Mutations**
+  - Installs, updates, reinstalls, removals, enable-state changes, MPQ edits, and rescans share one mutation boundary per profile while separate profiles remain independent.
+  - Duplicate operations against the same repository are rejected, and Update All performs mutations sequentially.
+- **Bounded Rescans and Shutdown**
+  - Repository scans have a cooperative deadline, operation-scoped progress, and cancellation checks between major phases.
+  - Timed-out or cancelled scans cannot publish stale progress or overlap later filesystem/database work.
+  - Closing Wuddle during active work now shows a finishing state, saves settings, invalidates cancellable work, synchronizes diagnostics, and uses one bounded shutdown policy on Windows and Linux.
+
+### Installation, Repair & Removal
+
+- **Transactional Addon-Git Updates**
+  - Addon-Git updates clone and validate a staged worktree before changing the live installation.
+  - Dirty worktrees are preserved during routine updates, while Reinstall / Repair remains the explicit way to replace local changes.
+  - Existing remotes, push URLs, refspecs, branches, and configured upstreams are carried into staged replacements instead of rewriting `origin`.
+  - Accepted conflicts, collection changes, updates, and reinstalls use rollback backups plus one coherent metadata transaction, restoring the previous installation after any failure.
+- **Transactional Mod Deployment**
+  - Release archives, direct DLLs, raw files, secondary DLLs, stale-file cleanup, and `dlls.txt` changes are prepared before one rollback-aware deployment.
+  - Managed, modified, shared, or untracked target collisions require explicit approval before live files change.
+  - Displaced files receive ownership-aware backups and can be restored when the replacing mod is removed.
+- **Shared File Ownership**
+  - DLL and raw-file ownership is tracked across the profile so two mods cannot silently overwrite or remove each other’s files.
+  - Ambiguous or disabled owners fail safely, and mods involved in an active shared-file replacement cannot be toggled into an inconsistent state.
+- **Safer Repair and Removal**
+  - Targeted addon repair builds and validates a replacement before removing the live entry and now reports every partial failure.
+  - Reinstall / Repair preserves all secondary DLL assets rather than leaving untracked files behind.
+  - Repository removal verifies tracked worktree, remote, manifest, link, and file identity before deleting anything; modified or ambiguous paths are preserved.
+  - Ambiguous case-equivalent addon worktrees are never deleted automatically.
+- **Atomic Enable and Disable Operations**
+  - Multi-DLL and MPQ toggles preflight every rename, roll back partial filesystem changes, and restore files if metadata persistence fails.
+  - MPQ editor locks are enforced inside the engine for tracked and untracked files and continue following `.disabled` filename changes.
+- **Coherent MPQ State**
+  - MPQ manifests, backups, protection state, custom filenames, destinations, and curated release metadata commit together and roll back together.
+  - Cancelled or superseded MPQ inspection, target review, WDM resolution, installation, and removal results cannot affect a newer dialog or profile.
+  - Once an MPQ deployment reaches its commit phase, the dialog cannot be dismissed until the transaction finishes.
+- **GAM and Generic Git Compatibility**
+  - Manual addon imports retain the directory that actually exists instead of repeatedly renaming or re-importing it from the TOC name.
+  - Unknown and self-hosted Git servers remain generic Git sources with their nested namespace and remote format preserved.
+  - Case-insensitive repository identity is enforced during migration while legacy installs, manifests, dependencies, and GAM moved-folder layouts remain intact.
+  - Truncated GitHub tree responses fall back to the staged Git probe rather than being treated as a complete addon layout.
+
+### Updates, Launching & Platform Reliability
+
+- **Bounded Update Checks**
+  - Git operations receive connection, server-I/O, and overall operation deadlines with cooperative cancellation and bounded concurrency.
+  - Timed-out checks retain and await their workers instead of leaving detached Git activity able to hold resources or publish late results.
+  - Curated patch checks also stop before starting another request after cancellation.
+- **More Accurate Update Decisions**
+  - Unavailable pinned releases remain pinned and produce an actionable error instead of silently falling back to Latest.
+  - Multi-DLL updates compare the complete selected DLL set, including added or removed secondary files.
+  - Cached ZIP, 7z, and DLL assets are revalidated and corrupt entries are discarded before retrying.
+  - GitHub API conservation applies only to GitHub; GitLab, Gitea, Codeberg, generic Git, and direct sources are not skipped.
+  - Infrequent-update schedules persist independently per profile.
+  - Generic local MPQs are no longer sent through remote release-version fetching, while WDM and Epoch Water retain their dedicated update checks.
+- **Verified Self-Updates**
+  - Update selection requires a matching release tag, platform, architecture, asset name, size, and GitHub SHA-256 digest.
+  - Linux updates validate the downloaded x86_64 AppImage, commit it atomically, retain one rollback image, and restore it if relaunch fails.
+  - Windows updates validate and stage both the stable launcher and versioned runtime before changing `current.json`, preserving the previous launcher/runtime for rollback.
+- **Windows Launcher Reliability**
+  - Version selection now follows SemVer, including correct beta ordering and stable promotion, while malformed or incomplete version directories cannot outrank valid releases.
+  - Restarts wait for the confirmed parent process before acquiring single-instance ownership.
+  - Old runtimes are pruned only after a confirmed successful launch and never through linked, malformed, local-development, staged, or still-active paths.
+- **Single-Instance Hardening**
+  - Primary ownership now uses an operating-system file lock with a nonce-authenticated activation handshake.
+  - Stale markers, unrelated localhost listeners, crashes, and ambiguous ownership fail safely instead of opening competing Wuddle processes.
+- **Launching and Window Restoration**
+  - Wine, Lutris, Custom, and bundled-tool arguments now share one non-shell parser supporting quoted values, escapes, empty arguments, and Windows paths.
+  - Saved window positions are checked against connected displays, preserving valid negative-coordinate secondary-monitor positions and recovering windows stranded off-screen.
+  - Linux portable and AppImage data roots now resolve from the actual executable or host AppImage rather than directory-name assumptions.
+
+### Diagnostics, Maintenance & Release Quality
+
+- **Expanded Operation Diagnostics**
+  - Verbose diagnostics now cover meaningful MPQ, mod, DLL, and repository requests, decisions, filesystem changes, metadata commits, cancellations, errors, and rollbacks.
+  - MPQ enable/disable, lock changes, renames, moves, classification, protection, installation, removal, and rescans now identify the affected safe project/component and outcome.
+  - Mod and DLL toggles plus repository removals report their requested state, mechanism, affected-file count, and final result.
+- **Reliable Message Routing**
+  - Frontend messages are classified by reference and moved into exactly one owning feature handler instead of being cloned through every router.
+  - Dialog-sensitive archive messages retain the correct addon-versus-MPQ workflow, and internal routing mismatches are diagnosed rather than silently ignored.
+- **Cleaner Internal Boundaries**
+  - Added focused archive, deployment, network-safety, URL-safety, self-update, profile-operation, desktop-notification, and message-routing modules.
+  - Removed obsolete scratch/resource files and completed crate metadata and Windows executable metadata.
+- **Stronger Release Validation**
+  - Releases now require exact agreement between the Git tag, Cargo manifest, lockfile, isolated changelog heading, and README version heading.
+  - Stable and prerelease eligibility use explicit SemVer selection, and release packages receive structural smoke tests before upload.
+  - Engine, Auto-Login, frontend, no-default-features, launcher, release-validator, formatting, dependency-audit, and strict Clippy coverage were expanded across the completed fixes.
+
 ## v3.7.0-beta.6
 
 ### Improvements

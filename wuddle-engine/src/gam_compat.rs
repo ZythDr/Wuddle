@@ -6,7 +6,7 @@
 //! one place so Wuddle can consume GAM layouts without rewriting them.
 
 use anyhow::{Context, Result};
-use git2::Repository;
+use git2::{ObjectType, Repository, Tree};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use url::Url;
@@ -97,14 +97,6 @@ fn identity_from_parts(url: String, host: String, path: &str) -> Option<GitIdent
     })
 }
 
-fn sanitized_url(mut parsed: Url) -> String {
-    if matches!(parsed.scheme(), "http" | "https") {
-        let _ = parsed.set_username("");
-        let _ = parsed.set_password(None);
-    }
-    parsed.to_string().trim_end_matches('/').to_string()
-}
-
 /// Parse any clone URL accepted by git without guessing an unknown forge.
 /// Full namespace paths are retained, which is important for self-hosted
 /// GitLab and other servers with nested groups.
@@ -155,7 +147,7 @@ pub(crate) fn identity_from_remote(raw: &str) -> Option<GitIdentity> {
             .to_string_lossy()
             .replace('\\', "/");
         return Some(GitIdentity {
-            url: sanitized_url(parsed),
+            url: crate::url_safety::sanitize_remote_for_storage(parsed.as_str()),
             forge: "git".to_string(),
             host: "local".to_string(),
             owner,
@@ -165,7 +157,11 @@ pub(crate) fn identity_from_remote(raw: &str) -> Option<GitIdentity> {
 
     let host = parsed.host_str()?.to_string();
     let path = parsed.path().to_string();
-    identity_from_parts(sanitized_url(parsed), host, &path)
+    identity_from_parts(
+        crate::url_safety::sanitize_remote_for_storage(parsed.as_str()),
+        host,
+        &path,
+    )
 }
 
 /// Build stable local-only identity for a valid worktree with no configured
@@ -195,7 +191,7 @@ pub(crate) fn local_worktree_identity(worktree: &Path) -> GitIdentity {
 
 fn remote_url(repo: &Repository, name: &str) -> Option<String> {
     let remote = repo.find_remote(name).ok()?;
-    let url = remote.url()?.trim();
+    let url = remote.url().ok()?.trim();
     (!url.is_empty()).then(|| url.to_string())
 }
 
@@ -203,11 +199,11 @@ fn remote_name_for_ref(repo: &Repository, refname: &str) -> Option<String> {
     if refname.starts_with("refs/heads/") {
         repo.branch_upstream_remote(refname)
             .ok()
-            .and_then(|name| name.as_str().map(str::to_string))
+            .and_then(|name| name.as_str().ok().map(str::to_string))
     } else if refname.starts_with("refs/remotes/") {
         repo.branch_remote_name(refname)
             .ok()
-            .and_then(|name| name.as_str().map(str::to_string))
+            .and_then(|name| name.as_str().ok().map(str::to_string))
     } else {
         None
     }
@@ -216,7 +212,7 @@ fn remote_name_for_ref(repo: &Repository, refname: &str) -> Option<String> {
 fn reflog_upstream_remote_name(repo: &Repository) -> Option<String> {
     let reflog = repo.reflog("HEAD").ok()?;
     for entry in reflog.iter() {
-        let Some(message) = entry.message() else {
+        let Some(message) = entry.message().ok().flatten() else {
             continue;
         };
         let Some(target) = message
@@ -227,14 +223,14 @@ fn reflog_upstream_remote_name(repo: &Repository) -> Option<String> {
         };
 
         if let Ok(branch) = repo.find_branch(target, git2::BranchType::Local) {
-            if let Some(refname) = branch.get().name() {
+            if let Ok(refname) = branch.get().name() {
                 if let Some(remote) = remote_name_for_ref(repo, refname) {
                     return Some(remote);
                 }
             }
         }
         if let Ok(branch) = repo.find_branch(target, git2::BranchType::Remote) {
-            if let Some(refname) = branch.get().name() {
+            if let Ok(refname) = branch.get().name() {
                 if let Some(remote) = remote_name_for_ref(repo, refname) {
                     return Some(remote);
                 }
@@ -249,7 +245,7 @@ fn reflog_upstream_remote_name(repo: &Repository) -> Option<String> {
 /// changed by this lookup.
 pub(crate) fn preferred_remote(repo: &Repository) -> Option<GitRemote> {
     if let Ok(head) = repo.head() {
-        if let Some(refname) = head.name() {
+        if let Ok(refname) = head.name() {
             let remote_name = remote_name_for_ref(repo, refname);
             if let Some(name) = remote_name {
                 if let Some(url) = remote_url(repo, &name) {
@@ -272,7 +268,12 @@ pub(crate) fn preferred_remote(repo: &Repository) -> Option<GitRemote> {
         });
     }
 
-    for name in repo.remotes().ok()?.iter().flatten() {
+    for name in repo
+        .remotes()
+        .ok()?
+        .iter()
+        .filter_map(|name| name.ok().flatten())
+    {
         if let Some(url) = remote_url(repo, name) {
             return Some(GitRemote {
                 name: name.to_string(),
@@ -330,6 +331,217 @@ pub(crate) fn exposed_addon_is_healthy(
     detect(exposed)
         .iter()
         .any(|name| name.eq_ignore_ascii_case(addon_name))
+}
+
+fn case_insensitive_child(parent: &Path, name: &str) -> Option<PathBuf> {
+    std::fs::read_dir(parent)
+        .ok()?
+        .flatten()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(name)
+        })
+        .map(|entry| entry.path())
+}
+
+fn tree_matches_directory(repo: &Repository, tree: &Tree<'_>, directory: &Path) -> bool {
+    tree.iter().all(|entry| {
+        let Ok(name) = entry.name() else {
+            return false;
+        };
+        let Some(path) = case_insensitive_child(directory, name) else {
+            return false;
+        };
+        match entry.kind() {
+            Some(ObjectType::Blob) if entry.filemode() == 0o120000 => false,
+            Some(ObjectType::Blob) => {
+                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                    return false;
+                };
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return false;
+                }
+                let Ok(contents) = std::fs::read(&path) else {
+                    return false;
+                };
+                git2::Oid::hash_object(ObjectType::Blob, &contents)
+                    .map(|oid| oid == entry.id())
+                    .unwrap_or(false)
+            }
+            Some(ObjectType::Tree) => {
+                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                    return false;
+                };
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return false;
+                }
+                repo.find_tree(entry.id())
+                    .map(|child| tree_matches_directory(repo, &child, &path))
+                    .unwrap_or(false)
+            }
+            _ => false,
+        }
+    })
+}
+
+fn tree_matches_directory_exact(repo: &Repository, tree: &Tree<'_>, directory: &Path) -> bool {
+    if !tree_matches_directory(repo, tree, directory) {
+        return false;
+    }
+    let expected = tree
+        .iter()
+        .filter_map(|entry| entry.name().ok().map(str::to_ascii_lowercase))
+        .collect::<std::collections::HashSet<_>>();
+    let actual = match std::fs::read_dir(directory) {
+        Ok(entries) => entries
+            .filter_map(|entry| {
+                entry
+                    .ok()
+                    .and_then(|entry| entry.file_name().into_string().ok())
+                    .map(|name| name.to_ascii_lowercase())
+            })
+            .collect::<std::collections::HashSet<_>>(),
+        Err(_) => return false,
+    };
+    if actual != expected {
+        return false;
+    }
+
+    tree.iter()
+        .filter(|entry| entry.kind() == Some(ObjectType::Tree))
+        .all(|entry| {
+            let Ok(name) = entry.name() else {
+                return false;
+            };
+            repo.find_tree(entry.id())
+                .map(|child| tree_matches_directory_exact(repo, &child, &directory.join(name)))
+                .unwrap_or(false)
+        })
+}
+
+fn collect_addon_trees(
+    repo: &Repository,
+    tree: &Tree<'_>,
+    addon_name: &str,
+    matches: &mut Vec<git2::Oid>,
+) {
+    let defines_addon = tree.iter().any(|entry| {
+        entry.kind() == Some(ObjectType::Blob)
+            && entry
+                .name()
+                .ok()
+                .and_then(|name| Path::new(name).extension().and_then(|ext| ext.to_str()))
+                .map(|ext| ext.eq_ignore_ascii_case("toc"))
+                .unwrap_or(false)
+            && entry
+                .name()
+                .ok()
+                .and_then(|name| Path::new(name).file_stem().and_then(|stem| stem.to_str()))
+                .map(|stem| stem.eq_ignore_ascii_case(addon_name))
+                .unwrap_or(false)
+    });
+    if defines_addon {
+        matches.push(tree.id());
+    }
+
+    for entry in tree
+        .iter()
+        .filter(|entry| entry.kind() == Some(ObjectType::Tree))
+    {
+        if let Ok(child) = repo.find_tree(entry.id()) {
+            collect_addon_trees(repo, &child, addon_name, matches);
+        }
+    }
+}
+
+fn collect_addon_tree_paths(
+    repo: &Repository,
+    tree: &Tree<'_>,
+    prefix: &Path,
+    addon_name: &str,
+    matches: &mut Vec<PathBuf>,
+) {
+    let defines_addon = tree.iter().any(|entry| {
+        entry.kind() == Some(ObjectType::Blob)
+            && entry
+                .name()
+                .ok()
+                .and_then(|name| Path::new(name).extension().and_then(|ext| ext.to_str()))
+                .map(|ext| ext.eq_ignore_ascii_case("toc"))
+                .unwrap_or(false)
+            && entry
+                .name()
+                .ok()
+                .and_then(|name| Path::new(name).file_stem().and_then(|stem| stem.to_str()))
+                .map(|stem| stem.eq_ignore_ascii_case(addon_name))
+                .unwrap_or(false)
+    });
+    if defines_addon {
+        matches.push(prefix.to_path_buf());
+    }
+
+    for entry in tree
+        .iter()
+        .filter(|entry| entry.kind() == Some(ObjectType::Tree))
+    {
+        let Ok(name) = entry.name() else {
+            continue;
+        };
+        if let Ok(child) = repo.find_tree(entry.id()) {
+            collect_addon_tree_paths(repo, &child, &prefix.join(name), addon_name, matches);
+        }
+    }
+}
+
+pub(crate) fn moved_addon_head_path(worktree: &Path, addon_name: &str) -> Option<PathBuf> {
+    let repo = Repository::open(worktree).ok()?;
+    let head_tree = repo.head().ok()?.peel_to_tree().ok()?;
+    let mut matches = Vec::new();
+    collect_addon_tree_paths(&repo, &head_tree, Path::new(""), addon_name, &mut matches);
+    let [path] = matches.as_slice() else {
+        return None;
+    };
+    Some(path.clone())
+}
+
+/// Verify GAM's real-folder fallback against the checked-out Git tree before
+/// deleting it. Extra untracked files are preserved as part of the directory,
+/// but every tracked file must still match HEAD. Ambiguous duplicate addon
+/// definitions are deliberately rejected.
+pub(crate) fn moved_addon_matches_head(worktree: &Path, exposed: &Path, addon_name: &str) -> bool {
+    let Ok(repo) = Repository::open(worktree) else {
+        return false;
+    };
+    let Ok(head_tree) = repo.head().and_then(|head| head.peel_to_tree()) else {
+        return false;
+    };
+    let mut matches = Vec::new();
+    collect_addon_trees(&repo, &head_tree, addon_name, &mut matches);
+    let [tree_id] = matches.as_slice() else {
+        return false;
+    };
+    repo.find_tree(*tree_id)
+        .map(|tree| tree_matches_directory(&repo, &tree, exposed))
+        .unwrap_or(false)
+}
+
+pub(crate) fn moved_addon_is_clean(worktree: &Path, exposed: &Path, addon_name: &str) -> bool {
+    let Ok(repo) = Repository::open(worktree) else {
+        return false;
+    };
+    let Ok(head_tree) = repo.head().and_then(|head| head.peel_to_tree()) else {
+        return false;
+    };
+    let mut matches = Vec::new();
+    collect_addon_trees(&repo, &head_tree, addon_name, &mut matches);
+    let [tree_id] = matches.as_slice() else {
+        return false;
+    };
+    repo.find_tree(*tree_id)
+        .map(|tree| tree_matches_directory_exact(&repo, &tree, exposed))
+        .unwrap_or(false)
 }
 
 #[cfg(windows)]
@@ -407,6 +619,48 @@ mod tests {
             identity_from_remote("https://user:secret@forge.example/team/project.git").unwrap();
         assert!(!identity.url.contains("user"));
         assert!(!identity.url.contains("secret"));
+    }
+
+    #[test]
+    fn strips_query_and_fragment_from_stored_identity() {
+        let identity = identity_from_remote(
+            "https://forge.example/team/project.git?access_token=secret#branch",
+        )
+        .unwrap();
+        assert_eq!(identity.url, "https://forge.example/team/project.git");
+    }
+
+    #[test]
+    fn moved_folder_identity_requires_tracked_files_to_match_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("Collection.repo");
+        let exposed = temp.path().join("Module");
+        let module = worktree.join("Module");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(module.join("Module.toc"), b"## Interface: 30300\n").unwrap();
+        std::fs::write(module.join("Module.lua"), b"print('original')\n").unwrap();
+        let repo = Repository::init(&worktree).unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("Wuddle Test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+            .unwrap();
+        std::fs::rename(module, &exposed).unwrap();
+
+        assert!(moved_addon_matches_head(&worktree, &exposed, "Module"));
+        assert!(moved_addon_is_clean(&worktree, &exposed, "Module"));
+        std::fs::write(exposed.join("user-note.txt"), b"keep me\n").unwrap();
+        assert!(moved_addon_matches_head(&worktree, &exposed, "Module"));
+        assert!(!moved_addon_is_clean(&worktree, &exposed, "Module"));
+        std::fs::remove_file(exposed.join("user-note.txt")).unwrap();
+        std::fs::write(exposed.join("Module.lua"), b"print('changed')\n").unwrap();
+        assert!(!moved_addon_matches_head(&worktree, &exposed, "Module"));
+        assert!(!moved_addon_is_clean(&worktree, &exposed, "Module"));
     }
 
     #[test]
@@ -488,10 +742,11 @@ mod tests {
         let exposed = temp.path().join("Module");
         symlink("./Collection.repo/Module", &exposed).unwrap();
         let detect = |path: &Path| {
-            path.join("Module.toc")
-                .is_file()
-                .then(|| vec!["Module".to_string()])
-                .unwrap_or_default()
+            if path.join("Module.toc").is_file() {
+                vec!["Module".to_string()]
+            } else {
+                Default::default()
+            }
         };
         assert!(exposed_addon_is_healthy(
             &worktree, &exposed, "Module", detect

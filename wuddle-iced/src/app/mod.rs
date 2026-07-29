@@ -5,7 +5,7 @@ use iced::widget::{
 use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::components::drop_overlay;
 use crate::components::helpers::*;
@@ -14,7 +14,7 @@ use crate::components::presets::build_quick_add_presets;
 use crate::dialogs::mods_warning;
 use crate::dialogs::patches_warning;
 use crate::dialogs::simple_warnings::{
-    addon_conflict, av_false_positive_warning, collection_addon_conflict,
+    addon_conflict, av_false_positive_warning, collection_addon_conflict, file_conflict,
 };
 use crate::message::Message;
 use crate::panels;
@@ -24,7 +24,25 @@ use crate::theme::{self, ThemeColors, WuddleTheme, FRIZ, LIFECRAFT, NOTO};
 use crate::types::*;
 use crate::{chrono_now, chrono_now_fmt, monitor};
 
+mod message_route;
+
 const DIALOG_FOCUS_SCOPE_ID: &str = "wuddle_dialog_focus_scope";
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
+
+fn shutdown_deadline_reached(elapsed: Duration) -> bool {
+    elapsed >= SHUTDOWN_GRACE_PERIOD
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn forced_shutdown_is_only_allowed_after_the_full_grace_period() {
+        assert!(!shutdown_deadline_reached(Duration::from_millis(4999)));
+        assert!(shutdown_deadline_reached(Duration::from_secs(5)));
+    }
+}
 
 fn move_dialog_focus(reverse: bool) -> Task<Message> {
     let scope_id = iced::widget::Id::new(DIALOG_FOCUS_SCOPE_ID);
@@ -39,6 +57,29 @@ fn move_dialog_focus(reverse: bool) -> Task<Message> {
             iced::advanced::widget::operation::focusable::focus_next::<Message>(),
         ))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitHubTokenStatus {
+    None,
+    StoredUnverified,
+    EnvironmentUnverified,
+    Validated,
+    Invalid,
+    OfflineUnverified,
+}
+
+impl GitHubTokenStatus {
+    pub fn is_configured(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateCheckTrigger {
+    Manual,
+    Launch,
+    Scheduled,
 }
 
 pub struct App {
@@ -63,6 +104,10 @@ pub struct App {
 
     // GitHub auth
     pub github_token_input: String,
+    /// Separates credential presence from successful GitHub authentication.
+    pub github_token_status: GitHubTokenStatus,
+    /// Fences late token-validation responses after replacement or removal.
+    pub github_token_validation_generation: u64,
     /// A credential-store error from startup or the last token operation.
     /// Tokens themselves are never kept here or shown in the UI.
     pub github_token_storage_error: Option<String>,
@@ -100,6 +145,9 @@ pub struct App {
     pub error: Option<String>,
     pub wow_dir: String,
     pub active_profile_id: String,
+    /// Changes whenever the active profile context changes. Async results must
+    /// carry the generation they started under before they may update the app.
+    pub profile_generation: u64,
     pub db_path: Option<PathBuf>,
     pub last_checked: Option<String>,
 
@@ -117,8 +165,13 @@ pub struct App {
     pub update_check_stage_started_at_by_repo: HashMap<i64, Instant>,
     pub update_check_last_warning_secs_by_repo: HashMap<i64, u64>,
     pub local_archive_hover_path: Option<PathBuf>,
+    pub async_request_counter: u64,
+    pub pending_wow_path_picker: Option<u64>,
+    pub pending_local_archive_picker: Option<u64>,
+    pub preview_request_generation: u64,
     pub busy_started_at: Option<Instant>,
     pub busy_state_snapshot: Option<String>,
+    pub shutdown_requested_at: Option<Instant>,
     pub launch_in_progress: bool,
     #[cfg(feature = "auto-login")]
     pub auto_login_account_picker_tooltip_visible: bool,
@@ -139,14 +192,18 @@ pub struct App {
     pub self_update_assets_pending: bool,
     pub self_update_in_progress: bool,
     pub self_update_done: bool,
+    /// Prevent repository refreshes from repeating the launch-time update
+    /// request. Explicit About-page and hourly checks remain available.
+    pub self_update_launch_check_started: bool,
 
     // Auto-check
-    pub autocheck_done: bool,
+    /// Profiles that have received their once-per-session launch check.
+    pub autocheck_done_profile_ids: HashSet<String>,
     pub auto_check_minutes: u32,
     /// Tracks when infrequent repos were last checked (wall-clock unix seconds).
     pub last_infrequent_check_unix: i64,
-    /// Per-profile copy of the infrequent check timer, retained across profile switches.
-    pub last_infrequent_check_unix_by_profile: HashMap<String, i64>,
+    /// Identifies whether the visible check was manual or automatic.
+    pub update_check_trigger: Option<UpdateCheckTrigger>,
     /// Repos considered infrequently updated (last release > 3 days ago, no pending update).
     pub infrequent_repo_ids: std::collections::HashSet<i64>,
 
@@ -194,6 +251,10 @@ pub struct App {
     // Repos whose updates are being ignored
     pub ignored_update_ids: HashSet<i64>,
     pub ignored_update_ids_by_profile: HashMap<String, HashSet<i64>>,
+    pub pending_profile_deletion_ids: HashSet<String>,
+    pub profile_deletions_in_progress: HashSet<String>,
+    #[cfg(feature = "auto-login")]
+    pub auto_login_deletions_in_progress: HashSet<(String, String)>,
     pub mods_warning_dismissed_profile_ids: HashSet<String>,
     pub patches_warning_dismissed_profile_ids: HashSet<String>,
 
@@ -252,7 +313,15 @@ impl App {
         theme_colors.body_font = if opt_friz_font { FRIZ } else { NOTO };
         // Do this before the first API work. Errors are retained for Options
         // instead of being silently treated as an anonymous session.
-        let github_token_storage_error = service::sync_github_token().err();
+        let token_sync = service::sync_github_token();
+        let github_token_status = match token_sync.as_ref().ok().copied() {
+            Some(service::GitHubTokenSource::Stored) => GitHubTokenStatus::StoredUnverified,
+            Some(service::GitHubTokenSource::Environment) => {
+                GitHubTokenStatus::EnvironmentUnverified
+            }
+            Some(service::GitHubTokenSource::None) | None => GitHubTokenStatus::None,
+        };
+        let github_token_storage_error = token_sync.err();
         let mut app = Self {
             active_tab: Tab::default(),
             theme_colors,
@@ -270,6 +339,8 @@ impl App {
             opt_friz_font: false,
             remember_window_geometry: true,
             github_token_input: String::new(),
+            github_token_status,
+            github_token_validation_generation: 0,
             github_token_storage_error,
             tweaks: TweakState::default(),
             log_lines: {
@@ -284,8 +355,7 @@ impl App {
                     if let Some((w, h)) = monitor::primary_monitor_size() {
                         lines.push(LogLine {
                             level: LogLevel::Info,
-                            text: format!("Monitor {w}x{h} detected \u{2014} auto scale {pct}%")
-                                .into(),
+                            text: format!("Monitor {w}x{h} detected \u{2014} auto scale {pct}%"),
                             timestamp: chrono_now(),
                         });
                     }
@@ -316,6 +386,7 @@ impl App {
             error: None,
             wow_dir: String::new(),
             active_profile_id: String::from("default"),
+            profile_generation: 0,
             db_path: None,
             last_checked: None,
             checking_updates: false,
@@ -328,8 +399,13 @@ impl App {
             update_check_stage_started_at_by_repo: HashMap::new(),
             update_check_last_warning_secs_by_repo: HashMap::new(),
             local_archive_hover_path: None,
+            async_request_counter: 0,
+            pending_wow_path_picker: None,
+            pending_local_archive_picker: None,
+            preview_request_generation: 0,
             busy_started_at: None,
             busy_state_snapshot: None,
+            shutdown_requested_at: None,
             launch_in_progress: false,
             #[cfg(feature = "auto-login")]
             auto_login_account_picker_tooltip_visible: false,
@@ -345,10 +421,11 @@ impl App {
             self_update_assets_pending: false,
             self_update_in_progress: false,
             self_update_done: false,
-            autocheck_done: false,
+            self_update_launch_check_started: false,
+            autocheck_done_profile_ids: HashSet::new(),
             auto_check_minutes: 60,
             last_infrequent_check_unix: 0,
-            last_infrequent_check_unix_by_profile: HashMap::new(),
+            update_check_trigger: None,
             infrequent_repo_ids: std::collections::HashSet::new(),
             profiles: vec![settings::ProfileConfig::default()],
             #[cfg(feature = "auto-login")]
@@ -380,6 +457,10 @@ impl App {
             toast_counter: 0,
             ignored_update_ids: HashSet::new(),
             ignored_update_ids_by_profile: HashMap::new(),
+            pending_profile_deletion_ids: HashSet::new(),
+            profile_deletions_in_progress: HashSet::new(),
+            #[cfg(feature = "auto-login")]
+            auto_login_deletions_in_progress: HashSet::new(),
             mods_warning_dismissed_profile_ids: HashSet::new(),
             patches_warning_dismissed_profile_ids: HashSet::new(),
             github_rate_info: None,
@@ -414,8 +495,10 @@ impl App {
         }
 
         // Load settings synchronously (fast, local JSON), then kick off async repo load
-        let settings_task =
-            Task::perform(async { settings::load_settings() }, Message::SettingsLoaded);
+        let settings_task = Task::perform(
+            async { settings::load_settings_with_warning() },
+            Message::SettingsLoaded,
+        );
 
         let task = settings_task;
 
@@ -430,6 +513,72 @@ impl App {
             timestamp: chrono_now_fmt(self.opt_clock12),
         });
         self.rebuild_log_content();
+    }
+
+    pub fn profile_operation_scope(&self) -> ProfileOperationScope {
+        ProfileOperationScope::new(self.active_profile_id.clone(), self.profile_generation)
+    }
+
+    pub fn advance_profile_generation(&mut self) {
+        self.profile_generation = self.profile_generation.wrapping_add(1);
+        // Busy flags and progress snapshots belong to the previous generation.
+        // Clearing them here prevents a discarded stale result from leaving the
+        // newly selected profile permanently marked as busy.
+        self.checking_updates = false;
+        self.update_check_trigger = None;
+        self.updating_all = false;
+        self.updating_repo_ids.clear();
+        self.current_rescan_snapshot = None;
+        self.current_rescan_started_at = None;
+        self.last_rescan_warning_secs = None;
+        self.update_check_stage_by_repo.clear();
+        self.update_check_stage_started_at_by_repo.clear();
+        self.update_check_last_warning_secs_by_repo.clear();
+        service::clear_rescan_progress();
+        service::clear_update_check_progress();
+    }
+
+    pub fn next_async_request_id(&mut self) -> u64 {
+        self.async_request_counter = self.async_request_counter.wrapping_add(1);
+        self.async_request_counter
+    }
+
+    pub fn begin_preview_request(&mut self) -> u64 {
+        self.preview_request_generation = self.preview_request_generation.wrapping_add(1);
+        self.preview_request_generation
+    }
+
+    pub fn preview_request_is_current(&mut self, generation: u64, operation: &str) -> bool {
+        if generation == self.preview_request_generation {
+            true
+        } else {
+            self.log(
+                LogLevel::Info,
+                &format!("Discarded stale {operation} result after its dialog changed."),
+            );
+            false
+        }
+    }
+
+    /// Returns the task value only when it still belongs to the exact profile
+    /// context that started it.
+    pub fn accept_profile_result<T>(
+        &mut self,
+        result: ProfileScoped<T>,
+        operation: &str,
+    ) -> Option<T> {
+        if result
+            .scope
+            .matches(&self.active_profile_id, self.profile_generation)
+        {
+            Some(result.value)
+        } else {
+            self.log(
+                LogLevel::Info,
+                &format!("Discarded stale {operation} result after the profile context changed."),
+            );
+            None
+        }
     }
 
     pub fn show_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
@@ -527,8 +676,17 @@ impl App {
         }
     }
 
-    pub fn save_settings(&self) {
-        let _ = self.try_save_settings();
+    pub fn save_settings(&mut self) {
+        if let Err(error) = self.try_save_settings() {
+            self.log(
+                LogLevel::Error,
+                &format!("Settings could not be saved: {error}"),
+            );
+            self.show_toast(
+                "Wuddle could not save its settings. Your latest change may not persist after restart.",
+                ToastKind::Error,
+            );
+        }
     }
 
     pub fn try_save_settings(&self) -> Result<(), String> {
@@ -565,6 +723,15 @@ impl App {
             profiles: self.profiles.clone(),
             ignored_update_ids: current_ignored,
             ignored_update_ids_by_profile,
+            pending_profile_deletion_ids: {
+                let mut ids = self
+                    .pending_profile_deletion_ids
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                ids.sort();
+                ids
+            },
             mods_warning_dismissed_profile_ids: {
                 let mut ids = self
                     .mods_warning_dismissed_profile_ids
@@ -640,6 +807,7 @@ impl App {
             || !self.updating_repo_ids.is_empty()
             || self.add_repo_preview_loading
             || self.mpq_ui.busy
+            || self.self_update_in_progress
     }
 
     pub fn busy_reasons(&self) -> Vec<String> {
@@ -661,6 +829,9 @@ impl App {
         }
         if self.mpq_ui.busy {
             reasons.push("managing MPQ patches".to_string());
+        }
+        if self.self_update_in_progress {
+            reasons.push("installing a Wuddle update".to_string());
         }
         reasons
     }
@@ -685,9 +856,7 @@ impl App {
             let active = service::active_update_check_progress();
             for progress in active.iter().take(3) {
                 let stage = match progress.stage {
-                    wuddle_engine::UpdateCheckProgressStage::Started => {
-                        "starting the update check"
-                    }
+                    wuddle_engine::UpdateCheckProgressStage::Started => "starting the update check",
                     wuddle_engine::UpdateCheckProgressStage::InspectingInstallation => {
                         "preparing the repository check"
                     }
@@ -783,6 +952,25 @@ impl App {
         task
     }
 
+    fn finish_routed_update(
+        &mut self,
+        task: Option<Task<Message>>,
+        route: &'static str,
+    ) -> Task<Message> {
+        match task {
+            Some(task) => self.finish_update(task),
+            None => {
+                self.log(
+                    LogLevel::Error,
+                    &format!(
+                        "Internal message-routing mismatch in {route}; the action was ignored."
+                    ),
+                );
+                self.finish_update(Task::none())
+            }
+        }
+    }
+
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subs = Vec::new();
 
@@ -828,6 +1016,13 @@ impl App {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(400))
                     .map(|_| Message::PollRescanProgress),
+            );
+        }
+
+        if self.shutdown_requested_at.is_some() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(100))
+                    .map(|_| Message::ShutdownTick),
             );
         }
 
@@ -1016,27 +1211,40 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        if let Some(task) = crate::mpq::update(self, message.clone()) {
-            return self.finish_update(task);
-        }
-        #[cfg(feature = "auto-login")]
-        if let Some(task) = crate::auto_login::update(self, message.clone()) {
-            return self.finish_update(task);
-        }
-        if let Some(task) = crate::update::misc::update(self, message.clone()) {
-            return self.finish_update(task);
-        }
-        if let Some(task) = crate::update::tweaks::update(self, message.clone()) {
-            return self.finish_update(task);
-        }
-        if let Some(task) = crate::update::about::update(self, message.clone()) {
-            return self.finish_update(task);
-        }
-        if let Some(task) = crate::update::settings::update(self, message.clone()) {
-            return self.finish_update(task);
-        }
-        if let Some(task) = crate::update::repos::update(self, message.clone()) {
-            return self.finish_update(task);
+        use message_route::MessageRoute;
+
+        let route = message_route::classify(&message, &self.dialog);
+        match route {
+            MessageRoute::Mpq => {
+                let task = crate::mpq::update(self, message);
+                return self.finish_routed_update(task, "MPQ");
+            }
+            #[cfg(feature = "auto-login")]
+            MessageRoute::AutoLogin => {
+                let task = crate::auto_login::update(self, message);
+                return self.finish_routed_update(task, "Auto-login");
+            }
+            MessageRoute::Misc => {
+                let task = crate::update::misc::update(self, message);
+                return self.finish_routed_update(task, "Miscellaneous");
+            }
+            MessageRoute::Tweaks => {
+                let task = crate::update::tweaks::update(self, message);
+                return self.finish_routed_update(task, "Tweaks");
+            }
+            MessageRoute::About => {
+                let task = crate::update::about::update(self, message);
+                return self.finish_routed_update(task, "About");
+            }
+            MessageRoute::Settings => {
+                let task = crate::update::settings::update(self, message);
+                return self.finish_routed_update(task, "Settings");
+            }
+            MessageRoute::Repos => {
+                let task = crate::update::repos::update(self, message);
+                return self.finish_routed_update(task, "Repositories");
+            }
+            MessageRoute::App => {}
         }
 
         match message {
@@ -1086,6 +1294,7 @@ impl App {
                 }
                 // Fire self-update check whenever the About tab becomes active
                 if tab == Tab::About {
+                    self.self_update_launch_check_started = true;
                     return self.finish_update(Task::perform(
                         service::check_self_update_full(self.update_channel == UpdateChannel::Beta),
                         Message::CheckSelfUpdateResult,
@@ -1248,6 +1457,7 @@ impl App {
                 return self.finish_update(move_dialog_focus(true));
             }
             Message::OpenDialog(mut d) => {
+                self.begin_preview_request();
                 self.open_menu = None;
                 self.add_new_menu_open = false;
                 if matches!(
@@ -1275,16 +1485,19 @@ impl App {
                 let fetch_task = if let Dialog::RemoveRepo { id, .. } = &d {
                     let db = self.db_path.clone();
                     let repo_id = *id;
-                    Task::perform(
-                        service::list_repo_installs(db, repo_id),
-                        Message::RemoveRepoFilesLoaded,
-                    )
+                    let scope = self.profile_operation_scope();
+                    Task::perform(service::list_repo_installs(db, repo_id), move |result| {
+                        Message::RemoveRepoFilesLoaded(ProfileScoped::new(scope.clone(), result))
+                    })
                 } else if let Dialog::RepoDetails { id: Some(id), .. } = &d {
                     let db = self.db_path.clone();
                     let repo_id = *id;
+                    let scope = self.profile_operation_scope();
                     Task::perform(
                         service::load_repo_details(db, repo_id, PathBuf::from(&self.wow_dir)),
-                        Message::RepoDetailsLoaded,
+                        move |result| {
+                            Message::RepoDetailsLoaded(ProfileScoped::new(scope.clone(), result))
+                        },
                     )
                 } else if matches!(
                     d,
@@ -1318,18 +1531,27 @@ impl App {
                 self.dialog = Some(d);
                 return self.finish_update(fetch_task);
             }
-            Message::RemoveRepoFilesLoaded(result) => {
+            Message::RemoveRepoFilesLoaded(scoped) => {
+                let Some(result) = self.accept_profile_result(scoped, "repository removal preview")
+                else {
+                    return self.finish_update(Task::none());
+                };
                 if let Some(Dialog::RemoveRepo { ref mut files, .. }) = self.dialog {
                     *files = result.unwrap_or_default();
                 }
             }
-            Message::RepoDetailsLoaded(result) => {
+            Message::RepoDetailsLoaded(scoped) => {
+                let Some(result) = self.accept_profile_result(scoped, "repository details load")
+                else {
+                    return self.finish_update(Task::none());
+                };
                 if let Some(Dialog::RepoDetails { files, loading, .. }) = &mut self.dialog {
                     *loading = false;
                     *files = result.unwrap_or_default();
                 }
             }
             Message::ToggleRepoDetailsPath(path) => {
+                let scope = self.profile_operation_scope();
                 if let Some(Dialog::RepoDetails {
                     expanded_paths,
                     loading_paths,
@@ -1352,12 +1574,20 @@ impl App {
                     return self.finish_update(Task::perform(
                         service::load_game_directory_children(wow_dir, path),
                         move |result| {
-                            Message::RepoDetailsChildrenLoaded(result_path.clone(), result)
+                            Message::RepoDetailsChildrenLoaded(ProfileScoped::new(
+                                scope.clone(),
+                                (result_path.clone(), result),
+                            ))
                         },
                     ));
                 }
             }
-            Message::RepoDetailsChildrenLoaded(path, result) => {
+            Message::RepoDetailsChildrenLoaded(scoped) => {
+                let Some((path, result)) =
+                    self.accept_profile_result(scoped, "repository-details directory load")
+                else {
+                    return self.finish_update(Task::none());
+                };
                 if let Some(Dialog::RepoDetails {
                     expanded_paths,
                     loading_paths,
@@ -1385,6 +1615,33 @@ impl App {
                 }
             }
             Message::CloseDialog => {
+                let closing_mpq_workflow =
+                    self.dialog.as_ref().is_some_and(Dialog::is_mpq_workflow);
+                if closing_mpq_workflow && self.mpq_ui.dismissal_blocked() {
+                    self.show_toast(
+                        "Wuddle is finishing the MPQ operation. This window will close when it completes.",
+                        ToastKind::Info,
+                    );
+                    return self.finish_update(Task::none());
+                }
+                if closing_mpq_workflow {
+                    // Inspection, target preview, source picking, and WDM
+                    // resolution do not mutate the game. Invalidate their
+                    // result identity so closing here is a real UI cancel.
+                    self.mpq_ui.cancel_precommit_work();
+                }
+                self.begin_preview_request();
+                self.pending_wow_path_picker = None;
+                self.pending_local_archive_picker = None;
+                if let Some(repo_id) = self
+                    .dialog
+                    .as_ref()
+                    .and_then(Dialog::pending_conflict_cleanup_repo_id)
+                {
+                    self.dialog = None;
+                    return self
+                        .finish_update(Task::done(Message::CancelConflictInstall { repo_id }));
+                }
                 if let Some(Dialog::CollectionAddonConflict { repo_url, .. }) = self.dialog.take() {
                     self.dialog = Some(Dialog::AddRepo {
                         url: repo_url,
@@ -1436,7 +1693,13 @@ impl App {
                 }
             }
             Message::RequestExit => {
+                if self.shutdown_requested_at.is_some() {
+                    return self.finish_update(Task::none());
+                }
                 self.save_settings();
+                self.begin_preview_request();
+                self.add_repo_preview_loading = false;
+                self.mpq_ui.cancel_precommit_work();
 
                 let busy = self.busy_summary();
                 if let Some(summary) = busy.clone() {
@@ -1444,32 +1707,57 @@ impl App {
                         LogLevel::Info,
                         &format!("Close requested while busy: {}.", summary),
                     );
+                    self.shutdown_requested_at = Some(Instant::now());
+                    self.show_toast(
+                        "Finishing the current operation before closing Wuddle…",
+                        ToastKind::Info,
+                    );
+                    return self.finish_update(Task::none());
                 }
 
-                #[cfg(target_os = "windows")]
-                std::thread::spawn(move || {
-                    if let Some(summary) = busy {
-                        eprintln!(
-                            "[Wuddle] Forced shutdown on close request while busy: {}",
-                            summary
-                        );
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                    std::process::exit(0);
-                });
-
-                #[cfg(not(target_os = "windows"))]
-                if busy.is_some() {
-                    std::thread::spawn(move || {
-                        if let Some(summary) = busy {
-                            eprintln!("[Wuddle] Aborting on close request while busy: {}", summary);
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(750));
-                        std::process::abort();
-                    });
+                crate::diagnostics::write_system(
+                    "INFO",
+                    "shutdown",
+                    "Close requested while idle; closing normally.",
+                );
+                if let Err(error) = crate::diagnostics::flush() {
+                    eprintln!("[Wuddle] {error}");
                 }
-
                 return self.finish_update(iced::window::latest().and_then(iced::window::close));
+            }
+            Message::ShutdownTick => {
+                let Some(requested_at) = self.shutdown_requested_at else {
+                    return self.finish_update(Task::none());
+                };
+                if !self.is_busy() {
+                    self.log(
+                        LogLevel::Info,
+                        "Active work finished; completing the requested shutdown.",
+                    );
+                    self.shutdown_requested_at = None;
+                    if let Err(error) = crate::diagnostics::flush() {
+                        eprintln!("[Wuddle] {error}");
+                    }
+                    return self
+                        .finish_update(iced::window::latest().and_then(iced::window::close));
+                }
+                if shutdown_deadline_reached(requested_at.elapsed()) {
+                    let summary = self
+                        .busy_summary()
+                        .unwrap_or_else(|| "background work".to_string());
+                    crate::diagnostics::write_system(
+                        "ERROR",
+                        "shutdown",
+                        &format!(
+                            "Five-second shutdown deadline reached while busy: {summary}. Forcing process exit."
+                        ),
+                    );
+                    if let Err(error) = crate::diagnostics::flush() {
+                        eprintln!("[Wuddle] {error}");
+                    }
+                    std::process::exit(0);
+                }
+                return self.finish_update(Task::none());
             }
             Message::ConsumeDialogClick => {}
             Message::WindowMoved(_) | Message::WindowResized(_) => {}
@@ -1499,6 +1787,7 @@ impl App {
             Message::SaveSettings
             | Message::SaveGithubToken
             | Message::SaveGithubTokenResult(_)
+            | Message::ValidateGithubTokenResult { .. }
             | Message::ForgetGithubToken
             | Message::ForgetGithubTokenResult(_) => {}
 
@@ -1523,7 +1812,9 @@ impl App {
             Message::RemoveProfile(_) | Message::RemoveProfileResult(_, _) => {}
 
             // --- File dialog ---
-            Message::PickWowDirectory | Message::PickWowExecutable | Message::WowPathPicked(_) => {}
+            Message::PickWowDirectory
+            | Message::PickWowExecutable
+            | Message::WowPathPicked { .. } => {}
 
             // --- Tweak value setters ---
 
@@ -1541,7 +1832,12 @@ impl App {
                 self.open_menu = None;
                 self.dialog = Some(Dialog::AwesomeWotlkPatchWarning);
             }
-            Message::PromptAwesomeWotlkPatchIfInstalled(is_awesome_wotlk) => {
+            Message::PromptAwesomeWotlkPatchIfInstalled(scoped) => {
+                let Some(is_awesome_wotlk) =
+                    self.accept_profile_result(scoped, "Awesome WotLK installation check")
+                else {
+                    return self.finish_update(Task::none());
+                };
                 if is_awesome_wotlk {
                     self.open_menu = None;
                     self.dialog = Some(Dialog::AwesomeWotlkPatchWarning);
@@ -1615,10 +1911,8 @@ impl App {
                     }
                 }
             }
-            Message::DxvkPreviewEditorAction(action) => {
-                if !action.is_edit() {
-                    self.dxvk_preview_content.perform(action);
-                }
+            Message::DxvkPreviewEditorAction(action) if !action.is_edit() => {
+                self.dxvk_preview_content.perform(action);
             }
 
             // Tweak read/apply/restore
@@ -1636,6 +1930,7 @@ impl App {
             use_symlinks: self.opt_symlinks,
             set_xattr_comment: self.opt_xattr,
             replace_addon_conflicts: false,
+            replace_file_conflicts: false,
             cache_keep_versions: 2,
         }
     }
@@ -1671,8 +1966,7 @@ impl App {
         let main_content: Element<Message> = main_layout.into();
 
         // Determine which overlays to add
-        let overlay: Element<Message> = if self.dialog.is_some() {
-            let dialog = self.dialog.as_ref().unwrap();
+        let overlay: Element<Message> = if let Some(dialog) = self.dialog.as_ref() {
             let c = colors;
 
             // Two-card layout for AddRepo with a loaded (or loading) preview
@@ -1726,6 +2020,7 @@ impl App {
                     | Dialog::RemoveCollectionAddon { .. } => (650u32, 24),
                     Dialog::AddonConflict { .. } => (920u32, 24),
                     Dialog::CollectionAddonConflict { .. } => (920u32, 24),
+                    Dialog::FileConflict { .. } => (650u32, 24),
                     _ => (480u32, 24),
                 };
                 let c_dlg = c;
@@ -1766,7 +2061,7 @@ impl App {
             // Browsing/configuration dialogs may be abandoned by clicking the
             // backdrop. Confirmation and warning dialogs deliberately remain
             // modal, so an accidental background click cannot dismiss them.
-            let dismiss_on_backdrop = matches!(
+            let dismiss_on_backdrop = (matches!(
                 dialog,
                 Dialog::AddRepo { .. }
                     | Dialog::MpqAdd
@@ -1793,7 +2088,8 @@ impl App {
                 {
                     false
                 }
-            };
+            }) && !(dialog.is_mpq_workflow()
+                && self.mpq_ui.dismissal_blocked());
             let scrim_base = container(Space::new())
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -1822,7 +2118,6 @@ impl App {
                     .width(Length::Fill)
                     .height(Length::Fill),
             )
-            .into()
         } else {
             Space::new().width(0).height(0).into()
         };
@@ -1838,7 +2133,52 @@ impl App {
             .height(Length::Fill)
             .into();
 
-        self.layer_toasts(base, colors)
+        let base = self.layer_toasts(base, colors);
+
+        if self.shutdown_requested_at.is_some() {
+            let primary = colors.primary;
+            let c = colors;
+            let reason = self
+                .busy_summary()
+                .unwrap_or_else(|| "Finishing background work".to_string());
+            let status = row![
+                canvas(SpinnerCanvas {
+                    tick: self.spinner_tick,
+                    color: primary,
+                })
+                .width(28)
+                .height(28),
+                column![
+                    text("Closing Wuddle").size(20).font(Font {
+                        weight: iced::font::Weight::Semibold,
+                        ..Font::DEFAULT
+                    }),
+                    text(reason).size(16).color(colors.text_soft),
+                ]
+                .spacing(6),
+            ]
+            .align_y(iced::Alignment::Center)
+            .spacing(14);
+            let card = container(status)
+                .max_width(520)
+                .padding(24)
+                .style(move |_theme| theme::dialog_style(c));
+            let scrim = container(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_theme| theme::scrim_style());
+            let centered = container(card)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .padding(40);
+            iced::widget::opaque(
+                stack![base, scrim, centered]
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+        } else {
+            base
+        }
     }
 
     /// Renders the toast notification overlay on top of the given base element.
@@ -2555,7 +2895,7 @@ impl App {
 
                         // Files section
                         if !preview.files.is_empty() {
-                            let hinted_addon = service::selected_addon_hint_from_url(&url);
+                            let hinted_addon = service::selected_addon_hint_from_url(url);
                             let collection_mode = manage_mode
                                 || hinted_addon.is_some()
                                 || self.add_repo_collection_choice == Some(true);
@@ -3618,8 +3958,7 @@ impl App {
                                         if !r.items.is_empty() {
                                             col_items.push(
                                                 iced::widget::markdown::view(&r.items, rn_settings)
-                                                    .map(Message::OpenUrl)
-                                                    .into(),
+                                                    .map(Message::OpenUrl),
                                             );
                                         }
                                         container(column(col_items).spacing(3))
@@ -4607,6 +4946,9 @@ impl App {
                         iced::widget::text_input("--some-arg value", wine_args)
                             .on_input(|s| Message::UpdateInstanceField(InstanceField::WineArgs(s)))
                             .padding([8, 12]),
+                        text("Use quotes around an argument containing spaces. Backslashes may escape quotes or spaces.")
+                            .size(16)
+                            .color(colors.muted),
                     ]
                     .spacing(4)
                     .into(),
@@ -4629,6 +4971,9 @@ impl App {
                                 s
                             )))
                             .padding([8, 12]),
+                        text("Use quotes around an argument containing spaces. Backslashes may escape quotes or spaces.")
+                            .size(16)
+                            .color(colors.muted),
                         text("Tip: use {exe} for the game path and {autologin_args} where secure auto-login arguments should be inserted.")
                             .size(16)
                             .color(colors.muted),
@@ -4979,6 +5324,12 @@ impl App {
             Dialog::PatchesWarning { do_not_show_again } => {
                 patches_warning::view(*do_not_show_again, colors)
             }
+            Dialog::FileConflict {
+                repo_id,
+                repo_name,
+                files,
+                action,
+            } => file_conflict(*repo_id, repo_name, files, *action, colors),
             Dialog::AddonConflict {
                 url,
                 mode,

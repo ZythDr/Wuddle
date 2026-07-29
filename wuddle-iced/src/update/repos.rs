@@ -3,7 +3,7 @@ use crate::components::presets::{
 };
 use crate::service;
 use crate::settings::UpdateChannel;
-use crate::{App, CheckStats, Dialog, LogLevel, Message, ToastKind};
+use crate::{App, CheckStats, Dialog, FileConflictAction, LogLevel, Message, ToastKind};
 use iced::Task;
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -75,6 +75,51 @@ pub fn parse_addon_conflict_error(err: &str) -> Vec<String> {
     names
 }
 
+fn parse_file_conflict_error(error: &str) -> Vec<String> {
+    let details = error
+        .split_once("found for: ")
+        .map(|(_, details)| details)
+        .unwrap_or("existing installation files")
+        .split_once(". Confirm replacement")
+        .map(|(details, _)| details)
+        .unwrap_or("existing installation files");
+    let files = details
+        .split("; ")
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if files.is_empty() {
+        vec!["existing installation files".to_string()]
+    } else {
+        files
+    }
+}
+
+fn show_file_conflict(app: &mut App, repo_id: i64, action: FileConflictAction, error: &str) {
+    app.updating_repo_ids.remove(&repo_id);
+    let repo_name = app
+        .repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .map(|repo| format!("{}/{}", repo.owner, repo.name))
+        .unwrap_or_else(|| "this mod".to_string());
+    let files = parse_file_conflict_error(error);
+    app.log(
+        LogLevel::Info,
+        &format!(
+            "File replacement approval required for repo id={repo_id}: conflict_count={}",
+            files.len()
+        ),
+    );
+    app.dialog = Some(Dialog::FileConflict {
+        repo_id,
+        repo_name,
+        files,
+        action,
+    });
+}
+
 fn install_local_archive(app: &mut App, path: std::path::PathBuf) -> Option<Task<Message>> {
     crate::diagnostics::register_private_path(&path, "<LOCAL_ARCHIVE>");
     if !service::is_local_archive_path(&path) {
@@ -101,15 +146,19 @@ fn install_local_archive(app: &mut App, path: std::path::PathBuf) -> Option<Task
     app.dialog = None;
     app.reset_add_repo_state();
     app.log(LogLevel::Info, &format!("Adding local archive: {:?}", path));
+    let scope = app.profile_operation_scope();
     Some(Task::perform(
         service::add_local_archive_file(db, path),
-        Message::AddRepoResult,
+        move |result| Message::AddRepoResult(crate::ProfileScoped::new(scope.clone(), result)),
     ))
 }
 
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
-        Message::ReposLoaded(result) => {
+        Message::ReposLoaded(scoped) => {
+            let Some(result) = app.accept_profile_result(scoped, "repository load") else {
+                return Some(Task::none());
+            };
             app.loading = false;
             service::clear_rescan_progress();
             app.current_rescan_snapshot = None;
@@ -117,6 +166,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.last_rescan_warning_secs = None;
             match result {
                 Ok(load_result) => {
+                    crate::diagnostics::register_repository_rows(&load_result.rows);
                     for entry in &load_result.logs {
                         app.log(entry.level, &entry.text);
                     }
@@ -144,28 +194,43 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         .filter(|r| r.mode == "addon_git" && !app.branches.contains_key(&r.id))
                         .map(|r| {
                             let db = app.db_path.clone();
-                            Task::perform(
-                                service::list_repo_branches(db, r.id),
-                                Message::FetchBranchesResult,
-                            )
+                            let scope = app.profile_operation_scope();
+                            Task::perform(service::list_repo_branches(db, r.id), move |result| {
+                                Message::FetchBranchesResult(crate::ProfileScoped::new(
+                                    scope.clone(),
+                                    result,
+                                ))
+                            })
                         })
                         .collect();
-                    // Auto-check on launch if the option is enabled (only once per session)
+                    // Auto-check each loaded profile once per session. A global
+                    // flag left secondary profiles unchecked until the timer fired.
                     if app.opt_auto_check
                         && !app.repos.is_empty()
                         && !app.checking_updates
-                        && !app.autocheck_done
+                        && !app
+                            .autocheck_done_profile_ids
+                            .contains(&app.active_profile_id)
                     {
-                        app.autocheck_done = true;
+                        app.autocheck_done_profile_ids
+                            .insert(app.active_profile_id.clone());
                         app.checking_updates = true;
+                        app.update_check_trigger = Some(crate::app::UpdateCheckTrigger::Launch);
                         app.log(LogLevel::Api, "Auto-checking for updates on launch...");
                         tasks.push(check_updates_task(app));
                     }
-                    // Always fire self-update check on launch
-                    tasks.push(Task::perform(
-                        service::check_self_update_full(app.update_channel == UpdateChannel::Beta),
-                        Message::CheckSelfUpdateResult,
-                    ));
+                    // A repository reload is also used after adds, toggles, and
+                    // updates. Only the first load starts the launch-time Wuddle
+                    // update request; later checks are explicit or hourly.
+                    if !app.self_update_launch_check_started {
+                        app.self_update_launch_check_started = true;
+                        tasks.push(Task::perform(
+                            service::check_self_update_full(
+                                app.update_channel == UpdateChannel::Beta,
+                            ),
+                            Message::CheckSelfUpdateResult,
+                        ));
+                    }
                     if !tasks.is_empty() {
                         return Some(Task::batch(tasks));
                     }
@@ -199,7 +264,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     let should_warn = elapsed >= 10
                         && app
                             .last_rescan_warning_secs
-                            .map_or(true, |last| elapsed >= last + 10);
+                            .is_none_or(|last| elapsed >= last + 10);
                     if should_warn {
                         app.last_rescan_warning_secs = Some(elapsed);
                         app.log(
@@ -215,7 +280,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
 
             Some(Task::none())
         }
-        Message::PlansLoaded(result) => {
+        Message::PlansLoaded(scoped) => {
+            let Some(result) = app.accept_profile_result(scoped, "update-plan load") else {
+                return Some(Task::none());
+            };
             match result {
                 Ok(plans) => {
                     app.plans = plans;
@@ -240,6 +308,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             app.log(LogLevel::Info, "Checking for updates...");
             app.checking_updates = true;
+            app.update_check_trigger = Some(crate::app::UpdateCheckTrigger::Manual);
             Some(check_updates_task(app))
         }
         Message::PollUpdateCheckProgress => {
@@ -288,7 +357,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     && app
                         .update_check_last_warning_secs_by_repo
                         .get(&progress.repo_id)
-                        .map_or(true, |last| elapsed >= *last + 10);
+                        .is_none_or(|last| elapsed >= *last + 10);
                 if should_warn {
                     app.update_check_last_warning_secs_by_repo
                         .insert(progress.repo_id, elapsed);
@@ -316,17 +385,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
-        Message::GithubRateTick => {
-            return Some(Task::perform(
-                service::fetch_github_rate_limit(),
-                Message::GithubRateInfoResult,
-            ));
-        }
+        Message::GithubRateTick => Some(Task::perform(
+            service::fetch_github_rate_limit(),
+            Message::GithubRateInfoResult,
+        )),
 
-        Message::CheckUpdatesResult(result) => {
+        Message::CheckUpdatesResult(scoped) => {
+            let Some(result) = app.accept_profile_result(scoped, "update check") else {
+                return Some(Task::none());
+            };
             // If checking_updates is true, this was a user-initiated or auto-check;
             // if false, it was a silent post-update refresh — skip toasts/notifications.
-            let is_explicit_check = app.checking_updates;
+            let check_trigger = app.update_check_trigger.take();
+            let is_explicit_check = app.checking_updates && check_trigger.is_some();
             app.checking_updates = false;
             app.update_check_stage_by_repo.clear();
             app.update_check_stage_started_at_by_repo.clear();
@@ -422,10 +493,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         app.last_infrequent_check_unix = now;
                     }
                     if app.last_infrequent_check_unix > 0 {
-                        app.last_infrequent_check_unix_by_profile.insert(
-                            app.active_profile_id.clone(),
-                            app.last_infrequent_check_unix,
-                        );
+                        let mut schedule_changed = false;
+                        if let Some(profile) = app
+                            .profiles
+                            .iter_mut()
+                            .find(|profile| profile.id == app.active_profile_id)
+                        {
+                            schedule_changed = profile.last_infrequent_check_unix
+                                != app.last_infrequent_check_unix;
+                            profile.last_infrequent_check_unix = app.last_infrequent_check_unix;
+                        }
+                        if schedule_changed {
+                            app.save_settings();
+                        }
                     }
 
                     app.plans = plans;
@@ -437,40 +517,45 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     );
 
                     if is_explicit_check && app.opt_desktop_notify && update_count > 0 {
-                        let _ = notify_rust::Notification::new()
-                            .appname("Wuddle")
-                            .summary("Wuddle")
-                            .body(&format!(
-                                "{} update{} available",
-                                update_count,
-                                if update_count == 1 { "" } else { "s" }
-                            ))
-                            .icon(crate::notification_icon_path())
-                            .show();
+                        let _ = crate::desktop_notification::show_updates_available(update_count);
                     }
 
-                    // Auto-fetch versions for all mod repos that haven't been loaded yet
+                    // Auto-fetch versions only for repositories backed by the
+                    // generic forge release API. Generic MPQs have no remote
+                    // source, while curated MPQs use dedicated update resolvers.
                     let mut version_tasks: Vec<Task<Message>> = Vec::new();
                     for repo in &app.repos {
-                        if service::is_mod(repo)
+                        if service::supports_release_version_listing(repo)
                             && !app.repo_versions.contains_key(&repo.id)
                             && !app.repo_versions_loading.contains(&repo.id)
                         {
                             let db = app.db_path.clone();
                             let url = repo.url.clone();
                             let id = repo.id;
+                            let scope = app.profile_operation_scope();
                             app.repo_versions_loading.insert(id);
                             version_tasks.push(Task::perform(
                                 service::list_repo_versions(db, url),
-                                move |result| Message::FetchVersionsResult((id, result)),
+                                move |result| {
+                                    Message::FetchVersionsResult(crate::ProfileScoped::new(
+                                        scope.clone(),
+                                        (id, result),
+                                    ))
+                                },
                             ));
                         }
                     }
 
                     // Final summary rate fetch
+                    let scope = app.profile_operation_scope();
                     version_tasks.push(Task::perform(
                         service::fetch_github_rate_limit(),
-                        move |info| Message::UpdateCheckRateLimitResult(stats.clone(), info),
+                        move |info| {
+                            Message::UpdateCheckRateLimitResult(crate::ProfileScoped::new(
+                                scope.clone(),
+                                (stats.clone(), info),
+                            ))
+                        },
                     ));
 
                     if !version_tasks.is_empty() {
@@ -620,10 +705,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
 
                 let db = app.db_path.clone();
                 app.dialog = None;
-                app.log(LogLevel::Info, &format!("Adding repo: {}", url));
+                crate::diagnostics::register_repository_url(&url);
+                app.log(LogLevel::Info, "Adding repository...");
+                let scope = app.profile_operation_scope();
                 return Some(Task::perform(
                     service::add_repo(db, url, mode, asset_regex, selected_addons),
-                    Message::AddRepoResult,
+                    move |result| {
+                        Message::AddRepoResult(crate::ProfileScoped::new(scope.clone(), result))
+                    },
                 ));
             }
             Some(Task::none())
@@ -640,18 +729,69 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.local_archive_hover_path = None;
             Some(Task::none())
         }
-        Message::PickLocalAddonArchive => Some(Task::perform(
-            async {
-                rfd::AsyncFileDialog::new()
-                    .add_filter("Addon archives", &["zip", "7z"])
-                    .set_title("Select addon archive")
-                    .pick_file()
-                    .await
-                    .map(|handle| handle.path().to_path_buf())
-            },
-            Message::LocalArchivePicked,
-        )),
-        Message::LocalArchivePicked(path) => {
+        Message::PickLocalAddonArchive => {
+            let (dialog_url, dialog_mode) = match &app.dialog {
+                Some(Dialog::AddRepo {
+                    url,
+                    mode,
+                    is_addons: true,
+                    ..
+                }) => (url.clone(), mode.clone()),
+                _ => return Some(Task::none()),
+            };
+            let request_id = app.next_async_request_id();
+            app.pending_local_archive_picker = Some(request_id);
+            let scope = app.profile_operation_scope();
+            Some(Task::perform(
+                async {
+                    rfd::AsyncFileDialog::new()
+                        .add_filter("Addon archives", &["zip", "7z"])
+                        .set_title("Select addon archive")
+                        .pick_file()
+                        .await
+                        .map(|handle| handle.path().to_path_buf())
+                },
+                move |path| Message::LocalArchivePicked {
+                    request_id,
+                    scope: scope.clone(),
+                    dialog_url: dialog_url.clone(),
+                    dialog_mode: dialog_mode.clone(),
+                    path,
+                },
+            ))
+        }
+        Message::LocalArchivePicked {
+            request_id,
+            scope,
+            dialog_url,
+            dialog_mode,
+            path,
+        } => {
+            if app.pending_local_archive_picker != Some(request_id) {
+                app.log(
+                    LogLevel::Info,
+                    "Discarded a superseded addon archive picker result.",
+                );
+                return Some(Task::none());
+            }
+            app.pending_local_archive_picker = None;
+            if !scope.matches(&app.active_profile_id, app.profile_generation)
+                || !matches!(
+                    &app.dialog,
+                    Some(Dialog::AddRepo {
+                        url,
+                        mode,
+                        is_addons: true,
+                        ..
+                    }) if url == &dialog_url && mode == &dialog_mode
+                )
+            {
+                app.log(
+                    LogLevel::Info,
+                    "Discarded an addon archive picker result after its profile or dialog changed.",
+                );
+                return Some(Task::none());
+            }
             let Some(path) = path else {
                 return Some(Task::none());
             };
@@ -661,7 +801,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.local_archive_hover_path = None;
             install_local_archive(app, path)
         }
-        Message::AddRepoResult(result) => {
+        Message::AddRepoResult(scoped) => {
+            let scope = scoped.scope.clone();
+            let Some(result) = app.accept_profile_result(scoped, "repository add") else {
+                return Some(Task::none());
+            };
             let pending_addon_names = std::mem::take(&mut app.pending_add_repo_addon_names);
             match result {
                 Ok(id) => {
@@ -701,7 +845,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             service::check_pre_install_conflicts(db, id, wow, addon_names),
                             move |result| Message::PreInstallConflictResult {
                                 repo_id: id,
-                                result,
+                                result: crate::ProfileScoped::new(scope.clone(), result),
                             },
                         ));
                     }
@@ -721,7 +865,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
-        Message::PreInstallConflictResult { repo_id, result } => {
+        Message::PreInstallConflictResult {
+            repo_id,
+            result: scoped,
+        } => {
+            let scope = scoped.scope.clone();
+            let Some(result) = app.accept_profile_result(scoped, "pre-install conflict check")
+            else {
+                return Some(Task::none());
+            };
             let info = match result {
                 Ok(info) => info,
                 Err(e) => {
@@ -751,7 +903,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 app.log(LogLevel::Info, "Installing\u{2026}");
                 return Some(Task::perform(
                     service::install_new_repo(db, repo_id, wow, opts),
-                    move |result| Message::InstallAfterAddResult { repo_id, result },
+                    move |result| Message::InstallAfterAddResult {
+                        repo_id,
+                        result: crate::ProfileScoped::new(scope.clone(), result),
+                    },
                 ));
             }
 
@@ -792,17 +947,27 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             });
             Some(refresh_repos_task(app))
         }
-        Message::InstallAfterAddResult { repo_id, result } => {
+        Message::InstallAfterAddResult {
+            repo_id,
+            result: scoped,
+        } => {
+            let Some(result) = app.accept_profile_result(scoped, "repository installation") else {
+                return Some(Task::none());
+            };
             app.updating_repo_ids.remove(&repo_id);
             match result {
                 Ok(msg) => {
                     app.log(LogLevel::Info, &msg);
                     app.show_toast(msg, ToastKind::Info);
                     let db = app.db_path.clone();
-                    let prompt_task = Task::perform(
-                        service::is_awesome_wotlk_repo(db, repo_id),
-                        Message::PromptAwesomeWotlkPatchIfInstalled,
-                    );
+                    let scope = app.profile_operation_scope();
+                    let prompt_task =
+                        Task::perform(service::is_awesome_wotlk_repo(db, repo_id), move |result| {
+                            Message::PromptAwesomeWotlkPatchIfInstalled(crate::ProfileScoped::new(
+                                scope.clone(),
+                                result,
+                            ))
+                        });
                     return Some(Task::batch(vec![refresh_repos_task(app), prompt_task]));
                 }
                 Err(ref e) if e.contains("ADDON_CONFLICT:") => {
@@ -844,12 +1009,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     });
                     return Some(Task::none());
                 }
+                Err(ref e) if e.contains("FILE_CONFLICT:") => {
+                    show_file_conflict(app, repo_id, FileConflictAction::Install, e);
+                    return Some(Task::none());
+                }
                 Err(e) => {
                     app.log(LogLevel::Error, &format!("Install failed: {}", e));
                     app.show_toast(format!("Install failed: {}", e), ToastKind::Error);
                 }
             }
-            app.updating_repo_ids.clear();
+            app.updating_repo_ids.remove(&repo_id);
             Some(refresh_repos_task(app))
         }
         Message::CancelConflictInstall { repo_id } => {
@@ -861,12 +1030,26 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 LogLevel::Info,
                 &format!("Conflict cancelled, removing repo id={}.", repo_id),
             );
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::remove_repo(db, repo_id, None, false),
-                move |result| Message::CancelConflictInstallResult { repo_id, result },
+                move |result| Message::CancelConflictInstallResult {
+                    repo_id,
+                    result: crate::ProfileScoped::new(
+                        scope.clone(),
+                        result.map(|_removed_paths| ()),
+                    ),
+                },
             ))
         }
-        Message::CancelConflictInstallResult { repo_id, result } => {
+        Message::CancelConflictInstallResult {
+            repo_id,
+            result: scoped,
+        } => {
+            let Some(result) = app.accept_profile_result(scoped, "cancelled-install cleanup")
+            else {
+                return Some(Task::none());
+            };
             match result {
                 Ok(()) => app.log(
                     LogLevel::Info,
@@ -902,10 +1085,53 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     repo_id
                 ),
             );
-            return Some(Task::perform(
+            let scope = app.profile_operation_scope();
+            Some(Task::perform(
                 service::install_new_repo(db, repo_id, wow, opts),
-                move |result| Message::InstallAfterAddResult { repo_id, result },
-            ));
+                move |result| Message::InstallAfterAddResult {
+                    repo_id,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
+            ))
+        }
+        Message::ConfirmFileConflict { repo_id, action } => {
+            app.dialog = None;
+            if app.wow_dir.is_empty() {
+                return Some(Task::none());
+            }
+            app.updating_repo_ids.insert(repo_id);
+            let db = app.db_path.clone();
+            let wow = app.wow_dir.clone();
+            let mut opts = app.install_options();
+            opts.replace_file_conflicts = true;
+            let scope = app.profile_operation_scope();
+            app.log(
+                LogLevel::Info,
+                &format!("Approved backed-up file replacement for repo id={repo_id}."),
+            );
+            match action {
+                FileConflictAction::Install => Some(Task::perform(
+                    service::install_new_repo(db, repo_id, wow, opts),
+                    move |result| Message::InstallAfterAddResult {
+                        repo_id,
+                        result: crate::ProfileScoped::new(scope.clone(), result),
+                    },
+                )),
+                FileConflictAction::Update => Some(Task::perform(
+                    service::update_repo(db, repo_id, wow, opts),
+                    move |result| Message::UpdateRepoResult {
+                        repo_id,
+                        result: crate::ProfileScoped::new(scope.clone(), result),
+                    },
+                )),
+                FileConflictAction::Reinstall => Some(Task::perform(
+                    service::reinstall_repo(db, repo_id, wow, opts),
+                    move |result| Message::ReinstallRepoResult {
+                        repo_id,
+                        result: crate::ProfileScoped::new(scope.clone(), result),
+                    },
+                )),
+            }
         }
         Message::InstallRepoOverride { url, mode } => {
             // Re-add from scratch with replace_addon_conflicts = true so the engine
@@ -913,10 +1139,17 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             let db = app.db_path.clone();
             app.dialog = None;
             app.reset_add_repo_state();
-            app.log(LogLevel::Info, &format!("Adding repo (override): {}", url));
+            crate::diagnostics::register_repository_url(&url);
+            app.log(
+                LogLevel::Info,
+                "Adding repository with conflict override...",
+            );
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::add_repo(db, url, mode, None, None),
-                Message::AddRepoResult,
+                move |result| {
+                    Message::AddRepoResult(crate::ProfileScoped::new(scope.clone(), result))
+                },
             ))
         }
         Message::OpenCollectionManager(repo_id) => {
@@ -957,12 +1190,21 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             let db = app.db_path.clone();
             let wow = app.wow_dir.clone();
             let probe_url = url.clone();
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::probe_conflicts(db, url, wow),
-                move |result| Message::FetchCollectionProbeResult(probe_url, result),
+                move |result| {
+                    Message::FetchCollectionProbeResult(crate::ProfileScoped::new(
+                        scope.clone(),
+                        (probe_url.clone(), result),
+                    ))
+                },
             ))
         }
-        Message::FetchCollectionProbeResult(url, result) => {
+        Message::FetchCollectionProbeResult(scoped) => {
+            let Some((url, result)) = app.accept_profile_result(scoped, "collection probe") else {
+                return Some(Task::none());
+            };
             app.add_repo_probe_loading = false;
             if let Some(Dialog::AddRepo {
                 url: current_url, ..
@@ -987,9 +1229,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         .iter()
                         .map(|name| name.to_ascii_lowercase())
                         .collect::<HashSet<_>>();
-                    if hinted_addon.is_some() {
-                        app.add_repo_collection_choice = Some(true);
-                    } else if app.add_repo_manage_repo_id.is_some() {
+                    if hinted_addon.is_some() || app.add_repo_manage_repo_id.is_some() {
                         app.add_repo_collection_choice = Some(true);
                     }
 
@@ -1151,9 +1391,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 let db = app.db_path.clone();
                 let wow = app.wow_dir.clone();
                 let opts = app.install_options();
+                let scope = app.profile_operation_scope();
+                app.updating_repo_ids.insert(repo_id);
                 return Some(Task::perform(
                     service::reinstall_repo_with_selection(db, repo_id, wow, opts, name),
-                    Message::ReinstallRepoResult,
+                    move |result| Message::ReinstallRepoResult {
+                        repo_id,
+                        result: crate::ProfileScoped::new(scope.clone(), result),
+                    },
                 ));
             }
 
@@ -1476,9 +1721,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 LogLevel::Info,
                 &format!("Saving collection selection for repo id={}...", repo_id),
             );
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::update_collection_selection(db, repo_id, wow, selected, opts),
-                Message::SaveCollectionSelectionResult,
+                move |result| {
+                    Message::SaveCollectionSelectionResult(crate::ProfileScoped::new(
+                        scope.clone(),
+                        result,
+                    ))
+                },
             ))
         }
         Message::SaveCollectionSelectionOverride {
@@ -1499,12 +1750,22 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 LogLevel::Info,
                 &format!("Retrying collection selection for repo id={} with conflict replacement enabled...", repo_id),
             );
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::update_collection_selection(db, repo_id, wow, selected_addons, opts),
-                Message::SaveCollectionSelectionResult,
+                move |result| {
+                    Message::SaveCollectionSelectionResult(crate::ProfileScoped::new(
+                        scope.clone(),
+                        result,
+                    ))
+                },
             ))
         }
-        Message::SaveCollectionSelectionResult(result) => {
+        Message::SaveCollectionSelectionResult(scoped) => {
+            let Some(result) = app.accept_profile_result(scoped, "collection selection update")
+            else {
+                return Some(Task::none());
+            };
             match result {
                 Ok(msg) => {
                     app.log(LogLevel::Info, &msg);
@@ -1617,12 +1878,24 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     addon_name, repo_id
                 ),
             );
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::update_collection_selection(db, repo_id, wow, selected, opts),
-                Message::SaveCollectionSelectionResult,
+                move |result| {
+                    Message::SaveCollectionSelectionResult(crate::ProfileScoped::new(
+                        scope.clone(),
+                        result,
+                    ))
+                },
             ))
         }
         Message::RemoveRepoConfirm(id, remove_files) => {
+            let repo_name = app
+                .repos
+                .iter()
+                .find(|repo| repo.id == id)
+                .map(|repo| repo.name.clone())
+                .unwrap_or_else(|| format!("repository #{id}"));
             let db = app.db_path.clone();
             let wow = if app.wow_dir.is_empty() {
                 None
@@ -1632,22 +1905,48 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.dialog = None;
             app.log(
                 LogLevel::Info,
-                &format!("Removing repo id={} (remove_files={})...", id, remove_files),
+                &format!(
+                    "Removing \"{repo_name}\" (repo id={id}; remove_local_files={remove_files})..."
+                ),
             );
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::remove_repo(db, id, wow, remove_files),
-                Message::RemoveRepoResult,
+                move |result| Message::RemoveRepoResult {
+                    repo_id: id,
+                    repo_name: repo_name.clone(),
+                    remove_files,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
             ))
         }
-        Message::RemoveRepoResult(result) => {
+        Message::RemoveRepoResult {
+            repo_id,
+            repo_name,
+            remove_files,
+            result,
+        } => {
+            let Some(result) = app.accept_profile_result(result, "repository removal") else {
+                return Some(Task::none());
+            };
             match result {
-                Ok(()) => {
-                    app.log(LogLevel::Info, "Repo removed.");
+                Ok(removed_paths) => {
+                    app.log(
+                        LogLevel::Info,
+                        &format!(
+                            "Removed \"{repo_name}\" (repo id={repo_id}; remove_local_files={remove_files}; filesystem_targets_removed_or_restored={removed_paths}; metadata_committed=true)."
+                        ),
+                    );
                     app.show_toast("Repo removed.", ToastKind::Info);
                     return Some(refresh_repos_task(app));
                 }
                 Err(e) => {
-                    app.log(LogLevel::Error, &format!("Remove failed: {}", e));
+                    app.log(
+                        LogLevel::Error,
+                        &format!(
+                            "Removal failed for \"{repo_name}\" (repo id={repo_id}; remove_local_files={remove_files}): {e}"
+                        ),
+                    );
                     app.show_toast(format!("Remove failed: {}", e), ToastKind::Error);
                 }
             }
@@ -1693,46 +1992,77 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 ),
             );
             let db = app.db_path.clone();
+            let scope = app.profile_operation_scope();
             Some(iced::Task::perform(
                 service::set_merge_installs(db, id, merge),
-                Message::ToggleMergeInstallsResult,
+                move |result| {
+                    Message::ToggleMergeInstallsResult(crate::ProfileScoped::new(
+                        scope.clone(),
+                        result,
+                    ))
+                },
             ))
         }
-        Message::ToggleMergeInstallsResult(Ok(_id)) => Some(refresh_repos_task(app)),
-        Message::ToggleMergeInstallsResult(Err(e)) => {
-            app.log(LogLevel::Error, &format!("Toggle merge failed: {}", e));
-            Some(Task::none())
+        Message::ToggleMergeInstallsResult(scoped) => {
+            let Some(result) = app.accept_profile_result(scoped, "merge-install setting update")
+            else {
+                return Some(Task::none());
+            };
+            match result {
+                Ok(_id) => Some(refresh_repos_task(app)),
+                Err(e) => {
+                    app.log(LogLevel::Error, &format!("Toggle merge failed: {}", e));
+                    Some(Task::none())
+                }
+            }
         }
         Message::FetchVersions(id) => {
             let db = app.db_path.clone();
-            let url = app.repos.iter().find(|r| r.id == id).map(|r| r.url.clone());
+            let url = app
+                .repos
+                .iter()
+                .find(|repo| repo.id == id && service::supports_release_version_listing(repo))
+                .map(|repo| repo.url.clone());
             if let Some(url) = url {
+                let scope = app.profile_operation_scope();
                 return Some(Task::perform(
                     async move {
                         let res = service::list_repo_versions(db, url).await;
                         (id, res)
                     },
-                    |result| Message::FetchVersionsResult(result),
+                    move |result| {
+                        Message::FetchVersionsResult(crate::ProfileScoped::new(
+                            scope.clone(),
+                            result,
+                        ))
+                    },
                 ));
             }
             Some(Task::none())
         }
-        Message::FetchVersionsResult((id, Ok(versions))) => {
-            app.repo_versions.insert(id, versions);
-            Some(Task::none())
-        }
-        Message::FetchVersionsResult((id, Err(e))) => {
-            let name = app
-                .repos
-                .iter()
-                .find(|r| r.id == id)
-                .map(|r| r.name.as_str())
-                .unwrap_or("?");
-            app.log(
-                LogLevel::Error,
-                &format!("Fetch versions failed for '{}': {}", name, e),
-            );
-            app.show_github_rate_limit("Versions could not be loaded.", &e);
+        Message::FetchVersionsResult(scoped) => {
+            let Some((id, result)) = app.accept_profile_result(scoped, "repository-version load")
+            else {
+                return Some(Task::none());
+            };
+            match result {
+                Ok(versions) => {
+                    app.repo_versions.insert(id, versions);
+                }
+                Err(e) => {
+                    let name = app
+                        .repos
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.name.as_str())
+                        .unwrap_or("?");
+                    app.log(
+                        LogLevel::Error,
+                        &format!("Fetch versions failed for '{}': {}", name, e),
+                    );
+                    app.show_github_rate_limit("Versions could not be loaded.", &e);
+                }
+            }
             Some(Task::none())
         }
         Message::SetPinnedVersion(id, version) => {
@@ -1748,42 +2078,61 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 LogLevel::Info,
                 &format!("Pinning version to '{}' for repo id={}...", v_str, id),
             );
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::set_pinned_version(db, id, version),
-                Message::SetPinnedVersionResult,
+                move |result| {
+                    Message::SetPinnedVersionResult(crate::ProfileScoped::new(
+                        scope.clone(),
+                        result,
+                    ))
+                },
             ))
         }
-        Message::SetPinnedVersionResult(Ok(_id)) => {
-            app.log(
-                LogLevel::Info,
-                "Version pin updated. Re-checking updates...",
-            );
-            // A version choice must always be evaluated, even when this repo
-            // would normally be skipped by the low-frequency API check.
-            Some(Task::batch(vec![
-                refresh_repos_task(app),
-                check_updates_for_version_change_task(app),
-            ]))
-        }
-        Message::SetPinnedVersionResult(Err(e)) => {
-            app.log(LogLevel::Error, &format!("Set version failed: {}", e));
-            // Restore the persisted selection if the optimistic update above
-            // could not be saved.
-            Some(refresh_repos_task(app))
+        Message::SetPinnedVersionResult(scoped) => {
+            let Some(result) = app.accept_profile_result(scoped, "pinned-version update") else {
+                return Some(Task::none());
+            };
+            match result {
+                Ok(_id) => {
+                    app.log(
+                        LogLevel::Info,
+                        "Version pin updated. Re-checking updates...",
+                    );
+                    // A version choice must always be evaluated, even when this repo
+                    // would normally be skipped by the low-frequency API check.
+                    Some(Task::batch(vec![
+                        refresh_repos_task(app),
+                        check_updates_for_version_change_task(app),
+                    ]))
+                }
+                Err(e) => {
+                    app.log(LogLevel::Error, &format!("Set version failed: {}", e));
+                    // Restore the persisted selection if the optimistic update above
+                    // could not be saved.
+                    Some(refresh_repos_task(app))
+                }
+            }
         }
         Message::DllCountWarningChoice { repo_id, merge } => {
             app.dialog = None;
             if merge {
                 let db = app.db_path.clone();
-                return Some(Task::batch(vec![
+                let scope = app.profile_operation_scope();
+                Some(Task::batch(vec![
                     Task::perform(
                         service::set_merge_installs(db, repo_id, true),
-                        Message::ToggleMergeInstallsResult,
+                        move |result| {
+                            Message::ToggleMergeInstallsResult(crate::ProfileScoped::new(
+                                scope.clone(),
+                                result,
+                            ))
+                        },
                     ),
                     Task::done(Message::UpdateRepo(repo_id)),
-                ]));
+                ]))
             } else {
-                return Some(Task::done(Message::UpdateRepo(repo_id)));
+                Some(Task::done(Message::UpdateRepo(repo_id)))
             }
         }
         Message::BrowseRepo(id) => {
@@ -1821,6 +2170,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::UpdateRepo(id) => {
             app.open_menu = None;
+            if app.updating_repo_ids.contains(&id) {
+                app.show_toast(
+                    "That repository already has an operation in progress.",
+                    ToastKind::Warn,
+                );
+                return Some(Task::none());
+            }
             if app
                 .repos
                 .iter()
@@ -1873,15 +2229,25 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 let db = app.db_path.clone();
                 let wow = app.wow_dir.clone();
                 let opts = app.install_options();
+                let scope = app.profile_operation_scope();
                 return Some(Task::perform(
                     service::update_repo(db, id, wow, opts),
-                    Message::UpdateRepoResult,
+                    move |result| Message::UpdateRepoResult {
+                        repo_id: id,
+                        result: crate::ProfileScoped::new(scope.clone(), result),
+                    },
                 ));
             }
             Some(Task::none())
         }
-        Message::UpdateRepoResult(result) => {
-            app.updating_repo_ids.clear();
+        Message::UpdateRepoResult {
+            repo_id,
+            result: scoped,
+        } => {
+            let Some(result) = app.accept_profile_result(scoped, "repository update") else {
+                return Some(Task::none());
+            };
+            app.updating_repo_ids.remove(&repo_id);
             match result {
                 Ok(Some(plan)) => {
                     let name = format!("{}/{}", plan.owner, plan.name);
@@ -1892,27 +2258,88 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 }
                 Ok(None) => app.log(LogLevel::Info, "Already up to date."),
                 Err(e) => {
-                    app.log(LogLevel::Error, &format!("Update failed: {}", e));
-                    if !app.show_github_rate_limit("The update could not be downloaded.", &e) {
-                        app.show_toast(format!("Update failed: {}", e), ToastKind::Error);
+                    if e.starts_with("ADDON_GIT_LOCAL_CHANGES:") {
+                        app.log(
+                            LogLevel::Info,
+                            "Update skipped because the installed addon contains local changes.",
+                        );
+                        app.show_toast(
+                            "This addon contains local changes, so Wuddle did not update it.\n\nUse Reinstall / Repair only if you intend to discard them.",
+                            ToastKind::Warn,
+                        );
+                    } else if e.contains("FILE_CONFLICT:") {
+                        show_file_conflict(app, repo_id, FileConflictAction::Update, &e);
+                        return Some(Task::none());
+                    } else {
+                        app.log(LogLevel::Error, &format!("Update failed: {}", e));
+                        if !app.show_github_rate_limit("The update could not be downloaded.", &e) {
+                            app.show_toast(format!("Update failed: {}", e), ToastKind::Error);
+                        }
                     }
                 }
             }
-            return Some(refresh_repos_task(app));
+            Some(refresh_repos_task(app))
         }
         Message::ToggleRepoEnabled(id, enabled) => {
+            let repo_name = app
+                .repos
+                .iter()
+                .find(|repo| repo.id == id)
+                .map(|repo| repo.name.clone())
+                .unwrap_or_else(|| format!("repository #{id}"));
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "Mod state change requested: \"{repo_name}\" (repo id={id}) -> {}.",
+                    if enabled { "enabled" } else { "disabled" }
+                ),
+            );
             let db = app.db_path.clone();
             let wow = app.wow_dir.clone();
             let use_dlls_txt = app.quick_add_client_family() == service::ClientFamily::Vanilla;
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::set_repo_enabled(db, id, enabled, wow, use_dlls_txt),
-                Message::ToggleRepoEnabledResult,
+                move |result| Message::ToggleRepoEnabledResult {
+                    repo_id: id,
+                    enabled,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
             ))
         }
-        Message::ToggleRepoEnabledResult(result) => {
+        Message::ToggleRepoEnabledResult {
+            repo_id,
+            enabled,
+            result,
+        } => {
+            let Some(result) = app.accept_profile_result(result, "repository enable-state update")
+            else {
+                return Some(Task::none());
+            };
+            let repo_name = app
+                .repos
+                .iter()
+                .find(|repo| repo.id == repo_id)
+                .map(|repo| repo.name.clone())
+                .unwrap_or_else(|| format!("repository #{repo_id}"));
             match result {
-                Ok(()) => return Some(refresh_repos_task(app)),
-                Err(e) => app.log(LogLevel::Error, &format!("Toggle enabled failed: {}", e)),
+                Ok(changed_files) => {
+                    app.log(
+                        LogLevel::Info,
+                        &format!(
+                            "Mod {}: \"{repo_name}\" (repo id={repo_id}; affected file/entry count={changed_files}; metadata committed).",
+                            if enabled { "enabled" } else { "disabled" }
+                        ),
+                    );
+                    return Some(refresh_repos_task(app));
+                }
+                Err(e) => app.log(
+                    LogLevel::Error,
+                    &format!(
+                        "Mod state change failed: \"{repo_name}\" (repo id={repo_id}; requested_state={}): {e}",
+                        if enabled { "enabled" } else { "disabled" }
+                    ),
+                ),
             }
             Some(Task::none())
         }
@@ -1924,19 +2351,67 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
-        Message::ToggleDllEnabled(_repo_id, dll_name, enabled) => {
+        Message::ToggleDllEnabled(repo_id, dll_name, enabled) => {
+            let repo_name = app
+                .repos
+                .iter()
+                .find(|repo| repo.id == repo_id)
+                .map(|repo| repo.name.clone())
+                .unwrap_or_else(|| format!("repository #{repo_id}"));
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "DLL state change requested for mod \"{repo_name}\" (repo id={repo_id}) -> {}; component filename omitted from diagnostics.",
+                    if enabled { "enabled" } else { "disabled" }
+                ),
+            );
             let db = app.db_path.clone();
             let wow = app.wow_dir.clone();
             let use_dlls_txt = app.quick_add_client_family() == service::ClientFamily::Vanilla;
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
-                service::set_dll_enabled(db, wow, dll_name, enabled, use_dlls_txt),
-                Message::ToggleDllEnabledResult,
+                service::set_dll_enabled(db, wow, repo_id, dll_name.clone(), enabled, use_dlls_txt),
+                move |result| Message::ToggleDllEnabledResult {
+                    repo_id,
+                    dll_name: dll_name.clone(),
+                    enabled,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
             ))
         }
-        Message::ToggleDllEnabledResult(result) => {
+        Message::ToggleDllEnabledResult {
+            repo_id,
+            dll_name: _dll_name,
+            enabled,
+            result,
+        } => {
+            let Some(result) = app.accept_profile_result(result, "DLL enable-state update") else {
+                return Some(Task::none());
+            };
+            let repo_name = app
+                .repos
+                .iter()
+                .find(|repo| repo.id == repo_id)
+                .map(|repo| repo.name.clone())
+                .unwrap_or_else(|| format!("repository #{repo_id}"));
             match result {
-                Ok(()) => return Some(refresh_repos_task(app)),
-                Err(e) => app.log(LogLevel::Error, &format!("Toggle DLL failed: {}", e)),
+                Ok(changed) => {
+                    app.log(
+                        LogLevel::Info,
+                        &format!(
+                            "DLL component {} for mod \"{repo_name}\" (repo id={repo_id}; filesystem_or_dlls_txt_changed={changed}; metadata committed).",
+                            if enabled { "enabled" } else { "disabled" }
+                        ),
+                    );
+                    return Some(refresh_repos_task(app));
+                }
+                Err(e) => app.log(
+                    LogLevel::Error,
+                    &format!(
+                        "DLL state change failed for mod \"{repo_name}\" (repo id={repo_id}; requested_state={}): {e}",
+                        if enabled { "enabled" } else { "disabled" }
+                    ),
+                ),
             }
             Some(Task::none())
         }
@@ -1959,6 +2434,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     if plan.has_update
                         && !curated_mpq
                         && !app.ignored_update_ids.contains(&plan.repo_id)
+                        && !app.updating_repo_ids.contains(&plan.repo_id)
                     {
                         targets.push(plan.repo_id);
                         names.push(format!("{}/{}", plan.owner, plan.name));
@@ -1977,16 +2453,29 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         LogLevel::Info,
                         &format!("Updating {} repo(s)...", targets.len()),
                     );
+                    let scope = app.profile_operation_scope();
+                    let completed_ids = targets.clone();
                     return Some(Task::perform(
                         service::update_all(db, wow, targets, opts),
-                        Message::UpdateAllResult,
+                        move |result| Message::UpdateAllResult {
+                            repo_ids: completed_ids.clone(),
+                            result: crate::ProfileScoped::new(scope.clone(), result),
+                        },
                     ));
                 }
             }
             Some(Task::none())
         }
-        Message::UpdateAllResult(result) => {
-            app.updating_repo_ids.clear();
+        Message::UpdateAllResult {
+            repo_ids,
+            result: scoped,
+        } => {
+            let Some(result) = app.accept_profile_result(scoped, "update-all operation") else {
+                return Some(Task::none());
+            };
+            for repo_id in repo_ids {
+                app.updating_repo_ids.remove(&repo_id);
+            }
             match result {
                 Ok(results) => {
                     let mut applied = 0;
@@ -2039,10 +2528,18 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::ReinstallRepo(id) => {
             app.open_menu = None;
+            if app.updating_repo_ids.contains(&id) {
+                app.show_toast(
+                    "That repository already has an operation in progress.",
+                    ToastKind::Warn,
+                );
+                return Some(Task::none());
+            }
             if app.wow_dir.is_empty() {
                 app.log(LogLevel::Error, "Set a WoW directory in Options first.");
             } else {
                 app.dialog = None;
+                app.updating_repo_ids.insert(id);
                 let repo = app.repos.iter().find(|repo| repo.id == id).cloned();
                 if repo.as_ref().is_some_and(|repo| repo.mode == "addon_git") {
                     let repo = repo.expect("checked addon_git repo");
@@ -2055,11 +2552,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     );
                     let db = app.db_path.clone();
                     let wow = app.wow_dir.clone();
+                    let scope = app.profile_operation_scope();
                     return Some(Task::perform(
                         service::probe_conflicts_on_branch(db, repo.url, wow, repo.git_branch),
                         move |result| Message::ReinstallRepoProbeResult {
                             repo_id: id,
-                            result,
+                            result: crate::ProfileScoped::new(scope.clone(), result),
                         },
                     ));
                 }
@@ -2068,15 +2566,27 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 let db = app.db_path.clone();
                 let wow = app.wow_dir.clone();
                 let opts = app.install_options();
+                let scope = app.profile_operation_scope();
                 return Some(Task::perform(
                     service::reinstall_repo(db, id, wow, opts),
-                    Message::ReinstallRepoResult,
+                    move |result| Message::ReinstallRepoResult {
+                        repo_id: id,
+                        result: crate::ProfileScoped::new(scope.clone(), result),
+                    },
                 ));
             }
             Some(Task::none())
         }
-        Message::ReinstallRepoProbeResult { repo_id, result } => {
+        Message::ReinstallRepoProbeResult {
+            repo_id,
+            result: scoped,
+        } => {
+            let scope = scoped.scope.clone();
+            let Some(result) = app.accept_profile_result(scoped, "reinstall inspection") else {
+                return Some(Task::none());
+            };
             let Some(repo) = app.repos.iter().find(|repo| repo.id == repo_id).cloned() else {
+                app.updating_repo_ids.remove(&repo_id);
                 app.log(
                     LogLevel::Error,
                     "Reinstall failed: repository is no longer tracked.",
@@ -2088,6 +2598,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Ok(probe) => {
                     let root_options = service::root_probe_addon_names(&probe);
                     if root_options.len() > 1 {
+                        app.updating_repo_ids.remove(&repo_id);
                         let suggested = service::suggested_addon_for_expansion(
                             &root_options,
                             app.expansion_hint(),
@@ -2110,10 +2621,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     let opts = app.install_options();
                     return Some(Task::perform(
                         service::reinstall_repo(db, repo_id, wow, opts),
-                        Message::ReinstallRepoResult,
+                        move |result| Message::ReinstallRepoResult {
+                            repo_id,
+                            result: crate::ProfileScoped::new(scope.clone(), result),
+                        },
                     ));
                 }
                 Err(error) => {
+                    app.updating_repo_ids.remove(&repo_id);
                     app.log(
                         LogLevel::Error,
                         &format!("Reinstall inspection failed: {}", error),
@@ -2126,7 +2641,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
-        Message::ReinstallRepoResult(result) => {
+        Message::ReinstallRepoResult {
+            repo_id,
+            result: scoped,
+        } => {
+            let Some(result) = app.accept_profile_result(scoped, "repository reinstall") else {
+                return Some(Task::none());
+            };
+            app.updating_repo_ids.remove(&repo_id);
             match result {
                 Ok(plan) => {
                     app.log(
@@ -2135,18 +2657,30 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     );
                     return Some(refresh_repos_task(app));
                 }
+                Err(e) if e.contains("FILE_CONFLICT:") => {
+                    show_file_conflict(app, repo_id, FileConflictAction::Reinstall, &e);
+                    return Some(Task::none());
+                }
                 Err(e) => app.log(LogLevel::Error, &format!("Reinstall failed: {}", e)),
             }
             Some(Task::none())
         }
         Message::FetchBranches(repo_id) => {
             let db = app.db_path.clone();
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::list_repo_branches(db, repo_id),
-                Message::FetchBranchesResult,
+                move |result| {
+                    Message::FetchBranchesResult(crate::ProfileScoped::new(scope.clone(), result))
+                },
             ))
         }
-        Message::FetchBranchesResult((repo_id, result)) => {
+        Message::FetchBranchesResult(scoped) => {
+            let Some((repo_id, result)) =
+                app.accept_profile_result(scoped, "repository-branch load")
+            else {
+                return Some(Task::none());
+            };
             match result {
                 Ok(branch_list) => {
                     app.branches.insert(repo_id, branch_list);
@@ -2178,12 +2712,18 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 LogLevel::Info,
                 &format!("Setting branch to '{}' for repo id={}...", branch, repo_id),
             );
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::set_repo_branch(db, repo_id, branch),
-                Message::SetRepoBranchResult,
+                move |result| {
+                    Message::SetRepoBranchResult(crate::ProfileScoped::new(scope.clone(), result))
+                },
             ))
         }
-        Message::SetRepoBranchResult(result) => {
+        Message::SetRepoBranchResult(scoped) => {
+            let Some(result) = app.accept_profile_result(scoped, "repository-branch update") else {
+                return Some(Task::none());
+            };
             match result {
                 Ok(repo_id) => {
                     app.log(LogLevel::Info, "Branch updated. Refreshing repos...");
@@ -2197,7 +2737,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
-        Message::UpdateCheckRateLimitResult(stats, info) => {
+        Message::UpdateCheckRateLimitResult(scoped) => {
+            let Some((stats, info)) = app.accept_profile_result(scoped, "update-check summary")
+            else {
+                return Some(Task::none());
+            };
             app.github_rate_info = info;
 
             let updates = if stats.updates_found == 1 {
@@ -2243,7 +2787,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 LogLevel::Api,
                 &format!("Check complete: {}{}", summary, rate_suffix),
             );
-            None
+            Some(Task::none())
         }
 
         Message::GithubRateInfoResult(info) => {
@@ -2260,7 +2804,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
-        Message::RemoveRepoFilesLoaded(result) => {
+        Message::RemoveRepoFilesLoaded(scoped) => {
+            let Some(result) = app.accept_profile_result(scoped, "repository removal preview")
+            else {
+                return Some(Task::none());
+            };
             if let Some(Dialog::RemoveRepo { ref mut files, .. }) = app.dialog {
                 match result {
                     Ok(mut entries) => {
@@ -2280,14 +2828,18 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::FetchRepoPreview(url) => {
+            let generation = app.begin_preview_request();
             app.add_repo_preview_loading = true;
             let preview_url = url.clone();
             Some(Task::perform(
                 service::fetch_repo_preview(url),
-                move |result| Message::FetchRepoPreviewResult(preview_url, result),
+                move |result| {
+                    Message::FetchRepoPreviewResult(generation, preview_url.clone(), result)
+                },
             ))
         }
         Message::OpenRepoReadmePreview(title, url) => {
+            let generation = app.begin_preview_request();
             app.markdown_image_cache.clear();
             app.markdown_gif_cache.clear();
             app.dialog = Some(Dialog::Changelog {
@@ -2297,10 +2849,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             });
             Some(Task::perform(
                 service::fetch_repo_preview(url),
-                Message::RepoReadmePreviewLoaded,
+                move |result| Message::RepoReadmePreviewLoaded(generation, result),
             ))
         }
-        Message::RepoReadmePreviewLoaded(result) => {
+        Message::RepoReadmePreviewLoaded(generation, result) => {
+            if !app.preview_request_is_current(generation, "README preview") {
+                return Some(Task::none());
+            }
             let loaded_items = match result {
                 Ok(preview) => {
                     app.markdown_image_cache = preview.image_cache;
@@ -2323,7 +2878,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             Some(Task::none())
         }
-        Message::FetchRepoPreviewResult(url, result) => {
+        Message::FetchRepoPreviewResult(generation, url, result) => {
+            if !app.preview_request_is_current(generation, "repository preview") {
+                return Some(Task::none());
+            }
             app.add_repo_preview_loading = false;
             if let Some(Dialog::AddRepo {
                 url: current_url, ..
@@ -2360,7 +2918,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                                 let path = f.path.clone();
                                 iced::Task::perform(
                                     service::fetch_dir_contents(forge_url, path),
-                                    Message::FetchDirContentsResult,
+                                    move |result| {
+                                        Message::FetchDirContentsResult(generation, result)
+                                    },
                                 )
                             })
                             .collect()
@@ -2475,20 +3035,27 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 if !app.add_repo_dir_contents.contains_key(&path) {
                     if let Some(ref preview) = app.add_repo_preview {
                         let forge_url = preview.forge_url.clone();
+                        let generation = app.preview_request_generation;
                         return Some(Task::perform(
                             service::fetch_dir_contents(forge_url, path),
-                            Message::FetchDirContentsResult,
+                            move |result| Message::FetchDirContentsResult(generation, result),
                         ));
                     }
                 }
             }
             Some(Task::none())
         }
-        Message::FetchDirContents(forge_url, path) => Some(Task::perform(
-            service::fetch_dir_contents(forge_url, path),
-            Message::FetchDirContentsResult,
-        )),
-        Message::FetchDirContentsResult(result) => {
+        Message::FetchDirContents(forge_url, path) => {
+            let generation = app.preview_request_generation;
+            Some(Task::perform(
+                service::fetch_dir_contents(forge_url, path),
+                move |result| Message::FetchDirContentsResult(generation, result),
+            ))
+        }
+        Message::FetchDirContentsResult(generation, result) => {
+            if !app.preview_request_is_current(generation, "repository directory preview") {
+                return Some(Task::none());
+            }
             match result {
                 Ok((dir_path, entries)) => {
                     let mut sorted = entries;
@@ -2510,14 +3077,17 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             } else if let Some(ref preview) = app.add_repo_preview {
                 let url = preview.forge_url.clone();
                 app.add_repo_show_releases = true;
-                return Some(Task::perform(
-                    service::fetch_releases(url),
-                    Message::FetchReleaseNotesResult,
-                ));
+                let generation = app.preview_request_generation;
+                return Some(Task::perform(service::fetch_releases(url), move |result| {
+                    Message::FetchReleaseNotesResult(generation, result)
+                }));
             }
             Some(Task::none())
         }
-        Message::FetchReleaseNotesResult(result) => {
+        Message::FetchReleaseNotesResult(generation, result) => {
+            if !app.preview_request_is_current(generation, "release notes") {
+                return Some(Task::none());
+            }
             match result {
                 Ok(releases) => {
                     app.add_repo_release_notes = Some(releases.clone());
@@ -2564,14 +3134,18 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::PreviewRepoFile(path) => {
             if let Some(ref preview) = app.add_repo_preview {
                 let raw_base = preview.raw_base_url.clone();
+                let generation = app.preview_request_generation;
                 return Some(Task::perform(
                     service::fetch_raw_file(raw_base, path),
-                    Message::PreviewRepoFileResult,
+                    move |result| Message::PreviewRepoFileResult(generation, result),
                 ));
             }
             Some(Task::none())
         }
-        Message::PreviewRepoFileResult(result) => {
+        Message::PreviewRepoFileResult(generation, result) => {
+            if !app.preview_request_is_current(generation, "repository file preview") {
+                return Some(Task::none());
+            }
             match result {
                 Ok((path, content)) => app.add_repo_file_preview = Some((path, content)),
                 Err(e) => app.add_repo_file_preview = Some(("Error".to_string(), e)),
@@ -2600,11 +3174,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.add_repo_file_preview = None;
             app.add_repo_expanded_dirs.clear();
             app.add_repo_dir_contents.clear();
-            app.log(LogLevel::Info, &format!("Adding repo: {}", url));
-            return Some(Task::perform(
+            crate::diagnostics::register_repository_url(&url);
+            app.log(LogLevel::Info, "Adding repository...");
+            let scope = app.profile_operation_scope();
+            Some(Task::perform(
                 service::add_repo(db, url, mode, None, None),
-                Message::AddRepoResult,
-            ));
+                move |result| {
+                    Message::AddRepoResult(crate::ProfileScoped::new(scope.clone(), result))
+                },
+            ))
         }
         Message::SetAddRepoUrl(url) => {
             if let Some(Dialog::AddRepo {
@@ -2640,7 +3218,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             let trimmed = url.trim().to_string();
             if service::parse_forge_url(&trimmed).is_some()
-                && !service::is_direct_archive_url(&trimmed)
+                && !service::is_direct_archive_candidate(&trimmed)
             {
                 tasks.push(Task::perform(
                     async move {
@@ -2701,7 +3279,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 (String::new(), false, String::new())
             };
             if !url.is_empty() {
-                if service::is_direct_archive_url(&url) {
+                if service::is_direct_archive_candidate(&url) {
                     if let Some(Dialog::AddRepo { ref mut mode, .. }) = app.dialog {
                         *mode = "addon".to_string();
                     }
@@ -2730,6 +3308,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::OpenModFileInfo(name) => {
+            let generation = app.begin_preview_request();
             // Priority: if it's a WeirdUtils DLL, try to fetch live info from the README first.
             if WEIRD_UTILS_DLLS
                 .iter()
@@ -2742,7 +3321,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 });
                 return Some(Task::perform(
                     service::fetch_dll_description(name),
-                    Message::FetchDllDescriptionResult,
+                    move |result| Message::FetchDllDescriptionResult(generation, result),
                 ));
             }
 
@@ -2775,10 +3354,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 .map(|r| r.url.clone());
 
             if let Some(url) = url {
-                return Some(Task::perform(
-                    service::fetch_releases(url),
-                    Message::FetchReleaseNotesResult,
-                ));
+                Some(Task::perform(service::fetch_releases(url), move |result| {
+                    Message::FetchReleaseNotesResult(generation, result)
+                }))
             } else {
                 // If no repo found, just show "No info available"
                 if let Some(Dialog::Changelog {
@@ -2794,11 +3372,14 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     .items()
                     .to_vec();
                 }
-                return Some(Task::none());
+                Some(Task::none())
             }
         }
 
-        Message::FetchDllDescriptionResult(result) => {
+        Message::FetchDllDescriptionResult(generation, result) => {
+            if !app.preview_request_is_current(generation, "DLL information") {
+                return Some(Task::none());
+            }
             match result {
                 Ok((name, desc)) => {
                     if let Some(Dialog::Changelog {
@@ -2850,7 +3431,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     }
                 }
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         _ => None,
     }
@@ -2871,19 +3452,20 @@ fn delayed_add_repo_url_refocus_task() -> Task<Message> {
 
 pub fn refresh_repos_task_inner(app: &App, fix_casing: bool) -> Task<Message> {
     let db = app.db_path.clone();
+    let scope = app.profile_operation_scope();
     let wow = if app.wow_dir.is_empty() {
         None
     } else {
         Some(app.wow_dir.clone())
     };
-    Task::perform(
-        service::list_repos(db, wow, fix_casing),
-        Message::ReposLoaded,
-    )
+    Task::perform(service::list_repos(db, wow, fix_casing), move |result| {
+        Message::ReposLoaded(crate::ProfileScoped::new(scope.clone(), result))
+    })
 }
 
 pub fn check_updates_task(app: &mut App) -> Task<Message> {
     let db = app.db_path.clone();
+    let scope = app.profile_operation_scope();
     let wow = if app.wow_dir.is_empty() {
         None
     } else {
@@ -2909,7 +3491,7 @@ pub fn check_updates_task(app: &mut App) -> Task<Message> {
 
     Task::perform(
         service::check_updates_skip(db, wow, wuddle_engine::CheckMode::Force, skip),
-        Message::CheckUpdatesResult,
+        move |result| Message::CheckUpdatesResult(crate::ProfileScoped::new(scope.clone(), result)),
     )
 }
 
@@ -2918,6 +3500,7 @@ pub fn check_updates_task(app: &mut App) -> Task<Message> {
 /// release determines whether that row needs an install right now.
 fn check_updates_for_version_change_task(app: &App) -> Task<Message> {
     let db = app.db_path.clone();
+    let scope = app.profile_operation_scope();
     let wow = if app.wow_dir.is_empty() {
         None
     } else {
@@ -2925,7 +3508,7 @@ fn check_updates_for_version_change_task(app: &App) -> Task<Message> {
     };
     Task::perform(
         service::check_updates_skip(db, wow, wuddle_engine::CheckMode::Force, HashSet::new()),
-        Message::CheckUpdatesResult,
+        move |result| Message::CheckUpdatesResult(crate::ProfileScoped::new(scope.clone(), result)),
     )
 }
 
@@ -3015,7 +3598,7 @@ pub fn simplify_git_error(raw: &str) -> String {
 
     // Unwrap "connect remote URL (auth failed: DETAIL)" → keep DETAIL.
     if let Some(start) = inner.find("(auth failed: ") {
-        inner = inner[start + 14..].trim_end_matches(|c: char| c == ')' || c == ' ');
+        inner = inner[start + 14..].trim_end_matches([')', ' ']);
     }
 
     // Strip "Git sync check failed: " prefix if still present.
@@ -3046,5 +3629,24 @@ pub fn simplify_git_error(raw: &str) -> String {
     match error_code {
         Some(code) => format!("{} (Error Code {})", msg, code),
         None => msg,
+    }
+}
+
+#[cfg(test)]
+mod file_conflict_tests {
+    use super::parse_file_conflict_error;
+
+    #[test]
+    fn file_conflict_parser_keeps_file_and_owner_labels_without_confirmation_text() {
+        let parsed = parse_file_conflict_error(
+            "FILE_CONFLICT: Existing managed or local files were found for: d3d9.dll [owner/mod]; helper.dll [existing local file]. Confirm replacement to back them up and continue.",
+        );
+        assert_eq!(
+            parsed,
+            vec![
+                "d3d9.dll [owner/mod]".to_string(),
+                "helper.dll [existing local file]".to_string()
+            ]
+        );
     }
 }

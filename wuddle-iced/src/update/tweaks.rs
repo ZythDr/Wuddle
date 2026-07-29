@@ -58,7 +58,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     }
                 }
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::ToggleTweak(id, b) => {
             match id {
@@ -73,35 +73,35 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 TweakId::Quickloot => app.tweaks.quickloot = b,
                 TweakId::LargeAddress => app.tweaks.large_address = b,
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::SetTweakFov(v) => {
             app.tweak_values.fov = v;
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::SetTweakFarclip(v) => {
             app.tweak_values.farclip = v;
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::SetTweakFrilldistance(v) => {
             app.tweak_values.frilldistance = v;
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::SetTweakNameplateDist(v) => {
             app.tweak_values.nameplate_dist = v;
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::SetTweakMaxCameraDist(s) => {
             if let Ok(v) = s.parse::<f32>() {
                 app.tweak_values.max_camera_dist = v.clamp(10.0, 200.0);
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::SetTweakSoundChannels(s) => {
             if let Ok(v) = s.parse::<u32>() {
                 app.tweak_values.sound_channels = v.clamp(1, 999);
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::ReadTweaks => {
             if let Some(reason) = app.tweaks_disabled_reason() {
@@ -126,7 +126,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     Message::ReadTweaksResult,
                 ));
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::ReadTweaksResult(result) => {
             match result {
@@ -152,7 +152,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.show_toast(format!("Read failed: {}", e), ToastKind::Error);
                 }
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::ApplyTweaks => {
             if let Some(reason) = app.tweaks_disabled_reason() {
@@ -207,7 +207,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     Message::ApplyTweaksResult,
                 ));
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::ApplyTweaksResult(result) => {
             match result {
@@ -220,7 +220,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.show_toast(format!("Apply tweaks failed: {}", e), ToastKind::Error);
                 }
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::RestoreTweaks => {
             if let Some(reason) = app.tweaks_disabled_reason() {
@@ -245,7 +245,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     Message::RestoreTweaksResult,
                 ));
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::RestoreTweaksResult(result) => {
             match result {
@@ -258,12 +258,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.show_toast(format!("Restore failed: {}", e), ToastKind::Error);
                 }
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::ResetTweaksToDefault => {
             app.tweak_values = TweakValues::default();
             app.log(LogLevel::Info, "Tweak values reset to defaults.");
-            return Some(Task::none());
+            Some(Task::none())
         }
         _ => None,
     }

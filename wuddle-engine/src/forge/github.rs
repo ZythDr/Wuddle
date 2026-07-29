@@ -265,6 +265,22 @@ pub struct RepoFile {
     pub is_dir: bool,
 }
 
+fn complete_tree_files(tree: GhTreeResponse) -> Result<Vec<RepoFile>> {
+    if tree.truncated {
+        anyhow::bail!(
+            "GitHub returned an incomplete repository tree; a staged Git probe is required"
+        );
+    }
+    Ok(tree
+        .tree
+        .into_iter()
+        .map(|entry| RepoFile {
+            path: entry.path,
+            is_dir: entry.kind == "tree",
+        })
+        .collect())
+}
+
 /// Fetch all files in a repo recursively using the Tree API.
 pub async fn list_files_recursive(
     client: &Client,
@@ -297,12 +313,34 @@ pub async fn list_files_recursive(
 
     let tree: GhTreeResponse = resp.json().await.context("invalid github tree json")?;
 
-    Ok(tree
-        .tree
-        .into_iter()
-        .map(|e| RepoFile {
-            path: e.path,
-            is_dir: e.kind == "tree",
-        })
-        .collect())
+    complete_tree_files(tree)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{complete_tree_files, GhTreeEntry, GhTreeResponse};
+
+    #[test]
+    fn truncated_recursive_trees_are_never_treated_as_authoritative() {
+        let truncated = GhTreeResponse {
+            tree: vec![GhTreeEntry {
+                path: "Partial/Partial.toc".to_string(),
+                kind: "blob".to_string(),
+            }],
+            truncated: true,
+        };
+        assert!(complete_tree_files(truncated).is_err());
+
+        let complete = GhTreeResponse {
+            tree: vec![GhTreeEntry {
+                path: "Complete/Complete.toc".to_string(),
+                kind: "blob".to_string(),
+            }],
+            truncated: false,
+        };
+        let files = complete_tree_files(complete).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "Complete/Complete.toc");
+        assert!(!files[0].is_dir);
+    }
 }

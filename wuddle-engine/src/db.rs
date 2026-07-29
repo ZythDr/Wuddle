@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use crate::model::{InstallMode, Repo};
 
-const SCHEMA_VERSION: i32 = 16;
+const SCHEMA_VERSION: i32 = 20;
+const REPO_CASING_RECOVERY: &str = "repo_casing_recovery_v4";
 static DB_OPEN_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone)]
@@ -48,12 +49,52 @@ pub struct MpqBackupRow {
     pub fingerprint: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InstallBackupRow {
+    pub replacement_repo_id: i64,
+    pub path: String,
+    pub backup_path: String,
+    pub kind: String,
+    pub sha256: Option<String>,
+    pub displaced_repo_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct InstallPathOwner {
+    pub repo_id: i64,
+    pub owner: String,
+    pub name: String,
+    pub enabled: bool,
+    pub kind: String,
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InstalledAssetState {
+    pub version: Option<String>,
+    pub asset_id: Option<String>,
+    pub asset_name: Option<String>,
+    pub asset_size: Option<i64>,
+    pub asset_url: Option<String>,
+    pub installed_at_unix: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AddonInstallOwner {
     pub repo_id: i64,
     pub owner: String,
     pub name: String,
     pub manifest_path: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AddonConflictMutation {
+    pub repo_id: i64,
+    pub removed_paths: Vec<String>,
+    pub remove_repo: bool,
+    pub update_selected_addons: bool,
+    pub selected_addons_json: Option<String>,
+    pub clear_installed_asset: bool,
 }
 
 pub struct Db {
@@ -195,7 +236,9 @@ impl Db {
 
         // v3 → v4: normalize host/owner/name to lowercase and deduplicate.
         // The UNIQUE INDEX was case-sensitive, so mixed-case duplicates could slip
-        // through when the same repo was added from different URL casings.
+        // through when the same repo was added from different URL casings. Clone
+        // URLs are deliberately preserved: their path components may be
+        // case-sensitive even when repository identity comparison is not.
         if current < 4 {
             self.migrate_v4_normalize_repos()?;
             self.conn.execute_batch("PRAGMA user_version = 4")?;
@@ -365,21 +408,134 @@ impl Db {
             )?;
         }
 
+        // v16 -> v17: remove credentials and transient query/fragment data
+        // from URLs written by older versions. Direct signed links may no
+        // longer be reusable after this cleanup, but secrets must not remain
+        // indefinitely in the profile database.
+        if current < 17 {
+            self.scrub_persisted_url_secrets()?;
+            self.conn.execute_batch("PRAGMA user_version = 17")?;
+        }
+
+        // v17 -> v18: replace the unreachable user_version=5 casing-repair
+        // handshake with a durable, independent migration flag. Every existing
+        // profile that already contains repositories gets one retryable casing
+        // refresh; fresh empty profiles are marked complete immediately.
+        if current < 18 {
+            self.conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS migration_flags (
+                  name       TEXT PRIMARY KEY,
+                  completed  INTEGER NOT NULL DEFAULT 0
+                );
+                "#,
+            )?;
+            let repo_count: i64 = self
+                .conn
+                .query_row("SELECT COUNT(*) FROM repos", [], |row| row.get(0))?;
+            self.conn.execute(
+                r#"
+                INSERT INTO migration_flags(name, completed)
+                VALUES (?1, ?2)
+                ON CONFLICT(name) DO UPDATE SET completed=excluded.completed
+                "#,
+                params![REPO_CASING_RECOVERY, i64::from(repo_count == 0)],
+            )?;
+            self.conn.execute_batch("PRAGMA user_version = 18")?;
+        }
+
+        // v18 -> v19: make case-insensitive repository identity an enforced
+        // database invariant even for profiles whose unique index was missing
+        // or recreated by an older recovery path.
+        if current < 19 {
+            self.migrate_v19_case_insensitive_repo_identity()?;
+            self.conn.execute_batch("PRAGMA user_version = 19")?;
+        }
+
+        // v19 -> v20: retain ownership-aware backups when one managed
+        // DLL/raw/addon path is explicitly displaced by another package.
+        if current < 20 {
+            self.conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS install_backups (
+                  replacement_repo_id  INTEGER NOT NULL,
+                  path                 TEXT NOT NULL COLLATE NOCASE,
+                  backup_path          TEXT NOT NULL,
+                  kind                 TEXT NOT NULL,
+                  sha256               TEXT,
+                  displaced_repo_id    INTEGER,
+                  PRIMARY KEY(replacement_repo_id, path),
+                  FOREIGN KEY(replacement_repo_id)
+                    REFERENCES repos(id) ON DELETE CASCADE,
+                  FOREIGN KEY(displaced_repo_id)
+                    REFERENCES repos(id) ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_install_backups_displaced
+                  ON install_backups(displaced_repo_id);
+
+                PRAGMA user_version = 20;
+                "#,
+            )?;
+        }
+
         Ok(())
     }
 
-    /// Returns true if the DB is at schema v5 (needs casing fix from GUI layer).
-    pub fn needs_casing_fix(&self) -> bool {
-        let ver: i32 = self
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap_or(0);
-        ver == 5
+    fn scrub_persisted_url_secrets(&self) -> Result<()> {
+        let rows = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, url, installed_asset_url FROM repos")?;
+            let mapped = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?;
+            mapped.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        for (id, url, installed_asset_url) in rows {
+            let safe_url = crate::url_safety::sanitize_remote_for_storage(&url);
+            let safe_asset_url = installed_asset_url
+                .as_deref()
+                .map(crate::url_safety::sanitize_remote_for_storage);
+            if safe_url != url || safe_asset_url != installed_asset_url {
+                self.conn.execute(
+                    "UPDATE repos SET url=?1, installed_asset_url=?2 WHERE id=?3",
+                    params![safe_url, safe_asset_url, id],
+                )?;
+            }
+        }
+        Ok(())
     }
 
-    /// Mark the casing fix as complete by bumping to v6.
+    /// Returns true while the one-time repository casing refresh remains
+    /// pending. This state is intentionally independent from `user_version` so
+    /// later schema migrations cannot make the recovery unreachable.
+    pub fn needs_casing_fix(&self) -> bool {
+        self.conn
+            .query_row(
+                "SELECT completed FROM migration_flags WHERE name=?1",
+                params![REPO_CASING_RECOVERY],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|completed| completed == 0)
+            .unwrap_or(false)
+    }
+
+    /// Mark the casing refresh complete without changing the schema version.
     pub fn mark_casing_fixed(&self) -> Result<()> {
-        self.conn.execute_batch("PRAGMA user_version = 6")?;
+        self.conn.execute(
+            r#"
+            INSERT INTO migration_flags(name, completed)
+            VALUES (?1, 1)
+            ON CONFLICT(name) DO UPDATE SET completed=1
+            "#,
+            params![REPO_CASING_RECOVERY],
+        )?;
         Ok(())
     }
 
@@ -393,14 +549,14 @@ impl Db {
     }
 
     fn migrate_v4_normalize_repos(&self) -> Result<()> {
-        // 1. Lowercase all host/owner/name/url values.
+        // 1. Lowercase identity columns only. Never lowercase the full clone
+        // URL because repository paths may be case-sensitive.
         self.conn.execute_batch(
             r#"
             UPDATE repos SET
               host  = LOWER(host),
               owner = LOWER(owner),
-              name  = LOWER(name),
-              url   = LOWER(url)
+              name  = LOWER(name)
             "#,
         )?;
 
@@ -456,6 +612,112 @@ impl Db {
             "#,
         )?;
 
+        Ok(())
+    }
+
+    fn migrate_v19_case_insensitive_repo_identity(&self) -> Result<()> {
+        // `migrate_locked` already runs inside the single BEGIN IMMEDIATE
+        // transaction that covers the complete schema upgrade. Keep this step
+        // on that connection instead of trying to nest another transaction.
+        self.conn
+            .execute_batch("DROP INDEX IF EXISTS idx_repos_unique;")?;
+
+        let duplicate_groups = {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT MIN(host), MIN(owner), MIN(name)
+                FROM repos
+                GROUP BY host COLLATE NOCASE, owner COLLATE NOCASE, name COLLATE NOCASE
+                HAVING COUNT(*) > 1
+                "#,
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        for (host, owner, name) in duplicate_groups {
+            let ids = {
+                let mut stmt = self.conn.prepare(
+                    r#"
+                    SELECT id FROM repos
+                    WHERE host=?1 COLLATE NOCASE
+                      AND owner=?2 COLLATE NOCASE
+                      AND name=?3 COLLATE NOCASE
+                    ORDER BY id DESC
+                    "#,
+                )?;
+                let rows =
+                    stmt.query_map(params![host, owner, name], |row| row.get::<_, i64>(0))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            let Some((&keep_id, remove_ids)) = ids.split_first() else {
+                continue;
+            };
+
+            for &remove_id in remove_ids {
+                self.conn.execute(
+                    r#"
+                    INSERT OR IGNORE INTO installs(
+                      repo_id, path, kind, sha256, version, display_name, file_fingerprint
+                    )
+                    SELECT ?1, path, kind, sha256, version, display_name, file_fingerprint
+                    FROM installs WHERE repo_id=?2
+                    "#,
+                    params![keep_id, remove_id],
+                )?;
+                self.conn.execute(
+                    r#"
+                    INSERT OR IGNORE INTO mpq_backups(
+                      repo_id, path, backup_path, sha256, fingerprint
+                    )
+                    SELECT ?1, path, backup_path, sha256, fingerprint
+                    FROM mpq_backups WHERE repo_id=?2
+                    "#,
+                    params![keep_id, remove_id],
+                )?;
+                self.conn.execute(
+                    r#"
+                    INSERT OR IGNORE INTO repo_dependencies(
+                      parent_repo_id, child_repo_id, relationship
+                    )
+                    SELECT
+                      CASE WHEN parent_repo_id=?1 THEN ?2 ELSE parent_repo_id END,
+                      CASE WHEN child_repo_id=?1 THEN ?2 ELSE child_repo_id END,
+                      relationship
+                    FROM repo_dependencies
+                    WHERE (parent_repo_id=?1 OR child_repo_id=?1)
+                      AND (CASE WHEN parent_repo_id=?1 THEN ?2 ELSE parent_repo_id END)
+                          != (CASE WHEN child_repo_id=?1 THEN ?2 ELSE child_repo_id END)
+                    "#,
+                    params![remove_id, keep_id],
+                )?;
+                self.conn.execute(
+                    "DELETE FROM repo_dependencies WHERE parent_repo_id=?1 OR child_repo_id=?1",
+                    params![remove_id],
+                )?;
+                self.conn
+                    .execute("DELETE FROM installs WHERE repo_id=?1", params![remove_id])?;
+                self.conn.execute(
+                    "DELETE FROM mpq_backups WHERE repo_id=?1",
+                    params![remove_id],
+                )?;
+                self.conn
+                    .execute("DELETE FROM repos WHERE id=?1", params![remove_id])?;
+            }
+        }
+
+        self.conn.execute_batch(
+            r#"
+            CREATE UNIQUE INDEX idx_repos_unique
+              ON repos(host COLLATE NOCASE, owner COLLATE NOCASE, name COLLATE NOCASE);
+            "#,
+        )?;
         Ok(())
     }
 
@@ -531,6 +793,11 @@ impl Db {
 
     pub fn add_repo(&self, repo: &Repo) -> Result<i64> {
         let mode_str = repo.mode.as_str();
+        let safe_url = crate::url_safety::sanitize_remote_for_storage(&repo.url);
+        let safe_installed_asset_url = repo
+            .installed_asset_url
+            .as_deref()
+            .map(crate::url_safety::sanitize_remote_for_storage);
 
         let insert_result = self.conn.execute(
             r#"
@@ -546,7 +813,7 @@ impl Db {
             )
             "#,
             params![
-                repo.url,
+                safe_url,
                 repo.forge,
                 repo.host,
                 repo.owner,
@@ -560,7 +827,7 @@ impl Db {
                 repo.installed_asset_id,
                 repo.installed_asset_name,
                 repo.installed_asset_size,
-                repo.installed_asset_url,
+                safe_installed_asset_url,
                 repo.installed_at_unix,
                 repo.published_at_unix,
                 if repo.merge_installs { 1 } else { 0 },
@@ -644,7 +911,7 @@ impl Db {
                 owner: row.get(4)?,
                 name: row.get(5)?,
                 enabled: row.get::<_, i64>(7)? != 0,
-                mode: InstallMode::from_str(&mode_str).unwrap_or(InstallMode::Auto),
+                mode: InstallMode::parse(&mode_str).unwrap_or(InstallMode::Auto),
                 git_branch: row.get(8)?,
                 asset_regex: row.get(9)?,
                 last_version: row.get(10)?,
@@ -696,7 +963,7 @@ impl Db {
                 owner: row.get(4)?,
                 name: row.get(5)?,
                 enabled: row.get::<_, i64>(7)? != 0,
-                mode: InstallMode::from_str(&mode_str).unwrap_or(InstallMode::Auto),
+                mode: InstallMode::parse(&mode_str).unwrap_or(InstallMode::Auto),
                 git_branch: row.get(8)?,
                 asset_regex: row.get(9)?,
                 last_version: row.get(10)?,
@@ -742,7 +1009,7 @@ impl Db {
                 owner: row.get(4)?,
                 name: row.get(5)?,
                 enabled: row.get::<_, i64>(7)? != 0,
-                mode: InstallMode::from_str(&mode_str).unwrap_or(InstallMode::Auto),
+                mode: InstallMode::parse(&mode_str).unwrap_or(InstallMode::Auto),
                 git_branch: row.get(8)?,
                 asset_regex: row.get(9)?,
                 last_version: row.get(10)?,
@@ -853,6 +1120,9 @@ impl Db {
         Ok(())
     }
 
+    // This persistence boundary deliberately mirrors the complete installed
+    // asset record so callers cannot leave a partially updated state.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_installed_asset_state(
         &self,
         id: i64,
@@ -863,6 +1133,7 @@ impl Db {
         asset_url: Option<&str>,
         installed_at_unix: Option<i64>,
     ) -> Result<()> {
+        let safe_asset_url = asset_url.map(crate::url_safety::sanitize_remote_for_storage);
         self.conn.execute(
             r#"
             UPDATE repos
@@ -880,7 +1151,7 @@ impl Db {
                 asset_id,
                 asset_name,
                 asset_size,
-                asset_url,
+                safe_asset_url,
                 installed_at_unix,
                 id
             ],
@@ -1052,11 +1323,336 @@ impl Db {
         Ok(())
     }
 
+    pub(crate) fn find_install_path_owners(
+        &self,
+        path: &str,
+        exclude_repo_id: Option<i64>,
+    ) -> Result<Vec<InstallPathOwner>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT r.id, r.owner, r.name, r.enabled, i.kind, i.sha256
+            FROM installs i
+            JOIN repos r ON r.id=i.repo_id
+            WHERE i.path=?1 COLLATE NOCASE
+              AND i.kind IN ('dll', 'raw', 'addon')
+              AND (?2 IS NULL OR i.repo_id <> ?2)
+            ORDER BY r.owner, r.name
+            "#,
+        )?;
+        let rows = stmt.query_map(params![path, exclude_repo_id], |row| {
+            Ok(InstallPathOwner {
+                repo_id: row.get(0)?,
+                owner: row.get(1)?,
+                name: row.get(2)?,
+                enabled: row.get(3)?,
+                kind: row.get(4)?,
+                sha256: row.get(5)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn list_install_backups(
+        &self,
+        replacement_repo_id: i64,
+    ) -> Result<Vec<InstallBackupRow>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT replacement_repo_id, path, backup_path, kind, sha256, displaced_repo_id
+            FROM install_backups
+            WHERE replacement_repo_id=?1
+            ORDER BY path
+            "#,
+        )?;
+        let rows = stmt.query_map(params![replacement_repo_id], |row| {
+            Ok(InstallBackupRow {
+                replacement_repo_id: row.get(0)?,
+                path: row.get(1)?,
+                backup_path: row.get(2)?,
+                kind: row.get(3)?,
+                sha256: row.get(4)?,
+                displaced_repo_id: row.get(5)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn list_install_backups_displacing(
+        &self,
+        displaced_repo_id: i64,
+    ) -> Result<Vec<InstallBackupRow>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT replacement_repo_id, path, backup_path, kind, sha256, displaced_repo_id
+            FROM install_backups
+            WHERE displaced_repo_id=?1
+            ORDER BY replacement_repo_id, path
+            "#,
+        )?;
+        let rows = stmt.query_map(params![displaced_repo_id], |row| {
+            Ok(InstallBackupRow {
+                replacement_repo_id: row.get(0)?,
+                path: row.get(1)?,
+                backup_path: row.get(2)?,
+                kind: row.get(3)?,
+                sha256: row.get(4)?,
+                displaced_repo_id: row.get(5)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_release_replacement(
+        &self,
+        repo_id: i64,
+        installs: &[InstallEntry],
+        backups: &[InstallBackupRow],
+        installed_asset: &InstalledAssetState,
+        merge_installs: bool,
+        mark_manual: bool,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        if !merge_installs {
+            tx.execute("DELETE FROM installs WHERE repo_id=?1", params![repo_id])?;
+        }
+        for install in installs {
+            tx.execute(
+                "DELETE FROM installs WHERE repo_id=?1 AND path=?2 COLLATE NOCASE",
+                params![repo_id, install.path],
+            )?;
+            tx.execute(
+                r#"
+                INSERT INTO installs(
+                  repo_id, path, kind, sha256, version, display_name, file_fingerprint
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    repo_id,
+                    install.path,
+                    install.kind,
+                    install.sha256,
+                    install.version,
+                    install.display_name,
+                    install.file_fingerprint
+                ],
+            )?;
+        }
+
+        tx.execute(
+            "DELETE FROM install_backups WHERE replacement_repo_id=?1",
+            params![repo_id],
+        )?;
+        for backup in backups {
+            tx.execute(
+                r#"
+                INSERT INTO install_backups(
+                  replacement_repo_id, path, backup_path, kind, sha256, displaced_repo_id
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
+                params![
+                    repo_id,
+                    backup.path,
+                    backup.backup_path,
+                    backup.kind,
+                    backup.sha256,
+                    backup.displaced_repo_id
+                ],
+            )?;
+        }
+
+        let updated = if mark_manual {
+            tx.execute(
+                r#"
+                UPDATE repos
+                SET
+                  url='',
+                  forge='manual',
+                  host='',
+                  owner='',
+                  mode='manual',
+                  git_branch=NULL,
+                  asset_regex=NULL,
+                  last_version='Manual',
+                  etag=NULL,
+                  installed_asset_id=NULL,
+                  installed_asset_name=NULL,
+                  installed_asset_size=NULL,
+                  installed_asset_url=NULL,
+                  installed_at_unix=NULL,
+                  published_at_unix=NULL,
+                  pinned_version=NULL,
+                  selected_addons_json=NULL
+                WHERE id=?1
+                "#,
+                params![repo_id],
+            )?
+        } else {
+            let safe_asset_url = installed_asset
+                .asset_url
+                .as_deref()
+                .map(crate::url_safety::sanitize_remote_for_storage);
+            tx.execute(
+                r#"
+                UPDATE repos
+                SET last_version=?1,
+                    installed_asset_id=?2,
+                    installed_asset_name=?3,
+                    installed_asset_size=?4,
+                    installed_asset_url=?5,
+                    installed_at_unix=?6
+                WHERE id=?7
+                "#,
+                params![
+                    installed_asset.version,
+                    installed_asset.asset_id,
+                    installed_asset.asset_name,
+                    installed_asset.asset_size,
+                    safe_asset_url,
+                    installed_asset.installed_at_unix,
+                    repo_id
+                ],
+            )?
+        };
+        if updated != 1 {
+            anyhow::bail!("The repository no longer exists in the profile database");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn remove_repo_with_displaced_backups(
+        &self,
+        repo_id: i64,
+        delete_displaced_backups: bool,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        if delete_displaced_backups {
+            tx.execute(
+                "DELETE FROM install_backups WHERE displaced_repo_id=?1",
+                params![repo_id],
+            )?;
+        }
+        let removed = tx.execute("DELETE FROM repos WHERE id=?1", params![repo_id])?;
+        if removed != 1 {
+            anyhow::bail!("The repository no longer exists in the profile database");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn commit_addon_git_replacement(
+        &self,
+        repo_id: i64,
+        installs: &[InstallEntry],
+        installed_asset: &InstalledAssetState,
+        conflict_mutations: &[AddonConflictMutation],
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        for mutation in conflict_mutations {
+            if mutation.remove_repo {
+                tx.execute("DELETE FROM repos WHERE id=?1", params![mutation.repo_id])?;
+                continue;
+            }
+
+            for path in &mutation.removed_paths {
+                tx.execute(
+                    r#"
+                    DELETE FROM installs
+                    WHERE repo_id=?1 AND kind='addon' AND path=?2 COLLATE NOCASE
+                    "#,
+                    params![mutation.repo_id, path],
+                )?;
+            }
+            if mutation.update_selected_addons {
+                tx.execute(
+                    "UPDATE repos SET selected_addons_json=?1 WHERE id=?2",
+                    params![mutation.selected_addons_json, mutation.repo_id],
+                )?;
+            }
+            if mutation.clear_installed_asset {
+                tx.execute(
+                    r#"
+                    UPDATE repos
+                    SET last_version=NULL,
+                        installed_asset_id=NULL,
+                        installed_asset_name=NULL,
+                        installed_asset_size=NULL,
+                        installed_asset_url=NULL,
+                        installed_at_unix=NULL
+                    WHERE id=?1
+                    "#,
+                    params![mutation.repo_id],
+                )?;
+            }
+        }
+
+        tx.execute("DELETE FROM installs WHERE repo_id=?1", params![repo_id])?;
+        for install in installs {
+            tx.execute(
+                r#"
+                INSERT INTO installs(
+                  repo_id, path, kind, sha256, version, display_name, file_fingerprint
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    repo_id,
+                    install.path,
+                    install.kind,
+                    install.sha256,
+                    install.version,
+                    install.display_name,
+                    install.file_fingerprint
+                ],
+            )?;
+        }
+
+        let safe_asset_url = installed_asset
+            .asset_url
+            .as_deref()
+            .map(crate::url_safety::sanitize_remote_for_storage);
+        let updated = tx.execute(
+            r#"
+            UPDATE repos
+            SET last_version=?1,
+                installed_asset_id=?2,
+                installed_asset_name=?3,
+                installed_asset_size=?4,
+                installed_asset_url=?5,
+                installed_at_unix=?6
+            WHERE id=?7
+            "#,
+            params![
+                installed_asset.version,
+                installed_asset.asset_id,
+                installed_asset.asset_name,
+                installed_asset.asset_size,
+                safe_asset_url,
+                installed_asset.installed_at_unix,
+                repo_id
+            ],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("The addon repository no longer exists in the profile database");
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn commit_mpq_installs(
         &self,
         repo_id: i64,
         installs: &[InstallEntry],
         backups: &[MpqBackupRow],
+        installed_asset: &InstalledAssetState,
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         // A newly managed MPQ starts unlocked. Reinstalls preserve an
@@ -1127,6 +1723,35 @@ impl Db {
                     backup.fingerprint
                 ],
             )?;
+        }
+        let safe_asset_url = installed_asset
+            .asset_url
+            .as_deref()
+            .map(crate::url_safety::sanitize_remote_for_storage);
+        let updated = tx.execute(
+            r#"
+            UPDATE repos
+            SET
+              last_version=?1,
+              installed_asset_id=?2,
+              installed_asset_name=?3,
+              installed_asset_size=?4,
+              installed_asset_url=?5,
+              installed_at_unix=?6
+            WHERE id=?7
+            "#,
+            params![
+                installed_asset.version,
+                installed_asset.asset_id,
+                installed_asset.asset_name,
+                installed_asset.asset_size,
+                safe_asset_url,
+                installed_asset.installed_at_unix,
+                repo_id
+            ],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("The MPQ package no longer exists in the profile database");
         }
         tx.commit()?;
         Ok(())
@@ -1294,6 +1919,8 @@ impl Db {
         Ok(())
     }
 
+    // Keep the old and replacement MPQ identity in one transactional call.
+    #[allow(clippy::too_many_arguments)]
     pub fn edit_mpq_protection_entry(
         &self,
         old_path: &str,
@@ -1356,6 +1983,8 @@ impl Db {
         Ok(())
     }
 
+    // Moving an entry must persist its full classification atomically.
+    #[allow(clippy::too_many_arguments)]
     pub fn move_mpq_protection(
         &self,
         old_path: &str,
@@ -1538,6 +2167,20 @@ impl Db {
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         for (old_path, new_path) in changes {
+            // The editor lock belongs to the managed file, so it must follow
+            // that file's `.disabled` rename. A restored replacement target
+            // may have acquired its own protection row while the managed file
+            // was disabled; it no longer occupies the target after the
+            // filesystem phase succeeds.
+            tx.execute(
+                "DELETE FROM mpq_protection WHERE path=?1 COLLATE NOCASE",
+                params![new_path],
+            )?;
+            tx.execute(
+                r#"UPDATE mpq_protection SET path=?2
+                   WHERE path=?1 COLLATE NOCASE"#,
+                params![old_path, new_path],
+            )?;
             tx.execute(
                 r#"UPDATE installs SET path=?3
                    WHERE repo_id=?1 AND path=?2 COLLATE NOCASE AND kind='mpq'"#,
@@ -1636,7 +2279,10 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
-    use super::Db;
+    use super::{
+        AddonConflictMutation, Db, InstallBackupRow, InstallEntry, InstalledAssetState,
+        SCHEMA_VERSION,
+    };
     use rusqlite::{params, Connection};
     use std::sync::{Arc, Barrier};
 
@@ -1683,9 +2329,458 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM installs", [], |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 16);
+        assert_eq!(version, SCHEMA_VERSION);
         assert_eq!(repo_count, 1);
         assert_eq!(install_count, 1);
+    }
+
+    #[test]
+    fn migration_scrubs_credentials_and_transient_url_parts() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("url-scrub.sqlite");
+
+        {
+            let db = Db::open(&path).unwrap();
+            db.conn
+                .execute(
+                    r#"
+                    INSERT INTO repos(
+                        url, forge, host, owner, name, mode, installed_asset_url
+                    )
+                    VALUES (?1, 'direct', 'example.org', 'example.org', 'archive', 'addon', ?2)
+                    "#,
+                    params![
+                        "https://user:secret@example.org/archive.zip?token=secret#download",
+                        "https://cdn.example.org/archive.zip?signature=secret"
+                    ],
+                )
+                .unwrap();
+            db.conn.execute_batch("PRAGMA user_version = 16").unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        let (url, asset_url): (String, Option<String>) = db
+            .conn
+            .query_row(
+                "SELECT url, installed_asset_url FROM repos WHERE name='archive'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(url, "https://example.org/archive.zip");
+        assert_eq!(
+            asset_url.as_deref(),
+            Some("https://cdn.example.org/archive.zip")
+        );
+    }
+
+    #[test]
+    fn legacy_casing_recovery_is_durable_and_never_downgrades_schema() {
+        for legacy_version in [3, 4, 5] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp
+                .path()
+                .join(format!("legacy-casing-v{legacy_version}.sqlite"));
+            let clone_url = "https://example.invalid/CaseSensitive/Project.git";
+
+            {
+                let db = Db::open(&path).unwrap();
+                db.conn
+                    .execute(
+                        r#"
+                        INSERT INTO repos(url, forge, host, owner, name, mode)
+                        VALUES (?1, 'git', 'Example.Invalid', 'CaseSensitive', 'Project', 'addon_git')
+                        "#,
+                        params![clone_url],
+                    )
+                    .unwrap();
+                db.conn.execute("DELETE FROM migration_flags", []).unwrap();
+                db.conn
+                    .execute_batch(&format!("PRAGMA user_version = {legacy_version}"))
+                    .unwrap();
+            }
+
+            let db = Db::open(&path).unwrap();
+            let version: i32 = db
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            let stored_url: String = db
+                .conn
+                .query_row("SELECT url FROM repos", [], |row| row.get(0))
+                .unwrap();
+
+            assert_eq!(version, SCHEMA_VERSION);
+            assert_eq!(stored_url, clone_url);
+            assert!(db.needs_casing_fix());
+
+            db.mark_casing_fixed().unwrap();
+            let version_after_mark: i32 = db
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version_after_mark, SCHEMA_VERSION);
+            assert!(!db.needs_casing_fix());
+
+            drop(db);
+            let reopened = Db::open(&path).unwrap();
+            assert!(!reopened.needs_casing_fix());
+        }
+    }
+
+    #[test]
+    fn migration_enforces_case_insensitive_identity_and_merges_manifests() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("case-identity.sqlite");
+        let (older_id, newer_id);
+
+        {
+            let db = Db::open(&path).unwrap();
+            db.conn
+                .execute_batch("DROP INDEX IF EXISTS idx_repos_unique")
+                .unwrap();
+            db.conn
+                .execute(
+                    r#"
+                    INSERT INTO repos(url, forge, host, owner, name, mode)
+                    VALUES (?1, 'github', 'GitHub.com', 'Owner', 'Project', 'dll')
+                    "#,
+                    params!["https://github.com/Owner/Project"],
+                )
+                .unwrap();
+            older_id = db.conn.last_insert_rowid();
+            db.conn
+                .execute(
+                    r#"
+                    INSERT INTO repos(url, forge, host, owner, name, mode)
+                    VALUES (?1, 'github', 'github.COM', 'owner', 'project', 'dll')
+                    "#,
+                    params!["https://github.com/owner/project"],
+                )
+                .unwrap();
+            newer_id = db.conn.last_insert_rowid();
+            db.add_install(older_id, "Older.dll", "dll", Some("v1"))
+                .unwrap();
+            db.add_install(newer_id, "Newer.dll", "dll", Some("v2"))
+                .unwrap();
+            db.conn.execute_batch("PRAGMA user_version = 18").unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        let ids = db
+            .conn
+            .prepare("SELECT id FROM repos")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(ids, vec![newer_id]);
+        let installs = db.list_installs(newer_id).unwrap();
+        assert_eq!(installs.len(), 2);
+        assert!(installs.iter().any(|entry| entry.path == "Older.dll"));
+        assert!(installs.iter().any(|entry| entry.path == "Newer.dll"));
+
+        let duplicate = db.conn.execute(
+            r#"
+            INSERT INTO repos(url, forge, host, owner, name, mode)
+            VALUES (?1, 'github', 'GITHUB.COM', 'OWNER', 'PROJECT', 'dll')
+            "#,
+            params!["https://github.com/OWNER/PROJECT"],
+        );
+        assert!(duplicate.is_err());
+    }
+
+    #[test]
+    fn mpq_manifest_and_release_state_roll_back_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Db::open(&temp.path().join("mpq-transaction.sqlite")).unwrap();
+        db.conn
+            .execute(
+                r#"
+                INSERT INTO repos(url, forge, host, owner, name, mode)
+                VALUES ('', 'local', 'local-mpq', 'local', 'package', 'mpq')
+                "#,
+                [],
+            )
+            .unwrap();
+        let repo_id = db.conn.last_insert_rowid();
+        db.add_install(repo_id, "Data/old.MPQ", "mpq", Some("old"))
+            .unwrap();
+        db.conn
+            .execute_batch(
+                r#"
+                CREATE TRIGGER reject_mpq_release_state
+                BEFORE UPDATE OF last_version ON repos
+                BEGIN
+                  SELECT RAISE(ABORT, 'simulated metadata failure');
+                END;
+                "#,
+            )
+            .unwrap();
+
+        let result = db.commit_mpq_installs(
+            repo_id,
+            &[InstallEntry {
+                path: "Data/new.MPQ".to_string(),
+                kind: "mpq".to_string(),
+                sha256: None,
+                version: Some("v2".to_string()),
+                display_name: Some("New".to_string()),
+                file_fingerprint: Some("fingerprint".to_string()),
+            }],
+            &[],
+            &InstalledAssetState {
+                version: Some("v2".to_string()),
+                installed_at_unix: Some(123),
+                ..InstalledAssetState::default()
+            },
+        );
+        assert!(result.is_err());
+
+        let installs = db.list_installs(repo_id).unwrap();
+        assert_eq!(installs.len(), 1);
+        assert_eq!(installs[0].path, "Data/old.MPQ");
+        let version: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT last_version FROM repos WHERE id=?1",
+                params![repo_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, None);
+    }
+
+    #[test]
+    fn addon_replacement_metadata_rolls_back_as_one_transaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Db::open(&temp.path().join("addon-transaction.sqlite")).unwrap();
+        for name in ["owner", "replacement"] {
+            db.conn
+                .execute(
+                    r#"
+                    INSERT INTO repos(
+                      url, forge, host, owner, name, mode, selected_addons_json
+                    )
+                    VALUES (?1, 'git', 'example.invalid', 'tests', ?2, 'addon_git', ?3)
+                    "#,
+                    params![
+                        format!("https://example.invalid/tests/{name}.git"),
+                        name,
+                        r#"["One","Two"]"#
+                    ],
+                )
+                .unwrap();
+        }
+        let owner_id: i64 = db
+            .conn
+            .query_row("SELECT id FROM repos WHERE name='owner'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let replacement_id: i64 = db
+            .conn
+            .query_row("SELECT id FROM repos WHERE name='replacement'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        db.add_install(owner_id, "Interface/AddOns/One", "addon", Some("old"))
+            .unwrap();
+        db.add_install(owner_id, "Interface/AddOns/Two", "addon", Some("old"))
+            .unwrap();
+        db.add_install(
+            replacement_id,
+            "Interface/AddOns/OldReplacement",
+            "addon",
+            Some("old"),
+        )
+        .unwrap();
+        db.conn
+            .execute_batch(
+                r#"
+                CREATE TRIGGER reject_addon_release_state
+                BEFORE UPDATE OF last_version ON repos
+                WHEN NEW.id = (SELECT id FROM repos WHERE name='replacement')
+                BEGIN
+                  SELECT RAISE(ABORT, 'simulated metadata failure');
+                END;
+                "#,
+            )
+            .unwrap();
+
+        let result = db.commit_addon_git_replacement(
+            replacement_id,
+            &[InstallEntry {
+                path: "Interface/AddOns/One".to_string(),
+                kind: "addon".to_string(),
+                sha256: None,
+                version: Some("new".to_string()),
+                display_name: None,
+                file_fingerprint: None,
+            }],
+            &InstalledAssetState {
+                version: Some("new".to_string()),
+                ..InstalledAssetState::default()
+            },
+            &[AddonConflictMutation {
+                repo_id: owner_id,
+                removed_paths: vec!["Interface/AddOns/One".to_string()],
+                remove_repo: false,
+                update_selected_addons: true,
+                selected_addons_json: Some(r#"["Two"]"#.to_string()),
+                clear_installed_asset: false,
+            }],
+        );
+        assert!(result.is_err());
+
+        assert_eq!(db.list_installs(owner_id).unwrap().len(), 2);
+        assert_eq!(
+            db.list_installs(replacement_id).unwrap()[0].path,
+            "Interface/AddOns/OldReplacement"
+        );
+        let owner_selection: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT selected_addons_json FROM repos WHERE id=?1",
+                params![owner_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner_selection.as_deref(), Some(r#"["One","Two"]"#));
+    }
+
+    #[test]
+    fn release_manifest_backup_and_version_roll_back_as_one_transaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Db::open(&temp.path().join("release-transaction.sqlite")).unwrap();
+        for name in ["owner", "replacement"] {
+            db.conn
+                .execute(
+                    r#"
+                    INSERT INTO repos(url, forge, host, owner, name, mode)
+                    VALUES (?1, 'github', 'github.com', 'tests', ?2, 'dll')
+                    "#,
+                    params![format!("https://github.com/tests/{name}"), name],
+                )
+                .unwrap();
+        }
+        let owner_id: i64 = db
+            .conn
+            .query_row("SELECT id FROM repos WHERE name='owner'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let replacement_id: i64 = db
+            .conn
+            .query_row("SELECT id FROM repos WHERE name='replacement'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        db.add_install(replacement_id, "Old.dll", "dll", Some("old"))
+            .unwrap();
+        db.conn
+            .execute_batch(
+                r#"
+                CREATE TRIGGER reject_release_state
+                BEFORE UPDATE OF last_version ON repos
+                WHEN NEW.id = (SELECT id FROM repos WHERE name='replacement')
+                BEGIN
+                  SELECT RAISE(ABORT, 'simulated metadata failure');
+                END;
+                "#,
+            )
+            .unwrap();
+
+        let result = db.commit_release_replacement(
+            replacement_id,
+            &[InstallEntry {
+                path: "Shared.dll".to_string(),
+                kind: "dll".to_string(),
+                sha256: Some("new".to_string()),
+                version: Some("v2".to_string()),
+                display_name: None,
+                file_fingerprint: None,
+            }],
+            &[InstallBackupRow {
+                replacement_repo_id: replacement_id,
+                path: "Shared.dll".to_string(),
+                backup_path: ".wuddle/backups/shared.dll".to_string(),
+                kind: "dll".to_string(),
+                sha256: Some("old".to_string()),
+                displaced_repo_id: Some(owner_id),
+            }],
+            &InstalledAssetState {
+                version: Some("v2".to_string()),
+                ..InstalledAssetState::default()
+            },
+            false,
+            false,
+        );
+        assert!(result.is_err());
+        assert_eq!(db.list_installs(replacement_id).unwrap()[0].path, "Old.dll");
+        assert!(db.list_install_backups(replacement_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn removing_a_displaced_owner_can_retain_or_delete_its_saved_file_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Db::open(&temp.path().join("backup-removal.sqlite")).unwrap();
+        for name in ["owner", "replacement"] {
+            db.conn
+                .execute(
+                    r#"
+                    INSERT INTO repos(url, forge, host, owner, name, mode)
+                    VALUES (?1, 'github', 'github.com', 'tests', ?2, 'dll')
+                    "#,
+                    params![format!("https://github.com/tests/{name}"), name],
+                )
+                .unwrap();
+        }
+        let owner_id: i64 = db
+            .conn
+            .query_row("SELECT id FROM repos WHERE name='owner'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let replacement_id: i64 = db
+            .conn
+            .query_row("SELECT id FROM repos WHERE name='replacement'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        db.conn
+            .execute(
+                r#"
+                INSERT INTO install_backups(
+                  replacement_repo_id, path, backup_path, kind, displaced_repo_id
+                )
+                VALUES (?1, 'Shared.dll', '.wuddle/backups/shared.dll', 'dll', ?2)
+                "#,
+                params![replacement_id, owner_id],
+            )
+            .unwrap();
+
+        db.remove_repo_with_displaced_backups(owner_id, false)
+            .unwrap();
+        let retained = db.list_install_backups(replacement_id).unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].displaced_repo_id, None);
+
+        db.remove_repo_with_displaced_backups(replacement_id, true)
+            .unwrap();
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM install_backups", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn fresh_empty_database_does_not_request_casing_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Db::open(&temp.path().join("fresh.sqlite")).unwrap();
+        assert!(!db.needs_casing_fix());
     }
 
     #[test]
@@ -1713,6 +2808,6 @@ mod tests {
         let version: i32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 16);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 }

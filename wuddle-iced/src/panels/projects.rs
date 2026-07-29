@@ -301,8 +301,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
     } else {
         addon_rows
             .iter()
-            .cloned()
-            .filter(|row| match app.filter {
+            .filter(|&row| match app.filter {
                 Filter::All => true,
                 Filter::Updates => {
                     app.plans
@@ -321,7 +320,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
                     !row.repo.enabled || app.ignored_update_ids.contains(&row.repo.id)
                 }
             })
-            .filter(|row| {
+            .filter(|&row| {
                 if app.project_search.is_empty() {
                     return true;
                 }
@@ -350,6 +349,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
                 }
                 false
             })
+            .cloned()
             .collect()
     };
 
@@ -791,11 +791,11 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
     let mut filtered_patch_rows = if is_patches_tab {
         filtered_repos
             .iter()
-            .map(|repo| PatchDisplayRow::Managed(*repo))
+            .map(|repo| PatchDisplayRow::Managed(repo))
             .chain(
                 filtered_manual_mpqs
                     .iter()
-                    .map(|entry| PatchDisplayRow::Manual(*entry)),
+                    .map(|entry| PatchDisplayRow::Manual(entry)),
             )
             .collect::<Vec<_>>()
     } else {
@@ -1897,7 +1897,6 @@ fn addon_collection_name_cell<'a>(
             tooltip::Position::Top,
             colors,
         )
-        .into()
     } else {
         title_row
     };
@@ -2094,7 +2093,6 @@ fn addon_name_cell<'a>(
             tooltip::Position::Top,
             colors,
         )
-        .into()
     } else {
         title_row
     };
@@ -2392,7 +2390,6 @@ fn name_cell_with_expand<'a>(
             tooltip::Position::Top,
             colors,
         )
-        .into()
     } else {
         title_row
     };
@@ -2444,9 +2441,7 @@ fn status_info(
     update_ignored: bool,
     colors: ThemeColors,
 ) -> (&'static str, iced::Color, iced::Color) {
-    if update_ignored {
-        ("Ignored", colors.muted, colors.muted)
-    } else if !enabled {
+    if update_ignored || !enabled {
         ("Ignored", colors.muted, colors.muted)
     } else if has_error {
         ("Error", colors.bad, colors.bad)
@@ -2461,6 +2456,7 @@ fn status_info(
 
 /// Colored badge pill matching Tauri's badge style.
 /// When an update is available, the badge has a tooltip showing the latest version.
+#[allow(clippy::too_many_arguments)]
 fn status_badge<'a>(
     has_error: bool,
     has_update: bool,

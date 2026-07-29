@@ -6,12 +6,16 @@
 mod anchored_overlay;
 #[cfg(feature = "auto-login")]
 mod auto_login;
+mod desktop_notification;
 mod diagnostics;
 mod github_api;
 mod monitor;
 mod mpq;
+mod network;
 pub mod panels;
 mod platform_identity;
+#[cfg_attr(test, allow(dead_code))]
+mod self_update;
 pub mod service;
 pub(crate) mod settings;
 mod single_instance;
@@ -37,6 +41,18 @@ use settings::{detect_auto_scale, AUTO_UI_SCALE};
 use theme::{FRIZ, LIFECRAFT, NOTO};
 
 fn main() -> iced::Result {
+    if let Err(error) = wuddle_engine::initialize_git_transport() {
+        eprintln!("Wuddle Git transport initialization failed: {error}");
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Some(result) = self_update::finish_launcher_update_if_requested() {
+        if let Err(error) = result {
+            eprintln!("Wuddle launcher update helper failed: {error}");
+        }
+        return Ok(());
+    }
+
     prefer_x11_for_file_drops_if_requested();
     platform_identity::initialize();
 
@@ -54,7 +70,7 @@ fn main() -> iced::Result {
         return Ok(());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     single_instance::wait_for_restart_parent();
 
     // Detect monitor resolution before iced starts
@@ -71,7 +87,15 @@ fn main() -> iced::Result {
         Ok(single_instance::AcquireResult::ExistingInstanceActivated) => return Ok(()),
         Err(error) => {
             eprintln!("Wuddle single-instance setup failed: {error}");
-            None
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("Wuddle could not start")
+                .set_description(format!(
+                    "{error}\n\nIf no Wuddle window is visible, wait a moment and try again."
+                ))
+                .set_buttons(rfd::MessageButtons::Ok)
+                .show();
+            return Ok(());
         }
     };
     if let Err(error) = diagnostics::init(saved.verbose_diagnostics) {
@@ -107,8 +131,8 @@ fn main() -> iced::Result {
         size: iced::Size::new(1100.0, 850.0),
         icon: window_icon,
         // Route title-bar closes through `Message::RequestExit` so settings
-        // are saved and the Windows hard-exit watchdog can terminate any
-        // blocked background work after the window disappears.
+        // and diagnostics are flushed and active mutations receive the shared
+        // cooperative shutdown grace period on every platform.
         exit_on_close_request: false,
         ..Default::default()
     };
@@ -116,7 +140,11 @@ fn main() -> iced::Result {
         if let Some((width, height)) = saved.window_geometry.initial_size() {
             window_settings.size = iced::Size::new(width, height);
         }
-        if let Some((x, y)) = saved.window_geometry.initial_position() {
+        let monitors = monitor::monitor_rects();
+        if let Some((x, y)) = saved.window_geometry.initial_position_on_monitors(
+            (window_settings.size.width, window_settings.size.height),
+            &monitors,
+        ) {
             window_settings.position = iced::window::Position::Specific(iced::Point::new(x, y));
         }
     }

@@ -180,7 +180,6 @@ fn latest_version_row<'a>(
     channel: UpdateChannel,
     c: ThemeColors,
 ) -> Element<'a, Message> {
-    let c = c;
     let val_owned = String::from(latest);
 
     let version_link = button(iced::widget::rich_text::<(), _, _, _>([

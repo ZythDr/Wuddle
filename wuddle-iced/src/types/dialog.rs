@@ -94,6 +94,13 @@ impl Default for DxvkConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileConflictAction {
+    Install,
+    Update,
+    Reinstall,
+}
+
 #[derive(Debug, Clone)]
 pub enum Dialog {
     MpqAdd,
@@ -218,6 +225,12 @@ pub enum Dialog {
         url: String,
         mode: String,
     },
+    FileConflict {
+        repo_id: i64,
+        repo_name: String,
+        files: Vec<String>,
+        action: FileConflictAction,
+    },
     AddonConflict {
         url: String,
         mode: String,
@@ -261,4 +274,102 @@ pub enum Dialog {
         url: String,
         options: Vec<String>,
     },
+}
+
+impl Dialog {
+    pub(crate) fn is_mpq_workflow(&self) -> bool {
+        matches!(
+            self,
+            Self::MpqAdd
+                | Self::MpqInstall
+                | Self::ProtectedMpqs
+                | Self::WdmInstall
+                | Self::RemoveWdm { .. }
+                | Self::MpqComponent { .. }
+                | Self::ManualMpq { .. }
+                | Self::RenameManualMpq { .. }
+                | Self::EditUntrackedMpq { .. }
+        )
+    }
+
+    /// A newly tracked repository must be removed when its conflict prompt is
+    /// dismissed by any route (Cancel, X, Escape, or scrim).
+    pub(crate) fn pending_conflict_cleanup_repo_id(&self) -> Option<i64> {
+        match self {
+            Self::AddonConflict {
+                pending_repo_id: Some(repo_id),
+                ..
+            } => Some(*repo_id),
+            Self::FileConflict {
+                repo_id,
+                action: FileConflictAction::Install,
+                ..
+            } => Some(*repo_id),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Dialog;
+
+    #[test]
+    fn only_newly_tracked_addon_conflicts_request_cleanup_on_close() {
+        let pending = Dialog::AddonConflict {
+            url: "https://example.invalid/repo".to_string(),
+            mode: "addon_git".to_string(),
+            conflicts: Vec::new(),
+            pending_repo_id: Some(42),
+            new_repo_label: "repo".to_string(),
+            existing_repos: Vec::new(),
+            selected_addons: Vec::new(),
+            new_repo_preview: None,
+        };
+        assert_eq!(pending.pending_conflict_cleanup_repo_id(), Some(42));
+
+        let untracked = Dialog::AddonConflict {
+            url: "https://example.invalid/repo".to_string(),
+            mode: "addon_git".to_string(),
+            conflicts: Vec::new(),
+            pending_repo_id: None,
+            new_repo_label: "repo".to_string(),
+            existing_repos: Vec::new(),
+            selected_addons: Vec::new(),
+            new_repo_preview: None,
+        };
+        assert_eq!(untracked.pending_conflict_cleanup_repo_id(), None);
+
+        let file_conflict = Dialog::FileConflict {
+            repo_id: 43,
+            repo_name: "owner/repo".to_string(),
+            files: vec!["shared.dll".to_string()],
+            action: super::FileConflictAction::Install,
+        };
+        assert_eq!(file_conflict.pending_conflict_cleanup_repo_id(), Some(43));
+
+        let update_conflict = Dialog::FileConflict {
+            repo_id: 43,
+            repo_name: "owner/repo".to_string(),
+            files: vec!["shared.dll".to_string()],
+            action: super::FileConflictAction::Update,
+        };
+        assert_eq!(update_conflict.pending_conflict_cleanup_repo_id(), None);
+    }
+
+    #[test]
+    fn mpq_workflow_dialogs_are_classified_for_commit_dismissal_guards() {
+        assert!(Dialog::MpqAdd.is_mpq_workflow());
+        assert!(Dialog::WdmInstall.is_mpq_workflow());
+        assert!(Dialog::RemoveWdm {
+            repo_id: 1,
+            addon_repo_id: 2,
+            remove_addon: true,
+        }
+        .is_mpq_workflow());
+        assert!(!Dialog::PatchesWarning {
+            do_not_show_again: false,
+        }
+        .is_mpq_workflow());
+    }
 }

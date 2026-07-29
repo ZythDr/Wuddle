@@ -44,10 +44,19 @@ pub fn allow_legacy_tauri_import() -> bool {
     !cfg!(target_os = "windows")
 }
 
-#[cfg(any(target_os = "windows", test))]
-#[cfg_attr(test, allow(dead_code))]
+#[cfg(target_os = "windows")]
 pub fn legacy_plaintext_token_paths() -> Result<Vec<PathBuf>, String> {
     windows::legacy_plaintext_token_paths()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn legacy_plaintext_token_paths() -> Result<Vec<PathBuf>, String> {
+    let path = app_dir()?.join(".github_token");
+    Ok(if path.is_file() {
+        vec![path]
+    } else {
+        Vec::new()
+    })
 }
 
 #[cfg(any(target_os = "windows", test))]

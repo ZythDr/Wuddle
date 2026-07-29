@@ -601,7 +601,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
                 let _ = cb.set().wait_until(deadline).text(text_owned);
             }
         });
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -823,7 +823,7 @@ pub fn simplify_git_error(raw: &str) -> String {
         inner = &inner[pos + 3..];
     }
     if let Some(start) = inner.find("(auth failed: ") {
-        inner = inner[start + 14..].trim_end_matches(|c: char| c == ')' || c == ' ');
+        inner = inner[start + 14..].trim_end_matches([')', ' ']);
     }
     inner = inner
         .strip_prefix("Git sync check failed: ")

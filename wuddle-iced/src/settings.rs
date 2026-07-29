@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub static AUTO_UI_SCALE: OnceLock<f32> = OnceLock::new();
+static PENDING_SETTINGS_WARNING: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -62,6 +66,46 @@ impl WindowGeometry {
         } else {
             None
         }
+    }
+
+    pub fn initial_position_on_monitors(
+        self,
+        window_size: (f32, f32),
+        monitors: &[crate::monitor::MonitorRect],
+    ) -> Option<(f32, f32)> {
+        let saved = self.initial_position()?;
+        if monitors.is_empty() {
+            return Some(saved);
+        }
+
+        let window_width = window_size.0.round().max(1.0) as i64;
+        let window_height = window_size.1.round().max(1.0) as i64;
+        let window_left = saved.0.round() as i64;
+        let window_top = saved.1.round() as i64;
+        let window_right = window_left.saturating_add(window_width);
+        let window_bottom = window_top.saturating_add(window_height);
+        let useful_width = window_width.min(64);
+        let useful_height = window_height.min(64);
+
+        let use_saved = monitors.iter().any(|monitor| {
+            let monitor_left = i64::from(monitor.x);
+            let monitor_top = i64::from(monitor.y);
+            let monitor_right = monitor_left.saturating_add(i64::from(monitor.width));
+            let monitor_bottom = monitor_top.saturating_add(i64::from(monitor.height));
+            let overlap_width = window_right.min(monitor_right) - window_left.max(monitor_left);
+            let overlap_height = window_bottom.min(monitor_bottom) - window_top.max(monitor_top);
+            overlap_width >= useful_width && overlap_height >= useful_height
+        });
+        if use_saved {
+            return Some(saved);
+        }
+
+        let primary = monitors.first()?;
+        let centered_x =
+            i64::from(primary.x) + (i64::from(primary.width) - window_width).max(0) / 2;
+        let centered_y =
+            i64::from(primary.y) + (i64::from(primary.height) - window_height).max(0) / 2;
+        Some((centered_x as f32, centered_y as f32))
     }
 
     pub fn remember_size(&mut self, width: f32, height: f32) {
@@ -169,6 +213,10 @@ pub struct ProfileConfig {
     pub custom_args: String,
     pub working_dir: String,
     pub env_text: String,
+    /// Last full check of this profile's infrequently updated repositories.
+    /// Persisting this prevents profile switches or restarts from spending the
+    /// anonymous GitHub budget again before the conservation interval expires.
+    pub last_infrequent_check_unix: i64,
     #[cfg(feature = "auto-login")]
     pub auto_login_accounts: Vec<wuddle_engine::auto_login::AccountRef>,
     #[cfg(not(feature = "auto-login"))]
@@ -177,6 +225,9 @@ pub struct ProfileConfig {
     pub selected_auto_login_account_id: Option<wuddle_engine::auto_login::AccountId>,
     #[cfg(not(feature = "auto-login"))]
     pub selected_auto_login_account_id: Option<serde_json::Value>,
+    /// Retry tombstones written before an account is removed from the OS vault.
+    /// Strings keep the settings document readable without the optional feature.
+    pub pending_auto_login_deletion_ids: Vec<String>,
 }
 
 impl Default for ProfileConfig {
@@ -200,6 +251,7 @@ impl Default for ProfileConfig {
             custom_args: String::new(),
             working_dir: String::new(),
             env_text: String::new(),
+            last_infrequent_check_unix: 0,
             #[cfg(feature = "auto-login")]
             auto_login_accounts: Vec::new(),
             #[cfg(not(feature = "auto-login"))]
@@ -208,6 +260,7 @@ impl Default for ProfileConfig {
             selected_auto_login_account_id: None,
             #[cfg(not(feature = "auto-login"))]
             selected_auto_login_account_id: None,
+            pending_auto_login_deletion_ids: Vec::new(),
         }
     }
 }
@@ -237,6 +290,7 @@ pub struct AppSettings {
     pub profiles: Vec<ProfileConfig>,
     pub ignored_update_ids: Vec<i64>,
     pub ignored_update_ids_by_profile: HashMap<String, Vec<i64>>,
+    pub pending_profile_deletion_ids: Vec<String>,
     pub mods_warning_dismissed_profile_ids: Vec<String>,
     pub patches_warning_dismissed_profile_ids: Vec<String>,
     pub update_channel: UpdateChannel,
@@ -267,6 +321,7 @@ impl Default for AppSettings {
             profiles: vec![ProfileConfig::default()],
             ignored_update_ids: Vec::new(),
             ignored_update_ids_by_profile: HashMap::new(),
+            pending_profile_deletion_ids: Vec::new(),
             mods_warning_dismissed_profile_ids: Vec::new(),
             patches_warning_dismissed_profile_ids: Vec::new(),
             update_channel: UpdateChannel::Beta,
@@ -302,18 +357,12 @@ pub fn profile_id_from_name(name: &str) -> String {
 
 pub fn unique_profile_id(name: &str, profiles: &[ProfileConfig]) -> String {
     let base = profile_id_from_name(name);
-    if !profiles.iter().any(|p| p.id == base) {
-        return base;
-    }
-
-    for n in 2.. {
-        let candidate = format!("{}-{}", base, n);
+    loop {
+        let candidate = format!("{}-{}", base, uuid::Uuid::new_v4().simple());
         if !profiles.iter().any(|p| p.id == candidate) {
             return candidate;
         }
     }
-
-    unreachable!()
 }
 
 pub fn normalize_wow_path_input(raw: &str) -> (String, Option<String>) {
@@ -398,22 +447,28 @@ pub(crate) fn portable_app_dir() -> Result<PathBuf, String> {
 }
 
 pub(crate) fn portable_root_dir() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let exe_dir = exe.parent().ok_or_else(|| "no exe parent".to_string())?;
-    // AppImage: exe is inside a version dir, go up one more
-    if exe_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n.starts_with("wuddle"))
-        .unwrap_or(false)
-    {
-        exe_dir
-            .parent()
-            .map(|p| p.to_path_buf())
-            .ok_or_else(|| "no parent".to_string())
-    } else {
-        Ok(exe_dir.to_path_buf())
-    }
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "linux")]
+    let appimage = std::env::var_os("APPIMAGE").map(PathBuf::from);
+    #[cfg(not(target_os = "linux"))]
+    let appimage: Option<PathBuf> = None;
+    portable_root_from_paths(&executable, appimage.as_deref())
+}
+
+fn portable_root_from_paths(executable: &Path, appimage: Option<&Path>) -> Result<PathBuf, String> {
+    let anchor = match appimage {
+        Some(path) if path.is_absolute() => path,
+        Some(_) => {
+            return Err(
+                "APPIMAGE must identify the absolute path of the running AppImage.".to_string(),
+            )
+        }
+        None => executable,
+    };
+    anchor
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "The Wuddle executable has no parent directory.".to_string())
 }
 
 /// DB path for a profile. "default" uses `wuddle.sqlite`, others use `wuddle-{id}.sqlite`.
@@ -436,16 +491,172 @@ fn settings_path() -> Result<PathBuf, String> {
     Ok(app_dir()?.join("settings.json"))
 }
 
+fn settings_backup_path(path: &Path) -> PathBuf {
+    path.with_file_name("settings.json.bak")
+}
+
+fn atomic_replace(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Settings location has no parent directory.".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create settings storage: {error}"))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|error| format!("Could not create a temporary settings file: {error}"))?;
+    temporary
+        .as_file_mut()
+        .write_all(contents)
+        .map_err(|error| format!("Could not write the temporary settings file: {error}"))?;
+    temporary
+        .as_file_mut()
+        .flush()
+        .map_err(|error| format!("Could not flush the temporary settings file: {error}"))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("Could not synchronize the temporary settings file: {error}"))?;
+    temporary
+        .persist(path)
+        .map_err(|error| format!("Could not replace the settings file: {}", error.error))?;
+
+    #[cfg(unix)]
+    {
+        let directory = fs::File::open(parent)
+            .map_err(|error| format!("Could not open the settings directory: {error}"))?;
+        directory
+            .sync_all()
+            .map_err(|error| format!("Could not synchronize the settings directory: {error}"))?;
+    }
+    Ok(())
+}
+
+fn preserve_corrupt_settings(path: &Path) -> Result<PathBuf, String> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    for suffix in 0..1000u16 {
+        let file_name = if suffix == 0 {
+            format!("settings.json.corrupt-{timestamp}")
+        } else {
+            format!("settings.json.corrupt-{timestamp}-{suffix}")
+        };
+        let preserved = path.with_file_name(file_name);
+        if preserved.exists() {
+            continue;
+        }
+        fs::rename(path, &preserved)
+            .map_err(|error| format!("Could not preserve the damaged settings file: {error}"))?;
+        return Ok(preserved);
+    }
+    Err("Could not allocate a recovery name for the damaged settings file.".to_string())
+}
+
+fn read_settings_document(path: &Path) -> Result<AppSettings, String> {
+    let data =
+        fs::read_to_string(path).map_err(|error| format!("Could not read settings: {error}"))?;
+    serde_json::from_str(&data).map_err(|error| format!("Settings JSON is invalid: {error}"))
+}
+
+fn load_settings_document(path: &Path) -> (AppSettings, bool, Option<String>) {
+    let backup = settings_backup_path(path);
+    match read_settings_document(path) {
+        Ok(settings) => (settings, true, None),
+        Err(primary_error) if !path.exists() => match read_settings_document(&backup) {
+            Ok(settings) => {
+                let restore_error = save_settings_to_path(&settings, path).err();
+                let warning = restore_error.map_or_else(
+                    || {
+                        "The main settings file was missing. Wuddle restored the last known-good backup."
+                            .to_string()
+                    },
+                    |error| {
+                        format!(
+                            "The main settings file was missing. Wuddle loaded its backup, but could not restore it: {error}"
+                        )
+                    },
+                );
+                (settings, true, Some(warning))
+            }
+            Err(_) if !backup.exists() => (AppSettings::default(), false, None),
+            Err(backup_error) => (
+                AppSettings::default(),
+                true,
+                Some(format!(
+                    "Wuddle could not read its settings or backup. Defaults were loaded without overwriting either file. {primary_error}; {backup_error}"
+                )),
+            ),
+        },
+        Err(primary_error) => match read_settings_document(&backup) {
+            Ok(settings) => {
+                let recovery = preserve_corrupt_settings(path)
+                    .and_then(|_| save_settings_to_path(&settings, path));
+                let warning = match recovery {
+                    Ok(()) => {
+                        "Wuddle detected damaged settings and restored the last known-good backup. The damaged file was preserved for recovery."
+                            .to_string()
+                    }
+                    Err(error) => format!(
+                        "Wuddle detected damaged settings and loaded the last known-good backup, but could not complete recovery: {error}"
+                    ),
+                };
+                (settings, true, Some(warning))
+            }
+            Err(backup_error) => {
+                let preservation = preserve_corrupt_settings(path);
+                let warning = match preservation {
+                    Ok(_) => format!(
+                        "Wuddle detected damaged settings and no usable backup. Defaults were loaded and the damaged file was preserved. {primary_error}; {backup_error}"
+                    ),
+                    Err(error) => format!(
+                        "Wuddle could not load or preserve its damaged settings. Defaults are active, but Wuddle will not overwrite the damaged file automatically. {primary_error}; {backup_error}; {error}"
+                    ),
+                };
+                (AppSettings::default(), true, Some(warning))
+            }
+        },
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedSettings {
+    pub settings: AppSettings,
+    pub warning: Option<String>,
+}
+
 pub fn load_settings() -> AppSettings {
+    let loaded = load_settings_impl();
+    if let Some(warning) = loaded.warning {
+        *PENDING_SETTINGS_WARNING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(warning);
+    }
+    loaded.settings
+}
+
+pub fn load_settings_with_warning() -> LoadedSettings {
+    let mut loaded = load_settings_impl();
+    let pending = PENDING_SETTINGS_WARNING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if loaded.warning.is_none() {
+        loaded.warning = pending;
+    }
+    loaded
+}
+
+fn load_settings_impl() -> LoadedSettings {
     let path = match settings_path() {
         Ok(p) => p,
-        Err(_) => return AppSettings::default(),
+        Err(error) => {
+            return LoadedSettings {
+                settings: AppSettings::default(),
+                warning: Some(format!("Wuddle could not locate settings storage: {error}")),
+            }
+        }
     };
-    let settings_existed = path.exists();
-    let mut settings: AppSettings = match std::fs::read_to_string(&path) {
-        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
-        Err(_) => AppSettings::default(),
-    };
+    let (mut settings, settings_existed, warning) = load_settings_document(&path);
 
     // On first launch (settings.json didn't exist yet), import everything
     // from Tauri v2's WebKit localStorage so options carry over seamlessly.
@@ -509,7 +720,7 @@ pub fn load_settings() -> AppSettings {
         }
     }
 
-    settings
+    LoadedSettings { settings, warning }
 }
 
 /// Scan for `wuddle-*.sqlite` files that aren't tracked in settings.profiles and add them.
@@ -690,6 +901,7 @@ fn read_tauri_localstorage_profiles() -> Vec<ProfileConfig> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
+                last_infrequent_check_unix: 0,
                 #[cfg(feature = "auto-login")]
                 auto_login_accounts: Vec::new(),
                 #[cfg(not(feature = "auto-login"))]
@@ -698,6 +910,7 @@ fn read_tauri_localstorage_profiles() -> Vec<ProfileConfig> {
                 selected_auto_login_account_id: None,
                 #[cfg(not(feature = "auto-login"))]
                 selected_auto_login_account_id: None,
+                pending_auto_login_deletion_ids: Vec::new(),
             })
         })
         .collect()
@@ -818,7 +1031,7 @@ fn import_tauri_options(settings: &mut AppSettings) {
     }
     if let Some(v) = read_ls("wuddle.opt.autocheck.minutes") {
         if let Ok(n) = v.trim().trim_matches('"').parse::<u32>() {
-            if n >= 1 && n <= 240 {
+            if (1..=240).contains(&n) {
                 settings.auto_check_minutes = n;
             }
         }
@@ -842,10 +1055,25 @@ fn import_tauri_options(settings: &mut AppSettings) {
     }
 }
 
+fn save_settings_to_path(settings: &AppSettings, path: &Path) -> Result<(), String> {
+    let data = serde_json::to_vec_pretty(settings)
+        .map_err(|error| format!("Could not serialize settings: {error}"))?;
+
+    if path.exists() {
+        let current = fs::read(path)
+            .map_err(|error| format!("Could not read the current settings file: {error}"))?;
+        if serde_json::from_slice::<AppSettings>(&current).is_ok() {
+            atomic_replace(&settings_backup_path(path), &current)?;
+        } else {
+            preserve_corrupt_settings(path)?;
+        }
+    }
+
+    atomic_replace(path, &data)
+}
+
 pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
-    let path = settings_path()?;
-    let data = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    std::fs::write(&path, data).map_err(|e| e.to_string())
+    save_settings_to_path(settings, &settings_path()?)
 }
 
 pub fn detect_auto_scale() -> f32 {
@@ -869,6 +1097,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn settings_save_is_atomic_and_retains_the_previous_valid_document() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let mut first = AppSettings {
+            theme: "classic".to_string(),
+            ..AppSettings::default()
+        };
+        save_settings_to_path(&first, &path).unwrap();
+
+        first.theme = "cata".to_string();
+        save_settings_to_path(&first, &path).unwrap();
+
+        let current: AppSettings = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let backup: AppSettings =
+            serde_json::from_slice(&fs::read(settings_backup_path(&path)).unwrap()).unwrap();
+        assert_eq!(current.theme, "cata");
+        assert_eq!(backup.theme, "classic");
+    }
+
+    #[test]
+    fn corrupt_settings_are_preserved_and_recovered_from_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let expected = AppSettings {
+            theme: "green".to_string(),
+            ..AppSettings::default()
+        };
+        fs::write(
+            settings_backup_path(&path),
+            serde_json::to_vec_pretty(&expected).unwrap(),
+        )
+        .unwrap();
+        fs::write(&path, b"{ definitely not valid json").unwrap();
+
+        let (loaded, existed, warning) = load_settings_document(&path);
+        assert!(existed);
+        assert_eq!(loaded.theme, "green");
+        assert!(warning.unwrap().contains("restored"));
+        let restored: AppSettings = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored.theme, "green");
+        assert!(fs::read_dir(temp.path()).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("settings.json.corrupt-")
+        }));
+    }
+
+    #[test]
     fn legacy_settings_default_to_manual_login() {
         let settings: AppSettings = serde_json::from_str("{}").unwrap();
         assert!(!settings.verbose_diagnostics);
@@ -887,6 +1164,65 @@ mod tests {
         assert!(settings.profiles[0].show_tweaks_tab);
         assert!(settings.remember_window_geometry);
         assert_eq!(settings.window_geometry, WindowGeometry::default());
+        assert!(settings.pending_profile_deletion_ids.is_empty());
+    }
+
+    #[test]
+    fn portable_root_is_the_actual_executable_directory_not_a_name_heuristic() {
+        assert_eq!(
+            portable_root_from_paths(Path::new("/opt/wuddle/wuddle-bin"), None).unwrap(),
+            PathBuf::from("/opt/wuddle")
+        );
+        assert_eq!(
+            portable_root_from_paths(Path::new("/games/wuddle-build/wuddle-bin"), None).unwrap(),
+            PathBuf::from("/games/wuddle-build")
+        );
+    }
+
+    #[test]
+    fn appimage_portable_root_uses_the_host_image_instead_of_the_mount() {
+        assert_eq!(
+            portable_root_from_paths(
+                Path::new("/tmp/.mount_Wuddlex/usr/bin/wuddle"),
+                Some(Path::new("/home/player/Applications/Wuddle.AppImage")),
+            )
+            .unwrap(),
+            PathBuf::from("/home/player/Applications")
+        );
+        assert!(portable_root_from_paths(
+            Path::new("/tmp/.mount_Wuddlex/usr/bin/wuddle"),
+            Some(Path::new("relative/Wuddle.AppImage")),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn new_profile_ids_are_non_reusable_and_keep_a_readable_prefix() {
+        let first = unique_profile_id("My Profile", &[]);
+        let second = unique_profile_id("My Profile", &[]);
+
+        assert_ne!(first, second);
+        assert!(first.starts_with("my-profile-"));
+        assert!(second.starts_with("my-profile-"));
+        assert!(first
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-'));
+    }
+
+    #[test]
+    fn pending_profile_deletions_round_trip() {
+        let settings = AppSettings {
+            pending_profile_deletion_ids: vec!["retired-profile-id".to_string()],
+            ..AppSettings::default()
+        };
+
+        let encoded = serde_json::to_string(&settings).unwrap();
+        let decoded: AppSettings = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(
+            decoded.pending_profile_deletion_ids,
+            vec!["retired-profile-id"]
+        );
     }
 
     #[test]
@@ -909,6 +1245,63 @@ mod tests {
         };
         assert_eq!(unreasonable.initial_size(), None);
         assert_eq!(unreasonable.initial_position(), None);
+    }
+
+    #[test]
+    fn window_geometry_preserves_connected_secondary_monitors_and_recenters_missing_ones() {
+        let monitors = [
+            crate::monitor::MonitorRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            crate::monitor::MonitorRect {
+                x: -1920,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        ];
+        let connected = WindowGeometry {
+            x: Some(-1400),
+            y: Some(100),
+            ..WindowGeometry::default()
+        };
+        assert_eq!(
+            connected.initial_position_on_monitors((1100.0, 700.0), &monitors),
+            Some((-1400.0, 100.0))
+        );
+
+        let disconnected = WindowGeometry {
+            x: Some(5000),
+            y: Some(4000),
+            ..WindowGeometry::default()
+        };
+        assert_eq!(
+            disconnected.initial_position_on_monitors((1100.0, 700.0), &monitors),
+            Some((410.0, 190.0))
+        );
+    }
+
+    #[test]
+    fn window_geometry_requires_a_usefully_visible_area() {
+        let monitors = [crate::monitor::MonitorRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }];
+        let barely_visible = WindowGeometry {
+            x: Some(1900),
+            y: Some(1060),
+            ..WindowGeometry::default()
+        };
+
+        assert_eq!(
+            barely_visible.initial_position_on_monitors((1100.0, 700.0), &monitors),
+            Some((410.0, 190.0))
+        );
     }
 
     #[test]
@@ -941,6 +1334,25 @@ mod tests {
     }
 
     #[test]
+    fn profile_infrequent_check_schedule_defaults_and_round_trips() {
+        let legacy: ProfileConfig =
+            serde_json::from_str(r#"{"id":"legacy","name":"Legacy"}"#).unwrap();
+        assert_eq!(legacy.last_infrequent_check_unix, 0);
+
+        let scheduled: ProfileConfig = serde_json::from_str(
+            r#"{
+                "id":"scheduled",
+                "name":"Scheduled",
+                "last_infrequent_check_unix":123456789
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(scheduled.last_infrequent_check_unix, 123_456_789);
+        let encoded = serde_json::to_string(&scheduled).unwrap();
+        assert!(encoded.contains("\"last_infrequent_check_unix\":123456789"));
+    }
+
+    #[test]
     fn auto_login_metadata_round_trips_without_credentials() {
         let raw = r#"{
             "auto_login_warning_acknowledged": true,
@@ -952,7 +1364,10 @@ mod tests {
                     "id": "de305d54-75b4-431b-adb2-eb6b9e546014",
                     "label": "Main"
                 }],
-                "selected_auto_login_account_id": "de305d54-75b4-431b-adb2-eb6b9e546014"
+                "selected_auto_login_account_id": "de305d54-75b4-431b-adb2-eb6b9e546014",
+                "pending_auto_login_deletion_ids": [
+                    "de305d54-75b4-431b-adb2-eb6b9e546014"
+                ]
             }]
         }"#;
         let settings: AppSettings = serde_json::from_str(raw).unwrap();
@@ -961,6 +1376,10 @@ mod tests {
         assert!(encoded.contains("\"auto_login_enabled\":true"));
         assert!(encoded.contains("Main"));
         assert!(encoded.contains("de305d54-75b4-431b-adb2-eb6b9e546014"));
+        assert_eq!(
+            settings.profiles[0].pending_auto_login_deletion_ids,
+            vec!["de305d54-75b4-431b-adb2-eb6b9e546014"]
+        );
         assert!(!encoded.contains("password"));
         assert!(!encoded.contains("realmlist"));
         assert!(!encoded.contains("realm_name"));

@@ -262,7 +262,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 .iter_mut()
                 .find(|profile| profile.id == app.active_profile_id)
             {
-                let valid = account_id.as_ref().map_or(true, |selected| {
+                let valid = account_id.as_ref().is_none_or(|selected| {
                     profile
                         .auto_login_accounts
                         .iter()
@@ -307,20 +307,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 return Some(Task::none());
             };
             let profile_id = app.active_profile_id.clone();
-            Some(Task::perform(
-                delete_account(profile_id.clone(), account_id.clone()),
-                move |result| Message::DeleteAutoLoginAccountResult {
-                    profile_id: profile_id.clone(),
-                    account_id: account_id.clone(),
-                    result,
-                },
-            ))
+            stage_account_deletion(app, profile_id, account_id)
         }
+        Message::RetryDeleteAutoLoginAccount {
+            profile_id,
+            account_id,
+        } => stage_account_deletion(app, profile_id, account_id),
         Message::DeleteAutoLoginAccountResult {
             profile_id,
             account_id,
             result,
         } => {
+            app.auto_login_deletions_in_progress
+                .remove(&(profile_id.clone(), account_id.as_str().to_string()));
             match result {
                 Ok(()) => {
                     if let Some(profile) = app
@@ -334,19 +333,27 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         if profile.selected_auto_login_account_id.as_ref() == Some(&account_id) {
                             profile.selected_auto_login_account_id = None;
                         }
+                        profile
+                            .pending_auto_login_deletion_ids
+                            .retain(|pending| pending != account_id.as_str());
                     }
                     if let Err(error) = app.try_save_settings() {
-                        app.log(LogLevel::Error, &format!("Credential was removed, but account metadata could not be saved: {error}"));
+                        app.log(LogLevel::Error, &format!("Credential was removed, but its retry tombstone could not be finalized: {error}"));
                         app.show_toast(
-                            format!(
-                                "Credential was removed, but settings could not be saved: {error}"
-                            ),
-                            ToastKind::Error,
+                            "The credential was removed. Wuddle will finish its account metadata cleanup after restart.",
+                            ToastKind::Warn,
                         );
-                        app.dialog = Some(Dialog::AutoLoginAccounts);
                         return Some(Task::none());
                     }
-                    app.dialog = Some(Dialog::AutoLoginAccounts);
+                    if matches!(
+                        app.dialog.as_ref(),
+                        Some(Dialog::DeleteAutoLoginAccount {
+                            account_id: current,
+                            ..
+                        }) if current == &account_id
+                    ) {
+                        app.dialog = Some(Dialog::AutoLoginAccounts);
+                    }
                     app.log(
                         LogLevel::Info,
                         "Auto-login account removed from secure storage.",
@@ -359,7 +366,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         &format!("Could not remove auto-login account: {error}"),
                     );
                     app.show_toast(
-                        format!("Could not remove auto-login account: {error}"),
+                        format!(
+                            "Could not remove auto-login account: {error}\n\nThe deletion remains pending and can be retried."
+                        ),
                         ToastKind::Error,
                     );
                 }
@@ -368,6 +377,90 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         _ => None,
     }
+}
+
+fn stage_account_deletion(
+    app: &mut App,
+    profile_id: String,
+    account_id: AccountId,
+) -> Option<Task<Message>> {
+    let operation_key = (profile_id.clone(), account_id.as_str().to_string());
+    if app
+        .auto_login_deletions_in_progress
+        .contains(&operation_key)
+    {
+        return Some(Task::none());
+    }
+
+    let Some(profile_index) = app
+        .profiles
+        .iter()
+        .position(|profile| profile.id == profile_id)
+    else {
+        return Some(Task::none());
+    };
+    let account_id_text = account_id.as_str().to_string();
+    let inserted = if app.profiles[profile_index]
+        .pending_auto_login_deletion_ids
+        .iter()
+        .any(|pending| pending == &account_id_text)
+    {
+        false
+    } else {
+        app.profiles[profile_index]
+            .pending_auto_login_deletion_ids
+            .push(account_id_text.clone());
+        true
+    };
+    if inserted {
+        if let Err(error) = app.try_save_settings() {
+            app.profiles[profile_index]
+                .pending_auto_login_deletion_ids
+                .retain(|pending| pending != &account_id_text);
+            app.log(
+                LogLevel::Error,
+                &format!("Could not stage auto-login account deletion: {error}"),
+            );
+            app.show_toast(
+                "Account removal was stopped because Wuddle could not save its retry state.",
+                ToastKind::Error,
+            );
+            return Some(Task::none());
+        }
+    }
+
+    app.auto_login_deletions_in_progress.insert(operation_key);
+    Some(Task::perform(
+        delete_account(profile_id.clone(), account_id.clone()),
+        move |result| Message::DeleteAutoLoginAccountResult {
+            profile_id: profile_id.clone(),
+            account_id: account_id.clone(),
+            result,
+        },
+    ))
+}
+
+pub fn pending_deletion_tasks(app: &mut App) -> Vec<Task<Message>> {
+    let mut tasks = Vec::new();
+    let mut invalid_ids = 0usize;
+    for profile in &app.profiles {
+        for account_id in &profile.pending_auto_login_deletion_ids {
+            match AccountId::parse(account_id.clone()) {
+                Ok(account_id) => tasks.push(Task::done(Message::RetryDeleteAutoLoginAccount {
+                    profile_id: profile.id.clone(),
+                    account_id,
+                })),
+                Err(_) => invalid_ids += 1,
+            }
+        }
+    }
+    if invalid_ids > 0 {
+        app.log(
+            LogLevel::Error,
+            &format!("Ignored {invalid_ids} invalid pending auto-login deletion identifier(s)."),
+        );
+    }
+    tasks
 }
 
 fn save_editor(app: &mut App) -> Option<Task<Message>> {

@@ -6,11 +6,12 @@ use iced::Task;
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
         Message::CheckSelfUpdate => {
+            app.self_update_launch_check_started = true;
             app.log(LogLevel::Api, "Checking for Wuddle updates...");
-            return Some(Task::perform(
+            Some(Task::perform(
                 service::check_self_update_full(app.update_channel == UpdateChannel::Beta),
                 Message::CheckSelfUpdateResult,
-            ));
+            ))
         }
         Message::CheckSelfUpdateResult(result) => {
             match result {
@@ -37,7 +38,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     }
                 }
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::ApplySelfUpdate => {
             if app.self_update_in_progress {
@@ -47,10 +48,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.update_message = Some("Downloading update...".to_string());
             app.log(LogLevel::Info, "Downloading Wuddle update...");
             let beta = app.update_channel == UpdateChannel::Beta;
-            return Some(Task::perform(
+            Some(Task::perform(
                 service::apply_self_update(beta),
                 Message::ApplySelfUpdateResult,
-            ));
+            ))
         }
         Message::ApplySelfUpdateResult(result) => {
             app.self_update_in_progress = false;
@@ -69,7 +70,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.show_toast(format!("Self-update failed: {}", e), ToastKind::Error);
                 }
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::RestartAfterUpdate => {
             app.log(LogLevel::Info, "Restarting Wuddle...");
@@ -78,9 +79,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 app.update_message = Some(format!("Restart failed: {}", e));
                 app.show_toast(format!("Restart failed: {}", e), ToastKind::Error);
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::ShowChangelog => {
+            let generation = app.begin_preview_request();
             let beta_channel = app.update_channel == UpdateChannel::Beta;
             app.dialog = Some(Dialog::Changelog {
                 title: if beta_channel {
@@ -91,12 +93,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 items: Vec::new(),
                 loading: true,
             });
-            return Some(Task::perform(
+            Some(Task::perform(
                 service::fetch_changelog(beta_channel),
-                Message::ChangelogLoaded,
-            ));
+                move |result| Message::ChangelogLoaded(generation, result),
+            ))
         }
-        Message::ChangelogLoaded(result) => {
+        Message::ChangelogLoaded(generation, result) => {
+            if !app.preview_request_is_current(generation, "changelog") {
+                return Some(Task::none());
+            }
             let text = match result {
                 Ok(text) => text,
                 Err(error) => {
@@ -118,20 +123,20 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     .items()
                     .to_vec();
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::SetUpdateChannel(ch) => {
             app.update_channel = ch;
             app.save_settings();
             app.log(LogLevel::Info, &format!("Update channel set to {:?}.", ch));
-            return Some(Task::none());
+            Some(Task::none())
         }
         Message::SwitchToStableChannel => {
             app.log(LogLevel::Info, "Switching to the stable channel...");
             if !switch_to_stable_channel() {
                 let _ = open::that("https://github.com/ZythDr/Wuddle/releases");
             }
-            return Some(Task::none());
+            Some(Task::none())
         }
         _ => None,
     }
@@ -167,7 +172,7 @@ fn switch_to_stable_channel() -> bool {
         return false;
     }
 
-    stables.sort_by(|a, b| semver_parts(b).cmp(&semver_parts(a)));
+    stables.sort_by_key(|entry| std::cmp::Reverse(semver_parts(entry)));
     let best = &stables[0];
     let json = format!("{{\"current\":\"{}\"}}\n", best);
     if std::fs::write(launcher_dir.join("current.json"), json).is_err() {

@@ -30,7 +30,25 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.7.0-beta.6
+### What's New in v3.7.0-beta.7
+
+This beta completes a full security, reliability, and data-integrity review of Wuddle, addressing 75 documented findings.
+
+- **Safer Installs and Removals** — Addons, mods, DLLs, and MPQs now use stronger staging, ownership checks, backups, and rollback handling.
+- **Stronger Security and Privacy** — Hardened downloads, archives, README previews, redirects, credentials, diagnostic exports, and release assets.
+- **Reliable Profile Isolation** — Delayed background work can no longer affect the wrong profile, database, dialog, or WoW installation.
+- **More Dependable Updates** — Added bounded Git operations, cancellation, stronger cache validation, accurate multi-file checks, and safer API budgeting.
+- **Verified Self-Updates** — Linux and Windows updates now validate exact packages and digests while retaining rollback copies.
+- **Launcher and Platform Hardening** — Improved Windows version selection, restart handoff, single-instance ownership, Linux portable paths, and window restoration.
+- **Better MPQ Behavior** — MPQ changes are more transactional, and local patches are no longer incorrectly treated as remote repositories.
+- **Expanded Diagnostics** — Meaningful actions, file changes, metadata commits, failures, and rollbacks are now easier to trace without exposing private data.
+
+See the [full changelog](CHANGELOG.md#v370-beta7) for the complete technical breakdown.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.7.0-beta.6
 
 #### Improvements
 - **Window Position Memory**
@@ -42,9 +60,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 #### Bug Fixes
 - **Update Check Deadlock** — Fixed an expired GitHub rate-limit record potentially leaving Wuddle permanently stuck checking for updates.
 - **Linux Update Restart** — Fixed Wuddle closing without restarting after installing an AppImage update.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.7.0-beta.5
 

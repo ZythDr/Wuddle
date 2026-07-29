@@ -14,19 +14,14 @@ pub const NOTO: Font = Font::with_name("Noto Sans");
 pub const TOOLTIP_TEXT_SIZE: f32 = 15.0;
 
 /// Wuddle's 5 custom themes, ported from the CSS variables.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WuddleTheme {
+    #[default]
     Cata,
     Obsidian,
     Emerald,
     Ashen,
     WowUi,
-}
-
-impl Default for WuddleTheme {
-    fn default() -> Self {
-        WuddleTheme::Cata
-    }
 }
 
 /// Extended color palette for Wuddle themes — covers gradients, borders, etcolors.

@@ -124,7 +124,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 tv.fov,
                 1.0..=2.5,
                 0.025,
-                |v| Message::SetTweakFov(v),
+                Message::SetTweakFov,
                 format!("{:.2} ({:.0}°)", tv.fov, tv.fov.to_degrees()),
                 colors,
             ),
@@ -136,7 +136,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 tv.farclip,
                 777.0..=10000.0,
                 1.0,
-                |v| Message::SetTweakFarclip(v),
+                Message::SetTweakFarclip,
                 format!("{:.0}", tv.farclip),
                 colors,
             ),
@@ -148,7 +148,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 tv.frilldistance,
                 70.0..=1000.0,
                 1.0,
-                |v| Message::SetTweakFrilldistance(v),
+                Message::SetTweakFrilldistance,
                 format!("{:.0}", tv.frilldistance),
                 colors,
             ),
@@ -160,7 +160,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 tv.nameplate_dist,
                 20.0..=80.0,
                 1.0,
-                |v| Message::SetTweakNameplateDist(v),
+                Message::SetTweakNameplateDist,
                 format!("{:.0}", tv.nameplate_dist),
                 colors,
             ),
@@ -186,7 +186,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 TweakId::MaxCameraDist,
                 t.max_camera_dist,
                 &format!("{:.0}", tv.max_camera_dist),
-                |s| Message::SetTweakMaxCameraDist(s),
+                Message::SetTweakMaxCameraDist,
                 colors,
             ),
         ]
@@ -211,7 +211,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 TweakId::SoundChannels,
                 t.sound_channels,
                 &format!("{}", tv.sound_channels),
-                |s| Message::SetTweakSoundChannels(s),
+                Message::SetTweakSoundChannels,
                 colors,
             ),
         ]
@@ -265,6 +265,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
 }
 
 /// Tweak row with checkbox + slider + value display
+#[allow(clippy::too_many_arguments)]
 fn tweak_row_slider<'a, F>(
     name: &str,
     desc: &str,

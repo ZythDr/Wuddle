@@ -3,7 +3,7 @@
 //! - `addon_conflict`    — conflict resolution for duplicate addon sources
 
 use crate::components::helpers::{close_button, forge_svg_handle, tip};
-use crate::{theme, Message};
+use crate::{theme, FileConflictAction, Message};
 use iced::widget::{button, column, container, row, scrollable, text, Space};
 use iced::{Background, Border, Color};
 use iced::{Element, Length};
@@ -115,6 +115,73 @@ fn tree_panel<'a>(
     .into()
 }
 
+pub fn file_conflict<'a>(
+    repo_id: i64,
+    repo_name: &'a str,
+    files: &'a [String],
+    action: FileConflictAction,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
+    let c = colors;
+    let action_label = match action {
+        FileConflictAction::Install => "installation",
+        FileConflictAction::Update => "update",
+        FileConflictAction::Reinstall => "reinstallation",
+    };
+    let file_rows = files.iter().map(|file| {
+        container(text(file).size(13).color(c.text))
+            .padding([5, 8])
+            .width(Length::Fill)
+            .style(move |_theme| theme::card_style(c))
+            .into()
+    });
+
+    column![
+        row![
+            text("Installation File Conflict")
+                .size(18)
+                .color(c.title),
+            Space::new().width(Length::Fill),
+            close_button(c),
+        ]
+        .align_y(iced::Alignment::Center),
+        text(format!(
+            "The {} for \"{}\" would replace existing files.",
+            action_label, repo_name
+        ))
+        .size(14)
+        .color(c.text),
+        column(file_rows).spacing(6),
+        text("If you continue, Wuddle will keep a private backup of each displaced file and restore it when this mod is removed. No live files have been changed yet.")
+            .size(13)
+            .color(c.warn),
+        row![
+            Space::new().width(Length::Fill),
+            button(text("Cancel").size(14))
+                .on_press(Message::CloseDialog)
+                .padding([8, 20])
+                .style(move |_theme, status| match status {
+                    button::Status::Hovered => theme::tab_button_hovered_style(c),
+                    _ => theme::tab_button_style(c),
+                }),
+            button(text("Back up & Continue").size(14))
+                .on_press(Message::ConfirmFileConflict {
+                    repo_id,
+                    action,
+                })
+                .padding([8, 20])
+                .style(move |_theme, status| match status {
+                    button::Status::Hovered => theme::play_button_hovered_style(c),
+                    _ => theme::play_button_style(c),
+                }),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
+    ]
+    .spacing(14)
+    .into()
+}
+
 /// Anti-virus warning shown before installing certain mods.
 pub fn av_false_positive_warning<'a>(
     url: &'a str,
@@ -204,6 +271,7 @@ pub fn av_false_positive_warning<'a>(
 }
 
 /// Addon conflict confirmation dialog.
+#[allow(clippy::too_many_arguments)]
 pub fn addon_conflict<'a>(
     url: &'a str,
     mode: &'a str,
@@ -252,10 +320,9 @@ pub fn addon_conflict<'a>(
     // Then, supplement with other top-level directories from the preview if available.
     if let Some(preview) = new_repo_preview {
         for f in preview {
-            if f.is_dir && !f.name.starts_with('.') {
-                if !new_items.iter().any(|(n, _)| n == &f.name) {
-                    new_items.push((f.name.clone(), true));
-                }
+            if f.is_dir && !f.name.starts_with('.') && !new_items.iter().any(|(n, _)| n == &f.name)
+            {
+                new_items.push((f.name.clone(), true));
             }
         }
     }

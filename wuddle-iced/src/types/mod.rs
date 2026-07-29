@@ -1,11 +1,13 @@
 pub mod config;
 pub mod dialog;
+pub mod profile_operations;
 pub mod tabs;
 pub mod toasts;
 pub mod tweak_types;
 
 pub use config::*;
 pub use dialog::*;
+pub use profile_operations::*;
 pub use tabs::Tab;
 pub use toasts::*;
 pub use tweak_types::*;

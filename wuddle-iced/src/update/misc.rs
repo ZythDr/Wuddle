@@ -6,9 +6,33 @@ use std::time::{Duration, Instant};
 
 const MINIMUM_LAUNCH_FEEDBACK: Duration = Duration::from_secs(1);
 
+fn validated_external_web_url(raw: &str) -> Result<reqwest::Url, &'static str> {
+    let parsed =
+        reqwest::Url::parse(raw.trim()).map_err(|_| "This link is not a valid web address.")?;
+    if !matches!(parsed.scheme(), "https" | "http") || parsed.host_str().is_none() {
+        return Err("For safety, Wuddle only opens HTTP and HTTPS web links.");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("For safety, Wuddle will not open links containing credentials.");
+    }
+    Ok(parsed)
+}
+
 pub fn open_url(app: &mut App, url: String) -> Task<Message> {
-    if let Err(e) = open::that(&url) {
-        app.log(LogLevel::Error, &format!("Failed to open URL: {}", e));
+    let url = match validated_external_web_url(&url) {
+        Ok(url) => url,
+        Err(message) => {
+            app.log(LogLevel::Error, message);
+            app.show_toast(message, ToastKind::Warn);
+            return Task::none();
+        }
+    };
+    if open::that(url.as_str()).is_err() {
+        // Platform errors can echo the full URL. Keep signed query parameters
+        // out of logs while still giving the user an actionable result.
+        let message = "The web link could not be opened by your system.";
+        app.log(LogLevel::Error, message);
+        app.show_toast(message, ToastKind::Error);
     }
     Task::none()
 }
@@ -282,5 +306,28 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::ToastHovered(id, hovered) => Some(set_toast_hovered(app, id, hovered)),
         Message::ToastAnimationTick => Some(toast_animation_tick(app)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::validated_external_web_url;
+
+    #[test]
+    fn external_links_allow_only_credential_free_web_urls() {
+        assert!(validated_external_web_url("https://example.org/readme").is_ok());
+        assert!(validated_external_web_url("http://example.org/readme").is_ok());
+        for unsafe_url in [
+            "file:///home/alice/private.txt",
+            "javascript:alert(1)",
+            "steam://run/123",
+            "https://token@example.org/private",
+            "mailto:alice@example.org",
+        ] {
+            assert!(
+                validated_external_web_url(unsafe_url).is_err(),
+                "{unsafe_url} should be rejected"
+            );
+        }
     }
 }

@@ -45,6 +45,7 @@ pub struct InstallOptions {
     pub use_symlinks: bool,
     pub set_xattr_comment: bool,
     pub replace_addon_conflicts: bool,
+    pub replace_file_conflicts: bool,
     /// Number of cached release versions to retain per repo (0 = only current).
     pub cache_keep_versions: usize,
 }
@@ -208,15 +209,22 @@ fn find_first_file_by_name(root: &Path, want: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
-    if dest_dir.exists() {
-        fs::remove_dir_all(dest_dir).with_context(|| format!("cleanup {:?}", dest_dir))?;
-    }
+    remove_any_target(dest_dir).with_context(|| format!("cleanup {:?}", dest_dir))?;
     fs::create_dir_all(dest_dir).with_context(|| format!("mkdir {:?}", dest_dir))?;
 
-    match detect_archive_kind(archive_path)? {
+    let result = match detect_archive_kind(archive_path)? {
         ArchiveKind::Zip => unzip(archive_path, dest_dir),
         ArchiveKind::SevenZip => unseven(archive_path, dest_dir),
+    };
+    if let Err(error) = result {
+        let _ = remove_any_target(dest_dir);
+        return Err(error);
     }
+    if let Err(error) = crate::archive::validate_extracted_tree(dest_dir) {
+        let _ = remove_any_target(dest_dir);
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn detect_archive_kind(archive_path: &Path) -> Result<ArchiveKind> {
@@ -243,12 +251,26 @@ fn detect_archive_kind(archive_path: &Path) -> Result<ArchiveKind> {
 fn unzip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
     let file = fs::File::open(zip_path).with_context(|| format!("open zip {:?}", zip_path))?;
     let mut archive = zip::ZipArchive::new(file).context("read zip")?;
+    let mut budget = crate::archive::ArchiveBudget::default();
+
+    // Validate the complete central directory before creating any output.
+    for i in 0..archive.len() {
+        let f = archive.by_index(i).context("zip entry")?;
+        let is_directory = f.is_dir();
+        if let Some(mode) = f.unix_mode() {
+            let file_type = mode & 0o170000;
+            let expected_type = if is_directory { 0o040000 } else { 0o100000 };
+            if file_type != 0 && file_type != expected_type {
+                anyhow::bail!("ZIP archive contains a link or special filesystem entry");
+            }
+        }
+        budget.register(f.name(), is_directory, f.size(), Some(f.compressed_size()))?;
+    }
+    budget.validate_archive_ratio(fs::metadata(zip_path)?.len())?;
 
     for i in 0..archive.len() {
         let mut f = archive.by_index(i).context("zip entry")?;
-        let Some(entry_path) = f.enclosed_name() else {
-            continue;
-        };
+        let entry_path = crate::archive::safe_relative_path(f.name())?;
         let outpath = dest_dir.join(entry_path);
 
         if f.is_dir() {
@@ -262,63 +284,118 @@ fn unzip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
 
         let mut outfile =
             fs::File::create(&outpath).with_context(|| format!("create {:?}", outpath))?;
-        io::copy(&mut f, &mut outfile).context("extract file")?;
+        let expected = f.size();
+        let copied = io::copy(&mut f, &mut outfile).context("extract file")?;
+        if copied != expected {
+            anyhow::bail!("ZIP entry expanded to an unexpected size");
+        }
     }
 
     Ok(())
 }
 
 fn unseven(seven_path: &Path, dest_dir: &Path) -> Result<()> {
-    let mut rejected = Vec::<String>::new();
+    let metadata = sevenz_rust::Archive::open(seven_path)
+        .with_context(|| format!("read 7z metadata {:?}", seven_path))?;
+    let mut budget = crate::archive::ArchiveBudget::default();
+    for entry in &metadata.files {
+        if entry.name().trim().is_empty() && entry.is_directory() {
+            continue;
+        }
+        // sevenz-rust marks ordinary explicit directory records as anti-items
+        // in archives produced by its own writer. They contain no stream and
+        // are safe to materialize as directories; file anti-items remain
+        // unsupported deletion semantics.
+        if entry.is_anti_item() && !entry.is_directory() {
+            anyhow::bail!("7z archive contains an unsupported file anti-item");
+        }
+        if entry.has_windows_attributes {
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+            let attributes = entry.windows_attributes();
+            let unix_file_type = (attributes >> 16) & 0o170000;
+            let expected_type = if entry.is_directory() {
+                0o040000
+            } else {
+                0o100000
+            };
+            if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                || (unix_file_type != 0 && unix_file_type != expected_type)
+            {
+                anyhow::bail!("7z archive contains a link or special filesystem entry");
+            }
+        }
+        budget.register(entry.name(), entry.is_directory(), entry.size(), None)?;
+    }
+    budget.validate_archive_ratio(fs::metadata(seven_path)?.len())?;
 
     sevenz_rust::decompress_file_with_extract_fn(seven_path, dest_dir, |entry, reader, dest| {
         if entry.name().trim().is_empty() && entry.is_directory() {
             return Ok(false);
         }
-        if safe_archive_path(entry.name()).is_none() {
-            rejected.push(entry.name().to_string());
-            return Ok(false);
+        crate::archive::safe_relative_path(entry.name()).map_err(|error| {
+            sevenz_rust::Error::other(format!("Unsafe 7z archive path: {error}"))
+        })?;
+        if entry.is_directory() {
+            fs::create_dir_all(dest).map_err(sevenz_rust::Error::io)?;
+            return Ok(true);
         }
-        sevenz_rust::default_entry_extract_fn(entry, reader, dest)
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(sevenz_rust::Error::io)?;
+        }
+        let mut output = fs::File::create(dest).map_err(sevenz_rust::Error::io)?;
+        let expected = entry.size();
+        let copied = io::copy(&mut reader.take(expected.saturating_add(1)), &mut output)
+            .map_err(sevenz_rust::Error::io)?;
+        if copied != expected {
+            return Err(sevenz_rust::Error::other(
+                "7z entry expanded to an unexpected size",
+            ));
+        }
+        output.sync_all().map_err(sevenz_rust::Error::io)?;
+        Ok(true)
     })
     .with_context(|| format!("read 7z {:?}", seven_path))?;
-
-    if !rejected.is_empty() {
-        anyhow::bail!(
-            "7z archive contains unsafe path(s): {}",
-            rejected.join(", ")
-        );
-    }
 
     Ok(())
 }
 
-fn safe_archive_path(name: &str) -> Option<PathBuf> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() || trimmed.contains('\\') || is_windows_drive_path(trimmed) {
-        return None;
+pub(crate) fn validate_asset_filename(filename: &str) -> Result<&str> {
+    if filename.is_empty()
+        || filename.trim() != filename
+        || filename.ends_with('.')
+        || filename
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '/' | '\\' | ':'))
+    {
+        anyhow::bail!("Asset filename is not a safe single file name");
     }
 
-    let path = Path::new(trimmed);
-    let mut safe = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => safe.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
-        }
+    let mut components = Path::new(filename).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        anyhow::bail!("Asset filename is not a safe single file name");
     }
 
-    if safe.as_os_str().is_empty() {
-        None
-    } else {
-        Some(safe)
+    let device_stem = filename
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let reserved = matches!(device_stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || device_stem.strip_prefix("COM").is_some_and(|suffix| {
+            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        })
+        || device_stem.strip_prefix("LPT").is_some_and(|suffix| {
+            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        });
+    if reserved {
+        anyhow::bail!("Asset filename uses a reserved device name");
     }
+
+    Ok(filename)
 }
 
-fn is_windows_drive_path(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
+fn safe_file_destination(dest_dir: &Path, filename: &str) -> Result<PathBuf> {
+    Ok(dest_dir.join(validate_asset_filename(filename)?))
 }
 
 fn copy_file(src: &Path, dst: &Path) -> Result<()> {
@@ -329,26 +406,48 @@ fn copy_file(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    let source_metadata =
+        fs::symlink_metadata(src).with_context(|| format!("metadata {:?}", src))?;
+    if source_metadata.file_type().is_symlink() {
+        anyhow::bail!("Refusing to copy a directory link from archive staging");
+    }
+    #[cfg(windows)]
+    if is_reparse_dir(&source_metadata) {
+        anyhow::bail!("Refusing to copy a directory reparse point from archive staging");
+    }
+    if !source_metadata.is_dir() {
+        anyhow::bail!("Archive staging source is not a directory");
+    }
+
     fs::create_dir_all(dst).with_context(|| format!("mkdir {:?}", dst))?;
     for entry in fs::read_dir(src).with_context(|| format!("read_dir {:?}", src))? {
         let entry = entry?;
         let path = entry.path();
         let target = dst.join(entry.file_name());
-        if path.is_dir() {
+        let metadata =
+            fs::symlink_metadata(&path).with_context(|| format!("metadata {:?}", path))?;
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!("Refusing to copy a link from archive staging");
+        }
+        #[cfg(windows)]
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            anyhow::bail!("Refusing to copy a reparse point from archive staging");
+        }
+        if metadata.is_dir() {
             copy_dir_recursive(&path, &target)?;
-        } else {
+        } else if metadata.is_file() {
             copy_file(&path, &target)?;
+        } else {
+            anyhow::bail!("Refusing to copy a special file from archive staging");
         }
     }
     Ok(())
 }
 
-fn remove_any_target(path: &Path) -> Result<()> {
-    if !path.exists() {
-        if !path.is_symlink() {
-            return Ok(());
-        }
+pub(crate) fn remove_any_target(path: &Path) -> Result<()> {
+    if !path.exists() && !path.is_symlink() {
+        return Ok(());
     }
     if let Ok(meta) = fs::symlink_metadata(path) {
         let ft = meta.file_type();
@@ -418,10 +517,8 @@ fn install_file_or_symlink(src: &Path, dst: &Path, use_symlink: bool) -> Result<
     }
     remove_any_target(dst)?;
 
-    if use_symlink && src.is_dir() {
-        if symlink_path(src, dst).is_ok() {
-            return Ok(());
-        }
+    if use_symlink && src.is_dir() && symlink_path(src, dst).is_ok() {
+        return Ok(());
     }
 
     copy_file(src, dst)
@@ -433,10 +530,8 @@ fn install_dir_or_symlink(src_dir: &Path, dst_dir: &Path, use_symlink: bool) -> 
     }
     remove_any_target(dst_dir)?;
 
-    if use_symlink {
-        if symlink_path(src_dir, dst_dir).is_ok() {
-            return Ok(());
-        }
+    if use_symlink && symlink_path(src_dir, dst_dir).is_ok() {
+        return Ok(());
     }
 
     copy_dir_recursive(src_dir, dst_dir)
@@ -927,20 +1022,19 @@ fn addon_folder_names_from_toc(dir: &Path, scan_root: &Path) -> Vec<String> {
     if let Some(rd) = rd {
         for entry in rd.flatten() {
             let p = entry.path();
-            if p.is_file() {
-                if p.extension()
+            if p.is_file()
+                && p.extension()
                     .and_then(|e| e.to_str())
                     .map(|e| e.eq_ignore_ascii_case("toc"))
                     .unwrap_or(false)
-                {
-                    let stem = p
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty());
-                    if let Some(name) = stem {
-                        stems.push(name);
-                    }
+            {
+                let stem = p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                if let Some(name) = stem {
+                    stems.push(name);
                 }
             }
         }
@@ -1033,8 +1127,18 @@ fn walk_dir(root: &Path, cb: &mut dyn FnMut(&Path)) {
     };
     for entry in rd.flatten() {
         let p = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        #[cfg(windows)]
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            continue;
+        }
         cb(&p);
-        if p.is_dir() {
+        if metadata.is_dir() {
             if p.file_name()
                 .and_then(|s| s.to_str())
                 .map(|name| {
@@ -1145,7 +1249,7 @@ pub fn install_dll(
     opts: InstallOptions,
     comment: &str,
 ) -> Result<InstallRecord> {
-    let dst = wow_dir.join(filename);
+    let dst = safe_file_destination(wow_dir, filename)?;
     install_file_or_symlink(downloaded, &dst, opts.use_symlinks)?;
     update_dlls_txt(wow_dir, comment, &[filename.to_string()][..])?;
     maybe_set_comment(&dst, comment, opts.set_xattr_comment);
@@ -1162,8 +1266,8 @@ pub fn install_raw_file(
     opts: InstallOptions,
     comment: &str,
 ) -> Result<InstallRecord> {
+    let dst = safe_file_destination(dest_dir, filename)?;
     fs::create_dir_all(dest_dir).context("create raw destination dir")?;
-    let dst = dest_dir.join(filename);
     install_file_or_symlink(downloaded, &dst, opts.use_symlinks)?;
     maybe_set_comment(&dst, comment, opts.set_xattr_comment);
     Ok(InstallRecord {
@@ -1175,9 +1279,11 @@ pub fn install_raw_file(
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_addons_in_tree, install_from_archive, normalize_toc_stem, safe_archive_path,
+        copy_dir_recursive, detect_addons_in_tree, extract_archive, install_dll,
+        install_from_archive, install_raw_file, normalize_toc_stem, validate_asset_filename,
         InstallOptions,
     };
+    use crate::archive::safe_relative_path;
     use git2::Repository;
     use std::{fs, io::Write};
 
@@ -1232,12 +1338,131 @@ mod tests {
 
     #[test]
     fn safe_archive_path_rejects_traversal_and_absolute_paths() {
-        assert!(safe_archive_path("folder/file.dll").is_some());
-        assert!(safe_archive_path("../evil.dll").is_none());
-        assert!(safe_archive_path("/tmp/evil.dll").is_none());
-        assert!(safe_archive_path("C:/evil.dll").is_none());
-        assert!(safe_archive_path("C:\\evil.dll").is_none());
-        assert!(safe_archive_path("").is_none());
+        assert!(safe_relative_path("folder/file.dll").is_ok());
+        assert!(safe_relative_path("../evil.dll").is_err());
+        assert!(safe_relative_path("/tmp/evil.dll").is_err());
+        assert!(safe_relative_path("C:/evil.dll").is_err());
+        assert!(safe_relative_path("C:\\evil.dll").is_err());
+        assert!(safe_relative_path("").is_err());
+    }
+
+    #[test]
+    fn asset_filenames_must_be_safe_single_cross_platform_components() {
+        for valid in [
+            "Awesome WotLK.dll",
+            "patch-enUS-M.MPQ",
+            "mod-v1.2.3.zip",
+            "Wüdłle Patch.7z",
+        ] {
+            assert_eq!(validate_asset_filename(valid).unwrap(), valid);
+        }
+
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "../outside.dll",
+            "nested/outside.dll",
+            "nested\\outside.dll",
+            "/tmp/outside.dll",
+            "C:\\outside.dll",
+            "file.dll:stream",
+            " trailing.dll",
+            "trailing.dll ",
+            "trailing.dll.",
+            "line\nbreak.dll",
+            "CON.dll",
+            "nul",
+            "COM1.dll",
+            "lpt9.zip",
+        ] {
+            assert!(
+                validate_asset_filename(invalid).is_err(),
+                "unexpectedly accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_file_installers_reject_paths_outside_the_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let downloaded = tmp.path().join("downloaded.dll");
+        let wow = tmp.path().join("wow");
+        let raw = tmp.path().join("raw");
+        fs::write(&downloaded, b"MZ fake dll").unwrap();
+
+        assert!(install_dll(
+            &downloaded,
+            &wow,
+            "../outside.dll",
+            InstallOptions::default(),
+            "test"
+        )
+        .is_err());
+        assert!(install_raw_file(
+            &downloaded,
+            &raw,
+            "nested/outside.dll",
+            InstallOptions::default(),
+            "test"
+        )
+        .is_err());
+        assert!(!tmp.path().join("outside.dll").exists());
+        assert!(!raw.join("nested").exists());
+    }
+
+    #[test]
+    fn unsafe_zip_entry_rejects_the_entire_archive_before_extraction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_path = tmp.path().join("mixed.zip");
+        let extract = tmp.path().join("extract");
+        let file = fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("safe/file.txt", options).unwrap();
+        zip.write_all(b"safe").unwrap();
+        zip.start_file("../escape.txt", options).unwrap();
+        zip.write_all(b"unsafe").unwrap();
+        zip.finish().unwrap();
+
+        assert!(extract_archive(&archive_path, &extract).is_err());
+        assert!(!extract.exists());
+        assert!(!tmp.path().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn zip_symlinks_are_rejected_before_extraction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_path = tmp.path().join("link.zip");
+        let extract = tmp.path().join("extract");
+        let file = fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.add_symlink(
+            "linked-file",
+            "../outside",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.finish().unwrap();
+
+        assert!(extract_archive(&archive_path, &extract).is_err());
+        assert!(!extract.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_copy_refuses_to_follow_directory_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let outside = tmp.path().join("outside");
+        let destination = tmp.path().join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"outside").unwrap();
+        std::os::unix::fs::symlink(&outside, source.join("linked")).unwrap();
+
+        assert!(copy_dir_recursive(&source, &destination).is_err());
+        assert!(!destination.join("linked").join("secret.txt").exists());
     }
 
     #[test]

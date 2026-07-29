@@ -4,9 +4,50 @@ use git2::{
     Cred, Direction, FetchOptions, Oid, RemoteCallbacks, Repository,
 };
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, OnceLock,
+};
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 use crate::gam_compat;
+
+const SERVER_CONNECT_TIMEOUT_MS: i32 = 5_000;
+const SERVER_IO_TIMEOUT_MS: i32 = 15_000;
+
+/// Configure libgit2's process-wide network deadlines.
+///
+/// libgit2 exposes these as C globals, so Wuddle calls this once at process
+/// startup, before Iced/Tokio can create worker threads. The callbacks below
+/// add a per-operation deadline and cancellation signal on top of these
+/// transport-level limits.
+pub(crate) fn initialize_transport_timeouts() -> Result<()> {
+    static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
+    let result = INITIALIZED.get_or_init(|| {
+        // SAFETY: Wuddle's binaries call this at the very beginning of `main`,
+        // before either runtime starts any worker threads. OnceLock also
+        // prevents concurrent writes to libgit2's process-global options.
+        unsafe {
+            git2::opts::set_server_connect_timeout_in_milliseconds(SERVER_CONNECT_TIMEOUT_MS)
+                .map_err(|error| error.to_string())?;
+            git2::opts::set_server_timeout_in_milliseconds(SERVER_IO_TIMEOUT_MS)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    });
+    result.clone().map_err(anyhow::Error::msg)
+}
+
+fn git_failure(action: &str, url: &str, error: &git2::Error) -> anyhow::Error {
+    anyhow!(
+        "{} {} failed ({:?}/{:?})",
+        action,
+        crate::url_safety::safe_remote_label(url),
+        error.class(),
+        error.code()
+    )
+}
 
 #[derive(Debug, Clone)]
 pub struct GitHeadState {
@@ -36,7 +77,40 @@ fn sanitize_fs_component(v: &str) -> String {
     }
 }
 
-fn remote_callbacks() -> RemoteCallbacks<'static> {
+#[derive(Clone)]
+struct RemoteOperationControl {
+    deadline: Option<Instant>,
+    cancelled: Option<Arc<AtomicBool>>,
+}
+
+impl RemoteOperationControl {
+    fn bounded(timeout: Duration, cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            deadline: Some(Instant::now() + timeout),
+            cancelled: Some(cancelled),
+        }
+    }
+
+    fn may_continue(&self) -> bool {
+        !self
+            .cancelled
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+            && !self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    fn check(&self) -> Result<()> {
+        if self.may_continue() {
+            Ok(())
+        } else {
+            anyhow::bail!("Git remote operation was cancelled or timed out")
+        }
+    }
+}
+
+fn remote_callbacks(control: Option<RemoteOperationControl>) -> RemoteCallbacks<'static> {
     let mut cb = RemoteCallbacks::new();
     cb.credentials(|_url, username_from_url, allowed| {
         if allowed.is_ssh_key() {
@@ -49,6 +123,14 @@ fn remote_callbacks() -> RemoteCallbacks<'static> {
         }
         Cred::default()
     });
+    if let Some(control) = control {
+        let transfer_control = control.clone();
+        cb.transfer_progress(move |_| transfer_control.may_continue());
+        let sideband_control = control.clone();
+        cb.sideband_progress(move |_| sideband_control.may_continue());
+        let tips_control = control.clone();
+        cb.update_tips(move |_, _, _| tips_control.may_continue());
+    }
     cb
 }
 
@@ -77,26 +159,157 @@ struct RemoteRefInfo {
     oid: Oid,
 }
 
-fn remote_refs_for_url(url: &str) -> Result<Vec<RemoteRefInfo>> {
+#[derive(Debug, Clone)]
+struct ConfiguredRemote {
+    name: String,
+    url: String,
+    pushurl: Option<String>,
+    fetch_refspecs: Vec<String>,
+    push_refspecs: Vec<String>,
+}
+
+fn configured_remotes(repo: &Repository) -> Result<Vec<ConfiguredRemote>> {
+    let names = repo.remotes().context("list configured Git remotes")?;
+    let mut configured = Vec::new();
+    for name in names.iter().filter_map(|name| name.ok().flatten()) {
+        let remote = repo
+            .find_remote(name)
+            .with_context(|| format!("open configured Git remote {name}"))?;
+        let url = remote
+            .url()
+            .context("read configured Git remote URL")?
+            .to_string();
+        let pushurl = remote
+            .pushurl()
+            .context("read configured Git push URL")?
+            .map(str::to_string);
+        let mut fetch_refspecs = Vec::new();
+        let mut push_refspecs = Vec::new();
+        for refspec in remote.refspecs() {
+            let value = refspec
+                .str()
+                .context("read configured Git refspec")?
+                .to_string();
+            match refspec.direction() {
+                Direction::Fetch => fetch_refspecs.push(value),
+                Direction::Push => push_refspecs.push(value),
+            }
+        }
+        configured.push(ConfiguredRemote {
+            name: name.to_string(),
+            url,
+            pushurl,
+            fetch_refspecs,
+            push_refspecs,
+        });
+    }
+    Ok(configured)
+}
+
+fn restore_remote_configuration(
+    source: &Repository,
+    staged: &Repository,
+    branch: &str,
+) -> Result<()> {
+    let preferred = gam_compat::preferred_remote(source);
+    let configured = configured_remotes(source)?;
+    if configured.is_empty() {
+        return Ok(());
+    }
+
+    let staged_names = staged
+        .remotes()
+        .context("list staged Git remotes")?
+        .iter()
+        .filter_map(|name| name.ok().flatten())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    for name in staged_names {
+        staged
+            .remote_delete(&name)
+            .with_context(|| format!("remove temporary staged Git remote {name}"))?;
+    }
+
+    for remote in &configured {
+        staged
+            .remote(&remote.name, &remote.url)
+            .with_context(|| format!("restore staged Git remote {}", remote.name))?;
+        if let Some(pushurl) = remote.pushurl.as_deref() {
+            staged
+                .remote_set_pushurl(&remote.name, Some(pushurl))
+                .with_context(|| format!("restore staged Git push URL for {}", remote.name))?;
+        }
+
+        // `Repository::remote` supplies the standard fetch refspec. Preserve
+        // additional custom refspecs without adding that default twice.
+        let default_fetch = format!("+refs/heads/*:refs/remotes/{}/*", remote.name);
+        for refspec in &remote.fetch_refspecs {
+            if refspec != &default_fetch {
+                staged
+                    .remote_add_fetch(&remote.name, refspec)
+                    .with_context(|| {
+                        format!("restore staged Git fetch refspec for {}", remote.name)
+                    })?;
+            }
+        }
+        for refspec in &remote.push_refspecs {
+            staged
+                .remote_add_push(&remote.name, refspec)
+                .with_context(|| format!("restore staged Git push refspec for {}", remote.name))?;
+        }
+    }
+
+    if let Some(preferred) = preferred {
+        let mut config = staged.config().context("open staged Git configuration")?;
+        config
+            .set_str(&format!("branch.{branch}.remote"), &preferred.name)
+            .context("restore staged Git branch remote")?;
+        config
+            .set_str(
+                &format!("branch.{branch}.merge"),
+                &format!("refs/heads/{branch}"),
+            )
+            .context("restore staged Git branch merge ref")?;
+    }
+    Ok(())
+}
+
+fn remote_refs_for_url(
+    url: &str,
+    control: Option<&RemoteOperationControl>,
+) -> Result<Vec<RemoteRefInfo>> {
+    if let Some(control) = control {
+        control.check()?;
+    }
     let tmp = tempdir().context("create temporary git dir")?;
     let bare_repo = Repository::init_bare(tmp.path()).context("init temporary bare repo")?;
     let mut remote = bare_repo
         .remote_anonymous(url)
-        .context("create anonymous remote")?;
+        .map_err(|error| git_failure("Create remote", url, &error))?;
 
     // Try credential-aware connect first (works for both public and private remotes),
     // then fall back to plain anonymous fetch if needed.
     let auth_res = remote
-        .connect_auth(Direction::Fetch, Some(remote_callbacks()), None)
+        .connect_auth(
+            Direction::Fetch,
+            Some(remote_callbacks(control.cloned())),
+            None,
+        )
         .map(|_| ());
-    if let Err(auth_err) = auth_res {
+    if auth_res.is_err() {
+        if let Some(control) = control {
+            control.check()?;
+        }
         remote
             .connect(Direction::Fetch)
-            .with_context(|| format!("connect remote {} (auth failed: {})", url, auth_err))?;
+            .map_err(|error| git_failure("Connect to remote", url, &error))?;
+    }
+    if let Some(control) = control {
+        control.check()?;
     }
     let refs = remote
         .list()
-        .context("list remote refs")?
+        .map_err(|error| git_failure("List remote refs for", url, &error))?
         .iter()
         .map(|h| RemoteRefInfo {
             name: h.name().to_string(),
@@ -105,12 +318,18 @@ fn remote_refs_for_url(url: &str) -> Result<Vec<RemoteRefInfo>> {
         })
         .collect::<Vec<_>>();
 
-    remote.disconnect()?;
+    remote
+        .disconnect()
+        .map_err(|error| git_failure("Disconnect remote", url, &error))?;
     Ok(refs)
 }
 
-fn choose_remote_head_for_url(url: &str, preferred_branch: Option<&str>) -> Result<GitHeadState> {
-    let refs = remote_refs_for_url(url)?;
+fn choose_remote_head_for_url(
+    url: &str,
+    preferred_branch: Option<&str>,
+    control: Option<&RemoteOperationControl>,
+) -> Result<GitHeadState> {
+    let refs = remote_refs_for_url(url, control)?;
 
     let preferred_ref = preferred_branch
         .map(str::trim)
@@ -170,6 +389,7 @@ fn choose_remote_head_for_url(url: &str, preferred_branch: Option<&str>) -> Resu
 fn choose_remote_head_with_url(
     url: &str,
     preferred_branch: Option<&str>,
+    control: Option<&RemoteOperationControl>,
 ) -> Result<(GitHeadState, String)> {
     let candidates = git_url_candidates(url);
     if candidates.is_empty() {
@@ -178,23 +398,35 @@ fn choose_remote_head_with_url(
 
     let mut last_err = None;
     for candidate in candidates {
-        match choose_remote_head_for_url(&candidate, preferred_branch) {
+        if let Some(control) = control {
+            control.check()?;
+        }
+        match choose_remote_head_for_url(&candidate, preferred_branch, control) {
             Ok(state) => return Ok((state, candidate)),
             Err(e) => last_err = Some(e),
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow!("Could not connect to git repository at {}", url)))
+    Err(last_err.unwrap_or_else(|| {
+        anyhow!(
+            "Could not connect to {}",
+            crate::url_safety::safe_remote_label(url)
+        )
+    }))
 }
 
 fn choose_remote_head_for_branch(
     url: &str,
     preferred_branch: Option<&str>,
+    control: Option<&RemoteOperationControl>,
 ) -> Result<GitHeadState> {
-    choose_remote_head_with_url(url, preferred_branch).map(|(state, _)| state)
+    choose_remote_head_with_url(url, preferred_branch, control).map(|(state, _)| state)
 }
 
-fn remote_branches_for_url(url: &str) -> Result<Vec<String>> {
-    let refs = remote_refs_for_url(url)?;
+fn remote_branches_for_url(
+    url: &str,
+    control: Option<&RemoteOperationControl>,
+) -> Result<Vec<String>> {
+    let refs = remote_refs_for_url(url, control)?;
     let mut branches = refs
         .into_iter()
         .filter_map(|r| r.name.strip_prefix("refs/heads/").map(|s| s.to_string()))
@@ -272,18 +504,18 @@ fn clone_repo(url: &str, path: &Path, branch: &str) -> Result<()> {
         .err()
         .ok_or_else(|| anyhow!("unexpected clone state"))?;
     let mut fo = FetchOptions::new();
-    fo.remote_callbacks(remote_callbacks());
+    fo.remote_callbacks(remote_callbacks(None));
     let mut builder = RepoBuilder::new();
     builder.fetch_options(fo);
     if !branch.trim().is_empty() {
         builder.branch(branch);
     }
-    builder.clone(url, path).with_context(|| {
-        format!(
-            "clone {} -> {} (plain failed: {})",
-            url,
-            path.display(),
-            first_err
+    builder.clone(url, path).map_err(|error| {
+        anyhow!(
+            "{}; unauthenticated attempt also failed ({:?}/{:?})",
+            git_failure("Clone", url, &error),
+            first_err.class(),
+            first_err.code()
         )
     })?;
     Ok(())
@@ -301,7 +533,7 @@ fn sync_existing_repo(url: &str, path: &Path, remote: &GitHeadState) -> Result<(
         Ok(remote) => remote,
         Err(_) => repo
             .remote(&remote_name, url)
-            .with_context(|| format!("add {} remote {}", remote_name, url))?,
+            .map_err(|error| git_failure("Add Git remote", url, &error))?,
     };
 
     let plain_fetch = git_remote
@@ -309,14 +541,16 @@ fn sync_existing_repo(url: &str, path: &Path, remote: &GitHeadState) -> Result<(
         .or_else(|_| git_remote.fetch(&[remote.branch.as_str()], None, None));
     if let Err(first_err) = plain_fetch {
         let mut fo = FetchOptions::new();
-        fo.remote_callbacks(remote_callbacks());
+        fo.remote_callbacks(remote_callbacks(None));
         git_remote
             .fetch(&[remote.remote_ref.as_str()], Some(&mut fo), None)
             .or_else(|_| git_remote.fetch(&[remote.branch.as_str()], Some(&mut fo), None))
-            .with_context(|| {
-                format!(
-                    "fetch {} {} (plain failed: {})",
-                    remote.remote_ref, url, first_err
+            .map_err(|error| {
+                anyhow!(
+                    "{}; unauthenticated attempt also failed ({:?}/{:?})",
+                    git_failure("Fetch from", url, &error),
+                    first_err.class(),
+                    first_err.code()
                 )
             })?;
     }
@@ -349,7 +583,7 @@ fn sync_existing_repo(url: &str, path: &Path, remote: &GitHeadState) -> Result<(
 pub fn sync_repo(url: &str, path: &Path, preferred_branch: Option<&str>) -> Result<GitHeadState> {
     let exists = ensure_git_repo(path)?;
     let effective_url = effective_remote_url(path, url).unwrap_or_else(|| url.to_string());
-    let (remote, remote_url) = choose_remote_head_with_url(&effective_url, preferred_branch)?;
+    let (remote, remote_url) = choose_remote_head_with_url(&effective_url, preferred_branch, None)?;
     if !exists {
         clone_repo(&remote_url, path, &remote.branch)?;
     } else {
@@ -363,6 +597,36 @@ pub fn sync_repo(url: &str, path: &Path, preferred_branch: Option<&str>) -> Resu
         branch: remote.branch,
         remote_ref: remote.remote_ref,
     })
+}
+
+/// Build an updated standalone worktree without mutating the installed one.
+///
+/// The remote selected by GAM's upstream rules is used for the clone, then all
+/// configured remotes and the active branch's preferred upstream are restored
+/// onto the staged clone before it can replace the live worktree.
+pub fn sync_repo_to_staging(
+    url: &str,
+    installed_worktree: Option<&Path>,
+    staging_path: &Path,
+    preferred_branch: Option<&str>,
+) -> Result<GitHeadState> {
+    let source_repo = installed_worktree
+        .map(Repository::open)
+        .transpose()
+        .context("open installed addon worktree for staging")?;
+    let effective_url = source_repo
+        .as_ref()
+        .and_then(gam_compat::preferred_remote)
+        .map(|remote| remote.url)
+        .unwrap_or_else(|| url.to_string());
+
+    let synced = sync_repo(&effective_url, staging_path, preferred_branch)?;
+    if let Some(source) = source_repo.as_ref() {
+        let staged =
+            Repository::open(staging_path).context("open updated staged addon worktree")?;
+        restore_remote_configuration(source, &staged, &synced.branch)?;
+    }
+    Ok(synced)
 }
 
 /// GAM follows the checked-out branch's configured upstream. Preserve that
@@ -379,7 +643,17 @@ pub fn effective_remote_url(path: &Path, fallback: &str) -> Option<String> {
 }
 
 pub fn remote_head_for_branch(url: &str, preferred_branch: Option<&str>) -> Result<GitHeadState> {
-    choose_remote_head_for_branch(url, preferred_branch)
+    choose_remote_head_for_branch(url, preferred_branch, None)
+}
+
+pub fn remote_head_for_branch_bounded(
+    url: &str,
+    preferred_branch: Option<&str>,
+    timeout: Duration,
+    cancelled: Arc<AtomicBool>,
+) -> Result<GitHeadState> {
+    let control = RemoteOperationControl::bounded(timeout, cancelled);
+    choose_remote_head_for_branch(url, preferred_branch, Some(&control))
 }
 
 pub fn remote_branches(url: &str) -> Result<Vec<String>> {
@@ -390,7 +664,7 @@ pub fn remote_branches(url: &str) -> Result<Vec<String>> {
 
     let mut last_err = None;
     for candidate in candidates {
-        match remote_branches_for_url(&candidate) {
+        match remote_branches_for_url(&candidate, None) {
             Ok(branches) => return Ok(branches),
             Err(e) => {
                 last_err = Some((candidate, e));
@@ -401,12 +675,15 @@ pub fn remote_branches(url: &str) -> Result<Vec<String>> {
     if let Some((candidate, e)) = last_err {
         anyhow::bail!(
             "list remote branches {} (last tried {}): {}",
-            url,
-            candidate,
+            crate::url_safety::safe_remote_label(url),
+            crate::url_safety::safe_remote_label(&candidate),
             e
         );
     }
-    anyhow::bail!("list remote branches {}", url);
+    anyhow::bail!(
+        "list remote branches {}",
+        crate::url_safety::safe_remote_label(url)
+    );
 }
 
 /// Return the target directory for an addon_git clone.
@@ -446,6 +723,23 @@ pub fn addon_repo_legacy_staging_dir(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn bounded_remote_control_observes_cancellation_and_deadlines() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let control =
+            RemoteOperationControl::bounded(Duration::from_secs(1), Arc::clone(&cancelled));
+        assert!(control.may_continue());
+        cancelled.store(true, Ordering::Release);
+        assert!(!control.may_continue());
+
+        let expired = RemoteOperationControl {
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            cancelled: None,
+        };
+        assert!(!expired.may_continue());
+        assert!(expired.check().is_err());
+    }
 
     fn commit_value(repo: &Repository, root: &Path, value: &str) -> Oid {
         fs::write(root.join("value.txt"), value.as_bytes()).unwrap();
@@ -519,11 +813,87 @@ mod tests {
         let repo = Repository::open(&worktree).unwrap();
         assert_eq!(
             repo.find_remote("origin").unwrap().url(),
-            Some(wrong_path.to_string_lossy().as_ref())
+            Ok(wrong_path.to_string_lossy().as_ref())
         );
         assert_eq!(
             repo.find_remote("gam").unwrap().url(),
-            Some(right_path.to_string_lossy().as_ref())
+            Ok(right_path.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn staged_update_preserves_all_remotes_and_the_configured_upstream() {
+        let temp = tempfile::tempdir().unwrap();
+        let right_path = temp.path().join("right");
+        let wrong_path = temp.path().join("wrong");
+        let installed = temp.path().join("installed");
+        let staged = temp.path().join("staged");
+        fs::create_dir_all(&right_path).unwrap();
+        fs::create_dir_all(&wrong_path).unwrap();
+        let right = Repository::init(&right_path).unwrap();
+        let wrong = Repository::init(&wrong_path).unwrap();
+        commit_value(&right, &right_path, "right-v1");
+        commit_value(&wrong, &wrong_path, "wrong-v1");
+
+        sync_repo(&right_path.to_string_lossy(), &installed, None).unwrap();
+        let branch_name;
+        {
+            let repo = Repository::open(&installed).unwrap();
+            repo.remote_rename("origin", "gam").unwrap();
+            repo.remote("origin", &wrong_path.to_string_lossy())
+                .unwrap();
+            branch_name = repo.head().unwrap().shorthand().unwrap().to_string();
+            let mut config = repo.config().unwrap();
+            config
+                .set_str(&format!("branch.{branch_name}.remote"), "gam")
+                .unwrap();
+            config
+                .set_str(
+                    &format!("branch.{branch_name}.merge"),
+                    &format!("refs/heads/{branch_name}"),
+                )
+                .unwrap();
+        }
+        commit_value(&right, &right_path, "right-v2");
+
+        sync_repo_to_staging(
+            &wrong_path.to_string_lossy(),
+            Some(&installed),
+            &staged,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(staged.join("value.txt")).unwrap(),
+            "right-v2"
+        );
+        let repo = Repository::open(&staged).unwrap();
+        assert_eq!(
+            repo.find_remote("origin").unwrap().url(),
+            Ok(wrong_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            repo.find_remote("gam").unwrap().url(),
+            Ok(right_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            repo.config()
+                .unwrap()
+                .get_string(&format!("branch.{branch_name}.remote"))
+                .unwrap(),
+            "gam"
+        );
+    }
+
+    #[test]
+    fn git_errors_do_not_repeat_remote_credentials_or_private_paths() {
+        let remote = "https://user:secret@example.org/private/project.git?token=secret";
+        let source = git2::Error::from_str(remote);
+        let rendered = git_failure("Fetch from", remote, &source).to_string();
+        assert!(rendered.contains("example.org"));
+        for private in ["user", "secret", "private", "project", "token"] {
+            assert!(!rendered.contains(private));
+        }
     }
 }

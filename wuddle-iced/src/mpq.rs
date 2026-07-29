@@ -31,6 +31,50 @@ fn manage_path_key(path: &str) -> String {
         .to_string()
 }
 
+fn tracked_package_name(app: &App, repo_id: i64) -> String {
+    app.repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .map(|repo| repo.name.clone())
+        .unwrap_or_else(|| format!("repository #{repo_id}"))
+}
+
+fn tracked_component_name(app: &App, repo_id: i64, path: &str) -> String {
+    app.repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .and_then(|repo| {
+            repo.installed_mpqs
+                .iter()
+                .find(|entry| entry.path.eq_ignore_ascii_case(path))
+        })
+        .map(|entry| entry.display_name.clone())
+        .unwrap_or_else(|| "MPQ component".to_string())
+}
+
+fn untracked_component_name(app: &App, path: &str) -> String {
+    app.mpq_ui
+        .protection
+        .iter()
+        .chain(app.untracked_mpqs.iter())
+        .find(|entry| entry.path.eq_ignore_ascii_case(path))
+        .map(|entry| {
+            entry
+                .display_name
+                .clone()
+                .unwrap_or_else(|| entry.file_name.clone())
+        })
+        .unwrap_or_else(|| "untracked MPQ".to_string())
+}
+
+fn enabled_state(enabled: bool) -> &'static str {
+    if enabled {
+        "enabled"
+    } else {
+        "disabled"
+    }
+}
+
 impl std::fmt::Display for MpqClassification {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
@@ -75,9 +119,60 @@ pub struct UiState {
     pub wdm_addon: bool,
     pub busy: bool,
     pub error: Option<String>,
+    pub active_operation_id: Option<u64>,
+    pub commit_operation_id: Option<u64>,
+    pub pending_picker_id: Option<u64>,
 }
 
-fn pick_source_task() -> Task<Message> {
+impl UiState {
+    pub fn commit_in_progress(&self) -> bool {
+        self.commit_operation_id.is_some()
+    }
+
+    pub fn dismissal_blocked(&self) -> bool {
+        self.commit_in_progress() || (self.busy && self.active_operation_id.is_none())
+    }
+
+    pub fn cancel_precommit_work(&mut self) {
+        if !self.commit_in_progress() {
+            self.active_operation_id = None;
+            self.pending_picker_id = None;
+            self.busy = false;
+        }
+    }
+}
+
+fn begin_operation(app: &mut App, commit: bool) -> (u64, crate::ProfileOperationScope) {
+    let operation_id = app.next_async_request_id();
+    app.mpq_ui.active_operation_id = Some(operation_id);
+    app.mpq_ui.commit_operation_id = commit.then_some(operation_id);
+    app.mpq_ui.busy = true;
+    (operation_id, app.profile_operation_scope())
+}
+
+fn accept_operation<T>(
+    app: &mut App,
+    operation_id: u64,
+    result: crate::ProfileScoped<T>,
+    label: &str,
+) -> Option<T> {
+    if app.mpq_ui.active_operation_id != Some(operation_id) {
+        app.log(
+            LogLevel::Info,
+            &format!("Discarded stale {label} result after its MPQ dialog changed."),
+        );
+        return None;
+    }
+    let result = app.accept_profile_result(result, label);
+    app.mpq_ui.active_operation_id = None;
+    if app.mpq_ui.commit_operation_id == Some(operation_id) {
+        app.mpq_ui.commit_operation_id = None;
+    }
+    app.mpq_ui.busy = false;
+    result
+}
+
+fn pick_source_task(request_id: u64, scope: crate::ProfileOperationScope) -> Task<Message> {
     Task::perform(
         async {
             rfd::AsyncFileDialog::new()
@@ -87,14 +182,22 @@ fn pick_source_task() -> Task<Message> {
                 .await
                 .map(|handle| handle.path().to_path_buf())
         },
-        Message::MpqSourcePicked,
+        move |path| Message::MpqSourcePicked {
+            request_id,
+            scope: scope.clone(),
+            path,
+        },
     )
 }
 
-fn inspect_task(app: &App, source: PathBuf) -> Task<Message> {
+fn inspect_task(app: &mut App, source: PathBuf) -> Task<Message> {
+    let (operation_id, scope) = begin_operation(app, false);
     Task::perform(
         service::inspect_local_mpq(app.db_path.clone(), app.wow_dir.clone(), source),
-        Message::MpqInspectionFinished,
+        move |result| Message::MpqInspectionFinished {
+            operation_id,
+            result: crate::ProfileScoped::new(scope.clone(), result),
+        },
     )
 }
 
@@ -110,6 +213,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::RescanMpqs => {
+            app.log(
+                LogLevel::Info,
+                "MPQ rescan requested for Data/ and the detected locale directory.",
+            );
             app.mpq_ui.busy = true;
             Some(Task::perform(
                 service::rescan_mpqs(app.db_path.clone(), app.wow_dir.clone()),
@@ -120,6 +227,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.mpq_ui.busy = false;
             match result {
                 Ok(count) => {
+                    app.log(
+                        LogLevel::Info,
+                        &format!(
+                            "MPQ rescan completed: {count} untracked archive(s) detected; managed packages refreshed."
+                        ),
+                    );
                     app.show_toast(
                         format!("Rescanned Data folders; found {count} untracked MPQ(s)."),
                         ToastKind::Info,
@@ -169,19 +282,29 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 );
                 return Some(Task::none());
             }
-            app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
+            let (operation_id, scope) = begin_operation(app, true);
             Some(Task::perform(
                 service::install_epoch_water(
                     app.db_path.clone(),
                     app.wow_dir.clone(),
                     app.install_options(),
                 ),
-                Message::EpochWaterInstalled,
+                move |result| Message::EpochWaterInstalled {
+                    operation_id,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
             ))
         }
-        Message::EpochWaterInstalled(result) => {
-            app.mpq_ui.busy = false;
+        Message::EpochWaterInstalled {
+            operation_id,
+            result,
+        } => {
+            let Some(result) =
+                accept_operation(app, operation_id, result, "Epoch Water installation")
+            else {
+                return Some(Task::none());
+            };
             match result {
                 Ok(_) => {
                     if matches!(app.dialog, Some(Dialog::MpqAdd)) {
@@ -212,6 +335,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
         }
         Message::OpenEpochWaterReadme => {
+            let generation = app.begin_preview_request();
             app.markdown_image_cache.clear();
             app.markdown_gif_cache.clear();
             app.dialog = Some(Dialog::Changelog {
@@ -221,10 +345,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             });
             Some(Task::perform(
                 service::fetch_repo_preview(service::EPOCH_WATER_URL.to_string()),
-                Message::EpochWaterReadmeLoaded,
+                move |result| Message::EpochWaterReadmeLoaded(generation, result),
             ))
         }
-        Message::EpochWaterReadmeLoaded(result) => {
+        Message::EpochWaterReadmeLoaded(generation, result) => {
+            if !app.preview_request_is_current(generation, "Epoch Water README") {
+                return Some(Task::none());
+            }
             let loaded_items = match result {
                 Ok(preview) => {
                     app.markdown_image_cache = preview.image_cache;
@@ -260,18 +387,42 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.dialog = Some(Dialog::MpqInstall);
             Some(Task::none())
         }
-        Message::PickMpqSource => Some(pick_source_task()),
-        Message::MpqSourcePicked(source) => {
-            let Some(source) = source else {
+        Message::PickMpqSource => {
+            let request_id = app.next_async_request_id();
+            let scope = app.profile_operation_scope();
+            app.mpq_ui.pending_picker_id = Some(request_id);
+            Some(pick_source_task(request_id, scope))
+        }
+        Message::MpqSourcePicked {
+            request_id,
+            scope,
+            path,
+        } => {
+            if app.mpq_ui.pending_picker_id != Some(request_id)
+                || !scope.matches(&app.active_profile_id, app.profile_generation)
+                || !matches!(app.dialog, Some(Dialog::MpqInstall))
+            {
+                app.log(
+                    LogLevel::Info,
+                    "Discarded a stale MPQ source picker result.",
+                );
+                return Some(Task::none());
+            }
+            app.mpq_ui.pending_picker_id = None;
+            let Some(source) = path else {
+                app.log(LogLevel::Info, "MPQ source selection cancelled.");
                 return Some(Task::none());
             };
+            app.log(
+                LogLevel::Info,
+                "Local MPQ source selected; inspection started (source path omitted).",
+            );
             app.mpq_ui.source = Some(source.clone());
             app.mpq_ui.inspection = None;
             app.mpq_ui.selections.clear();
             app.mpq_ui.target_previews.clear();
             app.mpq_ui.targets_reviewed = false;
             app.mpq_ui.error = None;
-            app.mpq_ui.busy = true;
             Some(inspect_task(app, source))
         }
         Message::LocalArchiveHovered(path) if matches!(app.dialog, Some(Dialog::MpqInstall)) => {
@@ -282,22 +433,41 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::LocalArchiveDropped(path) if matches!(app.dialog, Some(Dialog::MpqInstall)) => {
             app.local_archive_hover_path = None;
             if !wuddle_engine::mpq::is_supported_local_source(&path) {
+                app.log(
+                    LogLevel::Error,
+                    "Rejected an unsupported local MPQ drop; source path omitted.",
+                );
                 app.mpq_ui.error = Some("Drop a local .mpq, .zip, or .7z file.".to_string());
                 return Some(Task::none());
             }
+            app.log(
+                LogLevel::Info,
+                "Local MPQ source dropped; inspection started (source path omitted).",
+            );
             app.mpq_ui.source = Some(path.clone());
             app.mpq_ui.inspection = None;
             app.mpq_ui.selections.clear();
             app.mpq_ui.target_previews.clear();
             app.mpq_ui.targets_reviewed = false;
             app.mpq_ui.error = None;
-            app.mpq_ui.busy = true;
             Some(inspect_task(app, path))
         }
-        Message::MpqInspectionFinished(result) => {
-            app.mpq_ui.busy = false;
+        Message::MpqInspectionFinished {
+            operation_id,
+            result,
+        } => {
+            let Some(result) = accept_operation(app, operation_id, result, "MPQ inspection") else {
+                return Some(Task::none());
+            };
             match result {
                 Ok(inspection) => {
+                    app.log(
+                        LogLevel::Info,
+                        &format!(
+                            "Local MPQ inspection completed: {} valid MPQ candidate(s) staged for review.",
+                            inspection.candidates.len()
+                        ),
+                    );
                     app.mpq_ui.selections = inspection
                         .candidates
                         .iter()
@@ -315,7 +485,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.mpq_ui.targets_reviewed = false;
                     app.mpq_ui.error = None;
                 }
-                Err(error) => app.mpq_ui.error = Some(error),
+                Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!("Local MPQ inspection failed: {error}"),
+                    );
+                    app.mpq_ui.error = Some(error);
+                }
             }
             Some(Task::none())
         }
@@ -349,12 +525,23 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::InstallMpqPackage => {
             let Some(source) = app.mpq_ui.source.clone() else {
+                app.log(
+                    LogLevel::Error,
+                    "Local MPQ installation could not start because no source was selected.",
+                );
                 app.mpq_ui.error = Some("Choose an MPQ source first.".to_string());
                 return Some(Task::none());
             };
-            app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
             if !app.mpq_ui.targets_reviewed {
+                app.log(
+                    LogLevel::Info,
+                    &format!(
+                        "Reviewing {} local MPQ target(s) before installation; filenames and paths omitted.",
+                        app.mpq_ui.selections.len()
+                    ),
+                );
+                let (operation_id, scope) = begin_operation(app, false);
                 return Some(Task::perform(
                     service::preview_local_mpq_targets(
                         app.db_path.clone(),
@@ -362,9 +549,20 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         source,
                         app.mpq_ui.selections.clone(),
                     ),
-                    Message::MpqTargetsReviewed,
+                    move |result| Message::MpqTargetsReviewed {
+                        operation_id,
+                        result: crate::ProfileScoped::new(scope.clone(), result),
+                    },
                 ));
             }
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "Local MPQ installation commit requested: component_count={}; source and target paths omitted.",
+                    app.mpq_ui.selections.len()
+                ),
+            );
+            let (operation_id, scope) = begin_operation(app, true);
             Some(Task::perform(
                 service::install_local_mpq(
                     app.db_path.clone(),
@@ -373,23 +571,57 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.mpq_ui.selections.clone(),
                     app.opt_xattr,
                 ),
-                Message::MpqInstallFinished,
+                move |result| Message::MpqInstallFinished {
+                    operation_id,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
             ))
         }
-        Message::MpqTargetsReviewed(result) => {
-            app.mpq_ui.busy = false;
+        Message::MpqTargetsReviewed {
+            operation_id,
+            result,
+        } => {
+            let Some(result) = accept_operation(app, operation_id, result, "MPQ target preview")
+            else {
+                return Some(Task::none());
+            };
             match result {
                 Ok(previews) => {
+                    let collisions = previews
+                        .iter()
+                        .filter(|preview| {
+                            preview.status != wuddle_engine::mpq::MpqTargetStatus::Available
+                        })
+                        .count();
+                    app.log(
+                        LogLevel::Info,
+                        &format!(
+                            "Local MPQ target review completed: target_count={}; collision_count={collisions}.",
+                            previews.len()
+                        ),
+                    );
                     app.mpq_ui.target_previews = previews;
                     app.mpq_ui.targets_reviewed = true;
                     app.mpq_ui.error = None;
                 }
-                Err(error) => app.mpq_ui.error = Some(error),
+                Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!("Local MPQ target review failed: {error}"),
+                    );
+                    app.mpq_ui.error = Some(error);
+                }
             }
             Some(Task::none())
         }
-        Message::MpqInstallFinished(result) => {
-            app.mpq_ui.busy = false;
+        Message::MpqInstallFinished {
+            operation_id,
+            result,
+        } => {
+            let Some(result) = accept_operation(app, operation_id, result, "MPQ installation")
+            else {
+                return Some(Task::none());
+            };
             match result {
                 Ok(_) => {
                     app.dialog = None;
@@ -398,6 +630,12 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     Some(crate::update::repos::refresh_repos_task(app))
                 }
                 Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!(
+                            "MPQ package installation failed; staged data was not committed: {error}"
+                        ),
+                    );
                     app.mpq_ui.error = Some(error);
                     Some(Task::none())
                 }
@@ -407,7 +645,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if app.mpq_ui.busy {
                 return Some(Task::none());
             }
+            let target_name = tracked_package_name(app, repo_id);
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "MPQ state change requested: package \"{target_name}\" (repo id={repo_id}) -> {}.",
+                    enabled_state(enabled)
+                ),
+            );
             app.mpq_ui.busy = true;
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::set_mpq_enabled(
                     app.db_path.clone(),
@@ -416,7 +663,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     None,
                     enabled,
                 ),
-                Message::MpqEnabledChanged,
+                move |result| Message::MpqEnabledChanged {
+                    repo_id,
+                    target_name: target_name.clone(),
+                    package: true,
+                    enabled,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
             ))
         }
         Message::ToggleMpqEnabled(repo_id, path, enabled) => {
@@ -434,7 +687,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             {
                 return Some(Task::none());
             }
+            let target_name = tracked_component_name(app, repo_id, &path);
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "MPQ state change requested: component \"{target_name}\" (repo id={repo_id}) -> {}.",
+                    enabled_state(enabled)
+                ),
+            );
             app.mpq_ui.busy = true;
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::set_mpq_enabled(
                     app.db_path.clone(),
@@ -443,13 +705,36 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     Some(path),
                     enabled,
                 ),
-                Message::MpqEnabledChanged,
+                move |result| Message::MpqEnabledChanged {
+                    repo_id,
+                    target_name: target_name.clone(),
+                    package: false,
+                    enabled,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
             ))
         }
-        Message::MpqEnabledChanged(result) => {
+        Message::MpqEnabledChanged {
+            repo_id,
+            target_name,
+            package,
+            enabled,
+            result,
+        } => {
             app.mpq_ui.busy = false;
+            let Some(result) = app.accept_profile_result(result, "MPQ enable-state update") else {
+                return Some(Task::none());
+            };
+            let target_kind = if package { "package" } else { "component" };
             match result {
-                Ok(enabled) => {
+                Ok(changed) => {
+                    app.log(
+                        LogLevel::Info,
+                        &format!(
+                            "MPQ {target_kind} {}: \"{target_name}\" (repo id={repo_id}; filesystem rename(s)={changed}; metadata committed).",
+                            enabled_state(enabled)
+                        ),
+                    );
                     app.show_toast(
                         if enabled {
                             "MPQ patch enabled."
@@ -461,7 +746,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     Some(crate::update::repos::refresh_repos_task(app))
                 }
                 Err(error) => {
-                    app.log(LogLevel::Error, &format!("MPQ toggle failed: {error}"));
+                    app.log(
+                        LogLevel::Error,
+                        &format!(
+                            "MPQ {target_kind} state change failed: \"{target_name}\" (repo id={repo_id}; requested_state={}): {error}",
+                            enabled_state(enabled)
+                        ),
+                    );
                     app.show_toast(error, ToastKind::Error);
                     Some(Task::none())
                 }
@@ -564,6 +855,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::SetUntrackedMpqEditorUnlocked(path, editor_unlocked) => {
             app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
+            let target_name = untracked_component_name(app, &path);
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::set_untracked_mpq_editor_unlocked(
                     app.db_path.clone(),
@@ -571,12 +864,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     path,
                     editor_unlocked,
                 ),
-                Message::MpqProtectionChanged,
+                move |result| Message::MpqEditorLockChanged {
+                    repo_id: None,
+                    target_name: target_name.clone(),
+                    editor_unlocked,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
             ))
         }
         Message::SetTrackedMpqEditorUnlocked(repo_id, path, editor_unlocked) => {
             app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
+            let target_name = tracked_component_name(app, repo_id, &path);
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::set_tracked_mpq_editor_unlocked(
                     app.db_path.clone(),
@@ -585,8 +885,57 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     path,
                     editor_unlocked,
                 ),
-                Message::MpqProtectionChanged,
+                move |result| Message::MpqEditorLockChanged {
+                    repo_id: Some(repo_id),
+                    target_name: target_name.clone(),
+                    editor_unlocked,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
             ))
+        }
+        Message::MpqEditorLockChanged {
+            repo_id,
+            target_name,
+            editor_unlocked,
+            result,
+        } => {
+            app.mpq_ui.busy = false;
+            let Some(result) = app.accept_profile_result(result, "MPQ editor lock update") else {
+                return Some(Task::none());
+            };
+            let identifier = repo_id
+                .map(|id| format!("repo id={id}"))
+                .unwrap_or_else(|| "untracked component".to_string());
+            match result {
+                Ok(()) => app.log(
+                    LogLevel::Info,
+                    &format!(
+                        "MPQ editor {}: \"{target_name}\" ({identifier}).",
+                        if editor_unlocked {
+                            "unlocked"
+                        } else {
+                            "locked"
+                        }
+                    ),
+                ),
+                Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!(
+                            "MPQ editor lock change failed: \"{target_name}\" ({identifier}): {error}"
+                        ),
+                    );
+                    app.mpq_ui.error = Some(error);
+                    return Some(Task::none());
+                }
+            }
+            Some(Task::batch([
+                Task::perform(
+                    service::load_mpq_protection(app.db_path.clone(), app.wow_dir.clone()),
+                    Message::MpqProtectionLoaded,
+                ),
+                crate::update::repos::refresh_repos_task(app),
+            ]))
         }
         Message::ToggleUntrackedMpqEnabled(path, enabled) => {
             if app.mpq_ui.busy {
@@ -605,6 +954,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
             app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
+            let target_name = untracked_component_name(app, &path);
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "MPQ state change requested: untracked component \"{target_name}\" -> {}.",
+                    enabled_state(enabled)
+                ),
+            );
+            let scope = app.profile_operation_scope();
             Some(Task::perform(
                 service::set_untracked_mpq_enabled(
                     app.db_path.clone(),
@@ -612,14 +970,43 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     path,
                     enabled,
                 ),
-                Message::MpqProtectionChanged,
+                move |result| Message::UntrackedMpqEnabledChanged {
+                    target_name: target_name.clone(),
+                    enabled,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
             ))
         }
-        Message::MpqProtectionChanged(result) => {
+        Message::UntrackedMpqEnabledChanged {
+            target_name,
+            enabled,
+            result,
+        } => {
             app.mpq_ui.busy = false;
-            if let Err(error) = result {
-                app.mpq_ui.error = Some(error);
+            let Some(result) =
+                app.accept_profile_result(result, "untracked MPQ enable-state update")
+            else {
                 return Some(Task::none());
+            };
+            match result {
+                Ok(()) => app.log(
+                    LogLevel::Info,
+                    &format!(
+                        "Untracked MPQ {}: \"{target_name}\" (filesystem rename and metadata commit completed).",
+                        enabled_state(enabled)
+                    ),
+                ),
+                Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!(
+                            "Untracked MPQ state change failed: \"{target_name}\" (requested_state={}): {error}",
+                            enabled_state(enabled)
+                        ),
+                    );
+                    app.mpq_ui.error = Some(error);
+                    return Some(Task::none());
+                }
             }
             Some(Task::batch([
                 Task::perform(
@@ -664,28 +1051,59 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::SaveMpqEditor => {
-            let Some(Dialog::EditUntrackedMpq {
+            let (
                 path,
+                target_name,
                 edited_display_name,
                 edited_file_name,
                 edited_destination,
                 edited_core,
-                ..
-            }) = app.dialog.as_ref()
-            else {
-                return Some(Task::none());
+                friendly_name_changed,
+                filename_changed,
+                destination_changed,
+                classification_changed,
+            ) = match app.dialog.as_ref() {
+                Some(Dialog::EditUntrackedMpq {
+                    path,
+                    display_name,
+                    edited_display_name,
+                    file_name,
+                    edited_file_name,
+                    destination,
+                    edited_destination,
+                    core,
+                    edited_core,
+                }) => (
+                    path.clone(),
+                    display_name.clone(),
+                    edited_display_name.clone(),
+                    edited_file_name.clone(),
+                    edited_destination.clone(),
+                    *edited_core,
+                    display_name != edited_display_name,
+                    file_name != edited_file_name,
+                    destination != edited_destination,
+                    core != edited_core,
+                ),
+                _ => return Some(Task::none()),
             };
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "Untracked MPQ edit requested: \"{target_name}\" (friendly_name_changed={friendly_name_changed}; on_disk_rename={filename_changed}; destination_changed={destination_changed}; classification_changed={classification_changed})."
+                ),
+            );
             app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
             Some(Task::perform(
                 service::edit_untracked_mpq(
                     app.db_path.clone(),
                     app.wow_dir.clone(),
-                    path.clone(),
-                    edited_display_name.clone(),
-                    edited_file_name.clone(),
-                    edited_destination.clone(),
-                    *edited_core,
+                    path,
+                    edited_display_name,
+                    edited_file_name,
+                    edited_destination,
+                    edited_core,
                     app.opt_xattr,
                 ),
                 Message::MpqEditorSaved,
@@ -695,10 +1113,18 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.mpq_ui.busy = false;
             match result {
                 Ok(_) => {
+                    app.log(
+                        LogLevel::Info,
+                        "Untracked MPQ edit committed: filesystem and metadata are synchronized.",
+                    );
                     app.show_toast("MPQ settings updated.", ToastKind::Success);
                     Some(Task::done(Message::OpenMpqProtection))
                 }
                 Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!("Untracked MPQ edit failed; changes were not committed: {error}"),
+                    );
                     app.mpq_ui.error = Some(error);
                     Some(Task::none())
                 }
@@ -715,22 +1141,30 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::SaveManualMpqDisplayName => {
-            let Some(Dialog::ManualMpq {
-                path,
-                edited_display_name,
-                ..
-            }) = app.dialog.as_ref()
-            else {
-                return Some(Task::none());
+            let (path, target_name, edited_display_name) = match app.dialog.as_ref() {
+                Some(Dialog::ManualMpq {
+                    path,
+                    display_name,
+                    edited_display_name,
+                }) => (
+                    path.clone(),
+                    display_name.clone(),
+                    edited_display_name.clone(),
+                ),
+                _ => return Some(Task::none()),
             };
+            app.log(
+                LogLevel::Info,
+                &format!("Untracked MPQ friendly-name change requested: \"{target_name}\"."),
+            );
             app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
             Some(Task::perform(
                 service::rename_untracked_mpq(
                     app.db_path.clone(),
                     app.wow_dir.clone(),
-                    path.clone(),
-                    edited_display_name.clone(),
+                    path,
+                    edited_display_name,
                     app.opt_xattr,
                 ),
                 Message::ManualMpqDisplayNameSaved,
@@ -740,6 +1174,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.mpq_ui.busy = false;
             match result {
                 Ok(()) => {
+                    app.log(
+                        LogLevel::Info,
+                        "Untracked MPQ friendly-name metadata committed.",
+                    );
                     app.dialog = None;
                     app.show_toast("MPQ friendly name saved.", ToastKind::Success);
                     Some(Task::perform(
@@ -748,6 +1186,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     ))
                 }
                 Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!("Untracked MPQ friendly-name change failed: {error}"),
+                    );
                     app.mpq_ui.error = Some(error);
                     Some(Task::none())
                 }
@@ -763,23 +1205,29 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::SaveManualMpqFileName => {
-            let Some(Dialog::RenameManualMpq {
-                path,
-                edited_file_name,
-                ..
-            }) = app.dialog.as_ref()
-            else {
-                return Some(Task::none());
+            let (old_path, edited_file_name) = match app.dialog.as_ref() {
+                Some(Dialog::RenameManualMpq {
+                    path,
+                    edited_file_name,
+                    ..
+                }) => (path.clone(), edited_file_name.clone()),
+                _ => return Some(Task::none()),
             };
-            let old_path = path.clone();
+            let target_name = untracked_component_name(app, &old_path);
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "Untracked MPQ on-disk rename requested: \"{target_name}\"; filenames and paths omitted from diagnostics."
+                ),
+            );
             app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
             Some(Task::perform(
                 service::rename_untracked_mpq_file(
                     app.db_path.clone(),
                     app.wow_dir.clone(),
-                    path.clone(),
-                    edited_file_name.clone(),
+                    old_path.clone(),
+                    edited_file_name,
                 ),
                 move |result| Message::ManualMpqFileRenamed(old_path.clone(), result),
             ))
@@ -805,6 +1253,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     {
                         *key = new_key;
                     }
+                    app.log(
+                        LogLevel::Info,
+                        "Untracked MPQ on-disk rename committed: filesystem and metadata are synchronized.",
+                    );
                     app.show_toast("MPQ file renamed.", ToastKind::Success);
                     app.dialog = None;
                     if return_to_manage {
@@ -814,6 +1266,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     }
                 }
                 Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!("Untracked MPQ on-disk rename failed: {error}"),
+                    );
                     app.mpq_ui.error = Some(error);
                     Some(Task::none())
                 }
@@ -848,28 +1304,57 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::SaveMpqComponentDisplayName => {
-            let Some(Dialog::MpqComponent {
+            let (
                 repo_id,
                 path,
+                target_name,
                 edited_display_name,
                 edited_file_name,
                 edited_destination,
-                ..
-            }) = app.dialog.as_ref()
-            else {
-                return Some(Task::none());
+                friendly_name_changed,
+                filename_changed,
+                destination_changed,
+            ) = match app.dialog.as_ref() {
+                Some(Dialog::MpqComponent {
+                    repo_id,
+                    path,
+                    display_name,
+                    edited_display_name,
+                    file_name,
+                    edited_file_name,
+                    destination,
+                    edited_destination,
+                    ..
+                }) => (
+                    *repo_id,
+                    path.clone(),
+                    display_name.clone(),
+                    edited_display_name.clone(),
+                    edited_file_name.clone(),
+                    edited_destination.clone(),
+                    display_name != edited_display_name,
+                    file_name != edited_file_name,
+                    destination != edited_destination,
+                ),
+                _ => return Some(Task::none()),
             };
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "Tracked MPQ edit requested: \"{target_name}\" (repo id={repo_id}; friendly_name_changed={friendly_name_changed}; on_disk_rename={filename_changed}; destination_changed={destination_changed})."
+                ),
+            );
             app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
             Some(Task::perform(
                 service::rename_mpq_component(
                     app.db_path.clone(),
                     app.wow_dir.clone(),
-                    *repo_id,
-                    path.clone(),
-                    edited_display_name.clone(),
-                    edited_file_name.clone(),
-                    edited_destination.clone(),
+                    repo_id,
+                    path,
+                    edited_display_name,
+                    edited_file_name,
+                    edited_destination,
                     app.opt_xattr,
                 ),
                 Message::MpqComponentDisplayNameSaved,
@@ -879,28 +1364,48 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.mpq_ui.busy = false;
             match result {
                 Ok(_) => {
+                    app.log(
+                        LogLevel::Info,
+                        "Tracked MPQ edit committed: filesystem and package metadata are synchronized.",
+                    );
                     app.dialog = None;
                     app.show_toast("MPQ settings updated.", ToastKind::Success);
                     Some(crate::update::repos::refresh_repos_task(app))
                 }
                 Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!("Tracked MPQ edit failed; changes were not committed: {error}"),
+                    );
                     app.mpq_ui.error = Some(error);
                     Some(Task::none())
                 }
             }
         }
         Message::RemoveMpqComponent(force_modified) => {
-            let Some(Dialog::MpqComponent { repo_id, path, .. }) = app.dialog.as_ref() else {
-                return Some(Task::none());
+            let (repo_id, path, target_name) = match app.dialog.as_ref() {
+                Some(Dialog::MpqComponent {
+                    repo_id,
+                    path,
+                    display_name,
+                    ..
+                }) => (*repo_id, path.clone(), display_name.clone()),
+                _ => return Some(Task::none()),
             };
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "Tracked MPQ removal requested: \"{target_name}\" (repo id={repo_id}; force_modified={force_modified})."
+                ),
+            );
             app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
             Some(Task::perform(
                 service::remove_mpq_component(
                     app.db_path.clone(),
                     app.wow_dir.clone(),
-                    *repo_id,
-                    path.clone(),
+                    repo_id,
+                    path,
                     force_modified,
                 ),
                 Message::MpqComponentRemoved,
@@ -910,28 +1415,48 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.mpq_ui.busy = false;
             match result {
                 Ok(()) => {
+                    app.log(
+                        LogLevel::Info,
+                        "Tracked MPQ component removed; package metadata and any applicable backup restoration were committed.",
+                    );
                     app.dialog = None;
                     app.show_toast("MPQ removed.", ToastKind::Info);
                     Some(crate::update::repos::refresh_repos_task(app))
                 }
                 Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!("Tracked MPQ component removal failed: {error}"),
+                    );
                     app.mpq_ui.error = Some(error);
                     Some(Task::none())
                 }
             }
         }
         Message::KeepModifiedMpqProtected => {
-            let Some(Dialog::MpqComponent { repo_id, path, .. }) = app.dialog.as_ref() else {
-                return Some(Task::none());
+            let (repo_id, path, target_name) = match app.dialog.as_ref() {
+                Some(Dialog::MpqComponent {
+                    repo_id,
+                    path,
+                    display_name,
+                    ..
+                }) => (*repo_id, path.clone(), display_name.clone()),
+                _ => return Some(Task::none()),
             };
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "Keeping externally modified MPQ requested: \"{target_name}\" (repo id={repo_id}); the file will become protected."
+                ),
+            );
             app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
             Some(Task::perform(
                 service::protect_modified_mpq(
                     app.db_path.clone(),
                     app.wow_dir.clone(),
-                    *repo_id,
-                    path.clone(),
+                    repo_id,
+                    path,
                 ),
                 Message::ModifiedMpqProtected,
             ))
@@ -940,11 +1465,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.mpq_ui.busy = false;
             match result {
                 Ok(()) => {
+                    app.log(
+                        LogLevel::Info,
+                        "Externally modified MPQ retained and protection metadata committed.",
+                    );
                     app.dialog = None;
                     app.show_toast("Modified MPQ kept and protected.", ToastKind::Info);
                     Some(crate::update::repos::refresh_repos_task(app))
                 }
                 Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!("Could not retain and protect the modified MPQ: {error}"),
+                    );
                     app.mpq_ui.error = Some(error);
                     Some(Task::none())
                 }
@@ -974,16 +1507,24 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.mpq_ui.wdm_locale = None;
             app.mpq_ui.wdm_caverns = had_caverns;
             app.mpq_ui.wdm_addon = existing_wdm.is_none() || had_companion || had_caverns;
-            app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
             app.dialog = Some(Dialog::WdmInstall);
+            let (operation_id, scope) = begin_operation(app, false);
             Some(Task::perform(
                 service::resolve_wdm(app.db_path.clone(), app.wow_dir.clone()),
-                Message::WdmResolved,
+                move |result| Message::WdmResolved {
+                    operation_id,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
             ))
         }
-        Message::WdmResolved(result) => {
-            app.mpq_ui.busy = false;
+        Message::WdmResolved {
+            operation_id,
+            result,
+        } => {
+            let Some(result) = accept_operation(app, operation_id, result, "WDM resolution") else {
+                return Some(Task::none());
+            };
             match result {
                 Ok(catalog) => {
                     app.mpq_ui.wdm_locale = catalog.locale.recommended.clone();
@@ -1021,14 +1562,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 app.mpq_ui.error = Some("Choose the WoW client locale first.".to_string());
                 return Some(Task::none());
             };
-            app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
             let options = wuddle_engine::InstallOptions {
                 use_symlinks: app.opt_symlinks,
                 set_xattr_comment: app.opt_xattr,
                 replace_addon_conflicts: false,
+                replace_file_conflicts: false,
                 cache_keep_versions: 0,
             };
+            let (operation_id, scope) = begin_operation(app, true);
             Some(Task::perform(
                 service::install_wdm(
                     app.db_path.clone(),
@@ -1039,11 +1581,20 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.mpq_ui.wdm_addon,
                     options,
                 ),
-                Message::WdmInstallFinished,
+                move |result| Message::WdmInstallFinished {
+                    operation_id,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
             ))
         }
-        Message::WdmInstallFinished(result) => {
-            app.mpq_ui.busy = false;
+        Message::WdmInstallFinished {
+            operation_id,
+            result,
+        } => {
+            let Some(result) = accept_operation(app, operation_id, result, "WDM installation")
+            else {
+                return Some(Task::none());
+            };
             match result {
                 Ok(_) => {
                     app.dialog = None;
@@ -1065,29 +1616,41 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             Some(Task::none())
         }
         Message::ConfirmRemoveWdm => {
-            let Some(Dialog::RemoveWdm {
-                repo_id,
-                addon_repo_id,
-                remove_addon,
-            }) = app.dialog.as_ref()
+            let Some((repo_id, addon_repo_id, remove_addon)) =
+                app.dialog.as_ref().and_then(|dialog| match dialog {
+                    Dialog::RemoveWdm {
+                        repo_id,
+                        addon_repo_id,
+                        remove_addon,
+                    } => Some((*repo_id, *addon_repo_id, *remove_addon)),
+                    _ => None,
+                })
             else {
                 return Some(Task::none());
             };
-            app.mpq_ui.busy = true;
             app.mpq_ui.error = None;
+            let (operation_id, scope) = begin_operation(app, true);
             Some(Task::perform(
                 service::remove_wdm(
                     app.db_path.clone(),
                     app.wow_dir.clone(),
-                    *repo_id,
-                    *addon_repo_id,
-                    *remove_addon,
+                    repo_id,
+                    addon_repo_id,
+                    remove_addon,
                 ),
-                Message::WdmRemoved,
+                move |result| Message::WdmRemoved {
+                    operation_id,
+                    result: crate::ProfileScoped::new(scope.clone(), result),
+                },
             ))
         }
-        Message::WdmRemoved(result) => {
-            app.mpq_ui.busy = false;
+        Message::WdmRemoved {
+            operation_id,
+            result,
+        } => {
+            let Some(result) = accept_operation(app, operation_id, result, "WDM removal") else {
+                return Some(Task::none());
+            };
             match result {
                 Ok(()) => {
                     app.dialog = None;
@@ -1101,6 +1664,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             }
         }
         Message::OpenWdmReadme => {
+            let generation = app.begin_preview_request();
             app.markdown_image_cache.clear();
             app.markdown_gif_cache.clear();
             app.dialog = Some(Dialog::Changelog {
@@ -1110,10 +1674,13 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             });
             Some(Task::perform(
                 service::fetch_repo_preview("https://github.com/Trimitor/WDM-patch".to_string()),
-                Message::WdmReadmeLoaded,
+                move |result| Message::WdmReadmeLoaded(generation, result),
             ))
         }
-        Message::WdmReadmeLoaded(result) => {
+        Message::WdmReadmeLoaded(generation, result) => {
+            if !app.preview_request_is_current(generation, "WDM README") {
+                return Some(Task::none());
+            }
             let loaded_items = match result {
                 Ok(preview) => {
                     app.markdown_image_cache = preview.image_cache;
@@ -2489,5 +3056,43 @@ pub fn view_dialog<'a>(
         Dialog::EditUntrackedMpq { .. } => view_edit_untracked_mpq(app, dialog, colors),
         Dialog::RemoveWdm { .. } => view_remove_wdm(app, dialog, colors),
         _ => Space::new().into(),
+    }
+}
+
+#[cfg(test)]
+mod operation_tests {
+    use super::UiState;
+
+    #[test]
+    fn precommit_dialog_close_invalidates_pending_work() {
+        let mut state = UiState {
+            active_operation_id: Some(7),
+            pending_picker_id: Some(8),
+            busy: true,
+            ..UiState::default()
+        };
+
+        state.cancel_precommit_work();
+
+        assert_eq!(state.active_operation_id, None);
+        assert_eq!(state.pending_picker_id, None);
+        assert!(!state.busy);
+    }
+
+    #[test]
+    fn commit_work_cannot_be_cancelled_by_dialog_dismissal() {
+        let mut state = UiState {
+            active_operation_id: Some(9),
+            commit_operation_id: Some(9),
+            busy: true,
+            ..UiState::default()
+        };
+
+        state.cancel_precommit_work();
+
+        assert_eq!(state.active_operation_id, Some(9));
+        assert_eq!(state.commit_operation_id, Some(9));
+        assert!(state.busy);
+        assert!(state.dismissal_blocked());
     }
 }

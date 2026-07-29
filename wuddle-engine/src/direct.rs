@@ -17,6 +17,22 @@ pub fn is_direct_archive_url(url: &str) -> bool {
     parse_archive_url(url).is_ok()
 }
 
+pub fn is_direct_archive_candidate(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url.trim()) else {
+        return false;
+    };
+    let Some(raw_name) = parsed
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+    else {
+        return false;
+    };
+    let decoded = urlencoding::decode(raw_name)
+        .map(|name| name.into_owned())
+        .unwrap_or_else(|_| raw_name.to_string());
+    is_supported_archive_name(&decoded)
+}
+
 pub fn parse_archive_url(url: &str) -> Result<DirectArchive> {
     let trimmed = url.trim();
     let parsed = Url::parse(trimmed).context("Direct archive URL must be an absolute URL")?;
@@ -28,6 +44,16 @@ pub fn parse_archive_url(url: &str) -> Result<DirectArchive> {
     }
     if parsed.scheme() != "https" {
         anyhow::bail!("Direct archive URLs must use HTTPS or file://");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        anyhow::bail!(
+            "Direct archive URLs containing credentials are not supported. Use a credential-free URL."
+        );
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        anyhow::bail!(
+            "Direct archive URLs with query parameters or fragments cannot be saved securely. Use a stable URL without them."
+        );
     }
 
     let host = parsed
@@ -122,7 +148,7 @@ fn archive_stem(name: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_direct_archive_url, parse_archive_url};
+    use super::{is_direct_archive_candidate, is_direct_archive_url, parse_archive_url};
 
     #[test]
     fn accepts_https_archive_download_urls() {
@@ -147,5 +173,15 @@ mod tests {
     fn rejects_non_https_and_unsupported_files() {
         assert!(!is_direct_archive_url("http://example.com/addon.zip"));
         assert!(!is_direct_archive_url("https://example.com/addon.rar"));
+    }
+
+    #[test]
+    fn recognizes_but_rejects_archive_urls_that_could_persist_secrets() {
+        let signed = "https://example.com/addon.zip?signature=secret";
+        let credentialed = "https://token@example.com/addon.zip";
+        assert!(is_direct_archive_candidate(signed));
+        assert!(is_direct_archive_candidate(credentialed));
+        assert!(parse_archive_url(signed).is_err());
+        assert!(parse_archive_url(credentialed).is_err());
     }
 }

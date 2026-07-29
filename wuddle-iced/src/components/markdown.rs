@@ -245,9 +245,12 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for ImageViewer<'a> {
                 .into()
         } else {
             container(
-                text(format!("[image: {}]", url.split('/').last().unwrap_or(url)))
-                    .size(11)
-                    .color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.25)),
+                text(format!(
+                    "[image: {}]",
+                    url.split('/').next_back().unwrap_or(url)
+                ))
+                .size(11)
+                .color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.25)),
             )
             .padding([2, 0])
             .into()

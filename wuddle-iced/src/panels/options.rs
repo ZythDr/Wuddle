@@ -217,9 +217,9 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
             ),
             tip(
                 checkbox(app.opt_symlinks)
-                    .label("Use symlink installs when possible")
+                    .label("Use symlinks for extracted addon folders")
                     .on_toggle(Message::ToggleSymlinks),
-                "Applies to DLL and other non-addon_git installs only.\n\nAddons installed from the Addons tab use addon_git and follow GAM-compatible unpack behavior instead.",
+                "When possible, Wuddle links addon folders extracted from release archives instead of copying them.\n\nGit-based addons follow GAM-compatible layout rules. DLLs and individual files are copied.",
                 tooltip::Position::Top,
                 colors,
             ),
@@ -355,12 +355,28 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     // --- GitHub Authentication section ---
     let (token_status, token_status_color) = if app.github_token_storage_error.is_some() {
         ("Saved token unavailable", colors.bad)
-    } else if wuddle_engine::github_token().is_some() {
-        ("Token active (authenticated)", colors.good)
-    } else if app.github_token_input.is_empty() {
-        ("No token set", colors.muted)
-    } else {
+    } else if !app.github_token_input.is_empty() {
         ("Token entered — click Save to activate", colors.warn)
+    } else {
+        match app.github_token_status {
+            crate::app::GitHubTokenStatus::None => ("No token set", colors.muted),
+            crate::app::GitHubTokenStatus::StoredUnverified => {
+                ("Token stored — verification pending", colors.warn)
+            }
+            crate::app::GitHubTokenStatus::EnvironmentUnverified => {
+                ("Environment token — verification pending", colors.warn)
+            }
+            crate::app::GitHubTokenStatus::Validated => {
+                ("Token active (validated by GitHub)", colors.good)
+            }
+            crate::app::GitHubTokenStatus::Invalid => {
+                ("Saved token rejected by GitHub", colors.bad)
+            }
+            crate::app::GitHubTokenStatus::OfflineUnverified => (
+                "Token stored — GitHub verification unavailable",
+                colors.warn,
+            ),
+        }
     };
 
     let github_section = settings_card(
@@ -396,7 +412,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 {
                     let c2 = c;
                     let show_clear = !app.github_token_input.is_empty();
-                    let placeholder = if wuddle_engine::github_token().is_some() {
+                    let placeholder = if app.github_token_status.is_configured() {
                         "Saved securely — enter a replacement"
                     } else {
                         "ghp_..."

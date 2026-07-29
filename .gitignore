@@ -27,6 +27,10 @@ target
 *.pdb
 **/mutants.out*/
 
+# Python tooling output
+__pycache__/
+*.py[cod]
+
 # Node / frontend build output
 **/node_modules/
 **/dist/

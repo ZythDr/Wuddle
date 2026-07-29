@@ -541,7 +541,6 @@ pub(crate) fn stage_source(wow_dir: &Path, source: &Path) -> MpqResult<StagedMpq
         fs::copy(source, &target)
             .map_err(|_| MpqError::Filesystem("copying an MPQ into staging"))?;
     } else {
-        validate_archive_entries(source)?;
         install::extract_archive(source, &payload).map_err(|_| MpqError::InvalidArchive)?;
     }
 
@@ -565,35 +564,6 @@ pub(crate) fn stage_source(wow_dir: &Path, source: &Path) -> MpqResult<StagedMpq
         _temp_dir: temp_dir,
         files,
     })
-}
-
-fn validate_archive_entries(source: &Path) -> MpqResult<()> {
-    let lower = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if !lower.ends_with(".zip") {
-        return Ok(());
-    }
-    let file = fs::File::open(source).map_err(|_| MpqError::InvalidArchive)?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|_| MpqError::InvalidArchive)?;
-    for index in 0..archive.len() {
-        let entry = archive
-            .by_index(index)
-            .map_err(|_| MpqError::InvalidArchive)?;
-        if entry.enclosed_name().is_none() {
-            return Err(MpqError::InvalidArchive);
-        }
-        if entry
-            .unix_mode()
-            .map(|mode| mode & 0o170000 == 0o120000)
-            .unwrap_or(false)
-        {
-            return Err(MpqError::InvalidArchive);
-        }
-    }
-    Ok(())
 }
 
 fn collect_staged_mpqs(
@@ -676,7 +646,7 @@ pub fn validate_mpq_file(path: &Path) -> MpqResult<()> {
         let mut local = 0usize;
         while local + 8 <= read {
             let absolute = offset + local as u64;
-            if absolute % MPQ_HEADER_ALIGNMENT == 0 {
+            if absolute.is_multiple_of(MPQ_HEADER_ALIGNMENT) {
                 let header = &buffer[local..];
                 if header.starts_with(MPQ_HEADER) {
                     let size = u32::from_le_bytes(header[4..8].try_into().unwrap());
@@ -1090,7 +1060,7 @@ impl crate::Engine {
         diagnostics::emit(
             diagnostics::DiagnosticLevel::Trace,
             "engine.mpq",
-            "inspecting local MPQ source; path omitted".to_string(),
+            "inspecting local MPQ source; path omitted",
         );
         inspect_local_source(wow_dir, source).map_err(Into::into)
     }
@@ -1141,6 +1111,7 @@ impl crate::Engine {
         manifest_path: &str,
         protected: bool,
     ) -> Result<()> {
+        let _diagnostic = diagnostics::OperationGuard::new("set_mpq_protected");
         let entries = self.list_mpq_protection(wow_dir)?;
         let entry = entries
             .into_iter()
@@ -1165,6 +1136,7 @@ impl crate::Engine {
         manifest_path: &str,
         core: bool,
     ) -> Result<()> {
+        let _diagnostic = diagnostics::OperationGuard::new("set_mpq_core_classification");
         let entries = self.list_mpq_protection(wow_dir)?;
         let entry = entries
             .into_iter()
@@ -1197,7 +1169,7 @@ impl crate::Engine {
         diagnostics::emit(
             diagnostics::DiagnosticLevel::Debug,
             "engine.mpq",
-            "unlocked an untracked MPQ for editing; path omitted".to_string(),
+            "unlocked an untracked MPQ for editing; path omitted",
         );
         Ok(())
     }
@@ -1208,6 +1180,7 @@ impl crate::Engine {
         manifest_path: &str,
         editor_unlocked: bool,
     ) -> Result<()> {
+        let _diagnostic = diagnostics::OperationGuard::new("set_untracked_mpq_editor_unlocked");
         let entry = self
             .list_mpq_protection(wow_dir)?
             .into_iter()
@@ -1215,6 +1188,13 @@ impl crate::Engine {
             .ok_or_else(|| anyhow::anyhow!("The selected MPQ is no longer present"))?;
         self.db()
             .set_mpq_editor_unlocked(&entry.path, &entry.fingerprint, editor_unlocked)?;
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.mpq",
+            format!(
+                "untracked MPQ editor lock committed: editor_unlocked={editor_unlocked}; path omitted"
+            ),
+        );
         Ok(())
     }
 
@@ -1259,6 +1239,7 @@ impl crate::Engine {
         manifest_path: &str,
         editor_unlocked: bool,
     ) -> Result<()> {
+        let _diagnostic = diagnostics::OperationGuard::new("set_tracked_mpq_editor_unlocked");
         let entry = self
             .db()
             .list_installs(repo_id)?
@@ -1275,6 +1256,13 @@ impl crate::Engine {
             .upsert_mpq_protection(&entry.path, &fingerprint, false)?;
         self.db()
             .set_mpq_editor_unlocked(&entry.path, &fingerprint, editor_unlocked)?;
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.mpq",
+            format!(
+                "tracked MPQ editor lock committed: repo_id={repo_id}; editor_unlocked={editor_unlocked}; path omitted"
+            ),
+        );
         Ok(())
     }
 
@@ -1322,26 +1310,37 @@ impl crate::Engine {
         diagnostics::emit(
             diagnostics::DiagnosticLevel::Debug,
             "engine.mpq",
-            "changed untracked MPQ friendly name; values omitted".to_string(),
+            "changed untracked MPQ friendly name; values omitted",
         );
         Ok(())
     }
 
     /// Enable or disable an MPQ that exists in the game directory but is not
-    /// tracked as part of a Wuddle package. The protection padlock gates the
-    /// editor; enabled state remains an independent quick toggle.
+    /// tracked as part of a Wuddle package. The editor padlock is an engine
+    /// boundary, not merely a frontend affordance.
     pub fn set_untracked_mpq_enabled(
         &self,
         wow_dir: &Path,
         manifest_path: &str,
         enabled: bool,
     ) -> Result<()> {
+        let _diagnostic = diagnostics::OperationGuard::new("set_untracked_mpq_enabled");
         let entry = self
             .list_mpq_protection(wow_dir)?
             .into_iter()
             .find(|entry| entry.path.eq_ignore_ascii_case(manifest_path))
             .ok_or_else(|| anyhow::anyhow!("The selected MPQ is no longer present"))?;
+        if !entry.editor_unlocked {
+            anyhow::bail!("Unlock this MPQ before changing its enabled state");
+        }
         if entry.enabled == enabled {
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Debug,
+                "engine.mpq",
+                format!(
+                    "untracked MPQ state already matched request: enabled={enabled}; no filesystem change"
+                ),
+            );
             return Ok(());
         }
 
@@ -1371,15 +1370,35 @@ impl crate::Engine {
             ));
         }
 
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine.mpq",
+            format!("untracked MPQ filesystem rename started: enabled={enabled}; paths omitted"),
+        );
         fs::rename(&current, &desired)
             .map_err(|_| MpqError::Filesystem("changing an MPQ enabled state"))?;
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine.mpq",
+            "untracked MPQ filesystem rename completed; paths omitted",
+        );
         let fingerprint = match fs::symlink_metadata(&desired) {
             Ok(metadata) => metadata_fingerprint(&metadata),
             Err(_) => {
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Debug,
+                    "engine.mpq",
+                    "untracked MPQ metadata read failed; rolling back filesystem rename",
+                );
                 let _ = fs::rename(&desired, &current);
                 return Err(MpqError::Filesystem("reading MPQ metadata").into());
             }
         };
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine.mpq",
+            "untracked MPQ metadata commit started",
+        );
         if let Err(error) = self.db().move_mpq_protection(
             &entry.path,
             &new_manifest,
@@ -1389,13 +1408,20 @@ impl crate::Engine {
             entry.editor_unlocked,
             entry.display_name.as_deref(),
         ) {
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Debug,
+                "engine.mpq",
+                "untracked MPQ metadata commit failed; rolling back filesystem rename",
+            );
             let _ = fs::rename(&desired, &current);
             return Err(error);
         }
         diagnostics::emit(
             diagnostics::DiagnosticLevel::Debug,
             "engine.mpq",
-            format!("changed untracked MPQ enabled state: enabled={enabled}; path omitted"),
+            format!(
+                "untracked MPQ state committed: enabled={enabled}; filesystem_renamed=true; metadata_updated=true; path omitted"
+            ),
         );
         Ok(())
     }
@@ -1409,6 +1435,7 @@ impl crate::Engine {
         manifest_path: &str,
         new_file_name: &str,
     ) -> Result<String> {
+        let _diagnostic = diagnostics::OperationGuard::new("rename_untracked_mpq_file");
         let new_file_name = new_file_name.trim();
         validate_target_file_name(new_file_name)?;
         let entry = self
@@ -1433,6 +1460,11 @@ impl crate::Engine {
             .unwrap_or_else(|| Path::new(""));
         let new_manifest = normalize_relative_path(&relative_parent.join(&stored_file_name))?;
         if entry.path == new_manifest {
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Debug,
+                "engine.mpq",
+                "untracked MPQ rename skipped because the requested filename already matches",
+            );
             return Ok(entry.path);
         }
 
@@ -1455,11 +1487,26 @@ impl crate::Engine {
             }
         }
 
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine.mpq",
+            "untracked MPQ on-disk rename started; filenames and paths omitted",
+        );
         fs::rename(&current, &desired)
             .map_err(|_| MpqError::Filesystem("renaming a custom MPQ"))?;
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine.mpq",
+            "untracked MPQ on-disk rename completed; filenames and paths omitted",
+        );
         let fingerprint = match fs::symlink_metadata(&desired) {
             Ok(metadata) => metadata_fingerprint(&metadata),
             Err(_) => {
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Debug,
+                    "engine.mpq",
+                    "renamed MPQ metadata read failed; rolling back on-disk rename",
+                );
                 let _ = fs::rename(&desired, &current);
                 return Err(MpqError::Filesystem("reading renamed MPQ metadata").into());
             }
@@ -1473,13 +1520,18 @@ impl crate::Engine {
             entry.editor_unlocked,
             entry.display_name.as_deref(),
         ) {
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Debug,
+                "engine.mpq",
+                "renamed MPQ metadata commit failed; rolling back on-disk rename",
+            );
             let _ = fs::rename(&desired, &current);
             return Err(error);
         }
         diagnostics::emit(
             diagnostics::DiagnosticLevel::Debug,
             "engine.mpq",
-            "renamed an untracked custom MPQ; paths omitted".to_string(),
+            "untracked MPQ rename committed: filesystem_renamed=true; metadata_updated=true; paths omitted",
         );
         Ok(new_manifest)
     }
@@ -1487,6 +1539,9 @@ impl crate::Engine {
     /// Apply the editable properties of an unlocked, untracked MPQ as one
     /// filesystem/database operation. Classification and protection remain
     /// independent: saving never locks or unlocks the archive.
+    // Editing is one filesystem/database transaction, so keep all requested
+    // identity and placement fields together at this boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn edit_untracked_mpq(
         &self,
         wow_dir: &Path,
@@ -1497,6 +1552,7 @@ impl crate::Engine {
         core: bool,
         set_xattr_comment: bool,
     ) -> Result<String> {
+        let _diagnostic = diagnostics::OperationGuard::new("edit_untracked_mpq");
         let display_name = display_name.trim();
         if display_name.is_empty()
             || display_name.chars().count() > 120
@@ -1554,8 +1610,21 @@ impl crate::Engine {
             if let Some(parent) = desired.parent() {
                 fs::create_dir_all(parent)?;
             }
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Trace,
+                "engine.mpq",
+                format!(
+                    "untracked MPQ edit filesystem move started: destination={}; filenames and paths omitted",
+                    destination.label()
+                ),
+            );
             fs::rename(&current, &desired)
                 .map_err(|_| MpqError::Filesystem("renaming a custom MPQ"))?;
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Trace,
+                "engine.mpq",
+                "untracked MPQ edit filesystem move completed; filenames and paths omitted",
+            );
         }
 
         let committed_path = if path_changed { &desired } else { &current };
@@ -1563,6 +1632,11 @@ impl crate::Engine {
             Ok(metadata) => metadata_fingerprint(&metadata),
             Err(_) => {
                 if path_changed {
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Debug,
+                        "engine.mpq",
+                        "edited MPQ metadata read failed; rolling back filesystem move",
+                    );
                     let _ = fs::rename(&desired, &current);
                 }
                 return Err(MpqError::Filesystem("reading edited MPQ metadata").into());
@@ -1578,6 +1652,11 @@ impl crate::Engine {
             entry.editor_unlocked,
         ) {
             if path_changed {
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Debug,
+                    "engine.mpq",
+                    "untracked MPQ metadata commit failed; rolling back filesystem move",
+                );
                 let _ = fs::rename(&desired, &current);
             }
             return Err(error);
@@ -1586,7 +1665,9 @@ impl crate::Engine {
         diagnostics::emit(
             diagnostics::DiagnosticLevel::Debug,
             "engine.mpq",
-            "edited an untracked MPQ; values omitted".to_string(),
+            format!(
+                "untracked MPQ edit committed: filesystem_moved={path_changed}; metadata_updated=true; core={core}; xattr_requested={set_xattr_comment}; values omitted"
+            ),
         );
         Ok(new_manifest)
     }
@@ -1594,6 +1675,9 @@ impl crate::Engine {
     /// Rename or move an unlocked Wuddle-installed MPQ while retaining its
     /// package ownership, backup association, display metadata, and update
     /// tracking.
+    // Editing is one filesystem/database transaction, so keep all requested
+    // identity and placement fields together at this boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn edit_tracked_mpq(
         &self,
         repo_id: i64,
@@ -1604,6 +1688,7 @@ impl crate::Engine {
         destination: &MpqDestination,
         set_xattr_comment: bool,
     ) -> Result<String> {
+        let _diagnostic = diagnostics::OperationGuard::new("edit_tracked_mpq");
         let display_name = display_name.trim();
         if display_name.is_empty()
             || display_name.chars().count() > 120
@@ -1681,15 +1766,40 @@ impl crate::Engine {
             if let Some(parent) = desired.parent() {
                 fs::create_dir_all(parent)?;
             }
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Trace,
+                "engine.mpq",
+                format!(
+                    "tracked MPQ edit filesystem move started: repo_id={repo_id}; destination={}; filenames and paths omitted",
+                    destination.label()
+                ),
+            );
             fs::rename(&current, &desired)
                 .map_err(|_| MpqError::Filesystem("moving a tracked MPQ"))?;
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Trace,
+                "engine.mpq",
+                format!(
+                    "tracked MPQ edit filesystem move completed: repo_id={repo_id}; filenames and paths omitted"
+                ),
+            );
         }
 
         let restored_backup = if let Some(backup_path) = displaced_backup.as_ref() {
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Trace,
+                "engine.mpq",
+                format!("tracked MPQ displaced backup restoration started: repo_id={repo_id}"),
+            );
             if let Err(error) = fs::rename(backup_path, &current) {
                 let _ = fs::rename(&desired, &current);
                 return Err(error.into());
             }
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Trace,
+                "engine.mpq",
+                format!("tracked MPQ displaced backup restoration completed: repo_id={repo_id}"),
+            );
             true
         } else {
             false
@@ -1702,6 +1812,13 @@ impl crate::Engine {
             display_name,
             path_changed,
         ) {
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Debug,
+                "engine.mpq",
+                format!(
+                    "tracked MPQ metadata commit failed; rolling back filesystem changes: repo_id={repo_id}"
+                ),
+            );
             if restored_backup {
                 if let Some(backup_path) = displaced_backup.as_ref() {
                     let _ = fs::rename(&current, backup_path);
@@ -1720,7 +1837,9 @@ impl crate::Engine {
         diagnostics::emit(
             diagnostics::DiagnosticLevel::Debug,
             "engine.mpq",
-            "edited a tracked MPQ; values omitted".to_string(),
+            format!(
+                "tracked MPQ edit committed: repo_id={repo_id}; filesystem_moved={path_changed}; backup_restored={restored_backup}; metadata_updated=true; xattr_requested={set_xattr_comment}; values omitted"
+            ),
         );
         Ok(new_manifest)
     }
@@ -1816,10 +1935,22 @@ impl crate::Engine {
             owner: "local".to_string(),
             name: repo_name,
         })?;
+        let installed_asset = db::InstalledAssetState {
+            version: Some("Local".to_string()),
+            asset_id: Some(source_hash),
+            asset_size: source.metadata().ok().map(|meta| meta.len() as i64),
+            installed_at_unix: Some(Self::now_unix()),
+            ..db::InstalledAssetState::default()
+        };
 
-        if let Err(error) =
-            self.commit_staged_mpq_package(repo_id, wow_dir, &staged, selections, set_xattr_comment)
-        {
+        if let Err(error) = self.commit_staged_mpq_package(
+            repo_id,
+            wow_dir,
+            &staged,
+            selections,
+            set_xattr_comment,
+            &installed_asset,
+        ) {
             if self
                 .db()
                 .list_installs(repo_id)
@@ -1830,15 +1961,6 @@ impl crate::Engine {
             }
             return Err(error);
         }
-        self.db().set_installed_asset_state(
-            repo_id,
-            Some("Local"),
-            Some(&source_hash),
-            None,
-            source.metadata().ok().map(|meta| meta.len() as i64),
-            None,
-            Some(Self::now_unix()),
-        )?;
         Ok(repo_id)
     }
 
@@ -1873,8 +1995,32 @@ impl crate::Engine {
                 anyhow::bail!("Remote MPQ downloads must use HTTPS");
             }
             let destination = downloads.path().join(&asset.asset_name);
-            self.download_url_to(&asset.download_url, &destination)
-                .await?;
+            super::network::download_to_file(
+                &self.download_client,
+                &asset.download_url,
+                &destination,
+                super::network::MAX_REMOTE_ASSET_BYTES,
+                |url| {
+                    Self::validate_asset_url_for_source(
+                        &package.forge,
+                        &package.host,
+                        &package.owner,
+                        &package.name,
+                        url,
+                    )
+                },
+                |path| {
+                    if let Some(expected) = asset.size {
+                        let actual = path.metadata()?.len();
+                        if actual != expected {
+                            anyhow::bail!("Downloaded MPQ size did not match the release metadata");
+                        }
+                    }
+                    Self::verify_asset_digest(path, asset.sha256.as_deref())?;
+                    validate_mpq_file(path).map_err(anyhow::Error::from)
+                },
+            )
+            .await?;
             if let Some(expected) = asset.size {
                 let actual = destination.metadata()?.len();
                 if actual != expected {
@@ -1894,6 +2040,20 @@ impl crate::Engine {
             });
         }
 
+        let versions = assets
+            .iter()
+            .filter_map(|asset| asset.version.clone())
+            .collect::<Vec<_>>();
+        let version = if versions.is_empty() {
+            "Manual".to_string()
+        } else {
+            versions.join(" + ")
+        };
+        let installed_asset = db::InstalledAssetState {
+            version: Some(version),
+            installed_at_unix: Some(Self::now_unix()),
+            ..db::InstalledAssetState::default()
+        };
         let staged = stage_files(wow_dir, &sources)?;
         let repo_id = self.ensure_mpq_repo(package)?;
         if let Err(error) = self.commit_staged_mpq_package(
@@ -1902,6 +2062,7 @@ impl crate::Engine {
             &staged,
             &selections,
             set_xattr_comment,
+            &installed_asset,
         ) {
             if self
                 .db()
@@ -1913,24 +2074,6 @@ impl crate::Engine {
             }
             return Err(error);
         }
-        let versions = assets
-            .iter()
-            .filter_map(|asset| asset.version.clone())
-            .collect::<Vec<_>>();
-        let version = if versions.is_empty() {
-            "Manual".to_string()
-        } else {
-            versions.join(" + ")
-        };
-        self.db().set_installed_asset_state(
-            repo_id,
-            Some(&version),
-            None,
-            None,
-            None,
-            None,
-            Some(Self::now_unix()),
-        )?;
         Ok(repo_id)
     }
 
@@ -1976,6 +2119,7 @@ impl crate::Engine {
         staged: &StagedMpqSource,
         selections: &[MpqInstallSelection],
         set_xattr_comment: bool,
+        installed_asset: &db::InstalledAssetState,
     ) -> Result<()> {
         if selections.is_empty() {
             anyhow::bail!(MpqError::NoMpqFiles);
@@ -2185,7 +2329,7 @@ impl crate::Engine {
                 });
             }
             self.db()
-                .commit_mpq_installs(repo_id, &installs, &backups)?;
+                .commit_mpq_installs(repo_id, &installs, &backups, installed_asset)?;
             Ok(())
         })();
 
@@ -2345,6 +2489,7 @@ impl crate::Engine {
         enabled: bool,
         wow_dir: &Path,
     ) -> Result<usize> {
+        let _diagnostic = diagnostics::OperationGuard::new("set_mpq_enabled");
         // Refresh untracked target identities first. This is metadata-only and
         // lets a user explicitly approve a restored file that changed while a
         // replacement patch was disabled.
@@ -2365,6 +2510,24 @@ impl crate::Engine {
             .collect::<Vec<_>>();
         if selected.is_empty() {
             anyhow::bail!("Tracked MPQ not found");
+        }
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.mpq",
+            format!(
+                "tracked MPQ state plan started: repo_id={repo_id}; scope={}; selected_count={}; enabled={enabled}",
+                if manifest_path.is_some() {
+                    "component"
+                } else {
+                    "package"
+                },
+                selected.len()
+            ),
+        );
+        for entry in &selected {
+            if !self.tracked_mpq_editor_unlocked(wow_dir, &entry.path)? {
+                anyhow::bail!("Unlock this MPQ before changing its enabled state");
+            }
         }
 
         #[derive(Clone)]
@@ -2485,6 +2648,16 @@ impl crate::Engine {
             backup_moved: bool,
         }
         let rollback = |applied: &[AppliedToggle]| {
+            if !applied.is_empty() {
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Debug,
+                    "engine.mpq",
+                    format!(
+                        "tracked MPQ filesystem rollback started: repo_id={repo_id}; component_count={}",
+                        applied.len()
+                    ),
+                );
+            }
             for applied in applied.iter().rev() {
                 let item = &applied.item;
                 if enabled {
@@ -2509,11 +2682,31 @@ impl crate::Engine {
                     }
                 }
             }
+            if !applied.is_empty() {
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Debug,
+                    "engine.mpq",
+                    format!(
+                        "tracked MPQ filesystem rollback finished: repo_id={repo_id}; component_count={}",
+                        applied.len()
+                    ),
+                );
+            }
         };
 
         let mut applied = Vec::<AppliedToggle>::new();
-        for item in &toggles {
+        for (index, item) in toggles.iter().enumerate() {
             let mut backup_moved = false;
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Trace,
+                "engine.mpq",
+                format!(
+                    "tracked MPQ component transition started: repo_id={repo_id}; component={}/{}; enabled={enabled}; backup_or_restore_candidate={}; paths omitted",
+                    index + 1,
+                    toggles.len(),
+                    item.restored_target.is_some() || item.backup_path.is_some()
+                ),
+            );
             let operation = (|| -> Result<()> {
                 if enabled {
                     if let (Some(original), Some(storage)) =
@@ -2524,6 +2717,14 @@ impl crate::Engine {
                         }
                         fs::rename(original, storage)?;
                         backup_moved = true;
+                        diagnostics::emit(
+                            diagnostics::DiagnosticLevel::Trace,
+                            "engine.mpq",
+                            format!(
+                                "tracked MPQ conflicting target moved to backup: repo_id={repo_id}; component={}; paths omitted",
+                                index + 1
+                            ),
+                        );
                     }
                     fs::rename(&item.current, &item.desired)?;
                 } else {
@@ -2531,6 +2732,14 @@ impl crate::Engine {
                     if let Some(storage) = item.backup_path.as_ref().filter(|path| path.is_file()) {
                         fs::rename(storage, &item.current)?;
                         backup_moved = true;
+                        diagnostics::emit(
+                            diagnostics::DiagnosticLevel::Trace,
+                            "engine.mpq",
+                            format!(
+                                "tracked MPQ displaced target restored from backup: repo_id={repo_id}; component={}; paths omitted",
+                                index + 1
+                            ),
+                        );
                     }
                 }
                 Ok(())
@@ -2542,8 +2751,25 @@ impl crate::Engine {
                 };
                 rollback(std::slice::from_ref(&current));
                 rollback(&applied);
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Debug,
+                    "engine.mpq",
+                    format!(
+                        "tracked MPQ component transition failed: repo_id={repo_id}; component={}; rollback attempted",
+                        index + 1
+                    ),
+                );
                 return Err(error);
             }
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Trace,
+                "engine.mpq",
+                format!(
+                    "tracked MPQ component filesystem rename completed: repo_id={repo_id}; component={}/{}; enabled={enabled}; paths omitted",
+                    index + 1,
+                    toggles.len()
+                ),
+            );
             applied.push(AppliedToggle {
                 item: item.clone(),
                 backup_moved,
@@ -2565,6 +2791,13 @@ impl crate::Engine {
             .db()
             .update_mpq_enabled_paths(repo_id, &changes, repo_enabled)
         {
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Debug,
+                "engine.mpq",
+                format!(
+                    "tracked MPQ metadata commit failed: repo_id={repo_id}; filesystem rollback starting"
+                ),
+            );
             rollback(&applied);
             return Err(error);
         }
@@ -2573,8 +2806,9 @@ impl crate::Engine {
             diagnostics::DiagnosticLevel::Debug,
             "engine.mpq",
             format!(
-                "{} {} tracked MPQ component(s)",
+                "{} {} tracked MPQ component(s): repo_id={repo_id}; filesystem_renames={}; metadata_committed=true; repo_enabled={repo_enabled}",
                 if enabled { "enabled" } else { "disabled" },
+                changes.len(),
                 changes.len()
             ),
         );
@@ -2588,6 +2822,14 @@ impl crate::Engine {
         wow_dir: &Path,
         force_modified: bool,
     ) -> Result<bool> {
+        let _diagnostic = diagnostics::OperationGuard::new("remove_mpq_component");
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.mpq",
+            format!(
+                "tracked MPQ component removal started: repo_id={repo_id}; force_modified={force_modified}; path omitted"
+            ),
+        );
         let entry = self
             .db()
             .list_installs(repo_id)?
@@ -2625,6 +2867,13 @@ impl crate::Engine {
         let had_target = actual.is_file();
         if had_target {
             fs::rename(&actual, &removed_copy)?;
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Trace,
+                "engine.mpq",
+                format!(
+                    "tracked MPQ moved into removal rollback staging: repo_id={repo_id}; path omitted"
+                ),
+            );
         }
 
         let backup = self.db().get_mpq_backup(repo_id, &entry.path)?;
@@ -2638,13 +2887,28 @@ impl crate::Engine {
                 }
                 fs::rename(&backup_path, &target)?;
                 restored_from = Some(backup_path);
+                diagnostics::emit(
+                    diagnostics::DiagnosticLevel::Trace,
+                    "engine.mpq",
+                    format!(
+                        "displaced MPQ restored from backup during component removal: repo_id={repo_id}; paths omitted"
+                    ),
+                );
             }
         }
+        let restored_backup = restored_from.is_some();
 
         if let Err(error) = self
             .db()
             .remove_mpq_install_and_backup(repo_id, &entry.path)
         {
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Debug,
+                "engine.mpq",
+                format!(
+                    "tracked MPQ removal metadata commit failed; filesystem rollback started: repo_id={repo_id}"
+                ),
+            );
             if let Some(backup_path) = restored_from {
                 let _ = fs::rename(&target, backup_path);
             }
@@ -2662,7 +2926,14 @@ impl crate::Engine {
         {
             self.db().remove_repo(repo_id)?;
         }
-        Ok(had_target || restored_from.is_some())
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.mpq",
+            format!(
+                "tracked MPQ component removal committed: repo_id={repo_id}; managed_file_removed={had_target}; displaced_backup_restored={restored_backup}; metadata_updated=true"
+            ),
+        );
+        Ok(had_target || restored_backup)
     }
 
     pub fn protect_modified_mpq(
@@ -2671,6 +2942,7 @@ impl crate::Engine {
         manifest_path: &str,
         wow_dir: &Path,
     ) -> Result<()> {
+        let _diagnostic = diagnostics::OperationGuard::new("protect_modified_mpq");
         let entry = self
             .db()
             .list_installs(repo_id)?
@@ -2690,6 +2962,11 @@ impl crate::Engine {
             .upsert_mpq_protection(&entry.path, &fingerprint, false)?;
         self.db()
             .set_mpq_protection(&entry.path, &fingerprint, true)?;
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.mpq",
+            format!("modified tracked MPQ protection committed: repo_id={repo_id}; path omitted"),
+        );
         Ok(())
     }
 
@@ -2699,12 +2976,21 @@ impl crate::Engine {
         wow_dir: &Path,
         force_modified: bool,
     ) -> Result<usize> {
+        let _diagnostic = diagnostics::OperationGuard::new("remove_mpq_package");
         let entries = self
             .db()
             .list_installs(repo_id)?
             .into_iter()
             .filter(|entry| entry.kind == "mpq")
             .collect::<Vec<_>>();
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.mpq",
+            format!(
+                "MPQ package removal started: repo_id={repo_id}; component_count={}; force_modified={force_modified}",
+                entries.len()
+            ),
+        );
         // Preflight lightweight file identities before mutating any file.
         if !force_modified {
             for entry in &entries {
@@ -2753,6 +3039,15 @@ impl crate::Engine {
                     let saved = rollback_dir.path().join(format!("managed-{index}.mpq"));
                     fs::rename(&actual, &saved)?;
                     removed += 1;
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Trace,
+                        "engine.mpq",
+                        format!(
+                            "MPQ package component moved into rollback staging: repo_id={repo_id}; component={}/{}; paths omitted",
+                            index + 1,
+                            entries.len()
+                        ),
+                    );
                     Some(saved)
                 } else {
                     None
@@ -2776,6 +3071,15 @@ impl crate::Engine {
                     }
                     fs::rename(&backup, &target)?;
                     rollback.last_mut().expect("just pushed").restored_backup = true;
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Trace,
+                        "engine.mpq",
+                        format!(
+                            "MPQ package displaced backup restored: repo_id={repo_id}; component={}/{}; paths omitted",
+                            index + 1,
+                            entries.len()
+                        ),
+                    );
                 }
             }
             Ok(())
@@ -2794,13 +3098,35 @@ impl crate::Engine {
             }
         };
         if let Err(error) = filesystem_result {
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Debug,
+                "engine.mpq",
+                format!(
+                    "MPQ package filesystem removal failed; rollback started: repo_id={repo_id}"
+                ),
+            );
             rollback_files(&rollback);
             return Err(error);
         }
         if let Err(error) = self.db().remove_repo(repo_id) {
+            diagnostics::emit(
+                diagnostics::DiagnosticLevel::Debug,
+                "engine.mpq",
+                format!(
+                    "MPQ package metadata removal failed; filesystem rollback started: repo_id={repo_id}"
+                ),
+            );
             rollback_files(&rollback);
             return Err(error);
         }
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.mpq",
+            format!(
+                "MPQ package removal committed: repo_id={repo_id}; managed_files_removed={removed}; backup_restorations={}; metadata_removed=true",
+                rollback.iter().filter(|item| item.restored_backup).count()
+            ),
+        );
         Ok(removed)
     }
 
@@ -2959,7 +3285,7 @@ mod tests {
     }
 
     #[test]
-    fn untracked_mpq_enabled_state_is_independent_from_editor_lock() {
+    fn untracked_mpq_enabled_state_requires_editor_unlock() {
         let temp = tempfile::tempdir().unwrap();
         let wow = temp.path().join("wow");
         fs::create_dir_all(wow.join("Data")).unwrap();
@@ -2974,6 +3300,13 @@ mod tests {
         engine
             .rename_untracked_mpq_display_name(&wow, &initial[0].path, "My manual patch", false)
             .unwrap();
+        assert!(engine
+            .set_untracked_mpq_enabled(&wow, &initial[0].path, false)
+            .is_err());
+        assert!(archive.is_file());
+        engine
+            .set_untracked_mpq_editor_unlocked(&wow, &initial[0].path, true)
+            .unwrap();
         engine
             .set_untracked_mpq_enabled(&wow, &initial[0].path, false)
             .unwrap();
@@ -2984,6 +3317,7 @@ mod tests {
         assert_eq!(disabled.len(), 1);
         assert!(!disabled[0].enabled);
         assert!(disabled[0].protected);
+        assert!(disabled[0].editor_unlocked);
         assert_eq!(disabled[0].display_name.as_deref(), Some("My manual patch"));
         engine
             .set_untracked_mpq_enabled(&wow, &disabled[0].path, true)
@@ -3142,6 +3476,9 @@ mod tests {
             .set_mpq_protected(&wow, &initial[0].path, false)
             .unwrap();
         engine
+            .set_untracked_mpq_editor_unlocked(&wow, &initial[0].path, true)
+            .unwrap();
+        engine
             .set_untracked_mpq_enabled(&wow, &initial[0].path, false)
             .unwrap();
         let disabled = engine.list_mpq_protection(&wow).unwrap();
@@ -3219,7 +3556,7 @@ mod tests {
         };
 
         let repo_id = engine
-            .install_local_mpq_package(&wow, &source, &[selection.clone()], false)
+            .install_local_mpq_package(&wow, &source, std::slice::from_ref(&selection), false)
             .unwrap();
         let installed = engine.list_installed_mpqs(repo_id, &wow).unwrap();
         assert_eq!(installed.len(), 1);
@@ -3325,7 +3662,7 @@ mod tests {
         };
         assert_eq!(
             engine
-                .preview_local_mpq_targets(&wow, &source, &[selection.clone()])
+                .preview_local_mpq_targets(&wow, &source, std::slice::from_ref(&selection))
                 .unwrap()[0]
                 .status,
             MpqTargetStatus::UnprotectedReplacement
@@ -3406,7 +3743,10 @@ mod tests {
             .install_local_mpq_package(&wow, &source, &[selection], false)
             .unwrap();
 
-        engine.set_mpq_enabled(repo_id, None, false, &wow).unwrap();
+        assert_eq!(
+            engine.set_mpq_enabled(repo_id, None, false, &wow).unwrap(),
+            1
+        );
         assert!(!wow.join("Data/patch-Toggle.MPQ").exists());
         assert!(wow.join("Data/patch-Toggle.MPQ.disabled").is_file());
         let disabled = engine.list_installed_mpqs(repo_id, &wow).unwrap();
@@ -3414,7 +3754,10 @@ mod tests {
         assert_eq!(disabled[0].path, "Data/patch-Toggle.MPQ.disabled");
         assert!(!engine.db().get_repo(repo_id).unwrap().enabled);
 
-        engine.set_mpq_enabled(repo_id, None, true, &wow).unwrap();
+        assert_eq!(
+            engine.set_mpq_enabled(repo_id, None, true, &wow).unwrap(),
+            1
+        );
         assert!(wow.join("Data/patch-Toggle.MPQ").is_file());
         assert!(!wow.join("Data/patch-Toggle.MPQ.disabled").exists());
         assert!(engine.list_installed_mpqs(repo_id, &wow).unwrap()[0].enabled);

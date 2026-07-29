@@ -1,8 +1,11 @@
 [package]
 name = "wuddle-iced"
-version = "3.7.0-beta.6"
-description = "Wuddle v3 — native GPU-rendered frontend using Iced"
+version = "3.7.0-beta.7"
+description = "Native desktop launcher and manager for legacy World of Warcraft clients"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/ZythDr/Wuddle"
+publish = false
 
 [features]
 default = ["auto-login"]
@@ -17,32 +20,35 @@ wuddle-engine = { path = "../wuddle-engine" }
 iced = { version = "0.14", features = ["markdown", "image", "svg", "tokio", "canvas", "advanced"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1"
+sha2 = "0.10"
 dirs = "6"
-tokio = { version = "1", features = ["rt", "sync", "time"] }
+tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
 tokio-util = "0.7"
 open = "5"
 arboard = "3"
 rfd = "0.15"
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "windows-native"] }
-notify-rust = "4"
 rusqlite = { version = "0.31", features = ["bundled", "backup"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking", "stream"] }
 image = { version = "0.25", features = ["webp", "jpeg", "png"] }
+tempfile = "3"
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
 iced_gif = { version = "0.14", features = ["tokio"] }
 async-stream = "0.3.6"
 pelite = "0.10"
 chrono = "0.4.44"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-
-[dev-dependencies]
-tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+fs2 = "0.4"
 
 [build-dependencies]
 embed-resource = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["randr"], default-features = false }
+zbus = "5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Graphics_Gdi", "Win32_Foundation", "Win32_UI_Shell"] }
+tauri-winrt-notification = "0.8.1"
+windows-sys = { version = "0.52", features = ["Win32_Graphics_Gdi", "Win32_Foundation", "Win32_UI_Shell", "Win32_System_Threading"] }
