@@ -1466,6 +1466,7 @@ impl App {
                         | Dialog::RenameManualMpq { .. }
                         | Dialog::EditUntrackedMpq { .. }
                         | Dialog::MpqComponent { .. }
+                        | Dialog::MpqPackage { .. }
                 ) {
                     self.mpq_ui.error = None;
                     self.mpq_ui.detected_locale = None;
@@ -1501,7 +1502,9 @@ impl App {
                     )
                 } else if matches!(
                     d,
-                    Dialog::EditUntrackedMpq { .. } | Dialog::MpqComponent { .. }
+                    Dialog::EditUntrackedMpq { .. }
+                        | Dialog::MpqComponent { .. }
+                        | Dialog::MpqPackage { .. }
                 ) {
                     Task::perform(
                         service::detect_mpq_locale(self.db_path.clone(), self.wow_dir.clone()),
@@ -2001,7 +2004,10 @@ impl App {
                 let (dialog_max_w, dialog_pad) = match dialog {
                     Dialog::AddRepo { .. } => (1400u32, 16),
                     Dialog::MpqAdd => (1000u32, 16),
-                    Dialog::MpqInstall | Dialog::ProtectedMpqs | Dialog::WdmInstall => (760u32, 24),
+                    Dialog::MpqInstall
+                    | Dialog::ProtectedMpqs
+                    | Dialog::WdmInstall
+                    | Dialog::MpqPackage { .. } => (760u32, 24),
                     Dialog::MpqComponent { .. }
                     | Dialog::ManualMpq { .. }
                     | Dialog::RenameManualMpq { .. }
@@ -2049,6 +2055,15 @@ impl App {
                         .height(Length::Fill)
                         .style(move |_theme| theme::dialog_style(c_dlg))
                         .into()
+                } else if matches!(dialog, Dialog::MpqPackage { .. }) {
+                    container(self.view_dialog(dialog, self.theme_colors))
+                        .max_width(dialog_max_w)
+                        .max_height(760)
+                        .padding(dialog_pad)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(move |_theme| theme::dialog_style(c_dlg))
+                        .into()
                 } else {
                     container(self.view_dialog(dialog, self.theme_colors))
                         .max_width(dialog_max_w)
@@ -2069,6 +2084,7 @@ impl App {
                     | Dialog::ProtectedMpqs
                     | Dialog::WdmInstall
                     | Dialog::MpqComponent { .. }
+                    | Dialog::MpqPackage { .. }
                     | Dialog::ManualMpq { .. }
                     | Dialog::RenameManualMpq { .. }
                     | Dialog::EditUntrackedMpq { .. }
@@ -2363,6 +2379,7 @@ impl App {
             | Dialog::ProtectedMpqs
             | Dialog::WdmInstall
             | Dialog::MpqComponent { .. }
+            | Dialog::MpqPackage { .. }
             | Dialog::ManualMpq { .. }
             | Dialog::RenameManualMpq { .. }
             | Dialog::EditUntrackedMpq { .. }
@@ -4069,17 +4086,26 @@ impl App {
                                 md_settings,
                                 &viewer,
                             );
-                            iced::widget::scrollable(readme_view)
-                                .height(Length::Fill)
-                                .direction(theme::vscroll())
-                                .style(move |t, s| theme::scrollable_style(c_form)(t, s))
-                                .into()
+                            iced::widget::scrollable(
+                                container(readme_view).width(Length::Fill).padding(8),
+                            )
+                            .height(Length::Fill)
+                            .direction(theme::vscroll())
+                            .style(move |t, s| theme::scrollable_style(c_form)(t, s))
+                            .into()
                         };
                         // Wrap the scrollable in a dark card (source toggle now lives on the label row)
                         container(inner_scrollable)
                             .width(Length::Fill)
                             .height(Length::Fill)
-                            .padding(8)
+                            // Keep the scrollbar close to the README frame without
+                            // letting it cover the frame's right, top, or bottom edge.
+                            .padding(iced::Padding {
+                                top: 5.0,
+                                right: 5.0,
+                                bottom: 5.0,
+                                left: 2.0,
+                            })
                             .style(move |_t| container::Style {
                                 background: Some(iced::Background::Color(iced::Color::from_rgba(
                                     0.0, 0.0, 0.0, 0.38,

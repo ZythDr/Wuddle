@@ -171,6 +171,15 @@ pub struct MpqInstalledFile {
     pub status: MpqFileStatus,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MpqPackageFileEdit {
+    pub path: String,
+    pub display_name: String,
+    pub file_name: String,
+    pub destination: MpqDestination,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MpqFileStatus {
     Installed,
@@ -1713,7 +1722,8 @@ impl crate::Engine {
         } else {
             new_file_name.to_string()
         };
-        let desired = target_path(wow_dir, destination, &stored_file_name)?;
+        let desired_base = target_path(wow_dir, destination, new_file_name)?;
+        let desired = desired_base.with_file_name(&stored_file_name);
         let new_manifest = normalize_relative_path(
             desired
                 .strip_prefix(wow_dir)
@@ -1844,16 +1854,339 @@ impl crate::Engine {
         Ok(new_manifest)
     }
 
-    fn local_mpq_repo_name(source: &Path) -> Result<String> {
-        let metadata = fs::symlink_metadata(source)
-            .map_err(|_| MpqError::Filesystem("reading MPQ source metadata"))?;
-        let source_hash = util::sha256_hex(&metadata_fingerprint(&metadata));
-        let base_name = source
+    fn validate_package_display_name(display_name: &str) -> Result<&str> {
+        let display_name = display_name.trim();
+        if display_name.is_empty()
+            || display_name.chars().count() > 120
+            || display_name.chars().any(char::is_control)
+        {
+            anyhow::bail!("MPQ package name must be 1–120 printable characters");
+        }
+        Ok(display_name)
+    }
+
+    fn local_mpq_display_name_from_identity(name: &str) -> String {
+        let Some((base, suffix)) = name.rsplit_once('-') else {
+            return name.to_string();
+        };
+        if suffix.len() == 8 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            base.to_string()
+        } else {
+            name.to_string()
+        }
+    }
+
+    pub fn mpq_package_display_name(&self, repo_id: i64) -> Result<String> {
+        if let Some(display_name) = self.db().mpq_package_display_name(repo_id)? {
+            return Ok(display_name);
+        }
+        let repo = self.db().get_repo(repo_id)?;
+        if repo.mode == InstallMode::Mpq
+            && repo.host.eq_ignore_ascii_case("local-mpq")
+            && repo.owner.eq_ignore_ascii_case("local")
+        {
+            Ok(Self::local_mpq_display_name_from_identity(&repo.name))
+        } else {
+            Ok(repo.name)
+        }
+    }
+
+    /// Edit an MPQ package label and its tracked files as one staged
+    /// filesystem/database transaction.
+    pub fn edit_tracked_mpq_package(
+        &self,
+        repo_id: i64,
+        wow_dir: &Path,
+        display_name: &str,
+        edits: &[MpqPackageFileEdit],
+        set_xattr_comment: bool,
+    ) -> Result<()> {
+        let _diagnostic = diagnostics::OperationGuard::new("edit_tracked_mpq_package");
+        let display_name = Self::validate_package_display_name(display_name)?;
+        if edits.is_empty() {
+            anyhow::bail!("The MPQ package has no editable files");
+        }
+
+        let installs = self
+            .db()
+            .list_installs(repo_id)?
+            .into_iter()
+            .filter(|entry| entry.kind == "mpq")
+            .collect::<Vec<_>>();
+        if installs.len() != edits.len() {
+            anyhow::bail!("The MPQ package changed while it was being edited; reopen it and retry");
+        }
+
+        struct Prepared {
+            old_path: String,
+            new_path: String,
+            display_name: String,
+            current: PathBuf,
+            desired: PathBuf,
+            path_changed: bool,
+            backup: Option<PathBuf>,
+        }
+
+        let mut prepared = Vec::with_capacity(edits.len());
+        let mut old_paths = HashSet::new();
+        let mut new_paths = HashSet::new();
+        let mut friendly_names = HashSet::new();
+
+        for edit in edits {
+            if !old_paths.insert(edit.path.to_ascii_lowercase()) {
+                anyhow::bail!("The MPQ package contains a duplicate component");
+            }
+            let component_name = edit.display_name.trim();
+            if component_name.is_empty()
+                || component_name.chars().count() > 120
+                || component_name.chars().any(char::is_control)
+            {
+                anyhow::bail!("MPQ friendly names must be 1–120 printable characters");
+            }
+            if !friendly_names.insert(component_name.to_ascii_lowercase()) {
+                anyhow::bail!("Friendly MPQ names must be unique within a package");
+            }
+            let file_name = edit.file_name.trim();
+            validate_target_file_name(file_name)?;
+            let entry = installs
+                .iter()
+                .find(|entry| entry.path.eq_ignore_ascii_case(&edit.path))
+                .ok_or_else(|| anyhow::anyhow!("An MPQ package component is no longer tracked"))?;
+            let stored_file_name = if edit.enabled {
+                file_name.to_string()
+            } else {
+                format!("{file_name}{DISABLED_SUFFIX}")
+            };
+            let desired_base = target_path(wow_dir, &edit.destination, file_name)?;
+            let desired = desired_base.with_file_name(&stored_file_name);
+            let new_path = normalize_relative_path(
+                desired
+                    .strip_prefix(wow_dir)
+                    .map_err(|_| MpqError::Filesystem("resolving the MPQ destination"))?,
+            )?;
+            if !new_paths.insert(new_path.to_ascii_lowercase()) {
+                anyhow::bail!("Two MPQs cannot use the same destination filename");
+            }
+            if self
+                .db()
+                .find_mpq_install_owner(&new_path)?
+                .is_some_and(|owner| owner != repo_id)
+            {
+                anyhow::bail!(MpqError::ManagedTarget(stored_file_name));
+            }
+            let current = Self::resolve_install_path(&entry.path, Some(wow_dir))
+                .and_then(|path| Self::find_actual_case(&path).or(Some(path)))
+                .ok_or_else(|| anyhow::anyhow!("Could not resolve a tracked MPQ path"))?;
+            if !current.is_file() {
+                anyhow::bail!("A selected MPQ is no longer present");
+            }
+            let path_changed = !entry.path.eq_ignore_ascii_case(&new_path)
+                || current.file_name() != desired.file_name();
+            let friendly_name_changed = entry
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(|current| current != component_name);
+            if (path_changed || friendly_name_changed)
+                && !self.tracked_mpq_editor_unlocked(wow_dir, &entry.path)?
+            {
+                anyhow::bail!("Unlock every changed MPQ in Manage MPQs before editing the package");
+            }
+            let backup = if path_changed {
+                self.db()
+                    .get_mpq_backup(repo_id, &entry.path)?
+                    .and_then(|backup| {
+                        Self::resolve_install_path(&backup.backup_path, Some(wow_dir))
+                    })
+                    .filter(|path| path.is_file())
+            } else {
+                None
+            };
+            prepared.push(Prepared {
+                old_path: entry.path.clone(),
+                new_path,
+                display_name: component_name.to_string(),
+                current,
+                desired,
+                path_changed,
+                backup,
+            });
+        }
+
+        // Moving directly into another component's old path would require
+        // ambiguous backup ownership. Keep that uncommon swap explicit instead
+        // of risking the wrong file being restored.
+        for edit in &prepared {
+            if edit.path_changed
+                && prepared.iter().any(|other| {
+                    !other.old_path.eq_ignore_ascii_case(&edit.old_path)
+                        && other.old_path.eq_ignore_ascii_case(&edit.new_path)
+                })
+            {
+                anyhow::bail!(
+                    "MPQ components cannot swap filenames in one edit; save an intermediate name first"
+                );
+            }
+            if edit.path_changed {
+                if let Some(existing) = edit.desired.parent().and_then(|parent| {
+                    find_case_insensitive_child(
+                        parent,
+                        edit.desired
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(""),
+                    )
+                }) {
+                    if existing != edit.current {
+                        anyhow::bail!(MpqError::ToggleCollision(
+                            edit.desired
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("MPQ")
+                                .to_string()
+                        ));
+                    }
+                }
+            }
+        }
+
+        struct MoveState {
+            original: PathBuf,
+            staged: PathBuf,
+            desired: PathBuf,
+            backup: Option<PathBuf>,
+            staged_ok: bool,
+            deployed: bool,
+            backup_restored: bool,
+        }
+
+        fn rollback_moves(moves: &mut [MoveState]) {
+            for moved in moves.iter_mut().rev() {
+                if moved.backup_restored {
+                    if let Some(backup) = moved.backup.as_ref() {
+                        let _ = fs::rename(&moved.original, backup);
+                    }
+                    moved.backup_restored = false;
+                }
+            }
+            for moved in moves.iter_mut().rev() {
+                if moved.deployed {
+                    let _ = fs::rename(&moved.desired, &moved.staged);
+                    moved.deployed = false;
+                }
+            }
+            for moved in moves.iter_mut().rev() {
+                if moved.staged_ok {
+                    let _ = fs::rename(&moved.staged, &moved.original);
+                    moved.staged_ok = false;
+                }
+            }
+        }
+
+        let staging_parent = util::cache_dir(Some(wow_dir))?.join("mpq-staging");
+        fs::create_dir_all(&staging_parent)?;
+        let staging = tempfile::Builder::new()
+            .prefix("package-edit-")
+            .tempdir_in(&staging_parent)?;
+        let mut moves = prepared
+            .iter()
+            .enumerate()
+            .filter(|(_, edit)| edit.path_changed)
+            .map(|(index, edit)| MoveState {
+                original: edit.current.clone(),
+                staged: staging.path().join(format!("component-{index}.mpq")),
+                desired: edit.desired.clone(),
+                backup: edit.backup.clone(),
+                staged_ok: false,
+                deployed: false,
+                backup_restored: false,
+            })
+            .collect::<Vec<_>>();
+
+        for moved in &mut moves {
+            if let Err(error) = fs::rename(&moved.original, &moved.staged) {
+                rollback_moves(&mut moves);
+                return Err(error.into());
+            }
+            moved.staged_ok = true;
+        }
+        for moved in &mut moves {
+            if let Some(parent) = moved.desired.parent() {
+                if let Err(error) = fs::create_dir_all(parent) {
+                    rollback_moves(&mut moves);
+                    return Err(error.into());
+                }
+            }
+            if let Err(error) = fs::rename(&moved.staged, &moved.desired) {
+                rollback_moves(&mut moves);
+                return Err(error.into());
+            }
+            moved.deployed = true;
+        }
+        for moved in &mut moves {
+            if let Some(backup) = moved.backup.as_ref() {
+                if let Err(error) = fs::rename(backup, &moved.original) {
+                    rollback_moves(&mut moves);
+                    return Err(error.into());
+                }
+                moved.backup_restored = true;
+            }
+        }
+
+        let db_edits = prepared
+            .iter()
+            .map(|edit| db::MpqPackageInstallEdit {
+                old_path: edit.old_path.clone(),
+                new_path: edit.new_path.clone(),
+                display_name: edit.display_name.clone(),
+                path_changed: edit.path_changed,
+            })
+            .collect::<Vec<_>>();
+        if let Err(error) = self
+            .db()
+            .edit_mpq_package_metadata(repo_id, display_name, &db_edits)
+        {
+            rollback_moves(&mut moves);
+            return Err(error);
+        }
+
+        for edit in &prepared {
+            set_friendly_comment(
+                if edit.path_changed {
+                    &edit.desired
+                } else {
+                    &edit.current
+                },
+                &edit.display_name,
+                set_xattr_comment,
+            );
+        }
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Debug,
+            "engine.mpq",
+            format!(
+                "tracked MPQ package edit committed: repo_id={repo_id}; component_count={}; moved_count={}; values omitted",
+                prepared.len(),
+                moves.len()
+            ),
+        );
+        Ok(())
+    }
+
+    fn local_mpq_base_name(source: &Path) -> String {
+        source
             .file_stem()
             .and_then(|name| name.to_str())
             .map(Self::sanitize_for_fs)
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "local-mpq".to_string());
+            .unwrap_or_else(|| "Local MPQ package".to_string())
+    }
+
+    fn local_mpq_repo_name(source: &Path) -> Result<String> {
+        let metadata = fs::symlink_metadata(source)
+            .map_err(|_| MpqError::Filesystem("reading MPQ source metadata"))?;
+        let source_hash = util::sha256_hex(&metadata_fingerprint(&metadata));
+        let base_name = Self::local_mpq_base_name(source);
         let suffix = source_hash.get(..8).unwrap_or(&source_hash);
         Ok(format!("{base_name}-{suffix}"))
     }
@@ -1935,6 +2268,8 @@ impl crate::Engine {
             owner: "local".to_string(),
             name: repo_name,
         })?;
+        self.db()
+            .ensure_mpq_package_display_name(repo_id, &Self::local_mpq_base_name(source))?;
         let installed_asset = db::InstalledAssetState {
             version: Some("Local".to_string()),
             asset_id: Some(source_hash),
@@ -2055,7 +2390,10 @@ impl crate::Engine {
             ..db::InstalledAssetState::default()
         };
         let staged = stage_files(wow_dir, &sources)?;
+        let package_display_name = package.name.clone();
         let repo_id = self.ensure_mpq_repo(package)?;
+        self.db()
+            .ensure_mpq_package_display_name(repo_id, &package_display_name)?;
         if let Err(error) = self.commit_staged_mpq_package(
             repo_id,
             wow_dir,
@@ -3930,5 +4268,98 @@ mod tests {
 
         assert!(inspect_local_source(&wow, &archive_path).is_err());
         assert!(!temp.path().join("escape.MPQ").exists());
+    }
+
+    #[test]
+    fn local_package_label_hides_collision_safe_identity_suffix() {
+        assert_eq!(
+            crate::Engine::local_mpq_display_name_from_identity("Darker_Nights-a981398b"),
+            "Darker_Nights"
+        );
+        assert_eq!(
+            crate::Engine::local_mpq_display_name_from_identity("patch-custom"),
+            "patch-custom"
+        );
+    }
+
+    #[test]
+    fn edits_a_local_mpq_package_and_all_components_transactionally() {
+        let temp = tempfile::tempdir().unwrap();
+        let wow = temp.path().join("wow");
+        fs::create_dir_all(wow.join("Data/enUS")).unwrap();
+        let archive_path = temp.path().join("Darker_Nights.zip");
+        let archive_file = fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(archive_file);
+        let options = zip::write::SimpleFileOptions::default();
+        for name in ["Darker Nights 50.MPQ", "Darker Nights 100.MPQ"] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(MPQ_HEADER).unwrap();
+            archive
+                .write_all(&MPQ_MIN_HEADER_SIZE.to_le_bytes())
+                .unwrap();
+            archive.write_all(&[0u8; 64]).unwrap();
+        }
+        archive.finish().unwrap();
+
+        let inspection = inspect_local_source(&wow, &archive_path).unwrap();
+        let selections = inspection
+            .candidates
+            .iter()
+            .map(|candidate| MpqInstallSelection {
+                source_key: candidate.source_key.clone(),
+                display_name: candidate.suggested_display_name.clone(),
+                file_name: candidate.original_file_name.clone(),
+                destination: MpqDestination::DataRoot,
+                replace_unprotected: false,
+                version: None,
+            })
+            .collect::<Vec<_>>();
+        let engine = crate::Engine::open(&temp.path().join("profile.sqlite3")).unwrap();
+        let repo_id = engine
+            .install_local_mpq_package(&wow, &archive_path, &selections, false)
+            .unwrap();
+        assert_eq!(
+            engine.mpq_package_display_name(repo_id).unwrap(),
+            "Darker_Nights"
+        );
+
+        let files = engine.list_installed_mpqs(repo_id, &wow).unwrap();
+        let edits = files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| MpqPackageFileEdit {
+                path: file.path.clone(),
+                display_name: format!("Darkness {}", index + 1),
+                file_name: format!("patch-Dark-{}.MPQ", index + 1),
+                destination: if index == 0 {
+                    MpqDestination::Locale("enUS".to_string())
+                } else {
+                    MpqDestination::DataRoot
+                },
+                enabled: index != 0,
+            })
+            .collect::<Vec<_>>();
+        engine
+            .edit_tracked_mpq_package(repo_id, &wow, "Darker Nights", &edits, false)
+            .unwrap();
+
+        assert_eq!(
+            engine.mpq_package_display_name(repo_id).unwrap(),
+            "Darker Nights"
+        );
+        let edited = engine.list_installed_mpqs(repo_id, &wow).unwrap();
+        assert_eq!(edited.len(), 2);
+        assert!(edited.iter().any(|file| {
+            file.path == "Data/enUS/patch-Dark-1.MPQ.disabled"
+                && file.display_name == "Darkness 1"
+                && !file.enabled
+        }));
+        assert!(edited.iter().any(|file| {
+            file.path == "Data/patch-Dark-2.MPQ"
+                && file.display_name == "Darkness 2"
+                && file.enabled
+        }));
+        assert!(wow.join("Data/enUS/patch-Dark-1.MPQ.disabled").is_file());
+        assert!(wow.join("Data/patch-Dark-2.MPQ").is_file());
     }
 }

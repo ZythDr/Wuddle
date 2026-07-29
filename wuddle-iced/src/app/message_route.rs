@@ -73,6 +73,13 @@ pub(super) fn classify(message: &Message, dialog: &Option<Dialog>) -> MessageRou
         | Message::SetMpqComponentDestination(..)
         | Message::SaveMpqComponentDisplayName
         | Message::MpqComponentDisplayNameSaved(..)
+        | Message::SetMpqPackageDisplayName(..)
+        | Message::SetMpqPackageFileDisplayName(..)
+        | Message::SetMpqPackageFileName(..)
+        | Message::SetMpqPackageFileDestination(..)
+        | Message::SetMpqPackageFileEnabled(..)
+        | Message::SaveMpqPackage
+        | Message::MpqPackageSaved(..)
         | Message::RemoveMpqComponent(..)
         | Message::MpqComponentRemoved(..)
         | Message::KeepModifiedMpqProtected

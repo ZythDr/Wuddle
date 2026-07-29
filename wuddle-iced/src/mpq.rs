@@ -35,7 +35,11 @@ fn tracked_package_name(app: &App, repo_id: i64) -> String {
     app.repos
         .iter()
         .find(|repo| repo.id == repo_id)
-        .map(|repo| repo.name.clone())
+        .map(|repo| {
+            repo.mpq_package_name
+                .clone()
+                .unwrap_or_else(|| repo.name.clone())
+        })
         .unwrap_or_else(|| format!("repository #{repo_id}"))
 }
 
@@ -1382,6 +1386,136 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 }
             }
         }
+        Message::SetMpqPackageDisplayName(value) => {
+            if let Some(Dialog::MpqPackage {
+                edited_display_name,
+                ..
+            }) = app.dialog.as_mut()
+            {
+                *edited_display_name = value;
+            }
+            Some(Task::none())
+        }
+        Message::SetMpqPackageFileDisplayName(index, value) => {
+            if let Some(Dialog::MpqPackage { files, .. }) = app.dialog.as_mut() {
+                if let Some(file) = files.get_mut(index).filter(|file| file.editor_unlocked) {
+                    file.edited_display_name = value;
+                }
+            }
+            Some(Task::none())
+        }
+        Message::SetMpqPackageFileName(index, value) => {
+            if let Some(Dialog::MpqPackage { files, .. }) = app.dialog.as_mut() {
+                if let Some(file) = files.get_mut(index).filter(|file| file.editor_unlocked) {
+                    file.edited_file_name = value;
+                }
+            }
+            Some(Task::none())
+        }
+        Message::SetMpqPackageFileDestination(index, destination) => {
+            if let Some(Dialog::MpqPackage { files, .. }) = app.dialog.as_mut() {
+                if let Some(file) = files.get_mut(index).filter(|file| file.editor_unlocked) {
+                    file.edited_destination = destination;
+                }
+            }
+            Some(Task::none())
+        }
+        Message::SetMpqPackageFileEnabled(index, enabled) => {
+            if let Some(Dialog::MpqPackage { files, .. }) = app.dialog.as_mut() {
+                if let Some(file) = files.get_mut(index).filter(|file| file.editor_unlocked) {
+                    file.edited_enabled = enabled;
+                }
+            }
+            Some(Task::none())
+        }
+        Message::SaveMpqPackage => {
+            let (repo_id, target_name, edited_display_name, edits, changed_files) =
+                match app.dialog.as_ref() {
+                    Some(Dialog::MpqPackage {
+                        repo_id,
+                        display_name,
+                        edited_display_name,
+                        files,
+                    }) => {
+                        let edits = files
+                            .iter()
+                            .map(|file| wuddle_engine::mpq::MpqPackageFileEdit {
+                                path: file.path.clone(),
+                                display_name: file.edited_display_name.clone(),
+                                file_name: file.edited_file_name.clone(),
+                                destination: file.edited_destination.clone(),
+                                enabled: file.edited_enabled,
+                            })
+                            .collect::<Vec<_>>();
+                        let changed_files = files
+                            .iter()
+                            .filter(|file| {
+                                file.display_name != file.edited_display_name
+                                    || file.file_name != file.edited_file_name
+                                    || file.destination != file.edited_destination
+                                    || file.enabled != file.edited_enabled
+                            })
+                            .count();
+                        (
+                            *repo_id,
+                            display_name.clone(),
+                            edited_display_name.clone(),
+                            edits,
+                            changed_files,
+                        )
+                    }
+                    _ => return Some(Task::none()),
+                };
+            app.log(
+                LogLevel::Info,
+                &format!(
+                    "MPQ package edit requested: \"{target_name}\" (repo id={repo_id}; component_count={}; changed_components={changed_files}; package_name_changed={}).",
+                    edits.len(),
+                    target_name != edited_display_name
+                ),
+            );
+            app.mpq_ui.busy = true;
+            app.mpq_ui.error = None;
+            let scope = app.profile_operation_scope();
+            Some(Task::perform(
+                service::edit_mpq_package(
+                    app.db_path.clone(),
+                    app.wow_dir.clone(),
+                    repo_id,
+                    edited_display_name,
+                    edits,
+                    app.opt_xattr,
+                ),
+                move |result| {
+                    Message::MpqPackageSaved(crate::ProfileScoped::new(scope.clone(), result))
+                },
+            ))
+        }
+        Message::MpqPackageSaved(result) => {
+            app.mpq_ui.busy = false;
+            let Some(result) = app.accept_profile_result(result, "MPQ package edit") else {
+                return Some(Task::none());
+            };
+            match result {
+                Ok(()) => {
+                    app.log(
+                        LogLevel::Info,
+                        "MPQ package edit committed: package and component metadata are synchronized.",
+                    );
+                    app.dialog = None;
+                    app.show_toast("MPQ package updated.", ToastKind::Success);
+                    Some(crate::update::repos::refresh_repos_task(app))
+                }
+                Err(error) => {
+                    app.log(
+                        LogLevel::Error,
+                        &format!("MPQ package edit failed; changes were rolled back: {error}"),
+                    );
+                    app.mpq_ui.error = Some(error);
+                    Some(Task::none())
+                }
+            }
+        }
         Message::RemoveMpqComponent(force_modified) => {
             let (repo_id, path, target_name) = match app.dialog.as_ref() {
                 Some(Dialog::MpqComponent {
@@ -2227,6 +2361,44 @@ pub fn component_dialog(repo_id: i64, entry: &wuddle_engine::mpq::MpqInstalledFi
     }
 }
 
+pub fn package_dialog(repo: &crate::service::RepoRow) -> Dialog {
+    let display_name = repo
+        .mpq_package_name
+        .clone()
+        .unwrap_or_else(|| repo.name.clone());
+    let files = repo
+        .installed_mpqs
+        .iter()
+        .map(|entry| {
+            let file_name = std::path::Path::new(&entry.path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(editable_mpq_file_name)
+                .unwrap_or_else(|| "patch.MPQ".to_string());
+            let destination = mpq_destination_from_path(&entry.path);
+            crate::MpqPackageFileDraft {
+                path: entry.path.clone(),
+                display_name: entry.display_name.clone(),
+                edited_display_name: entry.display_name.clone(),
+                file_name: file_name.clone(),
+                edited_file_name: file_name,
+                destination: destination.clone(),
+                edited_destination: destination,
+                enabled: entry.enabled,
+                edited_enabled: entry.enabled,
+                editor_unlocked: entry.editor_unlocked,
+                status: entry.status,
+            }
+        })
+        .collect();
+    Dialog::MpqPackage {
+        repo_id: repo.id,
+        display_name: display_name.clone(),
+        edited_display_name: display_name,
+        files,
+    }
+}
+
 pub fn untracked_component_dialog(entry: &wuddle_engine::mpq::MpqProtectionEntry) -> Dialog {
     let visible_name = entry
         .display_name
@@ -2444,7 +2616,11 @@ fn view_managed_manage_entry<'a>(
                     if repo.forge == "local" && repo.owner == "local" && repo.url.is_empty() {
                         format!("Local installation • {}", entry.path)
                     } else {
-                        format!("{} • {}", repo.name, entry.path)
+                        format!(
+                            "{} • {}",
+                            repo.mpq_package_name.as_deref().unwrap_or(&repo.name),
+                            entry.path
+                        )
                     }
                 )
                 .size(11)
@@ -2799,6 +2975,193 @@ fn view_component<'a>(
     .into()
 }
 
+fn view_package<'a>(app: &'a App, dialog: &'a Dialog, colors: ThemeColors) -> Element<'a, Message> {
+    let Dialog::MpqPackage {
+        display_name,
+        edited_display_name,
+        files,
+        ..
+    } = dialog
+    else {
+        return Space::new().into();
+    };
+
+    let mut seen_names = std::collections::HashSet::new();
+    let mut seen_targets = std::collections::HashSet::new();
+    let files_valid = files.iter().all(|file| {
+        let friendly_name = file.edited_display_name.trim();
+        let file_name = file.edited_file_name.trim();
+        let target = file.edited_destination.manifest_path(file_name);
+        !friendly_name.is_empty()
+            && friendly_name.chars().count() <= 120
+            && !friendly_name.chars().any(char::is_control)
+            && file_name.to_ascii_lowercase().ends_with(".mpq")
+            && seen_names.insert(friendly_name.to_ascii_lowercase())
+            && seen_targets.insert(target.to_ascii_lowercase())
+    });
+    let valid = !edited_display_name.trim().is_empty()
+        && edited_display_name.chars().count() <= 120
+        && !edited_display_name.chars().any(char::is_control)
+        && files_valid;
+
+    let file_cards = files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| {
+            let unlocked = file.editor_unlocked;
+            let friendly_input =
+                text_input(&file.display_name, &file.edited_display_name).width(Length::Fill);
+            let friendly_input: Element<Message> = if unlocked {
+                friendly_input
+                    .on_input(move |value| Message::SetMpqPackageFileDisplayName(index, value))
+                    .into()
+            } else {
+                friendly_input.into()
+            };
+            let file_name_input =
+                text_input(&file.file_name, &file.edited_file_name).width(Length::Fill);
+            let file_name_input: Element<Message> = if unlocked {
+                file_name_input
+                    .on_input(move |value| Message::SetMpqPackageFileName(index, value))
+                    .into()
+            } else {
+                file_name_input.into()
+            };
+            let destinations = edit_destination_options(app, &file.edited_destination);
+            let location: Element<Message> = if unlocked {
+                pick_list(
+                    destinations,
+                    Some(file.edited_destination.clone()),
+                    move |destination| Message::SetMpqPackageFileDestination(index, destination),
+                )
+                .into()
+            } else {
+                container(
+                    text(file.edited_destination.label())
+                        .size(13)
+                        .color(colors.muted),
+                )
+                .padding([7, 10])
+                .width(Length::Fill)
+                .style(move |_theme| theme::card_style(colors))
+                .into()
+            };
+            let enabled: Element<Message> = if unlocked {
+                checkbox(file.edited_enabled)
+                    .on_toggle(move |enabled| Message::SetMpqPackageFileEnabled(index, enabled))
+                    .into()
+            } else {
+                checkbox(file.edited_enabled).into()
+            };
+            let lock_note = if unlocked {
+                text("Editable").size(12).color(colors.good)
+            } else {
+                text("Locked — unlock this file in Manage MPQs to edit it.")
+                    .size(12)
+                    .color(colors.muted)
+            };
+            container(
+                column![
+                    row![
+                        text(&file.display_name).size(16).color(colors.title),
+                        Space::new().width(Length::Fill),
+                        lock_note,
+                    ]
+                    .align_y(iced::Alignment::Center),
+                    text(&file.path).size(11).color(colors.muted),
+                    row![
+                        column![dialog_field_label("Friendly name", colors), friendly_input,]
+                            .spacing(4)
+                            .width(Length::Fill),
+                        column![
+                            dialog_field_label("Filename on disk", colors),
+                            file_name_input,
+                        ]
+                        .spacing(4)
+                        .width(Length::Fill),
+                    ]
+                    .spacing(10),
+                    row![
+                        column![dialog_field_label("Location", colors), location]
+                            .spacing(4)
+                            .width(Length::Fill),
+                        column![dialog_field_label("Enabled", colors), enabled]
+                            .spacing(4)
+                            .align_x(iced::Alignment::Center)
+                            .width(120),
+                        column![
+                            dialog_field_label("Status", colors),
+                            text(file.status.label()).size(13).color(match file.status {
+                                wuddle_engine::mpq::MpqFileStatus::Installed => colors.good,
+                                wuddle_engine::mpq::MpqFileStatus::Missing => colors.bad,
+                                wuddle_engine::mpq::MpqFileStatus::Modified => colors.warn,
+                            }),
+                        ]
+                        .spacing(4)
+                        .width(120),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::End),
+                ]
+                .spacing(8),
+            )
+            .padding(12)
+            .width(Length::Fill)
+            .style(move |_theme| theme::card_style(colors))
+            .into()
+        })
+        .collect::<Vec<Element<Message>>>();
+
+    let save = button(
+        text(if app.mpq_ui.busy {
+            "Saving…"
+        } else {
+            "Save changes"
+        })
+        .size(13),
+    )
+    .padding([6, 14])
+    .style(move |_theme, _status| theme::tab_button_active_style(colors));
+    let save: Element<Message> = if valid && !app.mpq_ui.busy {
+        save.on_press(Message::SaveMpqPackage).into()
+    } else {
+        save.into()
+    };
+
+    column![
+        heading(
+            "Edit MPQ package",
+            "Rename this package and review all MPQ files it manages.",
+            colors,
+        ),
+        dialog_field_label("Package name", colors),
+        text_input(display_name, edited_display_name)
+            .on_input(Message::SetMpqPackageDisplayName),
+        dialog_description(
+            "The package name is only a Wuddle label. Its collision-safe internal identity remains unchanged.",
+            colors,
+        ),
+        scrollable(column(file_cards).spacing(10).width(Length::Fill))
+            .height(Length::Fill)
+            .direction(theme::vscroll())
+            .style(move |theme, status| theme::scrollable_style(colors)(theme, status)),
+        error_view(app.mpq_ui.error.as_deref(), colors),
+        row![
+            Space::new().width(Length::Fill),
+            button(text("Cancel").size(13))
+                .on_press(Message::CloseDialog)
+                .padding([6, 14])
+                .style(move |_theme, status| secondary_button_style(colors, status)),
+            save,
+        ]
+        .spacing(8),
+    ]
+    .spacing(10)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
 fn view_edit_untracked_mpq<'a>(
     app: &'a App,
     dialog: &'a Dialog,
@@ -3051,6 +3414,7 @@ pub fn view_dialog<'a>(
         Dialog::ProtectedMpqs => view_protection(app, colors),
         Dialog::WdmInstall => view_wdm(app, colors),
         Dialog::MpqComponent { .. } => view_component(app, dialog, colors),
+        Dialog::MpqPackage { .. } => view_package(app, dialog, colors),
         Dialog::ManualMpq { .. } => view_manual_component(app, dialog, colors),
         Dialog::RenameManualMpq { .. } => view_rename_manual_mpq(app, dialog, colors),
         Dialog::EditUntrackedMpq { .. } => view_edit_untracked_mpq(app, dialog, colors),

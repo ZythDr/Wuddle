@@ -296,11 +296,15 @@ pub fn inline_context_menu<'a>(
     let mut items: Vec<Element<Message>> = Vec::new();
 
     if repo.mode == "mpq" {
+        let package_name = repo
+            .mpq_package_name
+            .clone()
+            .unwrap_or_else(|| repo.name.clone());
         items.push(ctx_menu_item(
             "Details\u{2026}",
             Message::OpenDialog(Dialog::RepoDetails {
                 id: Some(rid),
-                name: repo.name.clone(),
+                name: package_name.clone(),
                 files: Vec::new(),
                 loading: true,
                 expanded_paths: Default::default(),
@@ -333,6 +337,13 @@ pub fn inline_context_menu<'a>(
                 ));
             }
         }
+        if repo.installed_mpqs.len() > 1 {
+            items.push(ctx_menu_item(
+                "Edit package\u{2026}",
+                Message::OpenDialog(crate::mpq::package_dialog(repo)),
+                c,
+            ));
+        }
         if repo
             .url
             .trim_end_matches('/')
@@ -356,7 +367,7 @@ pub fn inline_context_menu<'a>(
             })
             .unwrap_or_else(|| Dialog::RemoveRepo {
                 id: rid,
-                name,
+                name: package_name,
                 remove_files: true,
                 files: Vec::new(),
             });

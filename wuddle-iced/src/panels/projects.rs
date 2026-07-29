@@ -75,7 +75,11 @@ impl PatchDisplayRow<'_> {
                 .first()
                 .filter(|_| repo.installed_mpqs.len() == 1)
                 .map(|entry| entry.display_name.clone())
-                .unwrap_or_else(|| repo.name.clone()),
+                .unwrap_or_else(|| {
+                    repo.mpq_package_name
+                        .clone()
+                        .unwrap_or_else(|| repo.name.clone())
+                }),
             Self::Manual(entry) => manual_mpq_name(entry),
         }
     }
@@ -265,6 +269,9 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
                 }
                 let query = app.project_search.to_lowercase();
                 r.name.to_lowercase().contains(&query)
+                    || r.mpq_package_name
+                        .as_deref()
+                        .is_some_and(|name| name.to_lowercase().contains(&query))
                     || r.owner.to_lowercase().contains(&query)
                     || (is_patches_tab
                         && r.installed_mpqs.iter().any(|entry| {
@@ -1367,7 +1374,9 @@ fn mpq_parent_row<'a>(
     let multiple = repo.installed_mpqs.len() > 1;
     let expanded = app.expanded_repo_ids.contains(&repo.id);
     let title = if supports_online_updates || multiple {
-        repo.name.clone()
+        repo.mpq_package_name
+            .clone()
+            .unwrap_or_else(|| repo.name.clone())
     } else {
         repo.installed_mpqs
             .first()

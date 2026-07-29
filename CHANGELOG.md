@@ -82,6 +82,9 @@ This release completes a codebase-wide security, reliability, and data-integrity
   - MPQ manifests, backups, protection state, custom filenames, destinations, and curated release metadata commit together and roll back together.
   - Cancelled or superseded MPQ inspection, target review, WDM resolution, installation, and removal results cannot affect a newer dialog or profile.
   - Once an MPQ deployment reaches its commit phase, the dialog cannot be dismissed until the transaction finishes.
+  - Local multi-file packages now show clean, source-derived package names instead of exposing collision-safe internal identifiers.
+  - A transactional package editor can rename the package and update every child MPQ's friendly name, filename, destination, and enabled state together.
+  - Disabled tracked MPQs remain editable without their `.disabled` suffix being mistaken for an invalid MPQ filename.
 - **GAM and Generic Git Compatibility**
   - Manual addon imports retain the directory that actually exists instead of repeatedly renaming or re-importing it from the TOC name.
   - Unknown and self-hosted Git servers remain generic Git sources with their nested namespace and remote format preserved.
@@ -123,6 +126,9 @@ This release completes a codebase-wide security, reliability, and data-integrity
   - Verbose diagnostics now cover meaningful MPQ, mod, DLL, and repository requests, decisions, filesystem changes, metadata commits, cancellations, errors, and rollbacks.
   - MPQ enable/disable, lock changes, renames, moves, classification, protection, installation, removal, and rescans now identify the affected safe project/component and outcome.
   - Mod and DLL toggles plus repository removals report their requested state, mechanism, affected-file count, and final result.
+- **Interface Polish**
+  - README preview scrollbars now remain close to the content without obscuring the surrounding preview frame.
+  - Multi-file MPQ package editing keeps its header and actions visible while additional child files scroll within the dialog body.
 - **Reliable Message Routing**
   - Frontend messages are classified by reference and moved into exactly one owning feature handler instead of being cloned through every router.
   - Dialog-sensitive archive messages retain the correct addon-versus-MPQ workflow, and internal routing mismatches are diagnosed rather than silently ignored.

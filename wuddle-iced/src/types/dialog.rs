@@ -102,6 +102,21 @@ pub enum FileConflictAction {
 }
 
 #[derive(Debug, Clone)]
+pub struct MpqPackageFileDraft {
+    pub path: String,
+    pub display_name: String,
+    pub edited_display_name: String,
+    pub file_name: String,
+    pub edited_file_name: String,
+    pub destination: wuddle_engine::mpq::MpqDestination,
+    pub edited_destination: wuddle_engine::mpq::MpqDestination,
+    pub enabled: bool,
+    pub edited_enabled: bool,
+    pub editor_unlocked: bool,
+    pub status: wuddle_engine::mpq::MpqFileStatus,
+}
+
+#[derive(Debug, Clone)]
 pub enum Dialog {
     MpqAdd,
     MpqInstall,
@@ -122,6 +137,12 @@ pub enum Dialog {
         destination: wuddle_engine::mpq::MpqDestination,
         edited_destination: wuddle_engine::mpq::MpqDestination,
         status: wuddle_engine::mpq::MpqFileStatus,
+    },
+    MpqPackage {
+        repo_id: i64,
+        display_name: String,
+        edited_display_name: String,
+        files: Vec<MpqPackageFileDraft>,
     },
     ManualMpq {
         path: String,
@@ -286,6 +307,7 @@ impl Dialog {
                 | Self::WdmInstall
                 | Self::RemoveWdm { .. }
                 | Self::MpqComponent { .. }
+                | Self::MpqPackage { .. }
                 | Self::ManualMpq { .. }
                 | Self::RenameManualMpq { .. }
                 | Self::EditUntrackedMpq { .. }

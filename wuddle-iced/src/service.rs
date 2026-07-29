@@ -423,6 +423,9 @@ pub struct RepoRow {
     pub installed_dlls: Vec<(String, bool, Option<String>)>,
     pub installed_addons: Vec<String>,
     pub installed_mpqs: Vec<wuddle_engine::mpq::MpqInstalledFile>,
+    /// User-facing MPQ package label. The repository name remains the stable
+    /// collision-safe identity used to recognize local archive reinstalls.
+    pub mpq_package_name: Option<String>,
     pub dependencies: Vec<(i64, String)>,
     pub selected_addons: Vec<String>,
     pub is_collection: bool,
@@ -483,6 +486,7 @@ impl From<Repo> for RepoRow {
             installed_dlls: Vec::new(),
             installed_addons: Vec::new(),
             installed_mpqs: Vec::new(),
+            mpq_package_name: None,
             dependencies: Vec::new(),
             selected_addons: parse_selected_addons(r.selected_addons_json.as_deref()),
             is_collection: r
@@ -1427,6 +1431,31 @@ pub async fn rename_mpq_component(
             &display_name,
             &file_name,
             &destination,
+            set_xattr_comment,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn edit_mpq_package(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    repo_id: i64,
+    display_name: String,
+    edits: Vec<wuddle_engine::mpq::MpqPackageFileEdit>,
+    set_xattr_comment: bool,
+) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("edit_mpq_package");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.edit_tracked_mpq_package(
+            repo_id,
+            Path::new(&wow_dir),
+            &display_name,
+            &edits,
             set_xattr_comment,
         )
         .map_err(|error| error.to_string())
@@ -2573,6 +2602,7 @@ async fn list_repos_inner(
                 row.installed_mpqs = eng
                     .list_installed_mpqs(row.id, wow_path)
                     .unwrap_or_default();
+                row.mpq_package_name = eng.mpq_package_display_name(row.id).ok();
                 row.dependencies = eng.repo_dependencies(row.id).unwrap_or_default();
             }
             rows.push(row);

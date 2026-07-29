@@ -4,17 +4,12 @@ on:
   push:
     tags:
       - "v*"
-    branches:
-      - "v3.7.0-beta.7-testing"
 
 permissions:
   contents: read
 
 env:
-  # Branch-only test builds use the final intended package identity so their
-  # portable layout matches the release users will receive. Only tag runs may
-  # publish a GitHub Release.
-  WUDDLE_BUILD_TAG: ${{ github.ref_type == 'branch' && 'v3.7.0-beta.7' || github.ref_name }}
+  WUDDLE_BUILD_TAG: ${{ github.ref_name }}
 
 concurrency:
   group: iced-release-${{ github.ref }}
@@ -40,13 +35,6 @@ jobs:
       - id: check
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE}" == "branch" && \
-                "${GITHUB_REF_NAME}" == "v3.7.0-beta.7-testing" ]]; then
-            echo "should_build=true" >> "${GITHUB_OUTPUT}"
-            echo "Building branch-only beta.7 test artifacts; no GitHub Release will be published."
-            exit 0
-          fi
-
           git fetch --no-tags origin \
             +refs/heads/main:refs/remotes/origin/main \
             +refs/heads/beta:refs/remotes/origin/beta

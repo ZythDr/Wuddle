@@ -40,7 +40,7 @@ This beta completes a full security, reliability, and data-integrity review of W
 - **More Dependable Updates** — Added bounded Git operations, cancellation, stronger cache validation, accurate multi-file checks, and safer API budgeting.
 - **Verified Self-Updates** — Linux and Windows updates now validate exact packages and digests while retaining rollback copies.
 - **Launcher and Platform Hardening** — Improved Windows version selection, restart handoff, single-instance ownership, Linux portable paths, and window restoration.
-- **Better MPQ Behavior** — MPQ changes are more transactional, and local patches are no longer incorrectly treated as remote repositories.
+- **Better MPQ Behavior** — MPQ changes are more transactional, local patches are no longer incorrectly treated as remote repositories, and multi-file packages now have clean names plus a unified package editor.
 - **Expanded Diagnostics** — Meaningful actions, file changes, metadata commits, failures, and rollbacks are now easier to trace without exposing private data.
 
 See the [full changelog](CHANGELOG.md#v370-beta7) for the complete technical breakdown.

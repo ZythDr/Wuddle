@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::model::{InstallMode, Repo};
 
-const SCHEMA_VERSION: i32 = 20;
+const SCHEMA_VERSION: i32 = 21;
 const REPO_CASING_RECOVERY: &str = "repo_casing_recovery_v4";
 static DB_OPEN_LOCK: Mutex<()> = Mutex::new(());
 
@@ -67,6 +67,14 @@ pub(crate) struct InstallPathOwner {
     pub enabled: bool,
     pub kind: String,
     pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MpqPackageInstallEdit {
+    pub old_path: String,
+    pub new_path: String,
+    pub display_name: String,
+    pub path_changed: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -475,6 +483,22 @@ impl Db {
                   ON install_backups(displaced_repo_id);
 
                 PRAGMA user_version = 20;
+                "#,
+            )?;
+        }
+
+        // v20 -> v21: keep a user-facing MPQ package label separate from the
+        // collision-safe repository identity used for local archive installs.
+        if current < 21 {
+            self.conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS mpq_package_metadata (
+                  repo_id       INTEGER PRIMARY KEY,
+                  display_name  TEXT NOT NULL,
+                  FOREIGN KEY(repo_id) REFERENCES repos(id) ON DELETE CASCADE
+                );
+
+                PRAGMA user_version = 21;
                 "#,
             )?;
         }
@@ -1767,6 +1791,74 @@ impl Db {
             r#"UPDATE installs SET display_name=?1 WHERE repo_id=?2 AND path=?3"#,
             params![display_name, repo_id, path],
         )?;
+        Ok(())
+    }
+
+    pub fn mpq_package_display_name(&self, repo_id: i64) -> Result<Option<String>> {
+        let result = self.conn.query_row(
+            "SELECT display_name FROM mpq_package_metadata WHERE repo_id=?1",
+            params![repo_id],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(display_name) => Ok(Some(display_name)),
+            Err(SqlError::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn ensure_mpq_package_display_name(&self, repo_id: i64, display_name: &str) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT OR IGNORE INTO mpq_package_metadata(repo_id, display_name)
+            VALUES (?1, ?2)
+            "#,
+            params![repo_id, display_name],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn edit_mpq_package_metadata(
+        &self,
+        repo_id: i64,
+        display_name: &str,
+        edits: &[MpqPackageInstallEdit],
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let updated = tx.execute(
+            r#"
+            INSERT INTO mpq_package_metadata(repo_id, display_name)
+            VALUES (?1, ?2)
+            ON CONFLICT(repo_id) DO UPDATE SET display_name=excluded.display_name
+            "#,
+            params![repo_id, display_name],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("The MPQ package label could not be saved");
+        }
+        for edit in edits {
+            let updated = tx.execute(
+                r#"
+                UPDATE installs SET path=?3, display_name=?4
+                WHERE repo_id=?1 AND path=?2 COLLATE NOCASE AND kind='mpq'
+                "#,
+                params![repo_id, edit.old_path, edit.new_path, edit.display_name],
+            )?;
+            if updated != 1 {
+                anyhow::bail!("An MPQ package component is no longer tracked");
+            }
+            if edit.path_changed {
+                tx.execute(
+                    "DELETE FROM mpq_backups WHERE repo_id=?1 AND path=?2 COLLATE NOCASE",
+                    params![repo_id, edit.old_path],
+                )?;
+            }
+            tx.execute(
+                "UPDATE mpq_protection SET path=?2 WHERE path=?1 COLLATE NOCASE",
+                params![edit.old_path, edit.new_path],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
