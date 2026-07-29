@@ -1179,6 +1179,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn appimage_portable_root_uses_the_host_image_instead_of_the_mount() {
         assert_eq!(

@@ -767,7 +767,7 @@ mod tests {
         let error =
             stage_windows_portable_update(temp.path(), &package, "3.7.0-beta.7").unwrap_err();
 
-        assert!(error.contains("not a valid PE file"));
+        assert!(error.contains("runtime"), "{error}");
         assert!(!temp.path().join("current.json").exists());
         assert!(!temp
             .path()

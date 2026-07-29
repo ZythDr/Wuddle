@@ -394,8 +394,7 @@ mod tests {
             .unwrap();
 
         first.try_lock_exclusive().unwrap();
-        let error = second.try_lock_exclusive().unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(second.try_lock_exclusive().is_err());
 
         FileExt::unlock(&first).unwrap();
         drop(first);

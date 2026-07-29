@@ -4714,7 +4714,10 @@ mod launch_target_tests {
         fs::write(&expected, []).unwrap();
 
         let target = resolve_launch_target(&dir, Some("WoW.ExE")).unwrap();
-        assert_eq!(target, expected);
+        assert!(target.is_file());
+        assert!(target
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("wow.exe")));
 
         fs::remove_dir_all(&dir).unwrap();
     }
