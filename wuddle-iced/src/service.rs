@@ -191,6 +191,32 @@ mod repository_operation_tests {
             drop(held);
         });
     }
+
+    #[test]
+    fn update_all_skips_a_repository_removed_after_the_batch_was_prepared() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("wuddle.sqlite");
+        let wow_dir = temp.path().join("Game");
+        std::fs::create_dir_all(&wow_dir).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let results = runtime
+            .block_on(update_all(
+                Some(db_path),
+                wow_dir.to_string_lossy().into_owned(),
+                vec![4242],
+                InstallOptions::default(),
+            ))
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].repo_id, 4242);
+        assert!(results[0].skipped);
+        assert!(results[0].error.is_none());
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -723,6 +749,7 @@ static UPDATE_CHECK_PROGRESS: OnceLock<Mutex<HashMap<i64, wuddle_engine::UpdateC
     OnceLock::new();
 static UPDATE_CHECKS_BLOCKED_FOR_SESSION: AtomicBool = AtomicBool::new(false);
 const UPDATE_CHECK_DEADLINE: Duration = Duration::from_secs(30);
+const MAX_CONCURRENT_CURATED_MPQ_CHECKS: usize = 2;
 
 fn update_check_progress_slot() -> &'static Mutex<HashMap<i64, wuddle_engine::UpdateCheckProgress>>
 {
@@ -805,6 +832,18 @@ mod update_check_progress_tests {
         assert_eq!(active[0].repo_id, 22);
         assert_eq!(active[0].stage, UpdateCheckProgressStage::VerifyingFiles);
         clear_update_check_progress();
+    }
+
+    #[tokio::test]
+    async fn cancellation_waiter_observes_the_shared_deadline_signal() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let waiter = tokio::spawn(wait_for_update_check_cancellation(Arc::clone(&cancelled)));
+
+        cancelled.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_millis(100), waiter)
+            .await
+            .expect("cancellation waiter should stop promptly")
+            .expect("cancellation waiter task should not panic");
     }
 }
 
@@ -2750,6 +2789,105 @@ async fn build_epoch_water_update_plan(repo: Repo) -> PlanRow {
     }
 }
 
+async fn wait_for_update_check_cancellation(cancelled: Arc<AtomicBool>) {
+    while !cancelled.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn check_one_curated_update_plan(
+    eng: &Engine,
+    repo: Repo,
+    kind: CuratedMpqKind,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<PlanRow, String> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Update check cancelled after reaching its deadline".to_string());
+    }
+
+    set_update_check_progress(wuddle_engine::UpdateCheckProgress {
+        repo_id: repo.id,
+        owner: repo.owner.clone(),
+        name: repo.name.clone(),
+        mode: repo.mode.as_str().to_string(),
+        stage: wuddle_engine::UpdateCheckProgressStage::FetchingRelease,
+    });
+    let curated_started = Instant::now();
+    let row = match kind {
+        CuratedMpqKind::Wdm => {
+            tokio::select! {
+                _ = wait_for_update_check_cancellation(Arc::clone(cancelled)) => {
+                    return Err("Update check cancelled after reaching its deadline".to_string());
+                }
+                row = build_wdm_update_plan(eng, repo) => row,
+            }
+        }
+        CuratedMpqKind::EpochWater => {
+            tokio::select! {
+                _ = wait_for_update_check_cancellation(Arc::clone(cancelled)) => {
+                    return Err("Update check cancelled after reaching its deadline".to_string());
+                }
+                row = build_epoch_water_update_plan(repo) => row,
+            }
+        }
+    };
+    crate::diagnostics::debug(
+        "update_check",
+        format!(
+            "curated update check: repo_id={}; elapsed_ms={}; outcome={}",
+            row.repo_id,
+            curated_started.elapsed().as_millis(),
+            if row.error.is_some() {
+                "error"
+            } else {
+                "completed"
+            }
+        ),
+    );
+    set_update_check_progress(wuddle_engine::UpdateCheckProgress {
+        repo_id: row.repo_id,
+        owner: row.owner.clone(),
+        name: row.name.clone(),
+        mode: row.mode.clone(),
+        stage: wuddle_engine::UpdateCheckProgressStage::Finished,
+    });
+    Ok(row)
+}
+
+async fn check_curated_update_plans(
+    eng: &Engine,
+    repos: Vec<(Repo, CuratedMpqKind)>,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<Vec<PlanRow>, String> {
+    let mut rows = Vec::with_capacity(repos.len());
+
+    // There are currently two curated MPQ sources. Run both together while
+    // retaining a small explicit ceiling for future catalog additions.
+    for chunk in repos.chunks(MAX_CONCURRENT_CURATED_MPQ_CHECKS) {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("Update check cancelled after reaching its deadline".to_string());
+        }
+        match chunk {
+            [(repo, kind)] => {
+                rows.push(check_one_curated_update_plan(eng, repo.clone(), *kind, cancelled).await?)
+            }
+            [(left_repo, left_kind), (right_repo, right_kind)] => {
+                let (left, right) = tokio::join!(
+                    check_one_curated_update_plan(eng, left_repo.clone(), *left_kind, cancelled),
+                    check_one_curated_update_plan(eng, right_repo.clone(), *right_kind, cancelled)
+                );
+                // Both futures have completed before propagating either error,
+                // so no in-flight request is detached from the owned runtime.
+                rows.push(left?);
+                rows.push(right?);
+            }
+            _ => unreachable!("curated MPQ update chunks are bounded to two"),
+        }
+    }
+
+    Ok(rows)
+}
+
 fn installed_wdm_main_version<'a>(
     installs: impl IntoIterator<Item = (&'a str, Option<&'a str>, Option<&'a str>)>,
 ) -> Option<String> {
@@ -2796,6 +2934,7 @@ pub async fn check_updates_skip(
             .map_err(|error| error.to_string())?
             .into_iter()
             .filter_map(|repo| curated_mpq_kind_for_repo(&repo).map(|kind| (repo, kind)))
+            .filter(|(repo, _)| !skip_repo_ids.contains(&repo.id))
             .collect::<Vec<_>>();
         // Curated MPQs use their own source/release selection, so keep them out
         // of the generic forge updater and append purpose-built plans below.
@@ -2813,61 +2952,22 @@ pub async fn check_updates_skip(
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?;
-        let plans = runtime
-            .block_on(async {
+        let (plans, curated_rows) = runtime.block_on(async {
+            tokio::join!(
                 eng.check_updates_with_wow_skip_progress_cancel(
                     wow_dir.as_deref().map(Path::new),
                     mode,
                     &engine_skip_repo_ids,
                     progress_tx,
                     Arc::clone(&worker_cancelled),
-                )
-                .await
-            })
-            .map_err(|e| e.to_string())?;
-        let mut rows = plans.into_iter().map(PlanRow::from).collect::<Vec<_>>();
-        for (repo, kind) in curated_repos
-            .into_iter()
-            .filter(|(repo, _)| !skip_repo_ids.contains(&repo.id))
-        {
-            if worker_cancelled.load(Ordering::Acquire) {
-                return Err("Update check cancelled after reaching its deadline".to_string());
-            }
-            rows.retain(|plan| plan.repo_id != repo.id);
-            set_update_check_progress(wuddle_engine::UpdateCheckProgress {
-                repo_id: repo.id,
-                owner: repo.owner.clone(),
-                name: repo.name.clone(),
-                mode: repo.mode.as_str().to_string(),
-                stage: wuddle_engine::UpdateCheckProgressStage::FetchingRelease,
-            });
-            let curated_started = Instant::now();
-            let row = match kind {
-                CuratedMpqKind::Wdm => runtime.block_on(build_wdm_update_plan(&eng, repo)),
-                CuratedMpqKind::EpochWater => runtime.block_on(build_epoch_water_update_plan(repo)),
-            };
-            crate::diagnostics::debug(
-                "update_check",
-                format!(
-                    "curated update check: repo_id={}; elapsed_ms={}; outcome={}",
-                    row.repo_id,
-                    curated_started.elapsed().as_millis(),
-                    if row.error.is_some() {
-                        "error"
-                    } else {
-                        "completed"
-                    }
                 ),
-            );
-            set_update_check_progress(wuddle_engine::UpdateCheckProgress {
-                repo_id: row.repo_id,
-                owner: row.owner.clone(),
-                name: row.name.clone(),
-                mode: row.mode.clone(),
-                stage: wuddle_engine::UpdateCheckProgressStage::Finished,
-            });
-            rows.push(row);
-        }
+                check_curated_update_plans(&eng, curated_repos, &worker_cancelled),
+            )
+        });
+        let plans = plans.map_err(|error| error.to_string())?;
+        let curated_rows = curated_rows?;
+        let mut rows = plans.into_iter().map(PlanRow::from).collect::<Vec<_>>();
+        rows.extend(curated_rows);
         // Every nested Git worker is joined by the engine before this runtime
         // is dropped. The short timeout remains a defensive bound for unrelated
         // runtime bookkeeping rather than a way to abandon libgit2 work.
@@ -3363,6 +3463,9 @@ pub struct UpdateOneResult {
     pub repo_id: i64,
     pub owner: String,
     pub name: String,
+    /// True when the repository disappeared after the UI prepared the batch.
+    /// This is not an update failure; the stale item should be forgotten.
+    pub skipped: bool,
     /// The updated plan, or None if already up to date.
     pub plan: Option<PlanRow>,
     /// Verbose log lines for this repo.
@@ -3396,7 +3499,30 @@ pub async fn update_all(
         let wow = wow_dir.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<UpdateOneResult, String> {
             let eng = open_engine(db.as_deref())?;
-            let repo = eng.db().get_repo(id).map_err(|e| e.to_string())?;
+            let Some(repo) = eng
+                .db()
+                .get_repo_optional(id)
+                .map_err(|e| e.to_string())?
+            else {
+                crate::diagnostics::trace(
+                    "service",
+                    format!(
+                        "update_all: skipped stale repository entry; repo_id={id}"
+                    ),
+                );
+                return Ok(UpdateOneResult {
+                    repo_id: id,
+                    owner: String::new(),
+                    name: format!("repository #{id}"),
+                    skipped: true,
+                    plan: None,
+                    log_lines: vec![
+                        "The repository is no longer tracked by this profile; the stale update entry was skipped."
+                            .to_string(),
+                    ],
+                    error: None,
+                });
+            };
             let owner = repo.owner.clone();
             let name = repo.name.clone();
             let mut log: Vec<String> = Vec::new();
@@ -3422,6 +3548,7 @@ pub async fn update_all(
                         repo_id: id,
                         owner,
                         name,
+                        skipped: false,
                         plan: None,
                         log_lines: log,
                         error: Some(err),
@@ -3433,6 +3560,7 @@ pub async fn update_all(
                         repo_id: id,
                         owner,
                         name,
+                        skipped: false,
                         plan: None,
                         log_lines: log,
                         error: None,
@@ -3452,6 +3580,7 @@ pub async fn update_all(
                         repo_id: plan.repo_id,
                         owner: plan.owner.clone(),
                         name: plan.name.clone(),
+                        skipped: false,
                         plan: Some(PlanRow::from(plan)),
                         log_lines: log,
                         error: None,
@@ -4054,6 +4183,20 @@ fn spawn_launch_command(program: &str, args: &[String], cwd: &Path) -> Result<()
     spawn_command(cmd, program, cwd)
 }
 
+fn lutris_launch_spec(target: &str) -> Result<(&'static str, Vec<String>), String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err(
+            "Lutris launch target is empty (expected e.g. lutris:rungameid/2).".to_string(),
+        );
+    }
+
+    // Launch methods retain their own settings when the user switches between
+    // them. A Lutris launch must therefore never consult the hidden Custom
+    // command or argument fields.
+    Ok(("lutris", vec![target.to_string()]))
+}
+
 fn spawn_command(mut cmd: Command, program: &str, cwd: &Path) -> Result<(), String> {
     cmd.current_dir(cwd);
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -4164,19 +4307,7 @@ pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, S
         };
 
         if method == "lutris" {
-            let command = if cfg.custom_command.trim().is_empty() {
-                "lutris"
-            } else {
-                cfg.custom_command.trim()
-            };
-            let target_arg = cfg.lutris_target.trim();
-            if target_arg.is_empty() {
-                return Err(
-                    "Lutris launch target is empty (expected e.g. lutris:rungameid/2).".to_string(),
-                );
-            }
-            let mut args = vec![target_arg.to_string()];
-            args.extend(parse_arg_string(&cfg.custom_args)?);
+            let (command, args) = lutris_launch_spec(&cfg.lutris_target)?;
             spawn_launch_command(command, &args, &wow_path)?;
             return Ok(format!("Launched {} via {}.", target_name, command));
         }
@@ -4725,7 +4856,7 @@ mod github_token_tests {
 
 #[cfg(test)]
 mod launch_target_tests {
-    use super::{parse_arg_string, resolve_launch_target};
+    use super::{lutris_launch_spec, parse_arg_string, resolve_launch_target};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -4779,6 +4910,21 @@ mod launch_target_tests {
     fn launch_arguments_reject_unclosed_quotes() {
         let error = parse_arg_string(r#"--prefix "unfinished"#).unwrap_err();
         assert!(error.contains("unclosed quote"));
+    }
+
+    #[test]
+    fn lutris_launch_uses_only_the_lutris_target() {
+        let (command, args) = lutris_launch_spec("  lutris:rungameid/16  ").unwrap();
+
+        assert_eq!(command, "lutris");
+        assert_eq!(args, vec!["lutris:rungameid/16"]);
+    }
+
+    #[test]
+    fn lutris_launch_rejects_an_empty_target() {
+        let error = lutris_launch_spec(" \t ").unwrap_err();
+
+        assert!(error.contains("Lutris launch target is empty"));
     }
 }
 

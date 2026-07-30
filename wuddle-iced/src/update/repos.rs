@@ -11,6 +11,56 @@ use wuddle_engine;
 
 pub const INFREQUENT_CHECK_INTERVAL_SECS: i64 = 4 * 3600;
 
+fn retain_current_unique_plans(
+    plans: &mut Vec<service::PlanRow>,
+    repos: &[service::RepoRow],
+) -> usize {
+    let before = plans.len();
+    let current_ids = repos.iter().map(|repo| repo.id).collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    plans.retain(|plan| current_ids.contains(&plan.repo_id) && seen.insert(plan.repo_id));
+    before.saturating_sub(plans.len())
+}
+
+fn merge_current_update_plans(
+    mut checked: Vec<service::PlanRow>,
+    previous: &[service::PlanRow],
+    repos: &[service::RepoRow],
+) -> Vec<service::PlanRow> {
+    retain_current_unique_plans(&mut checked, repos);
+    let current_ids = repos.iter().map(|repo| repo.id).collect::<HashSet<_>>();
+    let mut seen = checked
+        .iter()
+        .map(|plan| plan.repo_id)
+        .collect::<HashSet<_>>();
+
+    checked.extend(
+        previous
+            .iter()
+            .filter(|plan| current_ids.contains(&plan.repo_id) && seen.insert(plan.repo_id))
+            .cloned(),
+    );
+    checked
+}
+
+fn sync_active_plan_cache(app: &mut App) {
+    app.cached_plans.insert(
+        app.active_profile_id.clone(),
+        (app.plans.clone(), app.last_checked.clone()),
+    );
+}
+
+fn reconcile_active_update_plans(app: &mut App) -> usize {
+    let removed = retain_current_unique_plans(&mut app.plans, &app.repos);
+    sync_active_plan_cache(app);
+    removed
+}
+
+fn forget_repo_update_plan(app: &mut App, repo_id: i64) {
+    app.plans.retain(|plan| plan.repo_id != repo_id);
+    sync_active_plan_cache(app);
+}
+
 fn update_check_stage_description(stage: wuddle_engine::UpdateCheckProgressStage) -> &'static str {
     match stage {
         wuddle_engine::UpdateCheckProgressStage::Started => "starting the update check",
@@ -176,6 +226,15 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     let mod_count = repos.iter().filter(|r| service::is_mod(r)).count();
                     let addon_count = count - mod_count;
                     app.repos = repos;
+                    let discarded_plans = reconcile_active_update_plans(app);
+                    if discarded_plans > 0 {
+                        crate::diagnostics::trace(
+                            "updates",
+                            format!(
+                                "discarded {discarded_plans} stale or duplicate update plan(s) after repository reload"
+                            ),
+                        );
+                    }
                     // published_at_unix is persisted in each profile database. Rebuild
                     // this derived UI state immediately instead of waiting for another
                     // network update check after a profile switch or application restart.
@@ -405,6 +464,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             service::clear_update_check_progress();
             match result {
                 Ok(mut plans) => {
+                    let discarded_checked_plans =
+                        retain_current_unique_plans(&mut plans, &app.repos);
+                    if discarded_checked_plans > 0 {
+                        crate::diagnostics::trace(
+                            "updates",
+                            format!(
+                                "discarded {discarded_checked_plans} stale or duplicate plan(s) returned by an update check"
+                            ),
+                        );
+                    }
                     let rate_limit_error = plans
                         .iter()
                         .filter_map(|plan| plan.error.as_deref())
@@ -474,13 +543,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         }
                     }
 
-                    // Merge in cached plans for repos that were skipped (infrequent).
-                    let returned_ids: HashSet<i64> = plans.iter().map(|p| p.repo_id).collect();
-                    for old_plan in &app.plans {
-                        if !returned_ids.contains(&old_plan.repo_id) {
-                            plans.push(old_plan.clone());
-                        }
-                    }
+                    // Merge cached plans only for repositories that still exist.
+                    // This preserves intentionally skipped infrequent checks without
+                    // resurrecting removed/replaced repositories or duplicate rows.
+                    plans = merge_current_update_plans(plans, &app.plans, &app.repos);
 
                     // Update infrequent check timestamp: if a token is present,
                     // we always check everything, so update the timestamp.
@@ -1931,6 +1997,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             };
             match result {
                 Ok(removed_paths) => {
+                    forget_repo_update_plan(app, repo_id);
                     app.log(
                         LogLevel::Info,
                         &format!(
@@ -2255,6 +2322,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.show_toast(format!("Updated {}.", name), ToastKind::Info);
                     // Remove from plans so it disappears from 'Updates' list in UI immediately
                     app.plans.retain(|p| p.repo_id != plan.repo_id);
+                    sync_active_plan_cache(app);
                 }
                 Ok(None) => app.log(LogLevel::Info, "Already up to date."),
                 Err(e) => {
@@ -2419,22 +2487,31 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             if app.wow_dir.is_empty() {
                 app.log(LogLevel::Error, "Set a WoW directory in Options first.");
             } else {
+                let discarded_plans = reconcile_active_update_plans(app);
+                if discarded_plans > 0 {
+                    app.log(
+                        LogLevel::Info,
+                        &format!(
+                            "Discarded {discarded_plans} stale or duplicate update entr{} before Update All.",
+                            if discarded_plans == 1 { "y" } else { "ies" }
+                        ),
+                    );
+                }
                 let db = app.db_path.clone();
                 let wow = app.wow_dir.clone();
                 let opts = app.install_options();
                 let mut targets = Vec::new();
                 let mut names = Vec::new();
+                let mut seen_targets = HashSet::new();
                 for plan in &app.plans {
-                    let curated_mpq = app
-                        .repos
-                        .iter()
-                        .find(|repo| repo.id == plan.repo_id)
-                        .map(service::is_curated_mpq_repo)
-                        .unwrap_or(false);
+                    let Some(repo) = app.repos.iter().find(|repo| repo.id == plan.repo_id) else {
+                        continue;
+                    };
                     if plan.has_update
-                        && !curated_mpq
+                        && !service::is_curated_mpq_repo(repo)
                         && !app.ignored_update_ids.contains(&plan.repo_id)
                         && !app.updating_repo_ids.contains(&plan.repo_id)
+                        && seen_targets.insert(plan.repo_id)
                     {
                         targets.push(plan.repo_id);
                         names.push(format!("{}/{}", plan.owner, plan.name));
@@ -2480,9 +2557,25 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Ok(results) => {
                     let mut applied = 0;
                     let mut errors = 0;
+                    let mut skipped = 0;
                     let mut rate_limit_error = None;
                     for r in results {
-                        let name = format!("{}/{}", r.owner, r.name);
+                        let name = if r.owner.is_empty() {
+                            r.name.clone()
+                        } else {
+                            format!("{}/{}", r.owner, r.name)
+                        };
+                        if r.skipped {
+                            skipped += 1;
+                            app.plans.retain(|plan| plan.repo_id != r.repo_id);
+                            app.log(
+                                LogLevel::Info,
+                                &format!(
+                                    "Skipped {name} because it is no longer tracked by this profile."
+                                ),
+                            );
+                            continue;
+                        }
                         if let Some(e) = r.error {
                             errors += 1;
                             if rate_limit_error.is_none()
@@ -2501,6 +2594,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             app.plans.retain(|p| p.repo_id != r.repo_id);
                         }
                     }
+                    sync_active_plan_cache(app);
                     if let Some(error) = rate_limit_error.as_deref() {
                         app.show_github_rate_limit("Some updates could not be downloaded.", error);
                     } else if errors > 0 {
@@ -2514,6 +2608,11 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             &format!("Done. Updated {} repo(s).", applied),
                         );
                         app.show_toast(format!("Updated {} repo(s).", applied), ToastKind::Info);
+                    } else if skipped > 0 {
+                        app.show_toast(
+                            "Removed stale update entries. Check again for current updates.",
+                            ToastKind::Info,
+                        );
                     }
                     return Some(refresh_repos_task(app));
                 }
@@ -3648,5 +3747,89 @@ mod file_conflict_tests {
                 "helper.dll [existing local file]".to_string()
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod update_plan_tests {
+    use super::{merge_current_update_plans, retain_current_unique_plans};
+    use crate::service::{PlanRow, RepoRow};
+
+    fn repo(id: i64) -> RepoRow {
+        RepoRow {
+            id,
+            forge: "github".to_string(),
+            owner: "owner".to_string(),
+            name: format!("repo-{id}"),
+            url: format!("https://github.com/owner/repo-{id}"),
+            mode: "addon_git".to_string(),
+            enabled: true,
+            last_version: None,
+            git_branch: None,
+            installed_branch: None,
+            installed_dlls: Vec::new(),
+            installed_addons: Vec::new(),
+            installed_mpqs: Vec::new(),
+            mpq_package_name: None,
+            dependencies: Vec::new(),
+            selected_addons: Vec::new(),
+            is_collection: false,
+            merge_installs: false,
+            pinned_version: None,
+            installed_at_unix: None,
+            published_at_unix: None,
+        }
+    }
+
+    fn plan(id: i64, latest: &str) -> PlanRow {
+        PlanRow {
+            repo_id: id,
+            owner: "owner".to_string(),
+            name: format!("repo-{id}"),
+            current: Some("old".to_string()),
+            latest: latest.to_string(),
+            asset_name: String::new(),
+            has_update: true,
+            repair_needed: false,
+            externally_modified: false,
+            not_modified: false,
+            mode: "addon_git".to_string(),
+            host: "github.com".to_string(),
+            error: None,
+            previous_dll_count: 0,
+            new_dll_count: 0,
+        }
+    }
+
+    #[test]
+    fn repository_reload_discards_stale_and_duplicate_update_plans() {
+        let repos = vec![repo(1), repo(2)];
+        let mut plans = vec![plan(1, "fresh"), plan(1, "duplicate"), plan(99, "stale")];
+
+        let removed = retain_current_unique_plans(&mut plans, &repos);
+
+        assert_eq!(removed, 2);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].repo_id, 1);
+        assert_eq!(plans[0].latest, "fresh");
+    }
+
+    #[test]
+    fn checked_plans_replace_cached_rows_and_keep_only_current_skipped_repos() {
+        let repos = vec![repo(1), repo(2)];
+        let checked = vec![plan(1, "fresh"), plan(1, "duplicate")];
+        let previous = vec![
+            plan(1, "cached"),
+            plan(2, "intentionally-skipped"),
+            plan(99, "removed"),
+        ];
+
+        let merged = merge_current_update_plans(checked, &previous, &repos);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].repo_id, 1);
+        assert_eq!(merged[0].latest, "fresh");
+        assert_eq!(merged[1].repo_id, 2);
+        assert_eq!(merged[1].latest, "intentionally-skipped");
     }
 }

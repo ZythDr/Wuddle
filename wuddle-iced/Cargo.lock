@@ -7126,6 +7126,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs 5.0.1",
+ "futures-util",
  "git2",
  "hex",
  "junction",
@@ -7151,7 +7152,7 @@ dependencies = [
 
 [[package]]
 name = "wuddle-iced"
-version = "3.7.0-beta.7"
+version = "3.7.0-beta.8"
 dependencies = [
  "arboard",
  "async-stream",

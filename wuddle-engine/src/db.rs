@@ -1011,7 +1011,7 @@ impl Db {
         }
     }
 
-    pub fn get_repo(&self, id: i64) -> Result<Repo> {
+    pub fn get_repo_optional(&self, id: i64) -> Result<Option<Repo>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
@@ -1023,7 +1023,7 @@ impl Db {
             "#,
         )?;
 
-        let repo = stmt.query_row(params![id], |row| {
+        let result = stmt.query_row(params![id], |row| {
             let mode_str: String = row.get(6)?;
             Ok(Repo {
                 id: row.get(0)?,
@@ -1048,9 +1048,18 @@ impl Db {
                 pinned_version: row.get(19)?,
                 selected_addons_json: row.get(20)?,
             })
-        })?;
+        });
 
-        Ok(repo)
+        match result {
+            Ok(repo) => Ok(Some(repo)),
+            Err(SqlError::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn get_repo(&self, id: i64) -> Result<Repo> {
+        self.get_repo_optional(id)?
+            .ok_or_else(|| SqlError::QueryReturnedNoRows.into())
     }
 
     pub fn set_last_version(&self, id: i64, version: Option<&str>) -> Result<()> {

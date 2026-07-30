@@ -2923,6 +2923,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs",
+ "futures-util",
  "git2",
  "hex",
  "junction",

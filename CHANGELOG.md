@@ -2,6 +2,24 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.7.0-beta.8
+
+### Improvements
+
+- **Faster Update Checks**
+  - Git repositories, release-based projects, and curated MPQ patches now check concurrently through separate bounded workloads.
+  - Replenishing schedulers start the next waiting check as soon as one finishes, while retaining cancellation, deadlines, and joined-worker safety.
+
+### Bug Fixes
+
+- **Repository Replacement and Batch Updates**
+  - Repository reloads now discard stale and duplicate cached update plans instead of keeping entries for repositories that were removed or replaced.
+  - Update All deduplicates its targets and safely skips a repository that disappears after the batch was prepared rather than aborting every remaining update.
+  - This is intended to address [Issue #18](https://github.com/ZythDr/Wuddle/issues/18); the issue remains open pending confirmation from the reporter.
+- **Isolated Launch Methods**
+  - Lutris now always launches its saved Lutris target through the Lutris executable.
+  - Hidden values retained for Custom launching can no longer replace the Lutris command or leak Custom arguments into a Lutris launch.
+
 ## v3.7.0-beta.7
 
 This release completes a codebase-wide security, reliability, and data-integrity audit covering 75 documented findings.

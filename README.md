@@ -30,7 +30,24 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.7.0-beta.7
+### What's New in v3.7.0-beta.8
+
+- **Faster Update Checks**
+  - Git repositories, release-based projects, and curated MPQ patches now check concurrently through separate bounded workloads.
+  - New checks begin as soon as a worker becomes available without weakening cancellation or timeout safeguards.
+- **More Reliable Repository Updates**
+  - Stale and duplicate cached update entries are discarded when repositories are removed, replaced, or reloaded.
+  - Update All now skips vanished repositories instead of aborting the remaining batch.
+  - This is intended to address [Issue #18](https://github.com/ZythDr/Wuddle/issues/18), which remains open pending reporter confirmation.
+- **Reliable Lutris Launching**
+  - Lutris launches are isolated from saved Custom command fields, preventing hidden Custom values from replacing the Lutris executable or arguments.
+
+See the [full changelog](CHANGELOG.md#v370-beta8) for the technical details.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.7.0-beta.7
 
 This beta completes a full security, reliability, and data-integrity review of Wuddle, addressing 75 documented findings.
 
@@ -42,11 +59,6 @@ This beta completes a full security, reliability, and data-integrity review of W
 - **Launcher and Platform Hardening** — Improved Windows version selection, restart handoff, single-instance ownership, Linux portable paths, and window restoration.
 - **Better MPQ Behavior** — MPQ changes are more transactional, local patches are no longer incorrectly treated as remote repositories, and multi-file packages now have clean names plus a unified package editor.
 - **Expanded Diagnostics** — Meaningful actions, file changes, metadata commits, failures, and rollbacks are now easier to trace without exposing private data.
-
-See the [full changelog](CHANGELOG.md#v370-beta7) for the complete technical breakdown.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.7.0-beta.6
 

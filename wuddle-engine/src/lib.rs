@@ -4,10 +4,8 @@ use reqwest::Client;
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    future::Future,
     io::Read,
     path::{Component, Path, PathBuf},
-    pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, LazyLock, Mutex, OnceLock,
@@ -29,6 +27,7 @@ mod gam_compat;
 mod install;
 mod model;
 mod network;
+mod update_scheduler;
 mod url_safety;
 mod util;
 
@@ -610,6 +609,8 @@ static RE_GITHUB_RESET: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"(?:reset |GITHUB_RATE_LIMIT:)(\d+)").unwrap());
 
 const REMOTE_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_CONCURRENT_GIT_UPDATE_CHECKS: usize = 4;
+const MAX_CONCURRENT_RELEASE_UPDATE_CHECKS: usize = 4;
 
 static RE_VERSION_FROM_ASSET: LazyLock<regex::Regex> = LazyLock::new(|| {
     // Suffix character class deliberately excludes '.' to avoid consuming file
@@ -3101,60 +3102,7 @@ impl Engine {
         result
     }
 
-    fn check_updates_parallel<'a>(
-        &'a self,
-        repos: &'a [Repo],
-        wow_dir: Option<&'a Path>,
-        check_mode: CheckMode,
-        progress_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<UpdateCheckProgress>>,
-        cancelled: &'a Arc<AtomicBool>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<UpdatePlan>>> + 'a>> {
-        Box::pin(async move {
-            let mut plans = Vec::with_capacity(repos.len());
-            // libgit2 work runs on Tokio's blocking pool and cannot be killed
-            // safely mid-call. Keep at most two probes active, and stop
-            // starting new probes as soon as cancellation is requested.
-            for chunk in repos.chunks(2) {
-                Self::ensure_update_check_active(cancelled)?;
-                match chunk {
-                    [repo] => plans.push(
-                        self.check_one_update_plan(
-                            repo,
-                            wow_dir,
-                            check_mode,
-                            progress_tx,
-                            cancelled,
-                        )
-                        .await?,
-                    ),
-                    [left, right] => {
-                        let (left_plan, right_plan) = tokio::join!(
-                            self.check_one_update_plan(
-                                left,
-                                wow_dir,
-                                check_mode,
-                                progress_tx,
-                                cancelled
-                            ),
-                            self.check_one_update_plan(
-                                right,
-                                wow_dir,
-                                check_mode,
-                                progress_tx,
-                                cancelled
-                            )
-                        );
-                        plans.push(left_plan?);
-                        plans.push(right_plan?);
-                    }
-                    _ => unreachable!("Git update chunks are bounded to two"),
-                }
-            }
-            Ok(plans)
-        })
-    }
-
-    async fn check_updates_batched(
+    async fn check_updates_parallel(
         &self,
         repos: &[Repo],
         wow_dir: Option<&Path>,
@@ -3162,60 +3110,50 @@ impl Engine {
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<UpdateCheckProgress>>,
         cancelled: &Arc<AtomicBool>,
     ) -> Result<Vec<UpdatePlan>> {
-        let _diagnostic = diagnostics::OperationGuard::new("check_updates_batched");
         diagnostics::emit(
             diagnostics::DiagnosticLevel::Trace,
             "engine",
             format!(
-                "check_updates_batched: repo_count={}; mode={check_mode:?}",
-                repos.len()
+                "check_git_updates_bounded: repo_count={}; concurrency_limit={}; mode={check_mode:?}",
+                repos.len(),
+                MAX_CONCURRENT_GIT_UPDATE_CHECKS
             ),
         );
-        let mut plans = Vec::with_capacity(repos.len());
+        // libgit2 work runs on Tokio's blocking pool and cannot be killed safely
+        // mid-call. Keep a small, fixed number of probes active and replenish
+        // the pool whenever one completes. The scheduler waits for every
+        // started probe before returning, including when one reports an error.
+        update_scheduler::run_bounded_ordered(repos, MAX_CONCURRENT_GIT_UPDATE_CHECKS, |repo| {
+            self.check_one_update_plan(repo, wow_dir, check_mode, progress_tx, cancelled)
+        })
+        .await
+    }
 
-        // Keep release API checks bounded to avoid bursty rate-limit pressure.
-        for chunk in repos.chunks(4) {
-            Self::ensure_update_check_active(cancelled)?;
-            match chunk {
-                [r1] => plans.push(
-                    self.check_one_update_plan(r1, wow_dir, check_mode, progress_tx, cancelled)
-                        .await?,
-                ),
-                [r1, r2] => {
-                    let (p1, p2) = tokio::join!(
-                        self.check_one_update_plan(r1, wow_dir, check_mode, progress_tx, cancelled),
-                        self.check_one_update_plan(r2, wow_dir, check_mode, progress_tx, cancelled)
-                    );
-                    plans.push(p1?);
-                    plans.push(p2?);
-                }
-                [r1, r2, r3] => {
-                    let (p1, p2, p3) = tokio::join!(
-                        self.check_one_update_plan(r1, wow_dir, check_mode, progress_tx, cancelled),
-                        self.check_one_update_plan(r2, wow_dir, check_mode, progress_tx, cancelled),
-                        self.check_one_update_plan(r3, wow_dir, check_mode, progress_tx, cancelled)
-                    );
-                    plans.push(p1?);
-                    plans.push(p2?);
-                    plans.push(p3?);
-                }
-                [r1, r2, r3, r4] => {
-                    let (p1, p2, p3, p4) = tokio::join!(
-                        self.check_one_update_plan(r1, wow_dir, check_mode, progress_tx, cancelled),
-                        self.check_one_update_plan(r2, wow_dir, check_mode, progress_tx, cancelled),
-                        self.check_one_update_plan(r3, wow_dir, check_mode, progress_tx, cancelled),
-                        self.check_one_update_plan(r4, wow_dir, check_mode, progress_tx, cancelled)
-                    );
-                    plans.push(p1?);
-                    plans.push(p2?);
-                    plans.push(p3?);
-                    plans.push(p4?);
-                }
-                _ => unreachable!("chunk size is bounded to 4"),
-            }
-        }
-
-        Ok(plans)
+    async fn check_release_updates_bounded(
+        &self,
+        repos: &[Repo],
+        wow_dir: Option<&Path>,
+        check_mode: CheckMode,
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<UpdateCheckProgress>>,
+        cancelled: &Arc<AtomicBool>,
+    ) -> Result<Vec<UpdatePlan>> {
+        let _diagnostic = diagnostics::OperationGuard::new("check_release_updates_bounded");
+        diagnostics::emit(
+            diagnostics::DiagnosticLevel::Trace,
+            "engine",
+            format!(
+                "check_release_updates_bounded: repo_count={}; concurrency_limit={}; mode={check_mode:?}",
+                repos.len(),
+                MAX_CONCURRENT_RELEASE_UPDATE_CHECKS
+            ),
+        );
+        // Keep release API checks bounded to avoid bursty rate-limit pressure,
+        // but do not make faster repositories wait for the slowest member of a
+        // fixed batch before another check can begin.
+        update_scheduler::run_bounded_ordered(repos, MAX_CONCURRENT_RELEASE_UPDATE_CHECKS, |repo| {
+            self.check_one_update_plan(repo, wow_dir, check_mode, progress_tx, cancelled)
+        })
+        .await
     }
 
     pub async fn check_updates_with_wow(
@@ -3311,7 +3249,13 @@ impl Engine {
 
         let (git_plans, release_plans) = tokio::join!(
             self.check_updates_parallel(&git_repos, wow_dir, check_mode, progress_tx, cancelled),
-            self.check_updates_batched(&release_repos, wow_dir, check_mode, progress_tx, cancelled)
+            self.check_release_updates_bounded(
+                &release_repos,
+                wow_dir,
+                check_mode,
+                progress_tx,
+                cancelled
+            )
         );
 
         let mut plans = Vec::with_capacity(git_repos.len() + release_repos.len());
