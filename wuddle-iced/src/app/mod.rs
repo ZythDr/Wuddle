@@ -11,6 +11,7 @@ use crate::components::drop_overlay;
 use crate::components::helpers::*;
 use crate::components::markdown::ImageViewer;
 use crate::components::presets::build_quick_add_presets;
+use crate::dialogs::addon_local_changes;
 use crate::dialogs::mods_warning;
 use crate::dialogs::patches_warning;
 use crate::dialogs::simple_warnings::{
@@ -1934,6 +1935,7 @@ impl App {
             set_xattr_comment: self.opt_xattr,
             replace_addon_conflicts: false,
             replace_file_conflicts: false,
+            replace_local_changes: false,
             cache_keep_versions: 2,
         }
     }
@@ -2026,7 +2028,7 @@ impl App {
                     | Dialog::RemoveCollectionAddon { .. } => (650u32, 24),
                     Dialog::AddonConflict { .. } => (920u32, 24),
                     Dialog::CollectionAddonConflict { .. } => (920u32, 24),
-                    Dialog::FileConflict { .. } => (650u32, 24),
+                    Dialog::FileConflict { .. } | Dialog::AddonLocalChanges { .. } => (650u32, 24),
                     _ => (480u32, 24),
                 };
                 let c_dlg = c;
@@ -5350,6 +5352,7 @@ impl App {
             Dialog::PatchesWarning { do_not_show_again } => {
                 patches_warning::view(*do_not_show_again, colors)
             }
+            Dialog::AddonLocalChanges { repos } => addon_local_changes::view(repos, colors),
             Dialog::FileConflict {
                 repo_id,
                 repo_name,

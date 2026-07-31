@@ -1473,12 +1473,12 @@ impl Engine {
         None
     }
 
-    fn addon_git_worktree_has_local_changes(
+    fn addon_git_worktree_local_change_reason(
         &self,
         repo_id: i64,
         wow_dir: &Path,
         worktree: &Path,
-    ) -> Result<bool> {
+    ) -> Result<Option<&'static str>> {
         let repository = Repository::open(worktree).context("open installed addon worktree")?;
         let mut allowed_moved_paths = Vec::<PathBuf>::new();
 
@@ -1506,7 +1506,9 @@ impl Engine {
                 .and_then(|name| name.to_str())
                 .unwrap_or_default();
             if !gam_compat::moved_addon_is_clean(worktree, &exposed, addon_name) {
-                return Ok(true);
+                return Ok(Some(
+                    "a moved addon folder differs from the checked-out Git revision",
+                ));
             }
             if let Some(path) = gam_compat::moved_addon_head_path(worktree, addon_name) {
                 allowed_moved_paths.push(path);
@@ -1532,10 +1534,10 @@ impl Engine {
                     .iter()
                     .any(|allowed| path == allowed || path.starts_with(allowed));
             if !is_expected_moved_deletion {
-                return Ok(true);
+                return Ok(Some("the Git worktree contains unexpected changes"));
             }
         }
-        Ok(false)
+        Ok(None)
     }
 
     fn repo_key(host: &str, owner: &str, name: &str) -> String {
@@ -4948,6 +4950,25 @@ impl Engine {
             format!("update_repo: repo_id={repo_id}"),
         );
         let repo = self.db().get_repo(repo_id)?;
+        if matches!(repo.mode, InstallMode::AddonGit) && !opts.replace_local_changes {
+            self.migrate_staging_clone_if_needed(wow_dir, &repo)?;
+            if let Some(installed) = self.addon_git_worktree_dir(repo_id, wow_dir, &repo) {
+                if let Some(reason) =
+                    self.addon_git_worktree_local_change_reason(repo_id, wow_dir, &installed)?
+                {
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Debug,
+                        "engine.addon_git",
+                        format!(
+                            "update preflight preserved local changes: repo_id={repo_id}; reason={reason}"
+                        ),
+                    );
+                    anyhow::bail!(
+                        "ADDON_GIT_LOCAL_CHANGES: This addon has local changes that a routine update would replace ({reason}). Explicit approval is required before they can be replaced."
+                    );
+                }
+            }
+        }
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut plan = self
             .build_update_plan_for_repo(
@@ -5058,11 +5079,12 @@ impl Engine {
             diagnostics::DiagnosticLevel::Trace,
             "engine",
             format!(
-                "apply_one: repo_id={}; mode={}; repair={}; replace_conflicts={}",
+                "apply_one: repo_id={}; mode={}; repair={}; replace_conflicts={}; replace_local_changes={}",
                 plan.repo_id,
                 plan.mode.as_str(),
                 plan.repair_needed,
-                opts.replace_addon_conflicts
+                opts.replace_addon_conflicts,
+                opts.replace_local_changes
             ),
         );
         if matches!(plan.mode, InstallMode::AddonGit) {
@@ -5088,15 +5110,23 @@ impl Engine {
                             .update_repo_casing(repo.id, &repo.owner, base_name);
                     }
                 }
-                if !force_clean_git_reinstall
-                    && self.addon_git_worktree_has_local_changes(
-                        plan.repo_id,
-                        wow_dir,
-                        installed,
-                    )?
+                let local_change_reason = if force_clean_git_reinstall || opts.replace_local_changes
                 {
+                    None
+                } else {
+                    self.addon_git_worktree_local_change_reason(plan.repo_id, wow_dir, installed)?
+                };
+                if let Some(reason) = local_change_reason {
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Debug,
+                        "engine.addon_git",
+                        format!(
+                            "routine update preserved local changes: repo_id={}; reason={reason}",
+                            plan.repo_id
+                        ),
+                    );
                     anyhow::bail!(
-                        "ADDON_GIT_LOCAL_CHANGES: This addon has local changes that a routine update would replace. Use Reinstall / Repair only if you intend to discard those changes."
+                        "ADDON_GIT_LOCAL_CHANGES: This addon has local changes that a routine update would replace ({reason}). Explicit approval is required before they can be replaced."
                     );
                 }
             }
@@ -5911,6 +5941,7 @@ mod tests {
         InstallOptions, LatestRelease, ReleaseAsset, Repo, StagedGitWorktree, UpdatePlan,
     };
     use git2::Repository;
+    use std::collections::HashSet;
     use std::fs;
     use std::path::Path;
     use std::sync::Arc;
@@ -6853,7 +6884,7 @@ mod tests {
     }
 
     #[test]
-    fn routine_git_update_preserves_and_reports_local_changes() {
+    fn routine_git_update_requires_explicit_approval_to_replace_local_changes() {
         let tmp = tempfile::tempdir().unwrap();
         let wow = tmp.path().join("wow");
         let addons = wow.join("Interface").join("AddOns");
@@ -6883,6 +6914,93 @@ mod tests {
             b"keep me"
         );
         assert!(!worktree.join("remote.txt").exists());
+
+        runtime
+            .block_on(engine.update_repo(
+                repo_id,
+                &wow,
+                None,
+                InstallOptions {
+                    replace_local_changes: true,
+                    ..InstallOptions::default()
+                },
+            ))
+            .unwrap();
+        assert!(!worktree.join("local-note.txt").exists());
+        assert_eq!(fs::read(worktree.join("remote.txt")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn skipped_repository_is_excluded_before_remote_update_checks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let remote = tmp.path().join("owner").join("IgnoredAddon");
+        let remote_url = create_local_git_root_addon_repo(&remote, "IgnoredAddon");
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let repo_id = add_identified_local_git_repo(&engine, remote_url);
+        fs::remove_dir_all(&remote).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let plans = runtime
+            .block_on(engine.check_updates_with_wow_skip(
+                Some(&wow),
+                CheckMode::Force,
+                &HashSet::from([repo_id]),
+            ))
+            .unwrap();
+
+        assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn routine_git_update_accepts_clean_windows_moved_modules_with_crlf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let remote = tmp.path().join("owner").join("MovedCollection");
+        let remote_url = create_local_git_addon_repo(&remote, &["ModuleOne", "ModuleTwo"]);
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let repo_id = add_local_git_repo(&engine, remote_url, "MovedCollection");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(engine.update_repo(repo_id, &wow, None, InstallOptions::default()))
+            .unwrap();
+        let worktree = addons.join("MovedCollection");
+        Repository::open(&worktree)
+            .unwrap()
+            .config()
+            .unwrap()
+            .set_bool("core.autocrlf", true)
+            .unwrap();
+
+        // Emulate GAM's Windows fallback, where modules are real sibling
+        // folders rather than links into the worktree.
+        for module in ["ModuleOne", "ModuleTwo"] {
+            let exposed = addons.join(module);
+            Engine::remove_any_target(&exposed).unwrap();
+            fs::rename(worktree.join(module), &exposed).unwrap();
+            fs::write(
+                exposed.join(format!("{module}.toc")),
+                b"## Interface: 30300\r\n",
+            )
+            .unwrap();
+        }
+
+        commit_local_git_file(&remote, "README.md", b"remote update\n", "remote update");
+        let updated = runtime
+            .block_on(engine.update_repo(repo_id, &wow, None, InstallOptions::default()))
+            .unwrap();
+
+        assert!(updated.is_some());
+        assert!(addons.join("ModuleOne").join("ModuleOne.toc").is_file());
+        assert!(addons.join("ModuleTwo").join("ModuleTwo.toc").is_file());
     }
 
     #[test]

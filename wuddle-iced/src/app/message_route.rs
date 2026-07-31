@@ -241,6 +241,8 @@ pub(super) fn classify(message: &Message, dialog: &Option<Dialog>) -> MessageRou
         | Message::BrowseGamePathResult(..)
         | Message::UpdateRepo(..)
         | Message::UpdateRepoResult { .. }
+        | Message::ConfirmAddonLocalChangesUpdate(..)
+        | Message::IgnoreAddonLocalChangesUpdates(..)
         | Message::ToggleRepoEnabled(..)
         | Message::ToggleRepoEnabledResult { .. }
         | Message::ToggleRepoExpanded(..)

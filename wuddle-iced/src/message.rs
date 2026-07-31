@@ -279,8 +279,11 @@ pub enum Message {
     UpdateRepo(i64),
     UpdateRepoResult {
         repo_id: i64,
+        replace_local_changes: bool,
         result: ProfileScoped<Result<Option<PlanRow>, String>>,
     },
+    ConfirmAddonLocalChangesUpdate(Vec<i64>),
+    IgnoreAddonLocalChangesUpdates(Vec<i64>),
     ReinstallRepo(i64),
     ReinstallRepoProbeResult {
         repo_id: i64,

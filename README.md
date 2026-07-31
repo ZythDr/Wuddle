@@ -30,7 +30,19 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.7.0-beta.8
+### What's New in v3.7.0-beta.9
+
+- **Safer Updates for Modified Addons** — Wuddle now asks whether to cancel, ignore future updates, or explicitly overwrite when an addon contains local changes.
+- **Better Batch Behavior** — Update All completes unaffected projects before grouping modified addons into one confirmation dialog.
+- **Real Update Ignoring** — Ignored projects are excluded from automatic and manual checks before any network or GitHub API request.
+- **Windows Line-Ending Fix** — Normal CRLF/LF differences are no longer mistaken for local addon edits, further addressing [Issue #18](https://github.com/ZythDr/Wuddle/issues/18).
+
+See the [full changelog](CHANGELOG.md#v370-beta9) for the technical details.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.7.0-beta.8
 
 - **Faster Update Checks**
   - Git repositories, release-based projects, and curated MPQ patches now check concurrently through separate bounded workloads.
@@ -41,11 +53,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
   - This is intended to address [Issue #18](https://github.com/ZythDr/Wuddle/issues/18), which remains open pending reporter confirmation.
 - **Reliable Lutris Launching**
   - Lutris launches are isolated from saved Custom command fields, preventing hidden Custom values from replacing the Lutris executable or arguments.
-
-See the [full changelog](CHANGELOG.md#v370-beta8) for the technical details.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.7.0-beta.7
 

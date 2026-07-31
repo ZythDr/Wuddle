@@ -1702,6 +1702,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 set_xattr_comment: app.opt_xattr,
                 replace_addon_conflicts: false,
                 replace_file_conflicts: false,
+                replace_local_changes: false,
                 cache_keep_versions: 0,
             };
             let (operation_id, scope) = begin_operation(app, true);

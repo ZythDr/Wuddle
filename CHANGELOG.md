@@ -2,6 +2,25 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.7.0-beta.9
+
+### Improvements
+
+- **Locally Modified Addons**
+  - When an update would overwrite local addon changes, Wuddle now lets you cancel, ignore future updates, or explicitly overwrite and update.
+  - Update All continues updating unaffected projects, then groups modified addons into one confirmation dialog.
+  - Approved updates still use Wuddle's staged and rollback-aware installation process.
+- **Ignore Updates**
+  - Ignored projects are now excluded from both automatic and manual update checks before any network or GitHub API requests are made.
+  - Ignore settings remain isolated to the relevant profile.
+
+### Bug Fixes
+
+- **Windows Addon Updates**
+  - Git line-ending differences such as CRLF versus LF are no longer mistaken for local addon modifications.
+  - Improved change detection for GAM-compatible moved addon folders while preserving genuine user edits.
+  - Further addresses [Issue #18](https://github.com/ZythDr/Wuddle/issues/18); the issue will remain open until the reporter confirms the fix.
+
 ## v3.7.0-beta.8
 
 ### Improvements

@@ -1,6 +1,7 @@
 /// Dialog rendering modules.
 /// Each file renders one or more Dialog variants as a free function that
 /// receives the destructured dialog fields + ThemeColors — no &App required.
+pub mod addon_local_changes;
 pub mod changelog;
 pub mod dll_warning;
 pub mod mod_file_info;

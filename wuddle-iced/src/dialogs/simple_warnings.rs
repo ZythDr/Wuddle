@@ -125,7 +125,7 @@ pub fn file_conflict<'a>(
     let c = colors;
     let action_label = match action {
         FileConflictAction::Install => "installation",
-        FileConflictAction::Update => "update",
+        FileConflictAction::Update | FileConflictAction::UpdateApprovedLocalChanges => "update",
         FileConflictAction::Reinstall => "reinstallation",
     };
     let file_rows = files.iter().map(|file| {

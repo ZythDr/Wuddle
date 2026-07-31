@@ -46,6 +46,9 @@ pub struct InstallOptions {
     pub set_xattr_comment: bool,
     pub replace_addon_conflicts: bool,
     pub replace_file_conflicts: bool,
+    /// The user explicitly approved replacing local edits in an addon Git worktree.
+    /// Routine updates must leave this disabled.
+    pub replace_local_changes: bool,
     /// Number of cached release versions to retain per repo (0 = only current).
     pub cache_keep_versions: usize,
 }

@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use git2::{ObjectType, Repository, Tree};
 use sha2::{Digest, Sha256};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use url::Url;
 
@@ -346,7 +347,39 @@ fn case_insensitive_child(parent: &Path, name: &str) -> Option<PathBuf> {
         .map(|entry| entry.path())
 }
 
-fn tree_matches_directory(repo: &Repository, tree: &Tree<'_>, directory: &Path) -> bool {
+fn worktree_file_matches_blob(
+    repo: &Repository,
+    path_in_repo: &Path,
+    path_on_disk: &Path,
+    expected: git2::Oid,
+) -> bool {
+    let Ok(contents) = std::fs::read(path_on_disk) else {
+        return false;
+    };
+    if git2::Oid::hash_object(ObjectType::Blob, &contents)
+        .map(|actual| actual == expected)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let Ok(mut writer) = repo.blob_writer(Some(path_in_repo)) else {
+        return false;
+    };
+    if writer.write_all(&contents).is_err() {
+        return false;
+    }
+    writer
+        .commit()
+        .map(|actual| actual == expected)
+        .unwrap_or(false)
+}
+
+fn tree_matches_directory(
+    repo: &Repository,
+    tree: &Tree<'_>,
+    directory: &Path,
+    path_in_repo: &Path,
+) -> bool {
     tree.iter().all(|entry| {
         let Ok(name) = entry.name() else {
             return false;
@@ -354,6 +387,7 @@ fn tree_matches_directory(repo: &Repository, tree: &Tree<'_>, directory: &Path) 
         let Some(path) = case_insensitive_child(directory, name) else {
             return false;
         };
+        let entry_path = path_in_repo.join(name);
         match entry.kind() {
             Some(ObjectType::Blob) if entry.filemode() == 0o120000 => false,
             Some(ObjectType::Blob) => {
@@ -363,12 +397,7 @@ fn tree_matches_directory(repo: &Repository, tree: &Tree<'_>, directory: &Path) 
                 if !metadata.is_file() || metadata.file_type().is_symlink() {
                     return false;
                 }
-                let Ok(contents) = std::fs::read(&path) else {
-                    return false;
-                };
-                git2::Oid::hash_object(ObjectType::Blob, &contents)
-                    .map(|oid| oid == entry.id())
-                    .unwrap_or(false)
+                worktree_file_matches_blob(repo, &entry_path, &path, entry.id())
             }
             Some(ObjectType::Tree) => {
                 let Ok(metadata) = std::fs::symlink_metadata(&path) else {
@@ -378,7 +407,7 @@ fn tree_matches_directory(repo: &Repository, tree: &Tree<'_>, directory: &Path) 
                     return false;
                 }
                 repo.find_tree(entry.id())
-                    .map(|child| tree_matches_directory(repo, &child, &path))
+                    .map(|child| tree_matches_directory(repo, &child, &path, &entry_path))
                     .unwrap_or(false)
             }
             _ => false,
@@ -386,8 +415,13 @@ fn tree_matches_directory(repo: &Repository, tree: &Tree<'_>, directory: &Path) 
     })
 }
 
-fn tree_matches_directory_exact(repo: &Repository, tree: &Tree<'_>, directory: &Path) -> bool {
-    if !tree_matches_directory(repo, tree, directory) {
+fn tree_matches_directory_exact(
+    repo: &Repository,
+    tree: &Tree<'_>,
+    directory: &Path,
+    path_in_repo: &Path,
+) -> bool {
+    if !tree_matches_directory(repo, tree, directory, path_in_repo) {
         return false;
     }
     let expected = tree
@@ -416,44 +450,16 @@ fn tree_matches_directory_exact(repo: &Repository, tree: &Tree<'_>, directory: &
                 return false;
             };
             repo.find_tree(entry.id())
-                .map(|child| tree_matches_directory_exact(repo, &child, &directory.join(name)))
+                .map(|child| {
+                    tree_matches_directory_exact(
+                        repo,
+                        &child,
+                        &directory.join(name),
+                        &path_in_repo.join(name),
+                    )
+                })
                 .unwrap_or(false)
         })
-}
-
-fn collect_addon_trees(
-    repo: &Repository,
-    tree: &Tree<'_>,
-    addon_name: &str,
-    matches: &mut Vec<git2::Oid>,
-) {
-    let defines_addon = tree.iter().any(|entry| {
-        entry.kind() == Some(ObjectType::Blob)
-            && entry
-                .name()
-                .ok()
-                .and_then(|name| Path::new(name).extension().and_then(|ext| ext.to_str()))
-                .map(|ext| ext.eq_ignore_ascii_case("toc"))
-                .unwrap_or(false)
-            && entry
-                .name()
-                .ok()
-                .and_then(|name| Path::new(name).file_stem().and_then(|stem| stem.to_str()))
-                .map(|stem| stem.eq_ignore_ascii_case(addon_name))
-                .unwrap_or(false)
-    });
-    if defines_addon {
-        matches.push(tree.id());
-    }
-
-    for entry in tree
-        .iter()
-        .filter(|entry| entry.kind() == Some(ObjectType::Tree))
-    {
-        if let Ok(child) = repo.find_tree(entry.id()) {
-            collect_addon_trees(repo, &child, addon_name, matches);
-        }
-    }
 }
 
 fn collect_addon_tree_paths(
@@ -518,12 +524,14 @@ pub(crate) fn moved_addon_matches_head(worktree: &Path, exposed: &Path, addon_na
         return false;
     };
     let mut matches = Vec::new();
-    collect_addon_trees(&repo, &head_tree, addon_name, &mut matches);
-    let [tree_id] = matches.as_slice() else {
+    collect_addon_tree_paths(&repo, &head_tree, Path::new(""), addon_name, &mut matches);
+    let [tree_path] = matches.as_slice() else {
         return false;
     };
-    repo.find_tree(*tree_id)
-        .map(|tree| tree_matches_directory(&repo, &tree, exposed))
+    head_tree
+        .get_path(tree_path)
+        .and_then(|entry| repo.find_tree(entry.id()))
+        .map(|tree| tree_matches_directory(&repo, &tree, exposed, tree_path))
         .unwrap_or(false)
 }
 
@@ -535,12 +543,14 @@ pub(crate) fn moved_addon_is_clean(worktree: &Path, exposed: &Path, addon_name: 
         return false;
     };
     let mut matches = Vec::new();
-    collect_addon_trees(&repo, &head_tree, addon_name, &mut matches);
-    let [tree_id] = matches.as_slice() else {
+    collect_addon_tree_paths(&repo, &head_tree, Path::new(""), addon_name, &mut matches);
+    let [tree_path] = matches.as_slice() else {
         return false;
     };
-    repo.find_tree(*tree_id)
-        .map(|tree| tree_matches_directory_exact(&repo, &tree, exposed))
+    head_tree
+        .get_path(tree_path)
+        .and_then(|entry| repo.find_tree(entry.id()))
+        .map(|tree| tree_matches_directory_exact(&repo, &tree, exposed, tree_path))
         .unwrap_or(false)
 }
 
@@ -659,6 +669,45 @@ mod tests {
         assert!(!moved_addon_is_clean(&worktree, &exposed, "Module"));
         std::fs::remove_file(exposed.join("user-note.txt")).unwrap();
         std::fs::write(exposed.join("Module.lua"), b"print('changed')\n").unwrap();
+        assert!(!moved_addon_matches_head(&worktree, &exposed, "Module"));
+        assert!(!moved_addon_is_clean(&worktree, &exposed, "Module"));
+    }
+
+    #[test]
+    fn moved_folder_comparison_honors_git_line_ending_filters() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("Collection.repo");
+        let exposed = temp.path().join("Module");
+        let module = worktree.join("Module");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(module.join("Module.toc"), b"## Interface: 30300\n").unwrap();
+        std::fs::write(module.join("Module.lua"), b"print('original')\n").unwrap();
+        let repo = Repository::init(&worktree).unwrap();
+        repo.config()
+            .unwrap()
+            .set_bool("core.autocrlf", true)
+            .unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("Wuddle Test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+            .unwrap();
+        std::fs::rename(module, &exposed).unwrap();
+
+        // Windows commonly checks text files out with CRLF while Git stores
+        // normalized LF blobs. That is a clean checkout, not a user edit.
+        std::fs::write(exposed.join("Module.toc"), b"## Interface: 30300\r\n").unwrap();
+        std::fs::write(exposed.join("Module.lua"), b"print('original')\r\n").unwrap();
+
+        assert!(moved_addon_matches_head(&worktree, &exposed, "Module"));
+        assert!(moved_addon_is_clean(&worktree, &exposed, "Module"));
+
+        std::fs::write(exposed.join("Module.lua"), b"print('changed')\r\n").unwrap();
         assert!(!moved_addon_matches_head(&worktree, &exposed, "Module"));
         assert!(!moved_addon_is_clean(&worktree, &exposed, "Module"));
     }

@@ -3,7 +3,10 @@ use crate::components::presets::{
 };
 use crate::service;
 use crate::settings::UpdateChannel;
-use crate::{App, CheckStats, Dialog, FileConflictAction, LogLevel, Message, ToastKind};
+use crate::{
+    AddonLocalChangesEntry, App, CheckStats, Dialog, FileConflictAction, LogLevel, Message,
+    ToastKind,
+};
 use iced::Task;
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -168,6 +171,49 @@ fn show_file_conflict(app: &mut App, repo_id: i64, action: FileConflictAction, e
         files,
         action,
     });
+}
+
+fn addon_local_change_reason(error: &str) -> String {
+    if error.contains("moved addon folder differs") {
+        "An exposed addon folder contains added, changed, or missing files.".to_string()
+    } else if error.contains("worktree contains unexpected changes") {
+        "The installed Git worktree contains added, changed, or deleted files.".to_string()
+    } else {
+        "The installed addon contains local file changes.".to_string()
+    }
+}
+
+fn addon_local_changes_entry(app: &App, repo_id: i64, error: &str) -> AddonLocalChangesEntry {
+    let repo_name = app
+        .repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .map(|repo| format!("{}/{}", repo.owner, repo.name))
+        .unwrap_or_else(|| format!("repository #{repo_id}"));
+    AddonLocalChangesEntry {
+        repo_id,
+        repo_name,
+        reason: addon_local_change_reason(error),
+    }
+}
+
+fn show_addon_local_changes_dialog(app: &mut App, repos: Vec<AddonLocalChangesEntry>) {
+    if repos.is_empty() {
+        return;
+    }
+    app.log(
+        LogLevel::Info,
+        &format!(
+            "Local-change approval required before updating {} addon {}.",
+            repos.len(),
+            if repos.len() == 1 {
+                "repository"
+            } else {
+                "repositories"
+            }
+        ),
+    );
+    app.dialog = Some(Dialog::AddonLocalChanges { repos });
 }
 
 fn install_local_archive(app: &mut App, path: std::path::PathBuf) -> Option<Task<Message>> {
@@ -592,6 +638,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     let mut version_tasks: Vec<Task<Message>> = Vec::new();
                     for repo in &app.repos {
                         if service::supports_release_version_listing(repo)
+                            && !app.ignored_update_ids.contains(&repo.id)
                             && !app.repo_versions.contains_key(&repo.id)
                             && !app.repo_versions_loading.contains(&repo.id)
                         {
@@ -1170,6 +1217,8 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             let wow = app.wow_dir.clone();
             let mut opts = app.install_options();
             opts.replace_file_conflicts = true;
+            opts.replace_local_changes =
+                matches!(action, FileConflictAction::UpdateApprovedLocalChanges);
             let scope = app.profile_operation_scope();
             app.log(
                 LogLevel::Info,
@@ -1183,13 +1232,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         result: crate::ProfileScoped::new(scope.clone(), result),
                     },
                 )),
-                FileConflictAction::Update => Some(Task::perform(
-                    service::update_repo(db, repo_id, wow, opts),
-                    move |result| Message::UpdateRepoResult {
-                        repo_id,
-                        result: crate::ProfileScoped::new(scope.clone(), result),
-                    },
-                )),
+                FileConflictAction::Update | FileConflictAction::UpdateApprovedLocalChanges => {
+                    Some(Task::perform(
+                        service::update_repo(db, repo_id, wow, opts),
+                        move |result| Message::UpdateRepoResult {
+                            repo_id,
+                            replace_local_changes: matches!(
+                                action,
+                                FileConflictAction::UpdateApprovedLocalChanges
+                            ),
+                            result: crate::ProfileScoped::new(scope.clone(), result),
+                        },
+                    ))
+                }
                 FileConflictAction::Reinstall => Some(Task::perform(
                     service::reinstall_repo(db, repo_id, wow, opts),
                     move |result| Message::ReinstallRepoResult {
@@ -2301,6 +2356,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     service::update_repo(db, id, wow, opts),
                     move |result| Message::UpdateRepoResult {
                         repo_id: id,
+                        replace_local_changes: false,
                         result: crate::ProfileScoped::new(scope.clone(), result),
                     },
                 ));
@@ -2309,6 +2365,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         Message::UpdateRepoResult {
             repo_id,
+            replace_local_changes,
             result: scoped,
         } => {
             let Some(result) = app.accept_profile_result(scoped, "repository update") else {
@@ -2327,16 +2384,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 Ok(None) => app.log(LogLevel::Info, "Already up to date."),
                 Err(e) => {
                     if e.starts_with("ADDON_GIT_LOCAL_CHANGES:") {
-                        app.log(
-                            LogLevel::Info,
-                            "Update skipped because the installed addon contains local changes.",
-                        );
-                        app.show_toast(
-                            "This addon contains local changes, so Wuddle did not update it.\n\nUse Reinstall / Repair only if you intend to discard them.",
-                            ToastKind::Warn,
-                        );
+                        let entry = addon_local_changes_entry(app, repo_id, &e);
+                        show_addon_local_changes_dialog(app, vec![entry]);
+                        return Some(Task::none());
                     } else if e.contains("FILE_CONFLICT:") {
-                        show_file_conflict(app, repo_id, FileConflictAction::Update, &e);
+                        let action = if replace_local_changes {
+                            FileConflictAction::UpdateApprovedLocalChanges
+                        } else {
+                            FileConflictAction::Update
+                        };
+                        show_file_conflict(app, repo_id, action, &e);
                         return Some(Task::none());
                     } else {
                         app.log(LogLevel::Error, &format!("Update failed: {}", e));
@@ -2347,6 +2404,66 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 }
             }
             Some(refresh_repos_task(app))
+        }
+        Message::ConfirmAddonLocalChangesUpdate(repo_ids) => {
+            app.dialog = None;
+            if app.wow_dir.is_empty() || repo_ids.is_empty() {
+                return Some(Task::none());
+            }
+            let mut opts = app.install_options();
+            opts.replace_local_changes = true;
+            let db = app.db_path.clone();
+            let wow = app.wow_dir.clone();
+            for repo_id in &repo_ids {
+                app.updating_repo_ids.insert(*repo_id);
+                app.log(
+                    LogLevel::Info,
+                    &format!("User approved replacing local addon changes for repo id={repo_id}."),
+                );
+            }
+            let scope = app.profile_operation_scope();
+            if let [repo_id] = repo_ids.as_slice() {
+                let repo_id = *repo_id;
+                Some(Task::perform(
+                    service::update_repo(db, repo_id, wow, opts),
+                    move |result| Message::UpdateRepoResult {
+                        repo_id,
+                        replace_local_changes: true,
+                        result: crate::ProfileScoped::new(scope.clone(), result),
+                    },
+                ))
+            } else {
+                let completed_ids = repo_ids.clone();
+                Some(Task::perform(
+                    service::update_all(db, wow, repo_ids, opts),
+                    move |result| Message::UpdateAllResult {
+                        repo_ids: completed_ids.clone(),
+                        result: crate::ProfileScoped::new(scope.clone(), result),
+                    },
+                ))
+            }
+        }
+        Message::IgnoreAddonLocalChangesUpdates(repo_ids) => {
+            app.dialog = None;
+            let ignored_count = repo_ids.len();
+            for repo_id in repo_ids {
+                app.ignored_update_ids.insert(repo_id);
+                app.log(
+                    LogLevel::Info,
+                    &format!(
+                        "Repo id={repo_id}: updates ignored after local changes were detected."
+                    ),
+                );
+            }
+            app.save_settings();
+            app.show_toast(
+                format!(
+                    "Ignored updates for {ignored_count} addon{}.",
+                    if ignored_count == 1 { "" } else { "s" }
+                ),
+                ToastKind::Info,
+            );
+            Some(Task::none())
         }
         Message::ToggleRepoEnabled(id, enabled) => {
             let repo_name = app
@@ -2559,6 +2676,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     let mut errors = 0;
                     let mut skipped = 0;
                     let mut rate_limit_error = None;
+                    let mut local_changes = Vec::new();
                     for r in results {
                         let name = if r.owner.is_empty() {
                             r.name.clone()
@@ -2577,6 +2695,16 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             continue;
                         }
                         if let Some(e) = r.error {
+                            if e.starts_with("ADDON_GIT_LOCAL_CHANGES:") {
+                                app.log(
+                                    LogLevel::Info,
+                                    &format!(
+                                        "Skipped {name} pending approval to replace local changes."
+                                    ),
+                                );
+                                local_changes.push(addon_local_changes_entry(app, r.repo_id, &e));
+                                continue;
+                            }
                             errors += 1;
                             if rate_limit_error.is_none()
                                 && crate::github_api::rate_limit_notice(&e).is_some()
@@ -2614,6 +2742,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                             ToastKind::Info,
                         );
                     }
+                    show_addon_local_changes_dialog(app, local_changes);
                     return Some(refresh_repos_task(app));
                 }
                 Err(e) => {
@@ -3570,23 +3699,34 @@ pub fn check_updates_task(app: &mut App) -> Task<Message> {
     } else {
         Some(app.wow_dir.clone())
     };
-    let skip = if app.opt_auto_check
+    let mut skip = app.ignored_update_ids.clone();
+    let ignored_count = skip.len();
+    let infrequent_count = if app.opt_auto_check
         && app.opt_conserve_github_api
         && wuddle_engine::github_token().is_none()
     {
         let s = infrequent_skip_ids(&app.repos, &app.plans, app.last_infrequent_check_unix);
-        if !s.is_empty() {
-            // Only log skipping in background or if manually triggered without token
-            app.log(LogLevel::Api, &format!("Checking active mods and addons ({} infrequent repos skipped to save API quota)...", s.len()));
+        let mut added = 0;
+        for repo_id in s {
+            if skip.insert(repo_id) {
+                added += 1;
+            }
         }
-        s
+        added
     } else {
-        app.log(
-            LogLevel::Api,
-            "Checking all repositories (authenticated)...",
-        );
-        HashSet::new()
+        0
     };
+    let auth = if wuddle_engine::github_token().is_some() {
+        "authenticated"
+    } else {
+        "unauthenticated"
+    };
+    app.log(
+        LogLevel::Api,
+        &format!(
+            "Checking active repositories ({auth}; {ignored_count} ignored and {infrequent_count} infrequent skipped)..."
+        ),
+    );
 
     Task::perform(
         service::check_updates_skip(db, wow, wuddle_engine::CheckMode::Force, skip),
@@ -3606,7 +3746,12 @@ fn check_updates_for_version_change_task(app: &App) -> Task<Message> {
         Some(app.wow_dir.clone())
     };
     Task::perform(
-        service::check_updates_skip(db, wow, wuddle_engine::CheckMode::Force, HashSet::new()),
+        service::check_updates_skip(
+            db,
+            wow,
+            wuddle_engine::CheckMode::Force,
+            app.ignored_update_ids.clone(),
+        ),
         move |result| Message::CheckUpdatesResult(crate::ProfileScoped::new(scope.clone(), result)),
     )
 }
@@ -3746,6 +3891,27 @@ mod file_conflict_tests {
                 "d3d9.dll [owner/mod]".to_string(),
                 "helper.dll [existing local file]".to_string()
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod local_change_tests {
+    use super::addon_local_change_reason;
+
+    #[test]
+    fn local_change_errors_become_safe_actionable_dialog_reasons() {
+        assert_eq!(
+            addon_local_change_reason(
+                "ADDON_GIT_LOCAL_CHANGES: a moved addon folder differs from the checked-out Git revision"
+            ),
+            "An exposed addon folder contains added, changed, or missing files."
+        );
+        assert_eq!(
+            addon_local_change_reason(
+                "ADDON_GIT_LOCAL_CHANGES: the Git worktree contains unexpected changes"
+            ),
+            "The installed Git worktree contains added, changed, or deleted files."
         );
     }
 }

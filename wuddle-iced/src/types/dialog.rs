@@ -98,7 +98,15 @@ impl Default for DxvkConfig {
 pub enum FileConflictAction {
     Install,
     Update,
+    UpdateApprovedLocalChanges,
     Reinstall,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddonLocalChangesEntry {
+    pub repo_id: i64,
+    pub repo_name: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +222,9 @@ pub enum Dialog {
         repo_name: String,
         previous_count: usize,
         new_count: usize,
+    },
+    AddonLocalChanges {
+        repos: Vec<AddonLocalChangesEntry>,
     },
     InstanceSettings {
         is_new: bool,

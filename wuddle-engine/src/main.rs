@@ -135,6 +135,7 @@ async fn run() -> Result<()> {
                 set_xattr_comment,
                 replace_addon_conflicts: false,
                 replace_file_conflicts: false,
+                replace_local_changes: false,
                 cache_keep_versions: 3,
             };
             let plans = engine.apply_updates(&wow_dir, raw_dest_ref, opts).await?;
