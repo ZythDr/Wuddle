@@ -724,7 +724,7 @@ fn accounts_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
                     button(text("Remove").size(12))
                         .on_press(Message::DeleteAutoLoginAccount(delete_id))
                         .padding([5, 10])
-                        .style(move |_theme, _| theme::btn_danger_style(c)),
+                        .style(move |_theme, status| theme::btn_danger_style(c, status)),
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
@@ -910,7 +910,7 @@ fn delete_dialog<'a>(label: &'a str, colors: ThemeColors) -> Element<'a, Message
             button(text("Remove").size(13))
                 .on_press(Message::ConfirmDeleteAutoLoginAccount)
                 .padding([6, 14])
-                .style(move |_theme, _| theme::btn_danger_style(c)),
+                .style(move |_theme, status| theme::btn_danger_style(c, status)),
         ]
         .spacing(8),
     ]

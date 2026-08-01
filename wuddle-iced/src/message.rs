@@ -99,6 +99,9 @@ pub enum Message {
 
     // Full settings/profile backup and restore
     OpenBackupRestore,
+    OpenWuddleBackupExport,
+    OpenWuddleBackupImport,
+    CloseWuddleBackupWorkflow,
     ExportWuddleBackup,
     WuddleBackupExportPathSelected(Option<PathBuf>),
     WuddleBackupExported(Result<crate::backup_restore::ExportSummary, String>),

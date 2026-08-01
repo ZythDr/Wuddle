@@ -1654,6 +1654,19 @@ impl App {
             Message::CloseDialog => {
                 self.text_input_context = None;
                 if matches!(self.dialog, Some(Dialog::BackupRestore))
+                    && self.backup_restore_ui.workflow.is_some()
+                {
+                    if self.backup_restore_ui.is_busy() {
+                        self.show_toast(
+                            "Wuddle is finishing the current backup or restore operation.",
+                            ToastKind::Info,
+                        );
+                    } else {
+                        self.backup_restore_ui.close_workflow();
+                    }
+                    return self.finish_update(Task::none());
+                }
+                if matches!(self.dialog, Some(Dialog::BackupRestore))
                     && self.backup_restore_ui.dismissal_blocked()
                 {
                     self.show_toast(
@@ -2092,7 +2105,7 @@ impl App {
                     .into()
             } else {
                 let (dialog_max_w, dialog_pad) = match dialog {
-                    Dialog::BackupRestore => (760u32, 24),
+                    Dialog::BackupRestore => (940u32, 0),
                     Dialog::AddRepo { .. } => (1400u32, 16),
                     Dialog::MpqAdd => (1000u32, 16),
                     Dialog::MpqInstall
@@ -2158,7 +2171,7 @@ impl App {
                 } else if matches!(dialog, Dialog::BackupRestore) {
                     container(self.view_dialog(dialog, self.theme_colors))
                         .max_width(dialog_max_w)
-                        .max_height(760)
+                        .max_height(self.backup_restore_ui.dialog_max_height())
                         .padding(dialog_pad)
                         .width(Length::Fill)
                         .height(Length::Fill)

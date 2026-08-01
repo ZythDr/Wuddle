@@ -2974,7 +2974,7 @@ fn view_component<'a>(
             }).size(13))
             .on_press(Message::RemoveMpqComponent(force_modified))
             .padding([6, 14])
-            .style(move |_theme, _status| theme::btn_danger_style(colors)),
+            .style(move |_theme, status| theme::btn_danger_style(colors, status)),
             Space::new().width(Length::Fill),
             if force_modified {
                 button(text("Keep and protect").size(13))
@@ -3469,7 +3469,7 @@ fn view_remove_wdm<'a>(
             button(text("Remove").size(13))
                 .on_press(Message::ConfirmRemoveWdm)
                 .padding([6, 14])
-                .style(move |_theme, _status| theme::btn_danger_style(colors)),
+                .style(move |_theme, status| theme::btn_danger_style(colors, status)),
         ]
         .spacing(8),
     ]

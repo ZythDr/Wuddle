@@ -20,6 +20,9 @@ pub(super) enum MessageRoute {
 pub(super) fn classify(message: &Message, dialog: &Option<Dialog>) -> MessageRoute {
     match message {
         Message::OpenBackupRestore
+        | Message::OpenWuddleBackupExport
+        | Message::OpenWuddleBackupImport
+        | Message::CloseWuddleBackupWorkflow
         | Message::ExportWuddleBackup
         | Message::WuddleBackupExportPathSelected(..)
         | Message::WuddleBackupExported(..)

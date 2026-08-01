@@ -67,7 +67,7 @@ pub fn view<'a>(repos: &'a [AddonLocalChangesEntry], colors: ThemeColors) -> Ele
             button(text("Overwrite & Update").size(14))
                 .on_press(Message::ConfirmAddonLocalChangesUpdate(repo_ids))
                 .padding([8, 18])
-                .style(move |_theme, _status| theme::btn_danger_style(c)),
+                .style(move |_theme, status| theme::btn_danger_style(c, status)),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),

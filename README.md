@@ -32,11 +32,12 @@ If this happens, you need to add the game installation folder to your Anti-virus
 
 ### What's New in v3.7.0-beta.12
 
-- **Full Wuddle Backups** — Export profiles, preferences, launch settings, and tracked addon/mod/patch data into one backup ZIP, then restore it all together later.
-- **Import an Old Installation** — A fresh Wuddle copy can import the data from an older Wuddle folder, including nested versioned layouts, with a preview before anything is changed.
-- **Rollback-Aware Restores** — Restores are validated and staged before restart, while the previous data directory is kept as a recovery copy. Credentials and installed game files are never placed in the backup.
-- **Fresh-Start Reset** — Reset Wuddle through an explicit warning to remove current and known legacy settings, databases, caches, and logs, with a choice to remove or retain system-vault credentials. WoW, addon, mod, and MPQ files are never deleted.
-- **Fixed Windows Self-Updates** — Portable updates no longer fail with `os error 32` while Wuddle validates the staged executable.
+- **Backup and Restore** — Export profiles, preferences, launch settings, and tracked addon/mod/patch metadata into one backup ZIP, or import a backup or older Wuddle installation. Restores are validated and staged before restart, with the previous data retained as a rollback copy.
+- **Reset Wuddle** — Start over through an explicit confirmation, with an automatic safety backup and a choice to retain or remove system-vault credentials. WoW installations and deployed addon, mod, and MPQ files remain untouched.
+- **Fixed Windows Self-Updates** — Portable updates no longer fail with `os error 32` while validating the staged executable.
+- **Responsive Backup Dialogs** — Backup and Restore workflows grow as previews and controls appear, while keeping headers and action buttons visible and making smaller layouts scrollable.
+- **Reliable Restore Staging** — Backups and older installations using SQLite WAL mode are converted into portable database snapshots before restoration.
+- **Single-Instance Activation** — Starting Wuddle again on Windows now restores or requests attention from the existing window instead of displaying a file-lock error.
 - **One-Time Manual Update May Be Required** — Windows users on an affected beta may need to download this release manually. Extract it over the existing folder, or import the old folder through Backup and Restore in the fresh copy.
 
 See the [full changelog](CHANGELOG.md#v370-beta12) for the technical details.

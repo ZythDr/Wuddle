@@ -130,7 +130,7 @@ pub fn acquire() -> Result<AcquireResult, String> {
 
     match ownership_file.try_lock_exclusive() {
         Ok(()) => create_primary(&marker_path, ownership_file).map(AcquireResult::Primary),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+        Err(error) if is_lock_contention(&error) => {
             for _ in 0..STARTUP_RETRIES {
                 if activate_existing(&marker_path) {
                     return Ok(AcquireResult::ExistingInstanceActivated);
@@ -146,6 +146,22 @@ pub fn acquire() -> Result<AcquireResult, String> {
             "Could not acquire Wuddle's single-instance ownership lock: {error}"
         )),
     }
+}
+
+fn is_lock_contention(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // LockFileEx reports contention as ERROR_LOCK_VIOLATION. Some Windows
+        // filesystems instead surface the adjacent sharing-violation code.
+        // Neither is a setup failure: both mean the existing Wuddle process
+        // should receive the activation request.
+        return matches!(error.raw_os_error(), Some(32 | 33));
+    }
+    #[cfg(not(target_os = "windows"))]
+    false
 }
 
 /// Returns whether this process owns the single-instance listener.
@@ -242,6 +258,13 @@ fn activate_existing(marker_path: &Path) -> bool {
     else {
         return false;
     };
+    #[cfg(target_os = "windows")]
+    unsafe {
+        // The newly launched process is normally allowed to request foreground
+        // activation. Pass that permission to the already-running Wuddle
+        // process before asking it to restore and focus its window.
+        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(marker.pid);
+    }
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), marker.port);
     let Ok(mut stream) = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) else {
         return false;
@@ -394,12 +417,20 @@ mod tests {
             .unwrap();
 
         first.try_lock_exclusive().unwrap();
-        assert!(second.try_lock_exclusive().is_err());
+        let contention = second.try_lock_exclusive().unwrap_err();
+        assert!(is_lock_contention(&contention));
 
         FileExt::unlock(&first).unwrap();
         drop(first);
         drop(second);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_lock_violation_is_treated_as_existing_instance_contention() {
+        assert!(is_lock_contention(&std::io::Error::from_raw_os_error(33)));
+        assert!(is_lock_contention(&std::io::Error::from_raw_os_error(32)));
     }
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]

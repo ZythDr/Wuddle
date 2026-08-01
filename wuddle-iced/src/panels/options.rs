@@ -471,14 +471,10 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 tip(
                     {
                         let c2 = c;
-                        button(text("Forget").size(13).color(c.bad))
+                        button(text("Forget").size(13))
                             .on_press(Message::ForgetGithubToken)
                             .padding([6, 12])
-                            .style(move |_theme, _status| {
-                                let mut s = theme::tab_button_style(c2);
-                                s.border.color = c2.bad;
-                                s
-                            })
+                            .style(move |_theme, status| theme::btn_danger_style(c2, status))
                     },
                     "Remove the saved GitHub token",
                     tooltip::Position::Top,

@@ -127,9 +127,17 @@ pub enum Operation {
     PreparingReset,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Workflow {
+    Create,
+    Restore,
+    Reset,
+}
+
 #[derive(Debug, Default)]
 pub struct UiState {
     pub operation: Option<Operation>,
+    pub workflow: Option<Workflow>,
     pub preview: Option<BackupPreview>,
     pub expanded: HashSet<PreviewSection>,
     pub confirming_restore: bool,
@@ -151,6 +159,28 @@ impl UiState {
 
     pub fn is_busy(&self) -> bool {
         self.operation.is_some()
+    }
+
+    pub fn close_workflow(&mut self) {
+        self.workflow = None;
+        self.preview = None;
+        self.expanded.clear();
+        self.confirming_restore = false;
+        self.confirming_reset = false;
+    }
+
+    /// Keep the hub compact, but give workflows enough room as soon as their
+    /// additional content becomes visible. The outer application layout still
+    /// constrains these maxima on small windows, where the body scrolls while
+    /// the workflow header and footer remain pinned.
+    pub fn dialog_max_height(&self) -> u32 {
+        match self.workflow {
+            None => 440,
+            Some(Workflow::Create) => 570,
+            Some(Workflow::Restore) if self.preview.is_some() => 680,
+            Some(Workflow::Restore) => 430,
+            Some(Workflow::Reset) => 560,
+        }
     }
 }
 
@@ -185,6 +215,26 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             app.backup_restore_ui.reset();
             app.dialog = Some(Dialog::BackupRestore);
             app.log(LogLevel::Info, "Opened Backup and Restore.");
+            Task::none()
+        }
+        Message::OpenWuddleBackupExport => {
+            if !app.backup_restore_ui.is_busy() {
+                app.backup_restore_ui.close_workflow();
+                app.backup_restore_ui.workflow = Some(Workflow::Create);
+            }
+            Task::none()
+        }
+        Message::OpenWuddleBackupImport => {
+            if !app.backup_restore_ui.is_busy() {
+                app.backup_restore_ui.close_workflow();
+                app.backup_restore_ui.workflow = Some(Workflow::Restore);
+            }
+            Task::none()
+        }
+        Message::CloseWuddleBackupWorkflow => {
+            if !app.backup_restore_ui.is_busy() {
+                app.backup_restore_ui.close_workflow();
+            }
             Task::none()
         }
         Message::ExportWuddleBackup => {
@@ -246,6 +296,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                         ),
                     );
                     app.show_toast("Wuddle backup saved.", ToastKind::Success);
+                    app.backup_restore_ui.close_workflow();
                 }
                 Err(error) => {
                     app.log(LogLevel::Error, &format!("Backup export failed: {error}"));
@@ -339,6 +390,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     .into_iter()
                     .collect();
                     app.backup_restore_ui.preview = Some(preview);
+                    app.backup_restore_ui.workflow = Some(Workflow::Restore);
+                    app.backup_restore_ui.confirming_restore = true;
                 }
                 Err(error) => {
                     app.log(
@@ -412,6 +465,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     );
                 }
                 Err(error) => {
+                    app.backup_restore_ui.confirming_restore =
+                        app.backup_restore_ui.preview.is_some();
                     app.log(LogLevel::Error, &format!("Restore staging failed: {error}"));
                     app.show_toast(
                         format!("Could not stage restore: {error}"),
@@ -438,6 +493,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::RequestWuddleReset => {
             if !app.backup_restore_ui.is_busy() {
+                app.backup_restore_ui.close_workflow();
+                app.backup_restore_ui.workflow = Some(Workflow::Reset);
                 app.backup_restore_ui.confirming_restore = false;
                 app.backup_restore_ui.confirming_reset = true;
                 app.backup_restore_ui.reset_credentials = true;
@@ -458,6 +515,17 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::ConfirmWuddleReset => {
             if app.backup_restore_ui.is_busy() || !app.backup_restore_ui.confirming_reset {
+                return Task::none();
+            }
+            if let Err(error) = app.try_save_settings() {
+                app.log(
+                    LogLevel::Error,
+                    &format!("Reset preparation failed while saving settings: {error}"),
+                );
+                app.show_toast(
+                    "Wuddle could not save its current settings, so the reset was stopped before creating its safety backup.",
+                    ToastKind::Error,
+                );
                 return Task::none();
             }
             app.backup_restore_ui.operation = Some(Operation::PreparingReset);
@@ -483,7 +551,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 Ok(()) => {
                     app.log(
                         LogLevel::Info,
-                        "Reset prepared. Restarting Wuddle to remove its saved data.",
+                        "Safety backup created and reset prepared. Restarting Wuddle to remove its saved data.",
                     );
                     return Task::perform(
                         async { restart_for_restore() },
@@ -491,6 +559,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     );
                 }
                 Err(error) => {
+                    app.backup_restore_ui.confirming_reset = true;
                     app.log(
                         LogLevel::Error,
                         &format!("Reset preparation failed: {error}"),
@@ -520,15 +589,62 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 }
 
 pub fn view_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
+    let hub = backup_restore_hub(app, colors);
+    let Some(workflow) = app.backup_restore_ui.workflow else {
+        return hub;
+    };
+
+    let child = match workflow {
+        Workflow::Create => create_backup_dialog(app, colors),
+        Workflow::Restore => restore_backup_dialog(app, colors),
+        Workflow::Reset => reset_wuddle_dialog(app, colors),
+    };
+    let (child_width, child_height) = match workflow {
+        Workflow::Create => (680, 522),
+        Workflow::Restore if app.backup_restore_ui.preview.is_some() => (780, 632),
+        Workflow::Restore => (780, 382),
+        Workflow::Reset => (650, 512),
+    };
     let c = colors;
+    let child_frame = container(child)
+        .max_width(child_width)
+        .max_height(child_height)
+        .padding(22)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_theme| theme::dialog_style(c));
+    let child_scrim = container(Space::new())
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme| theme::scrim_style());
+    let child_scrim: Element<Message> =
+        if workflow != Workflow::Reset && !app.backup_restore_ui.is_busy() {
+            iced::widget::mouse_area(child_scrim)
+                .on_press(Message::CloseWuddleBackupWorkflow)
+                .into()
+        } else {
+            child_scrim.into()
+        };
+    let centered_child = container(iced::widget::opaque(child_frame))
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .padding(24);
+
+    iced::widget::opaque(
+        iced::widget::stack![hub, child_scrim, centered_child]
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+}
+
+fn backup_restore_hub<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
+    let busy = app.backup_restore_ui.is_busy();
     let header = row![
         column![
             text("Backup and Restore").size(24).color(colors.title),
-            text(
-                "Back up Wuddle's settings and tracked project data, or restore a complete backup."
-            )
-            .size(16)
-            .color(colors.muted),
+            text("Create a recovery copy, restore saved Wuddle data, or start over cleanly.")
+                .size(16)
+                .color(colors.muted),
         ]
         .spacing(5),
         Space::new().width(Length::Fill),
@@ -536,319 +652,258 @@ pub fn view_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
     ]
     .align_y(iced::Alignment::Start);
 
-    let operation_text = match app.backup_restore_ui.operation {
-        Some(Operation::Exporting) => Some("Creating backup..."),
-        Some(Operation::Inspecting) => Some("Inspecting backup..."),
-        Some(Operation::StagingRestore) => Some("Validating and staging restore..."),
-        Some(Operation::PreparingReset) if app.backup_restore_ui.reset_credentials => {
-            Some("Clearing credentials and preparing reset...")
-        }
-        Some(Operation::PreparingReset) => {
-            Some("Preparing reset while keeping system-vault credentials...")
-        }
-        None => None,
-    };
-    let busy = app.backup_restore_ui.is_busy();
-    #[cfg(feature = "auto-login")]
-    let reset_credential_text = "The confirmation lets you either remove or retain saved GitHub and auto-login credentials in the operating system vault.";
-    #[cfg(not(feature = "auto-login"))]
-    let reset_credential_text = "The confirmation lets you either remove or retain the saved GitHub token. This build does not include the optional auto-login vault capability.";
+    let cards = row![
+        workflow_card(
+            "Create Backup",
+            "Save profiles, preferences, launch configuration, and tracked-project metadata.",
+            Message::OpenWuddleBackupExport,
+            colors,
+            busy,
+            false,
+        ),
+        workflow_card(
+            "Restore Backup",
+            "Preview and restore a Wuddle backup ZIP or import an older Wuddle installation.",
+            Message::OpenWuddleBackupImport,
+            colors,
+            busy,
+            false,
+        ),
+        workflow_card(
+            "Reset Wuddle",
+            "Remove Wuddle's saved configuration and restart with a clean setup.",
+            Message::RequestWuddleReset,
+            colors,
+            busy,
+            true,
+        ),
+    ]
+    .spacing(14)
+    .height(210);
+    let c = colors;
+    let body = scrollable(container(cards).padding([8, 0]))
+        .height(Length::Fill)
+        .direction(theme::vscroll())
+        .style(move |theme, status| theme::scrollable_style(c)(theme, status));
 
-    let mut body = column![
-        section_card(
+    let footer = row![
+        text("Backups never include game files, GitHub tokens, or auto-login passwords.")
+            .size(14)
+            .color(colors.warn),
+        Space::new().width(Length::Fill),
+        styled_button("Close", colors, !busy)
+            .on_press_maybe((!busy).then_some(Message::CloseDialog)),
+    ]
+    .spacing(12)
+    .align_y(iced::Alignment::Center);
+
+    let content = column![
+        header,
+        iced::widget::rule::horizontal(1),
+        body,
+        iced::widget::rule::horizontal(1),
+        footer,
+    ]
+    .spacing(12)
+    .height(Length::Fill);
+
+    container(content)
+        .padding(24)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+fn workflow_card<'a>(
+    title: &'a str,
+    description: &'a str,
+    message: Message,
+    colors: ThemeColors,
+    disabled: bool,
+    danger: bool,
+) -> Element<'a, Message> {
+    let c = colors;
+    let card_title: Element<Message> = if danger {
+        text(title).size(21).into()
+    } else {
+        text(title).size(21).color(c.title).into()
+    };
+    let card_description: Element<Message> = if danger {
+        text(description).size(15).into()
+    } else {
+        text(description).size(15).color(c.muted).into()
+    };
+    button(
+        container(
             column![
-                text("Create a backup").size(17).color(colors.title),
-                text("Includes profiles, preferences, launch configuration, and tracked addon, mod, and patch metadata.")
-                    .size(14)
-                    .color(colors.muted),
-                text("GitHub tokens and auto-login passwords stay in the operating system vault and are never included.")
-                    .size(14)
-                    .color(colors.warn),
+                card_title,
+                card_description,
+                Space::new().height(Length::Fill),
+            ]
+            .spacing(10),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill),
+    )
+    .on_press_maybe((!disabled).then_some(message))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .padding(18)
+    .style(move |_theme, status| {
+        if danger {
+            theme::btn_danger_style(c, status)
+        } else if !disabled && matches!(status, button::Status::Hovered) {
+            theme::tab_button_hovered_style(c)
+        } else {
+            theme::tab_button_style(c)
+        }
+    })
+    .into()
+}
+
+fn create_backup_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
+    let busy = app.backup_restore_ui.is_busy();
+    let profile_rows = app
+        .profiles
+        .iter()
+        .enumerate()
+        .map(|(index, profile)| {
+            let branch = if index + 1 == app.profiles.len() {
+                "└─"
+            } else {
+                "├─"
+            };
+            text(format!(
+                "  {branch} {} — profile settings and tracked-project database",
+                profile.name
+            ))
+            .size(14)
+            .color(colors.text)
+            .into()
+        })
+        .collect::<Vec<Element<Message>>>();
+    let mut tree = column![
+        text(default_backup_filename()).size(15).color(colors.title),
+        text("├─ manifest.json — backup format and integrity summary")
+            .size(14)
+            .color(colors.text),
+        text("├─ settings.json — preferences, profiles, paths, tabs, and launch configuration")
+            .size(14)
+            .color(colors.text),
+        text("├─ databases/").size(14).color(colors.text),
+    ]
+    .spacing(5);
+    for row in profile_rows {
+        tree = tree.push(row);
+    }
+    tree = tree.push(
+        text("└─ README.txt — backup contents and privacy notes")
+            .size(14)
+            .color(colors.text),
+    );
+
+    let status: Element<Message> =
+        if matches!(app.backup_restore_ui.operation, Some(Operation::Exporting)) {
+            text("Creating and validating the backup...")
+                .size(14)
+                .color(colors.warn)
+                .into()
+        } else {
+            Space::new().height(0).into()
+        };
+    let body = column![
+        section_card(tree, colors),
+        text("Not included: game files, installed addons/mods/MPQs, diagnostics, caches, GitHub tokens, and auto-login passwords.")
+            .size(14)
+            .color(colors.warn),
+        text("The backup may contain personal game paths, repository URLs, and custom launch configuration. Keep it as private as your other configuration backups.")
+            .size(14)
+            .color(colors.muted),
+        status,
+    ]
+    .spacing(10);
+
+    workflow_layout(
+        "Create Wuddle backup",
+        "Review what will be saved, then choose where to create the backup ZIP.",
+        body.into(),
+        row![
+            styled_button("Cancel", colors, !busy)
+                .on_press_maybe((!busy).then_some(Message::CloseWuddleBackupWorkflow)),
+            {
+                let c = colors;
+                button(text("Choose save location...").size(14))
+                    .on_press_maybe((!busy).then_some(Message::ExportWuddleBackup))
+                    .padding([8, 14])
+                    .style(move |_theme, _status| theme::tab_button_active_style(c))
+            },
+        ]
+        .spacing(8)
+        .into(),
+        colors,
+        !busy,
+    )
+}
+
+fn restore_backup_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
+    let busy = app.backup_restore_ui.is_busy();
+    let source_buttons = section_card(
+        column![
+            text("Choose a source").size(17).color(colors.title),
+            text("Wuddle inspects the selected source before anything can be restored.")
+                .size(14)
+                .color(colors.muted),
+            row![
                 tip(
-                    styled_button("Export backup...", colors, !busy)
-                        .on_press_maybe((!busy).then_some(Message::ExportWuddleBackup)),
-                    "Export Wuddle settings and tracked project data.\n\nSaves as wuddle-backup-YYYYMMDD-HHMMSS.zip.",
+                    styled_button("Choose backup ZIP...", colors, !busy)
+                        .on_press_maybe((!busy).then_some(Message::PickWuddleBackupArchive)),
+                    "Import settings from a previous Wuddle backup ZIP.",
+                    iced::widget::tooltip::Position::Top,
+                    colors,
+                ),
+                tip(
+                    styled_button("Choose old Wuddle folder...", colors, !busy)
+                        .on_press_maybe((!busy).then_some(Message::PickOldWuddleFolder)),
+                    "Import settings from a previous Wuddle installation.\n\nThis also supports versions from before\nBackup and Restore was introduced.",
                     iced::widget::tooltip::Position::Top,
                     colors,
                 ),
             ]
             .spacing(8),
-            colors,
-        ),
-        section_card(
-            column![
-                text("Restore Wuddle").size(17).color(colors.title),
-                text("Choose a Wuddle backup ZIP, or select the main folder of an older Wuddle installation. Wuddle will locate its data folder automatically.")
-                    .size(14)
-                    .color(colors.muted),
-                row![
-                    tip(
-                        styled_button("Choose backup ZIP...", colors, !busy)
-                            .on_press_maybe((!busy).then_some(Message::PickWuddleBackupArchive)),
-                        "Import settings from a previous Wuddle backup ZIP.",
-                        iced::widget::tooltip::Position::Top,
-                        colors,
-                    ),
-                    tip(
-                        styled_button("Choose old Wuddle folder...", colors, !busy)
-                            .on_press_maybe((!busy).then_some(Message::PickOldWuddleFolder)),
-                        "Import settings from a previous Wuddle installation.\n\nThis also supports versions from before\nBackup and Restore was introduced.",
-                        iced::widget::tooltip::Position::Top,
-                        colors,
-                    ),
-                ]
-                .spacing(8),
-            ]
-            .spacing(8),
-            colors,
-        ),
-        section_card(
-            column![
-                text("Reset Wuddle").size(17).color(colors.bad),
-                text("Remove every current and known legacy Wuddle setting, profile database, cache, and diagnostic file, then restart as a fresh installation.")
-                    .size(14)
-                    .color(colors.text),
-                text(format!("Installed WoW, addon, mod, and MPQ files are not deleted. {reset_credential_text}"))
-                    .size(14)
-                    .color(colors.warn),
-                {
-                    let c2 = colors;
-                    let reset: button::Button<'_, Message> =
-                        button(text("Reset Wuddle...").size(14))
-                            .padding([8, 14])
-                            .style(move |_theme, _status| theme::btn_danger_style(c2));
-                    let reset: Element<Message> = if busy {
-                        reset.into()
-                    } else {
-                        reset.on_press(Message::RequestWuddleReset).into()
-                    };
-                    tip(
-                        reset,
-                        "Open a warning and confirmation before resetting Wuddle.\n\nNothing is removed until you confirm.",
-                        iced::widget::tooltip::Position::Top,
-                        colors,
-                    )
-                },
-            ]
-            .spacing(8),
-            colors,
-        ),
-    ]
-    .spacing(10);
+        ]
+        .spacing(8),
+        colors,
+    );
 
-    if let Some(status) = operation_text {
-        body = body.push(text(status).size(14).color(colors.warn));
-    }
-
-    if let Some(preview) = app.backup_restore_ui.preview.as_ref() {
-        let profile_rows = preview
-            .profiles
-            .iter()
-            .map(|profile| {
-                let db = if profile.has_database {
-                    "tracked data included"
-                } else {
-                    "no profile database"
-                };
-                text(format!("• {} — {db}", profile.name))
-                    .size(14)
-                    .color(c.text)
-                    .into()
-            })
-            .collect::<Vec<Element<Message>>>();
-
-        let source_detail = match (&preview.source_version, preview.created_unix) {
-            (Some(version), Some(created)) => format!(
-                "{} created by Wuddle v{} at {}",
-                preview.source_kind,
-                version,
-                format_timestamp(created)
-            ),
-            _ => format!(
-                "{} from an existing Wuddle data folder",
-                preview.source_kind
-            ),
-        };
-        let profiles_content: Element<Message> = if app
-            .backup_restore_ui
-            .expanded
-            .contains(&PreviewSection::Profiles)
-        {
-            column(profile_rows).spacing(4).into()
-        } else {
-            Space::new().height(0).into()
-        };
-        let projects_content: Element<Message> = if app
-            .backup_restore_ui
-            .expanded
-            .contains(&PreviewSection::Projects)
-        {
-            column![
-                text(format!("• Addons: {}", preview.totals.addons)).size(14),
-                text(format!("• Mods: {}", preview.totals.mods)).size(14),
-                text(format!("• Patch packages: {}", preview.totals.patches)).size(14),
-            ]
-            .spacing(4)
-            .into()
-        } else {
-            Space::new().height(0).into()
-        };
-        let contents_content: Element<Message> = if app
-            .backup_restore_ui
-            .expanded
-            .contains(&PreviewSection::Contents)
-        {
-            column![
-                text("• Application preferences and window settings").size(14),
-                text("• Profile names, game paths, visible tabs, and launch configuration")
-                    .size(14),
-                text("• Tracked repositories, installed-file records, ignored updates, and MPQ metadata")
-                    .size(14),
-                text("• No addon, mod, patch, or game files are copied").size(14),
-                text("• No GitHub token or auto-login password is included")
-                    .size(14)
-                    .color(colors.warn),
-            ]
-            .spacing(4)
-            .into()
-        } else {
-            Space::new().height(0).into()
-        };
-
-        body = body.push(section_card(
-            column![
-                text("Restore preview").size(17).color(colors.title),
-                text(source_detail).size(14).color(colors.muted),
-                collapsible_header(
-                    "Profiles",
-                    PreviewSection::Profiles,
-                    app.backup_restore_ui
-                        .expanded
-                        .contains(&PreviewSection::Profiles),
-                    colors,
-                ),
-                profiles_content,
-                collapsible_header(
-                    "Tracked projects",
-                    PreviewSection::Projects,
-                    app.backup_restore_ui
-                        .expanded
-                        .contains(&PreviewSection::Projects),
-                    colors,
-                ),
-                projects_content,
-                collapsible_header(
-                    "What will be restored",
-                    PreviewSection::Contents,
-                    app.backup_restore_ui
-                        .expanded
-                        .contains(&PreviewSection::Contents),
-                    colors,
-                ),
-                contents_content,
-            ]
-            .spacing(8),
-            colors,
-        ));
-    }
-
-    if app.backup_restore_ui.confirming_restore {
-        body = body.push(section_card(
-            column![
-                text("Replace current Wuddle data?")
-                    .size(17)
-                    .color(colors.warn),
-                text("This restores the complete backup and restarts Wuddle. Current profiles and settings will be replaced together.")
-                    .size(14)
-                    .color(colors.text),
-                text("Your current Wuddle data will be kept in a separate rollback folder and will not be deleted automatically.")
-                    .size(14)
-                    .color(colors.muted),
-            ]
-            .spacing(7),
-            colors,
-        ));
-    }
-
-    if app.backup_restore_ui.confirming_reset {
-        #[cfg(feature = "auto-login")]
-        let credential_checkbox_label = "Also remove saved GitHub and auto-login credentials";
-        #[cfg(not(feature = "auto-login"))]
-        let credential_checkbox_label = "Also remove the saved GitHub token";
-
-        let credential_consequence = if app.backup_restore_ui.reset_credentials {
-            "The selected credentials will be permanently removed from the operating system vault and must be entered again after a restore."
-        } else {
-            "Credentials will remain in the operating system vault. A later import on this computer can reconnect to them through the restored non-secret references."
-        };
-
-        body = body.push(section_card(
-            column![
-                text("Permanently reset Wuddle?")
-                    .size(17)
-                    .color(colors.bad),
-                text("This permanently removes all Wuddle profiles, preferences, tracked-project databases, logs, caches, and known legacy Wuddle data after restarting.")
-                    .size(14)
-                    .color(colors.text),
-                checkbox(app.backup_restore_ui.reset_credentials)
-                    .label(credential_checkbox_label)
-                    .on_toggle(Message::ToggleWuddleResetCredentials)
-                    .text_size(14),
-                text(credential_consequence)
-                    .size(14)
-                    .color(colors.warn),
-                text("Game installations and their deployed addon, mod, and MPQ files remain untouched.")
-                    .size(14)
-                    .color(colors.muted),
-                text("Export a backup first if you may want this data later. This reset does not create a rollback copy.")
-                    .size(14)
-                    .color(colors.bad),
-            ]
-            .spacing(7),
-            colors,
-        ));
-    }
-
-    let restore_button: Element<Message> = if app.backup_restore_ui.confirming_restore {
-        if !busy {
-            let c2 = colors;
-            button(text("Replace and restart").size(14))
-                .on_press(Message::ConfirmWuddleRestore)
-                .padding([8, 14])
-                .style(move |_theme, _status| theme::tab_button_active_style(c2))
-                .into()
-        } else {
-            styled_button("Replace and restart", colors, false).into()
-        }
-    } else {
-        Space::new().width(0).into()
-    };
-
-    let cancel_restore: Element<Message> = if app.backup_restore_ui.confirming_restore && !busy {
-        styled_button("Cancel", colors, true)
-            .on_press(Message::CancelWuddleRestore)
+    let preview: Element<Message> = if let Some(preview) = app.backup_restore_ui.preview.as_ref() {
+        restore_preview(app, preview, colors)
+    } else if matches!(app.backup_restore_ui.operation, Some(Operation::Inspecting)) {
+        text("Inspecting and validating the selected Wuddle data...")
+            .size(14)
+            .color(colors.warn)
             .into()
     } else {
-        Space::new().width(0).into()
+        text("No restore source selected yet.")
+            .size(14)
+            .color(colors.muted)
+            .into()
     };
+    let body = column![source_buttons, preview].spacing(10);
 
-    let begin_restore: Element<Message> = if app.backup_restore_ui.preview.is_some()
-        && !app.backup_restore_ui.confirming_restore
-        && !app.backup_restore_ui.confirming_reset
+    let restore: Element<Message> = if app.backup_restore_ui.preview.is_some()
+        && app.backup_restore_ui.confirming_restore
         && !busy
     {
-        let c2 = colors;
+        let c = colors;
         button(text("Restore and restart").size(14))
-            .on_press(Message::RequestWuddleRestore)
+            .on_press(Message::ConfirmWuddleRestore)
             .padding([8, 14])
-            .style(move |_theme, _status| theme::tab_button_active_style(c2))
+            .style(move |_theme, _status| theme::tab_button_active_style(c))
             .into()
-    } else if app.backup_restore_ui.confirming_restore {
-        Space::new().width(0).into()
     } else if app.backup_restore_ui.preview.is_none() {
         tip(
             styled_button("Restore and restart", colors, false),
-            "Choose a backup ZIP or an old Wuddle folder first.\n\nWuddle will inspect it before Restore and restart becomes available.",
+            "Choose a backup ZIP or old Wuddle folder first.\n\nWuddle will inspect it before restoring is allowed.",
             iced::widget::tooltip::Position::Top,
             colors,
         )
@@ -856,44 +911,231 @@ pub fn view_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
         styled_button("Restore and restart", colors, false).into()
     };
 
-    let cancel_reset: Element<Message> = if app.backup_restore_ui.confirming_reset && !busy {
-        styled_button("Cancel", colors, true)
-            .on_press(Message::CancelWuddleReset)
-            .into()
-    } else {
-        Space::new().width(0).into()
-    };
+    workflow_layout(
+        "Restore Wuddle",
+        "Inspect a complete backup or an older Wuddle installation before replacing current data.",
+        body.into(),
+        row![
+            styled_button("Cancel", colors, !busy)
+                .on_press_maybe((!busy).then_some(Message::CloseWuddleBackupWorkflow)),
+            restore,
+        ]
+        .spacing(8)
+        .into(),
+        colors,
+        !busy,
+    )
+}
 
-    let confirm_reset: Element<Message> = if app.backup_restore_ui.confirming_reset && !busy {
-        let c2 = colors;
-        button(text("Reset and restart").size(14))
-            .on_press(Message::ConfirmWuddleReset)
-            .padding([8, 14])
-            .style(move |_theme, _status| theme::btn_danger_style(c2))
-            .into()
-    } else {
-        Space::new().width(0).into()
-    };
-
-    let footer = row![
-        Space::new().width(Length::Fill),
-        {
-            let close = styled_button("Close", colors, !app.backup_restore_ui.dismissal_blocked());
-            let close: Element<Message> = if app.backup_restore_ui.dismissal_blocked() {
-                close.into()
+fn restore_preview<'a>(
+    app: &'a App,
+    preview: &'a BackupPreview,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
+    let profile_rows = preview
+        .profiles
+        .iter()
+        .map(|profile| {
+            let db = if profile.has_database {
+                "tracked data included"
             } else {
-                close.on_press(Message::CloseDialog).into()
+                "no profile database"
             };
-            close
-        },
-        cancel_reset,
-        confirm_reset,
-        cancel_restore,
-        begin_restore,
-        restore_button,
+            text(format!("• {} — {db}", profile.name))
+                .size(14)
+                .color(colors.text)
+                .into()
+        })
+        .collect::<Vec<Element<Message>>>();
+    let source_detail = match (&preview.source_version, preview.created_unix) {
+        (Some(version), Some(created)) => format!(
+            "{} created by Wuddle v{} at {}",
+            preview.source_kind,
+            version,
+            format_timestamp(created)
+        ),
+        _ => format!(
+            "{} from an existing Wuddle data folder",
+            preview.source_kind
+        ),
+    };
+    let profiles_content: Element<Message> = if app
+        .backup_restore_ui
+        .expanded
+        .contains(&PreviewSection::Profiles)
+    {
+        column(profile_rows).spacing(4).into()
+    } else {
+        Space::new().height(0).into()
+    };
+    let projects_content: Element<Message> = if app
+        .backup_restore_ui
+        .expanded
+        .contains(&PreviewSection::Projects)
+    {
+        column![
+            text(format!("• Addons: {}", preview.totals.addons)).size(14),
+            text(format!("• Mods: {}", preview.totals.mods)).size(14),
+            text(format!("• Patch packages: {}", preview.totals.patches)).size(14),
+        ]
+        .spacing(4)
+        .into()
+    } else {
+        Space::new().height(0).into()
+    };
+    let contents_content: Element<Message> = if app
+        .backup_restore_ui
+        .expanded
+        .contains(&PreviewSection::Contents)
+    {
+        column![
+            text("• Application preferences and window settings").size(14),
+            text("• Profile names, game paths, visible tabs, and launch configuration").size(14),
+            text(
+                "• Tracked repositories, installed-file records, ignored updates, and MPQ metadata"
+            )
+            .size(14),
+            text("• No addon, mod, patch, or game files are copied").size(14),
+            text("• No GitHub token or auto-login password is included")
+                .size(14)
+                .color(colors.warn),
+        ]
+        .spacing(4)
+        .into()
+    } else {
+        Space::new().height(0).into()
+    };
+
+    section_card(
+        column![
+            text("Restore preview").size(18).color(colors.title),
+            text(source_detail).size(14).color(colors.muted),
+            collapsible_header(
+                "Profiles",
+                PreviewSection::Profiles,
+                app.backup_restore_ui.expanded.contains(&PreviewSection::Profiles),
+                colors,
+            ),
+            profiles_content,
+            collapsible_header(
+                "Tracked projects",
+                PreviewSection::Projects,
+                app.backup_restore_ui.expanded.contains(&PreviewSection::Projects),
+                colors,
+            ),
+            projects_content,
+            collapsible_header(
+                "What will be restored",
+                PreviewSection::Contents,
+                app.backup_restore_ui.expanded.contains(&PreviewSection::Contents),
+                colors,
+            ),
+            contents_content,
+            text("Restoring replaces all current profiles and settings together, then restarts Wuddle.")
+                .size(14)
+                .color(colors.warn),
+            text("The current Wuddle data is retained in a separate rollback folder.")
+                .size(14)
+                .color(colors.muted),
+        ]
+        .spacing(8),
+        colors,
+    )
+}
+
+fn reset_wuddle_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
+    let busy = app.backup_restore_ui.is_busy();
+    #[cfg(feature = "auto-login")]
+    let credential_checkbox_label = "Also remove saved GitHub and auto-login credentials";
+    #[cfg(not(feature = "auto-login"))]
+    let credential_checkbox_label = "Also remove the saved GitHub token";
+    let credential_consequence = if app.backup_restore_ui.reset_credentials {
+        "The selected credentials will be permanently removed from the operating system vault and must be entered again after a restore."
+    } else {
+        "Credentials remain in the operating system vault. A later import on this computer can reconnect to them through restored non-secret references."
+    };
+    let status: Element<Message> = if matches!(
+        app.backup_restore_ui.operation,
+        Some(Operation::PreparingReset)
+    ) {
+        text(if app.backup_restore_ui.reset_credentials {
+            "Creating a safety backup, then clearing credentials and preparing the reset..."
+        } else {
+            "Creating a safety backup, then preparing the reset while retaining system-vault credentials..."
+        })
+        .size(14)
+        .color(colors.warn)
+        .into()
+    } else {
+        Space::new().height(0).into()
+    };
+    let body = column![
+        section_card(
+            column![
+                text("Permanently reset Wuddle?").size(18).color(colors.bad),
+                text("This removes all Wuddle profiles, preferences, tracked-project databases, logs, caches, and known legacy Wuddle data after restarting.")
+                    .size(14)
+                    .color(colors.text),
+                checkbox(app.backup_restore_ui.reset_credentials)
+                    .label(credential_checkbox_label)
+                    .on_toggle_maybe((!busy).then_some(Message::ToggleWuddleResetCredentials))
+                    .text_size(14),
+                text(credential_consequence).size(14).color(colors.warn),
+                text("Game installations and their deployed addon, mod, and MPQ files remain untouched.")
+                    .size(14)
+                    .color(colors.muted),
+                text("Before resetting, Wuddle creates a complete recovery ZIP in the wuddle-backups folder beside the launcher. The reset stops if that backup cannot be created.")
+                    .size(14)
+                    .color(colors.bad),
+            ]
+            .spacing(9),
+            colors,
+        ),
+        status,
     ]
-    .spacing(8)
-    .align_y(iced::Alignment::Center);
+    .spacing(10);
+
+    let c = colors;
+    workflow_layout(
+        "Reset Wuddle",
+        "Review the consequences and choose whether saved credentials should also be removed.",
+        body.into(),
+        row![
+            styled_button("Cancel", colors, !busy)
+                .on_press_maybe((!busy).then_some(Message::CloseWuddleBackupWorkflow)),
+            button(text("Reset and restart").size(14))
+                .on_press_maybe((!busy).then_some(Message::ConfirmWuddleReset))
+                .padding([8, 14])
+                .style(move |_theme, status| theme::btn_danger_style(c, status)),
+        ]
+        .spacing(8)
+        .into(),
+        colors,
+        !busy,
+    )
+}
+
+fn workflow_layout<'a>(
+    title: &'a str,
+    description: &'a str,
+    body: Element<'a, Message>,
+    footer_actions: Element<'a, Message>,
+    colors: ThemeColors,
+    close_enabled: bool,
+) -> Element<'a, Message> {
+    let c = colors;
+    let header = row![
+        column![
+            text(title).size(23).color(colors.title),
+            text(description).size(15).color(colors.muted),
+        ]
+        .spacing(5),
+        Space::new().width(Length::Fill),
+        workflow_close_button(colors, close_enabled),
+    ]
+    .align_y(iced::Alignment::Start);
+    let footer =
+        row![Space::new().width(Length::Fill), footer_actions].align_y(iced::Alignment::Center);
 
     column![
         header,
@@ -907,6 +1149,40 @@ pub fn view_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
     ]
     .spacing(12)
     .height(Length::Fill)
+    .into()
+}
+
+fn workflow_close_button<'a>(colors: ThemeColors, enabled: bool) -> Element<'a, Message> {
+    let c = colors;
+    button(
+        text("✕")
+            .size(14)
+            .color(if enabled { c.bad } else { c.muted }),
+    )
+    .on_press_maybe(enabled.then_some(Message::CloseWuddleBackupWorkflow))
+    .padding([4, 8])
+    .style(move |_theme, status| match status {
+        button::Status::Hovered if enabled => button::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgba(
+                c.bad.r, c.bad.g, c.bad.b, 0.15,
+            ))),
+            text_color: c.bad,
+            border: iced::Border {
+                color: iced::Color::from_rgba(c.bad.r, c.bad.g, c.bad.b, 0.4),
+                width: 1.0,
+                radius: iced::border::Radius::from(4),
+            },
+            shadow: iced::Shadow::default(),
+            snap: true,
+        },
+        _ => button::Style {
+            background: None,
+            text_color: if enabled { c.bad } else { c.muted },
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        },
+    })
     .into()
 }
 
@@ -1218,7 +1494,7 @@ fn extract_backup_archive(path: &Path, destination: &Path) -> Result<Materialize
         let archive_name = format!("{DATABASES_DIRECTORY}/{database}");
         let target = destination.join(DATABASES_DIRECTORY).join(database);
         extract_zip_entry(&mut archive, &archive_name, &target, MAX_DATABASE_BYTES)?;
-        verify_database(&target)?;
+        finalize_staged_database(&target)?;
     }
     Ok(MaterializedSource {
         settings: parsed,
@@ -1445,6 +1721,10 @@ async fn prepare_reset(
     profiles: Vec<settings::ProfileConfig>,
     reset_credentials: bool,
 ) -> Result<(), String> {
+    tokio::task::spawn_blocking(create_automatic_reset_backup)
+        .await
+        .map_err(|error| format!("Safety backup task failed: {error}"))??;
+
     if !reset_credentials {
         return tokio::task::spawn_blocking(schedule_reset)
             .await
@@ -1483,6 +1763,40 @@ async fn prepare_reset(
     tokio::task::spawn_blocking(schedule_reset)
         .await
         .map_err(|error| format!("Reset preparation task failed: {error}"))?
+}
+
+fn create_automatic_reset_backup() -> Result<ExportSummary, String> {
+    let directory = crate::storage::installation_root()?.join("wuddle-backups");
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("Could not create the automatic backup directory: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("Could not secure the automatic backup directory: {error}"))?;
+    }
+    let destination = unique_automatic_backup_path(&directory)?;
+    export_backup(&destination)
+        .map_err(|error| format!("The automatic safety backup could not be created: {error}"))
+}
+
+fn unique_automatic_backup_path(directory: &Path) -> Result<PathBuf, String> {
+    let filename = default_backup_filename();
+    let path = directory.join(&filename);
+    if !path.exists() {
+        return Ok(path);
+    }
+    let stem = Path::new(&filename)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "The automatic backup filename is invalid.".to_string())?;
+    for suffix in 2..=9999 {
+        let candidate = directory.join(format!("{stem}-{suffix}.zip"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("Wuddle could not choose a unique automatic backup filename.".to_string())
 }
 
 fn schedule_reset() -> Result<(), String> {
@@ -1755,6 +2069,7 @@ fn promote_databases_to_live_layout(staging: &Path, settings: &AppSettings) -> R
         let database = database_name_for_profile(&profile.id)?;
         let source = databases.join(&database);
         if source.exists() {
+            remove_sqlite_sidecars(&source)?;
             fs::rename(&source, staging.join(&database)).map_err(|error| {
                 format!("Could not prepare profile database '{database}' for restore: {error}")
             })?;
@@ -1999,7 +2314,52 @@ fn snapshot_database(source: &Path, destination: &Path) -> Result<(), String> {
             .map_err(|error| format!("Could not finish a profile database backup: {error}"))?;
     }
     drop(destination_connection);
-    verify_database(destination)
+    finalize_staged_database(destination)
+}
+
+/// SQLite backups inherit the source database's journal-mode header. A real
+/// Wuddle database normally uses WAL, which can make later readback create
+/// `-wal`/`-shm` sidecars inside restore staging. Convert the isolated snapshot
+/// to one portable database file before it is fingerprinted, archived, or
+/// promoted into the live data directory.
+fn finalize_staged_database(path: &Path) -> Result<(), String> {
+    ensure_regular_file(path)?;
+    let connection = Connection::open(path)
+        .map_err(|error| format!("Could not finalize a staged profile database: {error}"))?;
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+        .map_err(|error| format!("Could not finalize a staged database journal: {error}"))?;
+    if !journal_mode.eq_ignore_ascii_case("delete") {
+        return Err("A staged profile database could not be made portable.".to_string());
+    }
+    drop(connection);
+    remove_sqlite_sidecars(path)?;
+    verify_database(path)
+}
+
+fn remove_sqlite_sidecars(database: &Path) -> Result<(), String> {
+    let file_name = database
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "A staged profile database has an invalid name.".to_string())?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = database.with_file_name(format!("{file_name}{suffix}"));
+        let metadata = match fs::symlink_metadata(&sidecar) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Could not inspect a staged database sidecar: {error}"
+                ))
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err("A staged database sidecar is not a regular file.".to_string());
+        }
+        fs::remove_file(&sidecar)
+            .map_err(|error| format!("Could not remove a staged database sidecar: {error}"))?;
+    }
+    Ok(())
 }
 
 fn verify_database(path: &Path) -> Result<(), String> {
@@ -2253,6 +2613,50 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_backup_workflow_returns_to_a_clean_hub() {
+        let mut state = UiState {
+            workflow: Some(Workflow::Restore),
+            expanded: [PreviewSection::Profiles].into_iter().collect(),
+            confirming_restore: true,
+            confirming_reset: true,
+            reset_credentials: true,
+            ..UiState::default()
+        };
+
+        state.close_workflow();
+
+        assert_eq!(state.workflow, None);
+        assert!(state.preview.is_none());
+        assert!(state.expanded.is_empty());
+        assert!(!state.confirming_restore);
+        assert!(!state.confirming_reset);
+        assert!(state.reset_credentials);
+    }
+
+    #[test]
+    fn backup_dialog_height_grows_when_workflow_content_appears() {
+        let mut state = UiState::default();
+        assert_eq!(state.dialog_max_height(), 440);
+
+        state.workflow = Some(Workflow::Restore);
+        assert_eq!(state.dialog_max_height(), 430);
+
+        state.preview = Some(BackupPreview {
+            source: RestoreSource::DataDirectory(PathBuf::from("test-data")),
+            fingerprint: [0; 32],
+            created_unix: None,
+            source_version: None,
+            profiles: Vec::new(),
+            totals: ProjectCounts::default(),
+            source_kind: "Test data",
+        });
+        assert_eq!(state.dialog_max_height(), 680);
+
+        state.workflow = Some(Workflow::Reset);
+        assert_eq!(state.dialog_max_height(), 560);
+    }
+
+    #[test]
     fn profile_database_names_are_exact_and_isolated() {
         assert_eq!(
             database_name_for_profile("default").unwrap(),
@@ -2323,6 +2727,43 @@ mod tests {
                 patches: 1,
             }
         );
+    }
+
+    #[test]
+    fn wal_database_snapshots_are_finalized_without_restore_sidecars() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source.sqlite");
+        let staging = temporary.path().join("restore-stage");
+        let databases = staging.join(DATABASES_DIRECTORY);
+        fs::create_dir_all(&databases).unwrap();
+
+        let connection = Connection::open(&source).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE repos (mode TEXT NOT NULL); INSERT INTO repos VALUES ('addon_git');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let staged = databases.join("wuddle.sqlite");
+        snapshot_database(&source, &staged).unwrap();
+        let staged_connection =
+            Connection::open_with_flags(&staged, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let journal_mode: String = staged_connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        drop(staged_connection);
+        assert_eq!(journal_mode.to_ascii_lowercase(), "delete");
+        for suffix in ["-wal", "-shm", "-journal"] {
+            assert!(!databases.join(format!("wuddle.sqlite{suffix}")).exists());
+        }
+
+        promote_databases_to_live_layout(&staging, &settings_with_profiles(&["default"])).unwrap();
+        assert!(staging.join("wuddle.sqlite").is_file());
+        assert!(!databases.exists());
     }
 
     #[test]
@@ -2410,6 +2851,9 @@ mod tests {
         let database = staged.join(DATABASES_DIRECTORY).join("wuddle.sqlite");
         let connection = Connection::open(&database).unwrap();
         connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        connection
             .execute_batch(
                 "CREATE TABLE repos (mode TEXT NOT NULL);\n\
                  INSERT INTO repos VALUES ('addon_git'), ('dll'), ('mpq');",
@@ -2480,6 +2924,22 @@ mod tests {
     }
 
     #[test]
+    fn automatic_reset_backups_never_reuse_an_existing_filename() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = unique_automatic_backup_path(directory.path()).unwrap();
+        fs::write(&first, b"existing backup").unwrap();
+
+        let second = unique_automatic_backup_path(directory.path()).unwrap();
+
+        assert_ne!(second, first);
+        assert!(!second.exists());
+        assert_eq!(
+            second.extension().and_then(|value| value.to_str()),
+            Some("zip")
+        );
+    }
+
+    #[test]
     fn staged_restore_swaps_data_and_preserves_the_previous_directory() {
         let parent = tempfile::tempdir().unwrap();
         let live = parent.path().join("wuddle-data");
@@ -2495,6 +2955,9 @@ mod tests {
         restored_settings.profiles[0].name = "Restored profile".to_string();
         write_json_file(&source.join(SETTINGS_NAME), &restored_settings).unwrap();
         let connection = Connection::open(source.join("wuddle.sqlite")).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE repos (mode TEXT NOT NULL); INSERT INTO repos VALUES ('mpq');",
@@ -2582,13 +3045,15 @@ mod tests {
         let legacy = parent.path().join("legacy-wuddle");
         let rollback = parent.path().join("wuddle-data-before-restore-1234567890");
         let game = parent.path().join("World of Warcraft");
-        for directory in [&live, &legacy, &rollback, &game] {
+        let backups = parent.path().join("wuddle-backups");
+        for directory in [&live, &legacy, &rollback, &game, &backups] {
             fs::create_dir_all(directory).unwrap();
         }
         fs::write(live.join(SETTINGS_NAME), b"saved settings").unwrap();
         fs::write(legacy.join("wuddle.sqlite"), b"saved database").unwrap();
         fs::write(rollback.join("wuddle.sqlite"), b"rollback database").unwrap();
         fs::write(game.join("Wow.exe"), b"game").unwrap();
+        fs::write(backups.join("wuddle-backup-test.zip"), b"recovery").unwrap();
         write_json_file(
             &parent.path().join(PENDING_RESET_MARKER_NAME),
             &PendingReset {
@@ -2606,6 +3071,7 @@ mod tests {
         assert!(!legacy.exists());
         assert!(!rollback.exists());
         assert!(game.join("Wow.exe").is_file());
+        assert!(backups.join("wuddle-backup-test.zip").is_file());
         assert!(!parent.path().join(PENDING_RESET_MARKER_NAME).exists());
     }
 }

@@ -748,15 +748,45 @@ pub fn badge_suggested_style(colors: ThemeColors) -> container::Style {
     }
 }
 
-/// Danger button style (red border/text)
-pub fn btn_danger_style(_colors: ThemeColors) -> button::Style {
+/// Danger button style (red border/text with an explicit hover highlight).
+pub fn btn_danger_style(colors: ThemeColors, status: button::Status) -> button::Style {
+    let (background, text_color, border_alpha) = match status {
+        button::Status::Hovered => (
+            Color::from_rgba(colors.bad.r, colors.bad.g, colors.bad.b, 0.82),
+            Color::WHITE,
+            1.0,
+        ),
+        button::Status::Pressed => (
+            Color::from_rgba(colors.bad.r, colors.bad.g, colors.bad.b, 0.96),
+            Color::WHITE,
+            1.0,
+        ),
+        button::Status::Disabled => (
+            Color::from_rgba(
+                colors.bad.r * 0.22,
+                colors.bad.g * 0.14,
+                colors.bad.b * 0.14,
+                0.45,
+            ),
+            Color::from_rgba(colors.bad.r, colors.bad.g, colors.bad.b, 0.45),
+            0.30,
+        ),
+        button::Status::Active => (
+            Color::from_rgba(
+                colors.bad.r * 0.28,
+                colors.bad.g * 0.16,
+                colors.bad.b * 0.16,
+                0.72,
+            ),
+            colors.bad,
+            0.78,
+        ),
+    };
     button::Style {
-        background: Some(iced::Background::Color(Color::from_rgba(
-            0.937, 0.267, 0.267, 0.18,
-        ))),
-        text_color: Color::from_rgb8(254, 202, 202),
+        background: Some(iced::Background::Color(background)),
+        text_color,
         border: Border {
-            color: Color::from_rgba(0.937, 0.267, 0.267, 0.52),
+            color: Color::from_rgba(colors.bad.r, colors.bad.g, colors.bad.b, border_alpha),
             width: 1.0,
             radius: Radius::new(0.0),
         },
