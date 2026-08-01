@@ -30,17 +30,24 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.7.0-beta.9
+### What's New in v3.7.0-beta.10
+
+- **Reliable Modified Addon Detection** — Rescanning now identifies edited, deleted, and newly added files in Wuddle- and GAM-managed Git addons.
+- **No Extra API Usage** — Modification detection compares against the local checked-out Git revision without contacting GitHub.
+- **Manual Addons Left Alone** — Addons without a local Git baseline are excluded from modification scanning.
+- **Clearer Warnings and Diagnostics** — Modified status is retained reliably, while prompts and privacy-safe logs better explain why an addon was flagged.
+
+See the [full changelog](CHANGELOG.md#v370-beta10) for the technical details.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.7.0-beta.9
 
 - **Safer Updates for Modified Addons** — Wuddle now asks whether to cancel, ignore future updates, or explicitly overwrite when an addon contains local changes.
 - **Better Batch Behavior** — Update All completes unaffected projects before grouping modified addons into one confirmation dialog.
 - **Real Update Ignoring** — Ignored projects are excluded from automatic and manual checks before any network or GitHub API request.
 - **Windows Line-Ending Fix** — Normal CRLF/LF differences are no longer mistaken for local addon edits, further addressing [Issue #18](https://github.com/ZythDr/Wuddle/issues/18).
-
-See the [full changelog](CHANGELOG.md#v370-beta9) for the technical details.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.7.0-beta.8
 

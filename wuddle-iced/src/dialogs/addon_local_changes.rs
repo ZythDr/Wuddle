@@ -33,9 +33,9 @@ pub fn view<'a>(repos: &'a [AddonLocalChangesEntry], colors: ThemeColors) -> Ele
         ]
         .align_y(iced::Alignment::Center),
         text(if plural {
-            "Some addons contain files that differ from the versions Wuddle installed."
+            "Some addons contain files that differ from their checked-out Git revisions."
         } else {
-            "This addon contains files that differ from the version Wuddle installed."
+            "This addon contains files that differ from its checked-out Git revision."
         })
         .size(14)
         .color(c.text),
@@ -44,7 +44,7 @@ pub fn view<'a>(repos: &'a [AddonLocalChangesEntry], colors: ThemeColors) -> Ele
             .direction(theme::vscroll_overlay())
             .style(move |theme, status| theme::scrollable_style(c)(theme, status)),
         text(
-            "Overwrite & Update will permanently replace the local changes, but only after the new version has been prepared successfully in staging.\n\nIgnore Updates keeps the current files and excludes the selected addon from future update checks.",
+            "If you did not make these changes yourself, another addon manager, an older installation, or another program may have changed the folder. Rescanning repairs Wuddle's tracking, but does not erase real file differences.\n\nOverwrite & Update will permanently replace the local changes, but only after the new version has been prepared successfully in staging.\n\nIgnore Updates keeps the current files and excludes the selected addon from future update checks.",
         )
         .size(13)
         .color(c.warn),

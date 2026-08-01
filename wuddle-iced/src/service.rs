@@ -557,6 +557,9 @@ pub struct RepoLoadLog {
 pub struct RepoLoadResult {
     pub rows: Vec<RepoRow>,
     pub untracked_mpqs: Vec<wuddle_engine::mpq::MpqProtectionEntry>,
+    /// Present only for an explicit Rescan. Normal repository reloads retain
+    /// the last authoritative local-change result in the frontend plan cache.
+    pub addon_git_local_changes: Option<wuddle_engine::AddonGitLocalChangeScan>,
     pub logs: Vec<RepoLoadLog>,
 }
 
@@ -2301,6 +2304,7 @@ async fn list_repos_inner(
             return Ok(RepoLoadResult {
                 rows: Vec::new(),
                 untracked_mpqs: Vec::new(),
+                addon_git_local_changes: None,
                 logs: Vec::new(),
             });
         }
@@ -2567,6 +2571,43 @@ async fn list_repos_inner(
                 },
             )?;
         }
+
+        let addon_git_local_changes = if fix_casing {
+            rescan_checkpoint(
+                operation_id,
+                &background_cancelled,
+                "Rescan",
+                "Comparing tracked Git addon files with their checked-out revisions...",
+            )?;
+            let started = Instant::now();
+            let scan = eng
+                .scan_addon_git_local_changes(wow_path)
+                .map_err(|error| error.to_string())?;
+            logs.push(RepoLoadLog {
+                level: if scan.failed > 0 {
+                    LogLevel::Error
+                } else {
+                    LogLevel::Info
+                },
+                text: format!(
+                    "Rescan: local Git comparison finished in {}ms ({} inspected, {} modified, {} failed).",
+                    started.elapsed().as_millis(),
+                    scan.inspected,
+                    scan.modified.len(),
+                    scan.failed
+                ),
+            });
+            rescan_checkpoint(
+                operation_id,
+                &background_cancelled,
+                "Rescan",
+                "Finished comparing tracked Git addon files.",
+            )?;
+            Some(scan)
+        } else {
+            None
+        };
+
         rescan_checkpoint(
             operation_id,
             &background_cancelled,
@@ -2664,6 +2705,7 @@ async fn list_repos_inner(
         Ok::<RepoLoadResult, String>(RepoLoadResult {
             rows,
             untracked_mpqs,
+            addon_git_local_changes,
             logs,
         })
     })
@@ -2680,6 +2722,7 @@ async fn list_repos_inner(
     Ok(RepoLoadResult {
         rows: background_logs.rows,
         untracked_mpqs: background_logs.untracked_mpqs,
+        addon_git_local_changes: background_logs.addon_git_local_changes,
         logs,
     })
 }

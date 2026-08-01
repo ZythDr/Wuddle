@@ -299,6 +299,25 @@ pub struct UpdatePlan {
     pub is_manual: bool,
 }
 
+/// Local-only comparison result for a tracked Git addon.
+///
+/// This is intentionally derived from the installed worktree and its checked-out
+/// revision. It never contacts a forge or consumes API requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddonGitLocalChange {
+    pub repo_id: i64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AddonGitLocalChangeScan {
+    pub inspected: usize,
+    pub failed: usize,
+    pub inspected_repo_ids: Vec<i64>,
+    pub failed_repo_ids: Vec<i64>,
+    pub modified: Vec<AddonGitLocalChange>,
+}
+
 /// Controls how aggressively the engine checks for updates.
 /// When no GitHub token is configured, adaptive frequency skips repos
 /// whose latest release is old (stable/dormant) to conserve API quota.
@@ -1538,6 +1557,60 @@ impl Engine {
             }
         }
         Ok(None)
+    }
+
+    /// Compare tracked Git addons with their local checked-out revisions.
+    ///
+    /// Manual/local addons are deliberately excluded because they have no
+    /// authoritative Git baseline. Missing worktrees are also skipped so this
+    /// scan cannot invent a modification state for an installation that first
+    /// needs repair or import reconciliation.
+    pub fn scan_addon_git_local_changes(&self, wow_dir: &Path) -> Result<AddonGitLocalChangeScan> {
+        let _diagnostic = diagnostics::OperationGuard::new("scan_addon_git_local_changes");
+        let repos = self.db().list_repos()?;
+        let mut scan = AddonGitLocalChangeScan::default();
+
+        for repo in repos
+            .into_iter()
+            .filter(|repo| matches!(repo.mode, InstallMode::AddonGit))
+        {
+            let Some(worktree) = self.addon_git_worktree_dir(repo.id, wow_dir, &repo) else {
+                continue;
+            };
+            scan.inspected += 1;
+            scan.inspected_repo_ids.push(repo.id);
+            match self.addon_git_worktree_local_change_reason(repo.id, wow_dir, &worktree) {
+                Ok(Some(reason)) => {
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Debug,
+                        "engine.addon_git",
+                        format!(
+                            "rescan detected local addon changes: repo_id={}; reason={reason}",
+                            repo.id
+                        ),
+                    );
+                    scan.modified.push(AddonGitLocalChange {
+                        repo_id: repo.id,
+                        reason: reason.to_string(),
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    scan.failed += 1;
+                    scan.failed_repo_ids.push(repo.id);
+                    diagnostics::emit(
+                        diagnostics::DiagnosticLevel::Debug,
+                        "engine.addon_git",
+                        format!(
+                            "rescan could not compare local addon files: repo_id={}; error_category=git_comparison; detail={error}",
+                            repo.id
+                        ),
+                    );
+                }
+            }
+        }
+
+        Ok(scan)
     }
 
     fn repo_key(host: &str, owner: &str, name: &str) -> String {
@@ -6846,6 +6919,105 @@ mod tests {
         let repo = engine.db().get_repo(repo_id).unwrap();
         assert_eq!(repo.id, repo_id);
         assert_eq!(repo.url, remote_url);
+    }
+
+    #[test]
+    fn complete_addon_git_removal_then_reinstall_has_no_stale_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let remote = tmp.path().join("owner").join("FreshAgain");
+        let remote_url = create_local_git_root_addon_repo(&remote, "FreshAgain");
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let old_repo_id = add_identified_local_git_repo(&engine, remote_url.clone());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(engine.update_repo(old_repo_id, &wow, None, InstallOptions::default()))
+            .unwrap();
+        assert_eq!(engine.db().list_installs(old_repo_id).unwrap().len(), 1);
+
+        engine.remove_repo(old_repo_id, Some(&wow), true).unwrap();
+
+        assert!(engine.db().get_repo(old_repo_id).is_err());
+        assert!(engine.db().list_installs(old_repo_id).unwrap().is_empty());
+        assert!(!addons.join("FreshAgain").exists());
+
+        let new_repo_id = add_identified_local_git_repo(&engine, remote_url);
+        assert_ne!(new_repo_id, old_repo_id);
+        runtime
+            .block_on(engine.update_repo(new_repo_id, &wow, None, InstallOptions::default()))
+            .unwrap();
+
+        let worktree = addons.join("FreshAgain");
+        assert!(worktree.join(".git").is_dir());
+        assert!(engine
+            .addon_git_worktree_local_change_reason(new_repo_id, &wow, &worktree)
+            .unwrap()
+            .is_none());
+        assert_eq!(engine.db().list_repos().unwrap().len(), 1);
+        assert_eq!(engine.db().list_installs(new_repo_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn addon_git_rescan_detects_tracked_edits_and_untracked_files_but_skips_manual_addons() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wow = tmp.path().join("wow");
+        let addons = wow.join("Interface").join("AddOns");
+        let remote = tmp.path().join("owner").join("ScannedAddon");
+        let remote_url = create_local_git_root_addon_repo(&remote, "ScannedAddon");
+        let engine = Engine::open(&tmp.path().join("wuddle.sqlite")).unwrap();
+        let repo_id = add_identified_local_git_repo(&engine, remote_url);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(engine.update_repo(repo_id, &wow, None, InstallOptions::default()))
+            .unwrap();
+
+        let manual = addons.join("ManualOnly");
+        fs::create_dir_all(&manual).unwrap();
+        fs::write(manual.join("ManualOnly.toc"), b"## Interface: 30300\n").unwrap();
+        assert_eq!(engine.import_existing_addons(&wow).unwrap(), 1);
+
+        let clean = engine.scan_addon_git_local_changes(&wow).unwrap();
+        assert_eq!(clean.inspected, 1);
+        assert_eq!(clean.failed, 0);
+        assert!(clean.modified.is_empty());
+
+        let worktree = addons.join("ScannedAddon");
+        fs::write(
+            worktree.join("ScannedAddon.toc"),
+            b"## Interface: 30300\n## locally edited\n",
+        )
+        .unwrap();
+        fs::write(
+            manual.join("local-note.txt"),
+            b"manual changes are not comparable",
+        )
+        .unwrap();
+
+        let edited = engine.scan_addon_git_local_changes(&wow).unwrap();
+        assert_eq!(edited.inspected, 1);
+        assert_eq!(edited.modified.len(), 1);
+        assert_eq!(edited.modified[0].repo_id, repo_id);
+
+        runtime
+            .block_on(engine.reinstall_repo(repo_id, &wow, None, InstallOptions::default()))
+            .unwrap();
+        let extra_dir = worktree.join("user-created");
+        fs::create_dir_all(&extra_dir).unwrap();
+        fs::write(extra_dir.join("note.txt"), b"untracked").unwrap();
+
+        let untracked = engine.scan_addon_git_local_changes(&wow).unwrap();
+        assert_eq!(untracked.inspected, 1);
+        assert_eq!(untracked.modified.len(), 1);
+        assert_eq!(untracked.modified[0].repo_id, repo_id);
     }
 
     #[test]

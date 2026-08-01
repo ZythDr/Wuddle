@@ -2,6 +2,17 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.7.0-beta.10
+
+### Bug Fixes
+
+- **Git Addon Modification Detection**
+  - Addon rescans now identify local changes in Wuddle- and GAM-managed Git addons.
+  - Detects edited or deleted files and newly added files or folders using the locally checked-out Git revision, without consuming GitHub API requests.
+  - Manual and locally installed addons without a Git baseline are excluded.
+  - Modified status persists through normal update checks and clears after a clean rescan, reinstall, or update.
+  - Warning text and privacy-safe diagnostics now explain why an addon was flagged.
+
 ## v3.7.0-beta.9
 
 ### Improvements

@@ -31,6 +31,18 @@ fn merge_current_update_plans(
     repos: &[service::RepoRow],
 ) -> Vec<service::PlanRow> {
     retain_current_unique_plans(&mut checked, repos);
+    // A remote update check does not perform the explicit Rescan's full local
+    // worktree comparison. Preserve that last authoritative local result until
+    // another Rescan, reinstall, or successful update replaces it.
+    for plan in &mut checked {
+        if plan.mode == "addon_git"
+            && previous
+                .iter()
+                .any(|cached| cached.repo_id == plan.repo_id && cached.externally_modified)
+        {
+            plan.externally_modified = true;
+        }
+    }
     let current_ids = repos.iter().map(|repo| repo.id).collect::<HashSet<_>>();
     let mut seen = checked
         .iter()
@@ -44,6 +56,65 @@ fn merge_current_update_plans(
             .cloned(),
     );
     checked
+}
+
+fn apply_addon_git_rescan_state(
+    plans: &mut Vec<service::PlanRow>,
+    repos: &[service::RepoRow],
+    scan: &wuddle_engine::AddonGitLocalChangeScan,
+) -> Vec<(String, String)> {
+    let modified = scan
+        .modified
+        .iter()
+        .map(|change| (change.repo_id, change.reason.as_str()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let successfully_inspected = scan
+        .inspected_repo_ids
+        .iter()
+        .filter(|repo_id| !scan.failed_repo_ids.contains(repo_id))
+        .copied()
+        .collect::<HashSet<_>>();
+
+    for plan in plans.iter_mut().filter(|plan| plan.mode == "addon_git") {
+        if successfully_inspected.contains(&plan.repo_id) {
+            plan.externally_modified = modified.contains_key(&plan.repo_id);
+        }
+    }
+
+    let mut detected = Vec::new();
+    for repo in repos.iter().filter(|repo| repo.mode == "addon_git") {
+        let Some(reason) = modified.get(&repo.id).copied() else {
+            continue;
+        };
+        if !plans.iter().any(|plan| plan.repo_id == repo.id) {
+            let revision = repo
+                .last_version
+                .clone()
+                .unwrap_or_else(|| "checked-out revision".to_string());
+            plans.push(service::PlanRow {
+                repo_id: repo.id,
+                owner: repo.owner.clone(),
+                name: repo.name.clone(),
+                current: repo.last_version.clone(),
+                latest: revision,
+                asset_name: String::new(),
+                has_update: false,
+                repair_needed: false,
+                externally_modified: true,
+                not_modified: true,
+                mode: repo.mode.clone(),
+                host: String::new(),
+                error: None,
+                previous_dll_count: 0,
+                new_dll_count: 0,
+            });
+        }
+        detected.push((
+            format!("{}/{}", repo.owner, repo.name),
+            addon_local_change_reason(reason),
+        ));
+    }
+    detected
 }
 
 fn sync_active_plan_cache(app: &mut App) {
@@ -201,6 +272,15 @@ fn show_addon_local_changes_dialog(app: &mut App, repos: Vec<AddonLocalChangesEn
     if repos.is_empty() {
         return;
     }
+    for repo in &repos {
+        app.log(
+            LogLevel::Info,
+            &format!(
+                "Local changes detected for {}: {}",
+                repo.repo_name, repo.reason
+            ),
+        );
+    }
     app.log(
         LogLevel::Info,
         &format!(
@@ -266,6 +346,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     for entry in &load_result.logs {
                         app.log(entry.level, &entry.text);
                     }
+                    let addon_git_local_changes = load_result.addon_git_local_changes;
                     app.untracked_mpqs = load_result.untracked_mpqs;
                     let repos = load_result.rows;
                     let count = repos.len();
@@ -280,6 +361,17 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                                 "discarded {discarded_plans} stale or duplicate update plan(s) after repository reload"
                             ),
                         );
+                    }
+                    if let Some(scan) = addon_git_local_changes.as_ref() {
+                        let detected =
+                            apply_addon_git_rescan_state(&mut app.plans, &app.repos, scan);
+                        for (repo_name, reason) in detected {
+                            app.log(
+                                LogLevel::Info,
+                                &format!("Local changes detected for {repo_name}: {reason}"),
+                            );
+                        }
+                        sync_active_plan_cache(app);
                     }
                     // published_at_unix is persisted in each profile database. Rebuild
                     // this derived UI state immediately instead of waiting for another
@@ -2879,6 +2971,10 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
             app.updating_repo_ids.remove(&repo_id);
             match result {
                 Ok(plan) => {
+                    // A clean reinstall establishes a new authoritative local
+                    // baseline, so discard any Modified state from the last
+                    // explicit Rescan before reloading repository rows.
+                    forget_repo_update_plan(app, repo_id);
                     app.log(
                         LogLevel::Info,
                         &format!("Reinstalled {}/{}.", plan.owner, plan.name),
@@ -3918,8 +4014,11 @@ mod local_change_tests {
 
 #[cfg(test)]
 mod update_plan_tests {
-    use super::{merge_current_update_plans, retain_current_unique_plans};
+    use super::{
+        apply_addon_git_rescan_state, merge_current_update_plans, retain_current_unique_plans,
+    };
     use crate::service::{PlanRow, RepoRow};
+    use wuddle_engine::{AddonGitLocalChange, AddonGitLocalChangeScan};
 
     fn repo(id: i64) -> RepoRow {
         RepoRow {
@@ -3997,5 +4096,76 @@ mod update_plan_tests {
         assert_eq!(merged[0].latest, "fresh");
         assert_eq!(merged[1].repo_id, 2);
         assert_eq!(merged[1].latest, "intentionally-skipped");
+    }
+
+    #[test]
+    fn remote_checks_preserve_the_last_explicit_rescan_modification_state() {
+        let repos = vec![repo(1)];
+        let checked = vec![plan(1, "fresh")];
+        let mut cached = plan(1, "cached");
+        cached.externally_modified = true;
+
+        let merged = merge_current_update_plans(checked, &[cached], &repos);
+
+        assert!(merged[0].externally_modified);
+    }
+
+    #[test]
+    fn rescan_marks_only_git_addons_and_a_later_clean_scan_clears_them() {
+        let git_repo = repo(1);
+        let mut manual_repo = repo(2);
+        manual_repo.mode = "manual".to_string();
+        let repos = vec![git_repo, manual_repo];
+        let mut plans = Vec::new();
+        let scan = AddonGitLocalChangeScan {
+            inspected: 1,
+            failed: 0,
+            inspected_repo_ids: vec![1],
+            failed_repo_ids: Vec::new(),
+            modified: vec![
+                AddonGitLocalChange {
+                    repo_id: 1,
+                    reason: "the Git worktree contains unexpected changes".to_string(),
+                },
+                // Defensive UI filtering: even a malformed scan result must
+                // never classify a manual addon as modified.
+                AddonGitLocalChange {
+                    repo_id: 2,
+                    reason: "the Git worktree contains unexpected changes".to_string(),
+                },
+            ],
+        };
+
+        let detected = apply_addon_git_rescan_state(&mut plans, &repos, &scan);
+        assert_eq!(detected.len(), 1);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].repo_id, 1);
+        assert!(plans[0].externally_modified);
+
+        apply_addon_git_rescan_state(
+            &mut plans,
+            &repos,
+            &AddonGitLocalChangeScan {
+                inspected: 1,
+                failed: 1,
+                inspected_repo_ids: vec![1],
+                failed_repo_ids: vec![1],
+                modified: Vec::new(),
+            },
+        );
+        assert!(plans[0].externally_modified);
+
+        apply_addon_git_rescan_state(
+            &mut plans,
+            &repos,
+            &AddonGitLocalChangeScan {
+                inspected: 1,
+                failed: 0,
+                inspected_repo_ids: vec![1],
+                failed_repo_ids: Vec::new(),
+                modified: Vec::new(),
+            },
+        );
+        assert!(!plans[0].externally_modified);
     }
 }
