@@ -572,6 +572,35 @@ pub async fn delete_profile_accounts(
     .map_err(|error| error.to_string())?
 }
 
+pub async fn delete_profile_credentials_for_reset(
+    profile_id: String,
+    accounts: Vec<AccountRef>,
+    pending_account_ids: Vec<String>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let service = AutoLoginService::system();
+        let mut account_ids = accounts
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>();
+        for pending in pending_account_ids {
+            if let Ok(account_id) = AccountId::parse(pending) {
+                if !account_ids.iter().any(|known| known == &account_id) {
+                    account_ids.push(account_id);
+                }
+            }
+        }
+        for account_id in account_ids {
+            service
+                .delete_account(&profile_id, &account_id)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 pub fn account_picker<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     let profile = app.active_profile().cloned().unwrap_or_default();
     if !profile.auto_login_enabled {

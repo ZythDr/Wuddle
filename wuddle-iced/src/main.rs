@@ -6,6 +6,7 @@
 mod anchored_overlay;
 #[cfg(feature = "auto-login")]
 mod auto_login;
+mod backup_restore;
 mod desktop_notification;
 mod diagnostics;
 mod github_api;
@@ -72,6 +73,36 @@ fn main() -> iced::Result {
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     single_instance::wait_for_restart_parent();
+
+    // A reset removes Wuddle's live and known legacy data only after the old
+    // process has released every settings/database/log file.
+    if let Err(error) = backup_restore::apply_pending_reset() {
+        eprintln!("Wuddle reset failed: {error}");
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("Wuddle could not be reset")
+            .set_description(format!(
+                "Wuddle stopped before opening its saved data.\n\n{error}\n\nClose Wuddle and try again; the reset remains prepared."
+            ))
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+        return Ok(());
+    }
+
+    // A full-state restore is committed after the previous Wuddle process has
+    // released its files, but before this process opens settings, databases,
+    // logging, or the single-instance endpoint in the live data folder.
+    if let Err(error) = backup_restore::apply_pending_restore() {
+        eprintln!("Wuddle restore failed: {error}");
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("Wuddle restore could not be applied")
+            .set_description(format!(
+                "Wuddle kept the existing data wherever possible.\n\n{error}\n\nThe staged restore and previous data were left in place for recovery."
+            ))
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    }
 
     // Detect monitor resolution before iced starts
     let auto_scale = detect_auto_scale();

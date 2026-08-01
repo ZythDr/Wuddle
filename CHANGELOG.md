@@ -2,6 +2,30 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.7.0-beta.12
+
+### New Features
+
+- **Backup and Restore**
+  - Export a complete Wuddle settings backup containing profiles, preferences, launch configuration, and each profile's tracked addon, mod, and MPQ metadata.
+  - Restore either a Wuddle backup ZIP or an older Wuddle installation through a read-only preview and an all-or-nothing restore. Selecting the main installation folder is supported, including bounded discovery of older nested/versioned data layouts.
+  - Database snapshots are checked for integrity, the complete restore is staged before restart, and the previous data directory is retained as a rollback copy.
+  - Game files, installed projects, logs, caches, GitHub tokens, and auto-login passwords are not copied. Existing same-machine vault credentials remain available through their saved non-secret references.
+  - Action tooltips explain backup filenames, ZIP and older-install imports, the confirmation required before a reset, and why restore remains unavailable until a source is selected.
+- **Reset Wuddle**
+  - Added an explicitly confirmed reset that restarts Wuddle before removing its current and known legacy settings, profile databases, logs, and caches.
+  - The warning lets users choose whether saved GitHub and auto-login credentials should also be removed from the operating system vault or retained for a later same-computer restore.
+  - Old Windows AppData and legacy Tauri data are cleared so they cannot be imported again after the reset. WoW installations and deployed addon, mod, and MPQ files remain untouched.
+
+### Bug Fixes
+
+- **Windows Self-Updates**
+  - Fixed Windows portable updates failing with `os error 32` while Wuddle inspected its own staged executable.
+  - Staged executables are still validated before installation, now through the file handle Wuddle already owns rather than a conflicting second handle.
+
+- **Windows users updating from an affected beta may need to download this release manually once.**
+  - Extract it over the existing Wuddle folder, or use the new installation's Backup and Restore dialog to import the settings from an old Wuddle folder.
+
 ## v3.7.0-beta.11
 
 ### New Features

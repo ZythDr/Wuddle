@@ -30,16 +30,25 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.7.0-beta.11
+### What's New in v3.7.0-beta.12
+
+- **Full Wuddle Backups** — Export profiles, preferences, launch settings, and tracked addon/mod/patch data into one backup ZIP, then restore it all together later.
+- **Import an Old Installation** — A fresh Wuddle copy can import the data from an older Wuddle folder, including nested versioned layouts, with a preview before anything is changed.
+- **Rollback-Aware Restores** — Restores are validated and staged before restart, while the previous data directory is kept as a recovery copy. Credentials and installed game files are never placed in the backup.
+- **Fresh-Start Reset** — Reset Wuddle through an explicit warning to remove current and known legacy settings, databases, caches, and logs, with a choice to remove or retain system-vault credentials. WoW, addon, mod, and MPQ files are never deleted.
+- **Fixed Windows Self-Updates** — Portable updates no longer fail with `os error 32` while Wuddle validates the staged executable.
+- **One-Time Manual Update May Be Required** — Windows users on an affected beta may need to download this release manually. Extract it over the existing folder, or import the old folder through Backup and Restore in the fresh copy.
+
+See the [full changelog](CHANGELOG.md#v370-beta12) for the technical details.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.7.0-beta.11
 
 - **Right-Click Copy and Paste** — Editable text fields throughout Wuddle now provide a consistent, themed context menu.
 - **Selection-Aware Editing** — Copy uses the current selection, while Paste replaces it or inserts text at the existing caret position without moving the caret when the menu opens.
 - **Safe Password Pasting** — Secure password fields allow Paste without exposing their contents through Copy or diagnostics.
-
-See the [full changelog](CHANGELOG.md#v370-beta11) for the technical details.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.7.0-beta.10
 

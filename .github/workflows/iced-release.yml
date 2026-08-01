@@ -4,12 +4,16 @@ on:
   push:
     tags:
       - "v*"
+    branches:
+      - "v3.7.0-beta.12-testing"
 
 permissions:
   contents: read
 
 env:
-  WUDDLE_BUILD_TAG: ${{ github.ref_name }}
+  # The branch-only test build uses the final package identity, but publishes
+  # only a collaborator-visible draft release under a separate testing tag.
+  WUDDLE_BUILD_TAG: ${{ github.ref_type == 'branch' && 'v3.7.0-beta.12' || github.ref_name }}
 
 concurrency:
   group: iced-release-${{ github.ref }}
@@ -35,6 +39,13 @@ jobs:
       - id: check
         run: |
           set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "branch" && \
+                "${GITHUB_REF_NAME}" == "v3.7.0-beta.12-testing" ]]; then
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+            echo "Building beta.12 test artifacts for a draft GitHub Release."
+            exit 0
+          fi
+
           git fetch --no-tags origin \
             +refs/heads/main:refs/remotes/origin/main \
             +refs/heads/beta:refs/remotes/origin/beta
@@ -346,6 +357,14 @@ jobs:
             wuddle-data\settings.json           <- settings (created on first run)
             wuddle-data\wuddle*.sqlite          <- profile databases
 
+          Manual updates:
+            Close Wuddle, then extract the new archive over the existing Wuddle
+            folder and allow its program files to be replaced. The archive does
+            not contain wuddle-data, so your existing profiles and settings are
+            preserved. If you use a new folder instead, open Backup and Restore
+            in the new copy and choose the old Wuddle folder, or copy the old
+            wuddle-data directory into the new folder before starting Wuddle.
+
           Upgrading from Wuddle v2 (Tauri):
             If you already have a v2 portable install, just unzip this into the
             same folder. The launcher will switch to v3 automatically.
@@ -389,11 +408,11 @@ jobs:
           if-no-files-found: error
 
   # ------------------------------------------------------------------
-  # Publish pre-release on GitHub
+  # Publish tagged releases, or keep branch-only test packages in a draft.
   # ------------------------------------------------------------------
   release:
     needs: [build-linux, build-windows]
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' || github.ref_name == 'v3.7.0-beta.12-testing'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -416,6 +435,10 @@ jobs:
       - name: Publish pre-release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
+          draft: ${{ github.ref_type == 'branch' }}
+          tag_name: ${{ github.ref_type == 'branch' && 'v3.7.0-beta.12-testing' || github.ref_name }}
+          name: ${{ github.ref_type == 'branch' && 'Wuddle v3.7.0-beta.12 — private testing draft' || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: false
           body_path: dist/RELEASE_BODY.md

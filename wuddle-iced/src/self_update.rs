@@ -11,10 +11,10 @@ use std::path::{Path, PathBuf};
 use pelite::{FileMap, PeFile};
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 use std::fs;
-#[cfg(any(target_os = "linux", test))]
-use std::io::Read;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
-use std::io::Write;
+use std::io::{Read, Write};
+#[cfg(any(target_os = "windows", test))]
+use std::io::{Seek, SeekFrom};
 #[cfg(any(target_os = "windows", test))]
 use std::path::Component;
 #[cfg(any(target_os = "windows", test))]
@@ -362,9 +362,17 @@ fn sync_and_validate_pe(
         .as_file()
         .sync_all()
         .map_err(|error| format!("Failed to synchronize the staged {description}: {error}"))?;
-    let map = FileMap::open(temporary.path())
+
+    // Validate through the handle that staged the file. Reopening the path
+    // while `NamedTempFile` still owns a writable handle causes a Windows
+    // sharing violation (error 32), even though both handles belong to Wuddle.
+    let file = temporary.as_file_mut();
+    file.seek(SeekFrom::Start(0))
         .map_err(|error| format!("Failed to inspect the staged {description}: {error}"))?;
-    PeFile::from_bytes(&map)
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("Failed to inspect the staged {description}: {error}"))?;
+    PeFile::from_bytes(&bytes)
         .map_err(|error| format!("The staged {description} is not a valid PE file: {error}"))?;
     Ok(())
 }
@@ -589,7 +597,8 @@ fn validate_pe_path(path: &Path, description: &str) -> Result<(), String> {
 mod tests {
     use super::{
         canonical_windows_version_name, is_packaged_launcher, is_packaged_runtime,
-        safe_current_version, stage_windows_portable_update, validate_appimage_header,
+        safe_current_version, stage_windows_portable_update, sync_and_validate_pe,
+        validate_appimage_header,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -745,6 +754,17 @@ mod tests {
             Path::new("nested/versions/v3.7.0-beta.7/Wuddle-bin.exe"),
             "v3.7.0-beta.7"
         ));
+    }
+
+    #[test]
+    fn staged_pe_validation_uses_the_existing_open_file_handle() {
+        let mut staged = tempfile::NamedTempFile::new().unwrap();
+        staged.write_all(b"not a PE file").unwrap();
+
+        let error = sync_and_validate_pe(&mut staged, "runtime").unwrap_err();
+
+        assert!(error.contains("not a valid PE file"), "{error}");
+        assert!(!error.contains("Failed to inspect"), "{error}");
     }
 
     #[test]

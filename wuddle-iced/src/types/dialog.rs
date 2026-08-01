@@ -126,6 +126,7 @@ pub struct MpqPackageFileDraft {
 
 #[derive(Debug, Clone)]
 pub enum Dialog {
+    BackupRestore,
     MpqAdd,
     MpqInstall,
     ProtectedMpqs,

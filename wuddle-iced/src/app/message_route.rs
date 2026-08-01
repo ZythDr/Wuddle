@@ -2,6 +2,7 @@ use crate::{Dialog, Message};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MessageRoute {
+    BackupRestore,
     Mpq,
     #[cfg(feature = "auto-login")]
     AutoLogin,
@@ -18,6 +19,27 @@ pub(super) enum MessageRoute {
 /// feature router.
 pub(super) fn classify(message: &Message, dialog: &Option<Dialog>) -> MessageRoute {
     match message {
+        Message::OpenBackupRestore
+        | Message::ExportWuddleBackup
+        | Message::WuddleBackupExportPathSelected(..)
+        | Message::WuddleBackupExported(..)
+        | Message::PickWuddleBackupArchive
+        | Message::PickOldWuddleFolder
+        | Message::WuddleBackupSourcePicked { .. }
+        | Message::WuddleBackupInspected(..)
+        | Message::ToggleWuddleBackupSection(..)
+        | Message::RequestWuddleRestore
+        | Message::CancelWuddleRestore
+        | Message::ConfirmWuddleRestore
+        | Message::WuddleRestoreStaged(..)
+        | Message::WuddleRestoreRestarted(..)
+        | Message::RequestWuddleReset
+        | Message::CancelWuddleReset
+        | Message::ToggleWuddleResetCredentials(..)
+        | Message::ConfirmWuddleReset
+        | Message::WuddleResetPrepared(..)
+        | Message::WuddleResetRestarted(..) => MessageRoute::BackupRestore,
+
         Message::LocalArchiveHovered(_) | Message::LocalArchiveDropped(_)
             if matches!(dialog, Some(Dialog::MpqInstall)) =>
         {

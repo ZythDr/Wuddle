@@ -130,6 +130,7 @@ pub struct App {
 
     // Dialog overlay
     pub dialog: Option<Dialog>,
+    pub backup_restore_ui: crate::backup_restore::UiState,
 
     // Context menu: which repo's menu is open
     pub open_menu: Option<String>,
@@ -379,6 +380,7 @@ impl App {
             log_error_fetch: true,
             log_error_misc: true,
             dialog: None,
+            backup_restore_ui: crate::backup_restore::UiState::default(),
             open_menu: None,
             text_input_context: None,
             add_new_menu_open: false,
@@ -496,6 +498,17 @@ impl App {
             app.log(
                 LogLevel::Error,
                 &format!("Persistent diagnostic logging is unavailable: {error}"),
+            );
+        }
+        if let Some(notice) = crate::backup_restore::take_restore_notice() {
+            app.log(LogLevel::Info, &notice);
+            app.show_toast(notice, ToastKind::Success);
+        }
+        if crate::backup_restore::take_reset_notice() {
+            app.log(LogLevel::Info, "Wuddle was reset successfully.");
+            app.show_toast(
+                "Wuddle was reset successfully. You can now create a new profile.",
+                ToastKind::Success,
             );
         }
 
@@ -812,6 +825,7 @@ impl App {
             || !self.updating_repo_ids.is_empty()
             || self.add_repo_preview_loading
             || self.mpq_ui.busy
+            || self.backup_restore_ui.is_busy()
             || self.self_update_in_progress
     }
 
@@ -834,6 +848,15 @@ impl App {
         }
         if self.mpq_ui.busy {
             reasons.push("managing MPQ patches".to_string());
+        }
+        if let Some(operation) = self.backup_restore_ui.operation {
+            let reason = match operation {
+                crate::backup_restore::Operation::Exporting => "exporting a Wuddle backup",
+                crate::backup_restore::Operation::Inspecting => "inspecting a Wuddle backup",
+                crate::backup_restore::Operation::StagingRestore => "staging a Wuddle restore",
+                crate::backup_restore::Operation::PreparingReset => "preparing a Wuddle reset",
+            };
+            reasons.push(reason.to_string());
         }
         if self.self_update_in_progress {
             reasons.push("installing a Wuddle update".to_string());
@@ -1223,6 +1246,10 @@ impl App {
             MessageRoute::Mpq => {
                 let task = crate::mpq::update(self, message);
                 return self.finish_routed_update(task, "MPQ");
+            }
+            MessageRoute::BackupRestore => {
+                let task = crate::backup_restore::update(self, message);
+                return self.finish_routed_update(Some(task), "Backup and Restore");
             }
             #[cfg(feature = "auto-login")]
             MessageRoute::AutoLogin => {
@@ -1626,6 +1653,15 @@ impl App {
             }
             Message::CloseDialog => {
                 self.text_input_context = None;
+                if matches!(self.dialog, Some(Dialog::BackupRestore))
+                    && self.backup_restore_ui.dismissal_blocked()
+                {
+                    self.show_toast(
+                        "Wuddle is staging the restore. This window will close when it completes.",
+                        ToastKind::Info,
+                    );
+                    return self.finish_update(Task::none());
+                }
                 let closing_mpq_workflow =
                     self.dialog.as_ref().is_some_and(Dialog::is_mpq_workflow);
                 if closing_mpq_workflow && self.mpq_ui.dismissal_blocked() {
@@ -2056,6 +2092,7 @@ impl App {
                     .into()
             } else {
                 let (dialog_max_w, dialog_pad) = match dialog {
+                    Dialog::BackupRestore => (760u32, 24),
                     Dialog::AddRepo { .. } => (1400u32, 16),
                     Dialog::MpqAdd => (1000u32, 16),
                     Dialog::MpqInstall
@@ -2110,6 +2147,15 @@ impl App {
                         .style(move |_theme| theme::dialog_style(c_dlg))
                         .into()
                 } else if matches!(dialog, Dialog::MpqPackage { .. }) {
+                    container(self.view_dialog(dialog, self.theme_colors))
+                        .max_width(dialog_max_w)
+                        .max_height(760)
+                        .padding(dialog_pad)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(move |_theme| theme::dialog_style(c_dlg))
+                        .into()
+                } else if matches!(dialog, Dialog::BackupRestore) {
                     container(self.view_dialog(dialog, self.theme_colors))
                         .max_width(dialog_max_w)
                         .max_height(760)
@@ -2428,6 +2474,7 @@ impl App {
     ) -> Element<'a, Message> {
         let c = colors;
         match dialog {
+            Dialog::BackupRestore => crate::backup_restore::view_dialog(self, colors),
             Dialog::MpqAdd
             | Dialog::MpqInstall
             | Dialog::ProtectedMpqs

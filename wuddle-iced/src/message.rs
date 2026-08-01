@@ -97,6 +97,31 @@ pub enum Message {
     DiagnosticsExportPathSelected(Option<PathBuf>),
     DiagnosticsExported(Result<(), String>),
 
+    // Full settings/profile backup and restore
+    OpenBackupRestore,
+    ExportWuddleBackup,
+    WuddleBackupExportPathSelected(Option<PathBuf>),
+    WuddleBackupExported(Result<crate::backup_restore::ExportSummary, String>),
+    PickWuddleBackupArchive,
+    PickOldWuddleFolder,
+    WuddleBackupSourcePicked {
+        path: Option<PathBuf>,
+        directory: bool,
+    },
+    WuddleBackupInspected(Result<crate::backup_restore::BackupPreview, String>),
+    ToggleWuddleBackupSection(crate::backup_restore::PreviewSection),
+    RequestWuddleRestore,
+    CancelWuddleRestore,
+    ConfirmWuddleRestore,
+    WuddleRestoreStaged(Result<crate::backup_restore::RestoreSchedule, String>),
+    WuddleRestoreRestarted(Result<(), String>),
+    RequestWuddleReset,
+    CancelWuddleReset,
+    ToggleWuddleResetCredentials(bool),
+    ConfirmWuddleReset,
+    WuddleResetPrepared(Result<(), String>),
+    WuddleResetRestarted(Result<(), String>),
+
     // Toast notifications
     DismissToast(usize),
     ToastHovered(usize, bool),

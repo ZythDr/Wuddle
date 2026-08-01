@@ -501,6 +501,41 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
         c,
     );
 
+    // --- Backup and Restore section ---
+    let backup_section = settings_card(
+        row![
+            column![
+                text("Backup and Restore").size(18).color(colors.title),
+                text("Save or restore Wuddle's profiles, preferences, and tracked project data.")
+                    .size(12)
+                    .color(colors.muted),
+                text("Installed game files and credentials are not copied into the backup.")
+                    .size(12)
+                    .color(colors.muted),
+            ]
+            .spacing(4),
+            Space::new().width(Length::Fill),
+            tip(
+                {
+                    let c2 = c;
+                    button(text("Backup and Restore...").size(13))
+                        .on_press(Message::OpenBackupRestore)
+                        .padding([6, 12])
+                        .style(move |_theme, status| match status {
+                            button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                            _ => theme::tab_button_style(c2),
+                        })
+                },
+                "Create a complete Wuddle settings backup, restore a backup ZIP, or import an old Wuddle data folder.\n\nGitHub tokens and auto-login passwords remain in the operating system credential vault.",
+                tooltip::Position::Top,
+                colors,
+            ),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center),
+        c,
+    );
+
     scrollable(
         column![
             instances_section,
@@ -508,6 +543,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 .spacing(8)
                 .height(280),
             github_section,
+            backup_section,
         ]
         .spacing(8)
         .width(Length::Fill),
