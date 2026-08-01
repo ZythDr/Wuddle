@@ -518,6 +518,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                     app.infrequent_repo_ids.clear();
                     app.updating_repo_ids.clear();
                     app.open_menu = None;
+                    app.text_input_context = None;
                     // Profile-specific dialogs can carry numeric repository IDs
                     // that are meaningful only in the database that opened them.
                     app.dialog = None;

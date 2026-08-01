@@ -1,9 +1,10 @@
 use iced::advanced::text::Wrapping;
 use iced::widget::{
-    button, checkbox, column, container, row, stack, text, text_editor, text_input, tooltip, Space,
+    button, checkbox, column, container, row, stack, text, text_editor, tooltip, Space,
 };
 use iced::{Element, Font, Length};
 
+use crate::components::text_input_context::context_text_input;
 use crate::theme::{self, ThemeColors};
 use crate::{App, LogFilter, LogLevel, Message};
 
@@ -170,7 +171,13 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
             let c2 = c;
             let show_clear = !app.log_search.is_empty();
             stack![
-                text_input("Search logs", &app.log_search)
+                context_text_input(
+                    app,
+                    colors,
+                    "log-search",
+                    "Search logs",
+                    &app.log_search,
+                )
                     .on_input(Message::SetLogSearch)
                     .width(180)
                     .padding(iced::Padding { top: 4.0, right: if show_clear { 26.0 } else { 10.0 }, bottom: 4.0, left: 10.0 }),

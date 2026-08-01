@@ -1,9 +1,9 @@
 use iced::widget::{
-    button, checkbox, column, container, grid, row, scrollable, stack, text, text_input, tooltip,
-    Space,
+    button, checkbox, column, container, grid, row, scrollable, stack, text, tooltip, Space,
 };
 use iced::{Element, Length};
 
+use crate::components::text_input_context::context_text_input;
 use crate::settings::{self, UiScaleMode};
 use crate::theme::{self, ThemeColors, WuddleTheme};
 use crate::{App, Dialog, Message};
@@ -149,9 +149,11 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     );
 
     // --- Behavior section ---
-    let interval_input = text_input("60", &app.auto_check_minutes.to_string())
-        .width(60)
-        .padding([4, 8]);
+    let interval_value = app.auto_check_minutes.to_string();
+    let interval_input =
+        context_text_input(app, colors, "auto-check-interval", "60", &interval_value)
+            .width(60)
+            .padding([4, 8]);
     let interval_input = if app.opt_auto_check {
         interval_input.on_input(Message::SetAutoCheckMinutes)
     } else {
@@ -418,7 +420,13 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                         "ghp_..."
                     };
                     stack![
-                        text_input(placeholder, &app.github_token_input)
+                        context_text_input(
+                            app,
+                            colors,
+                            "github-token",
+                            placeholder,
+                            &app.github_token_input,
+                        )
                             .on_input(Message::SetGithubTokenInput)
                             .width(Length::Fill)
                             .padding(iced::Padding { top: 8.0, right: if show_clear { 28.0 } else { 12.0 }, bottom: 8.0, left: 12.0 }),

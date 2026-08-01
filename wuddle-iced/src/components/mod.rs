@@ -13,3 +13,4 @@ pub mod helpers;
 pub mod markdown;
 #[allow(dead_code)]
 pub mod presets;
+pub mod text_input_context;

@@ -1,6 +1,5 @@
 use iced::widget::{
-    button, checkbox, column, container, mouse_area, pick_list, row, scrollable, text, text_input,
-    Space,
+    button, checkbox, column, container, mouse_area, pick_list, row, scrollable, text, Space,
 };
 use iced::{Element, Length, Task};
 use wuddle_engine::auto_login::{
@@ -8,6 +7,7 @@ use wuddle_engine::auto_login::{
 };
 
 use crate::components::helpers::{close_button, dialog_field_label};
+use crate::components::text_input_context::context_text_input;
 use crate::theme::{self, ThemeColors};
 use crate::{App, Dialog, LogLevel, Message, ToastKind};
 
@@ -801,26 +801,56 @@ fn editor_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> 
         ]
         .align_y(iced::Alignment::Center),
         dialog_field_label("Account label", colors),
-        text_input("Main account", &editor.label)
-            .on_input(Message::SetAutoLoginLabel)
-            .padding([8, 12]),
+        context_text_input(
+            app,
+            colors,
+            "auto-login-label",
+            "Main account",
+            &editor.label,
+        )
+        .on_input(Message::SetAutoLoginLabel)
+        .padding([8, 12]),
         dialog_field_label("Login", colors),
-        text_input("Account name or email", editor.login.expose())
-            .on_input(|value| Message::SetAutoLoginLogin(SecretText::new(value)))
-            .padding([8, 12]),
+        context_text_input(
+            app,
+            colors,
+            "auto-login-name",
+            "Account name or email",
+            editor.login.expose(),
+        )
+        .on_input(|value| Message::SetAutoLoginLogin(SecretText::new(value)))
+        .padding([8, 12]),
         dialog_field_label("Password", colors),
-        text_input(password_hint, editor.password.expose())
-            .secure(true)
-            .on_input(|value| Message::SetAutoLoginPassword(SecretText::new(value)))
-            .padding([8, 12]),
+        context_text_input(
+            app,
+            colors,
+            "auto-login-password",
+            password_hint,
+            editor.password.expose(),
+        )
+        .secure(true)
+        .on_input(|value| Message::SetAutoLoginPassword(SecretText::new(value)))
+        .padding([8, 12]),
         dialog_field_label("Realmlist (optional)", colors),
-        text_input("logon.example.com", editor.realmlist.expose())
-            .on_input(|value| Message::SetAutoLoginRealmlist(SecretText::new(value)))
-            .padding([8, 12]),
+        context_text_input(
+            app,
+            colors,
+            "auto-login-realmlist",
+            "logon.example.com",
+            editor.realmlist.expose(),
+        )
+        .on_input(|value| Message::SetAutoLoginRealmlist(SecretText::new(value)))
+        .padding([8, 12]),
         dialog_field_label("Realm name (optional)", colors),
-        text_input("Realm Name", editor.realm_name.expose())
-            .on_input(|value| Message::SetAutoLoginRealmName(SecretText::new(value)))
-            .padding([8, 12]),
+        context_text_input(
+            app,
+            colors,
+            "auto-login-realm-name",
+            "Realm Name",
+            editor.realm_name.expose(),
+        )
+        .on_input(|value| Message::SetAutoLoginRealmName(SecretText::new(value)))
+        .padding([8, 12]),
         warning,
         row![
             Space::new().width(Length::Fill),

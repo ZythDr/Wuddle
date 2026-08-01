@@ -1,11 +1,12 @@
 use iced::widget::{
-    button, column, container, pick_list, row, rule, scrollable, text, text_editor, text_input,
-    toggler, tooltip, Space,
+    button, column, container, pick_list, row, rule, scrollable, text, text_editor, toggler,
+    tooltip, Space,
 };
 use iced::{Element, Font, Length};
 
+use crate::components::text_input_context::context_text_input;
 use crate::theme::{self, ThemeColors};
-use crate::{AnisotropyLevel, DxvkConfig, DxvkField, Message, PresentInterval, TriState};
+use crate::{AnisotropyLevel, App, DxvkConfig, DxvkField, Message, PresentInterval, TriState};
 
 // ---------------------------------------------------------------------------
 // Config generator (pure function — no Iced dependency)
@@ -367,6 +368,7 @@ fn conf_highlight_format(
 // ---------------------------------------------------------------------------
 
 pub fn view<'a>(
+    app: &'a App,
     cfg: &'a DxvkConfig,
     wow_dir: &str,
     show_preview: bool,
@@ -417,6 +419,7 @@ pub fn view<'a>(
                     "Performance & Latency",
                     column![
                         num_row_tip(
+                            app,
                             "Max Frame Rate",
                             "Limits the frame rate (FPS). 0 = Unlimited, Recommended: Match monitor\u{2019}s refresh rate for energy savings, or set a custom limit up to 240 FPS*",
                             "* Frame rates above 240 may increase the chances of weird behavior such as invisible Player & NPC models in some situations. This issue can still occur below 240 FPS, but is more likely to occur at higher frame rates.",
@@ -425,6 +428,7 @@ pub fn view<'a>(
                             c,
                         ),
                         num_row(
+                            app,
                             "Max Frame Latency",
                             "How many frames the GPU may buffer ahead (1-16). Fewer frames means lower input latency. 1 is recommended for the most responsive feel.",
                             &cfg.max_frame_latency,
@@ -454,6 +458,7 @@ pub fn view<'a>(
                             c,
                         ),
                         num_row(
+                            app,
                             "Compiler Threads",
                             "Number of background threads dedicated to compiling graphics pipelines. 0 = use all available CPU cores. Reducing this can free cores for the game but may increase compile stutter.",
                             &cfg.num_compiler_threads,
@@ -573,13 +578,14 @@ pub fn view<'a>(
                     "Logging & HUD",
                     column![
                         input_row(
+                            app,
                             "Log Path",
                             "Directory where dxvk.log is written. Use \".\" to write it next to the game executable. Leave empty to disable DXVK file logging (errors still go to stderr).",
                             &cfg.log_path,
                             |s| Message::SetDxvkField(DxvkField::LogPath(s)),
                             c,
                         ),
-                        hud_row(&cfg.hud, c),
+                        hud_row(app, &cfg.hud, c),
                     ]
                     .spacing(16),
                     c,
@@ -853,6 +859,7 @@ where
 
 /// Number text-input row.
 fn num_row<'a, F>(
+    app: &'a App,
     label: &str,
     desc: &str,
     value: &str,
@@ -860,13 +867,13 @@ fn num_row<'a, F>(
     colors: ThemeColors,
 ) -> Element<'a, Message>
 where
-    F: 'a + Fn(String) -> Message,
+    F: 'static + Send + Sync + Fn(String) -> Message,
 {
     let c = colors;
     let inner = row![
         label_desc(label, desc, colors),
         Space::new().width(Length::FillPortion(3)),
-        text_input("", value)
+        context_text_input(app, colors, format!("dxvk-input-{label}"), "", value)
             .on_input(on_input)
             .width(80)
             .padding([5, 8]),
@@ -878,6 +885,7 @@ where
 
 /// Number text-input row with a separate tooltip text (different from the inline description).
 fn num_row_tip<'a, F>(
+    app: &'a App,
     label: &str,
     desc: &str,
     tip: &str,
@@ -886,13 +894,13 @@ fn num_row_tip<'a, F>(
     colors: ThemeColors,
 ) -> Element<'a, Message>
 where
-    F: 'a + Fn(String) -> Message,
+    F: 'static + Send + Sync + Fn(String) -> Message,
 {
     let c = colors;
     let inner = row![
         label_desc(label, desc, colors),
         Space::new().width(Length::FillPortion(3)),
-        text_input("", value)
+        context_text_input(app, colors, format!("dxvk-input-{label}"), "", value)
             .on_input(on_input)
             .width(80)
             .padding([5, 8]),
@@ -904,6 +912,7 @@ where
 
 /// Text-input row (for string fields like logPath / hud).
 fn input_row<'a, F>(
+    app: &'a App,
     label: &str,
     desc: &str,
     value: &str,
@@ -911,13 +920,13 @@ fn input_row<'a, F>(
     colors: ThemeColors,
 ) -> Element<'a, Message>
 where
-    F: 'a + Fn(String) -> Message,
+    F: 'static + Send + Sync + Fn(String) -> Message,
 {
     let c = colors;
     let inner = row![
         label_desc(label, desc, colors),
         Space::new().width(Length::FillPortion(3)),
-        text_input("", value)
+        context_text_input(app, colors, format!("dxvk-input-{label}"), "", value)
             .on_input(on_input)
             .width(120)
             .padding([5, 8]),
@@ -1023,7 +1032,7 @@ where
 }
 
 /// HUD row with a label, description, text input, and quick-preset buttons.
-fn hud_row<'a>(value: &str, colors: ThemeColors) -> Element<'a, Message> {
+fn hud_row<'a>(app: &'a App, value: &str, colors: ThemeColors) -> Element<'a, Message> {
     let c = colors;
     let desc = "On-screen performance overlay. Combine tokens: fps, memory, devinfo, pipelines. Leave empty to disable.";
 
@@ -1041,7 +1050,7 @@ fn hud_row<'a>(value: &str, colors: ThemeColors) -> Element<'a, Message> {
     let inner = column![
         label_desc("HUD", desc, colors),
         row![
-            text_input("e.g. fps,memory", value)
+            context_text_input(app, colors, "dxvk-input-hud", "e.g. fps,memory", value,)
                 .on_input(|s| Message::SetDxvkField(DxvkField::Hud(s)))
                 .width(Length::Fill)
                 .padding([5, 8]),

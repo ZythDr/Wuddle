@@ -3,7 +3,54 @@ use crate::settings::{self, UpdateChannel};
 use crate::theme::WuddleTheme;
 use crate::tweaks;
 use crate::types::*;
+use iced::Point;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct TextInputAction(Arc<dyn Fn(String) -> Message + Send + Sync>);
+
+impl std::fmt::Debug for TextInputAction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TextInputAction(<redacted>)")
+    }
+}
+
+impl TextInputAction {
+    pub fn new(action: impl Fn(String) -> Message + Send + Sync + 'static) -> Self {
+        Self(Arc::new(action))
+    }
+
+    pub fn apply(&self, value: String) -> Message {
+        (self.0)(value)
+    }
+}
+
+#[derive(Clone)]
+pub struct TextInputContext {
+    pub key: String,
+    pub value: String,
+    pub selection: Option<(usize, usize)>,
+    pub cursor: usize,
+    pub position: Point,
+    pub widget_id: iced::widget::Id,
+    pub action: Option<TextInputAction>,
+    pub secure: bool,
+}
+
+impl std::fmt::Debug for TextInputContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TextInputContext")
+            .field("key", &self.key)
+            .field("value", &"<redacted>")
+            .field("selection", &self.selection)
+            .field("cursor", &self.cursor)
+            .field("position", &self.position)
+            .field("secure", &self.secure)
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -188,6 +235,11 @@ pub enum Message {
     ToggleMenu(String),
     CloseMenu,
     ToggleAddNewMenu,
+    OpenTextInputContext(TextInputContext),
+    CloseTextInputContext,
+    CopyTextInputSelection,
+    PasteIntoTextInput,
+    TextInputClipboardRead(Option<String>),
 
     // Engine data (Phase 2)
     ReposLoaded(ProfileScoped<Result<RepoLoadResult, String>>),

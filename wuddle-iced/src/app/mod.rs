@@ -11,6 +11,7 @@ use crate::components::drop_overlay;
 use crate::components::helpers::*;
 use crate::components::markdown::ImageViewer;
 use crate::components::presets::build_quick_add_presets;
+use crate::components::text_input_context::context_text_input;
 use crate::dialogs::addon_local_changes;
 use crate::dialogs::mods_warning;
 use crate::dialogs::patches_warning;
@@ -132,6 +133,8 @@ pub struct App {
 
     // Context menu: which repo's menu is open
     pub open_menu: Option<String>,
+    // Native-style Copy/Paste menu for the active text input.
+    pub text_input_context: Option<crate::message::TextInputContext>,
     // "Add New" dropdown on the Home tab
     pub add_new_menu_open: bool,
 
@@ -377,6 +380,7 @@ impl App {
             log_error_misc: true,
             dialog: None,
             open_menu: None,
+            text_input_context: None,
             add_new_menu_open: false,
             branches: HashMap::new(),
             repos: Vec::new(),
@@ -1259,6 +1263,7 @@ impl App {
                 return Task::none();
             }
             Message::SetTab(tab) => {
+                self.text_input_context = None;
                 if !self.profile_tab_enabled(tab) {
                     return Task::none();
                 }
@@ -1459,6 +1464,7 @@ impl App {
             }
             Message::OpenDialog(mut d) => {
                 self.begin_preview_request();
+                self.text_input_context = None;
                 self.open_menu = None;
                 self.add_new_menu_open = false;
                 if matches!(
@@ -1619,6 +1625,7 @@ impl App {
                 }
             }
             Message::CloseDialog => {
+                self.text_input_context = None;
                 let closing_mpq_workflow =
                     self.dialog.as_ref().is_some_and(Dialog::is_mpq_workflow);
                 if closing_mpq_workflow && self.mpq_ui.dismissal_blocked() {
@@ -1768,6 +1775,7 @@ impl App {
 
             // Context menu
             Message::ToggleMenu(id) => {
+                self.text_input_context = None;
                 if self.open_menu.as_ref() == Some(&id) {
                     self.open_menu = None;
                 } else {
@@ -1780,8 +1788,52 @@ impl App {
                 self.add_new_menu_open = false;
             }
             Message::ToggleAddNewMenu => {
+                self.text_input_context = None;
                 self.add_new_menu_open = !self.add_new_menu_open;
                 self.open_menu = None;
+            }
+            Message::OpenTextInputContext(context) => {
+                self.text_input_context = Some(context);
+                self.open_menu = None;
+                self.add_new_menu_open = false;
+            }
+            Message::CloseTextInputContext => {
+                self.text_input_context = None;
+            }
+            Message::CopyTextInputSelection => {
+                let selected = self
+                    .text_input_context
+                    .as_ref()
+                    .and_then(crate::components::text_input_context::selected_text);
+                self.text_input_context = None;
+                if let Some(selected) = selected {
+                    return self.finish_update(iced::clipboard::write(selected));
+                }
+            }
+            Message::PasteIntoTextInput => {
+                return self
+                    .finish_update(iced::clipboard::read().map(Message::TextInputClipboardRead));
+            }
+            Message::TextInputClipboardRead(clipboard_text) => {
+                let Some(context) = self.text_input_context.take() else {
+                    return self.finish_update(Task::none());
+                };
+                let Some(clipboard_text) = clipboard_text else {
+                    return self.finish_update(Task::none());
+                };
+                let Some((message, cursor)) =
+                    crate::components::text_input_context::paste_message(&context, &clipboard_text)
+                else {
+                    return self.finish_update(Task::none());
+                };
+                let widget_id = context.widget_id;
+                return self.finish_update(
+                    Task::done(message)
+                        .chain(iced::widget::operation::focus(widget_id.clone()))
+                        .chain(iced::widget::operation::select_range(
+                            widget_id, cursor, cursor,
+                        )),
+                );
             }
 
             // --- Phase 2: Data loading ---
@@ -2431,7 +2483,7 @@ impl App {
                 let url_row: Element<Message> = {
                     let c2 = c;
                     let url_stack: Element<Message> = stack![
-                        iced::widget::text_input(placeholder, url)
+                        context_text_input(self, colors, "add-repo-url", placeholder, url)
                             .id(iced::widget::Id::new("add_repo_url"))
                             .on_input(Message::SetAddRepoUrl)
                             .on_submit(Message::ResolveAddRepoUrl)
@@ -4946,7 +4998,13 @@ impl App {
                             .size(16)
                             .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
                             .color(colors.text),
-                        iced::widget::text_input("lutris:rungameid/2", lutris_target)
+                        context_text_input(
+                            self,
+                            colors,
+                            "profile-lutris-target",
+                            "lutris:rungameid/2",
+                            lutris_target,
+                        )
                             .on_input(|s| Message::UpdateInstanceField(
                                 InstanceField::LutrisTarget(s)
                             ))
@@ -4962,7 +5020,13 @@ impl App {
                             .size(16)
                             .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
                             .color(colors.text),
-                        iced::widget::text_input("wine", wine_command)
+                        context_text_input(
+                            self,
+                            colors,
+                            "profile-wine-command",
+                            "wine",
+                            wine_command,
+                        )
                             .on_input(|s| Message::UpdateInstanceField(InstanceField::WineCommand(
                                 s
                             )))
@@ -4971,7 +5035,13 @@ impl App {
                             .size(16)
                             .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
                             .color(colors.text),
-                        iced::widget::text_input("--some-arg value", wine_args)
+                        context_text_input(
+                            self,
+                            colors,
+                            "profile-wine-arguments",
+                            "--some-arg value",
+                            wine_args,
+                        )
                             .on_input(|s| Message::UpdateInstanceField(InstanceField::WineArgs(s)))
                             .padding([8, 12]),
                         text("Use quotes around an argument containing spaces. Backslashes may escape quotes or spaces.")
@@ -4985,7 +5055,13 @@ impl App {
                             .size(16)
                             .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
                             .color(colors.text),
-                        iced::widget::text_input("command", custom_command)
+                        context_text_input(
+                            self,
+                            colors,
+                            "profile-custom-command",
+                            "command",
+                            custom_command,
+                        )
                             .on_input(|s| Message::UpdateInstanceField(
                                 InstanceField::CustomCommand(s)
                             ))
@@ -4994,7 +5070,13 @@ impl App {
                             .size(16)
                             .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
                             .color(colors.text),
-                        iced::widget::text_input("--flag value", custom_args)
+                        context_text_input(
+                            self,
+                            colors,
+                            "profile-custom-arguments",
+                            "--flag value",
+                            custom_args,
+                        )
                             .on_input(|s| Message::UpdateInstanceField(InstanceField::CustomArgs(
                                 s
                             )))
@@ -5171,7 +5253,13 @@ impl App {
                         .size(16)
                         .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
                         .color(colors.text),
-                    iced::widget::text_input("My WoW Install", name)
+                    context_text_input(
+                        self,
+                        colors,
+                        "profile-name",
+                        "My WoW Install",
+                        name,
+                    )
                         .on_input(|s| Message::UpdateInstanceField(InstanceField::Name(s)))
                         .padding([8, 12]),
                     Space::new().height(8),
@@ -5180,7 +5268,13 @@ impl App {
                         .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
                         .color(colors.text),
                     row![
-                        iced::widget::text_input("/path/to/WoW or /path/to/Game.exe", wow_dir)
+                        context_text_input(
+                            self,
+                            colors,
+                            "profile-wow-path",
+                            "/path/to/WoW or /path/to/Game.exe",
+                            wow_dir,
+                        )
                             .on_input(|s| Message::UpdateInstanceField(InstanceField::WowDir(s)))
                             .width(Length::Fill)
                             .padding([8, 12]),
@@ -5275,6 +5369,7 @@ impl App {
                 config,
                 show_preview,
             } => panels::dxvk_config::view(
+                self,
                 config,
                 &self.wow_dir,
                 *show_preview,

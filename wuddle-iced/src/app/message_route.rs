@@ -314,6 +314,11 @@ pub(super) fn classify(message: &Message, dialog: &Option<Dialog>) -> MessageRou
         | Message::ToggleMenu(..)
         | Message::CloseMenu
         | Message::ToggleAddNewMenu
+        | Message::OpenTextInputContext(..)
+        | Message::CloseTextInputContext
+        | Message::CopyTextInputSelection
+        | Message::PasteIntoTextInput
+        | Message::TextInputClipboardRead(..)
         | Message::RepoDetailsLoaded(..)
         | Message::ToggleRepoDetailsPath(..)
         | Message::RepoDetailsChildrenLoaded(..)

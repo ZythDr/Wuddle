@@ -30,17 +30,23 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.7.0-beta.10
+### What's New in v3.7.0-beta.11
+
+- **Right-Click Copy and Paste** — Editable text fields throughout Wuddle now provide a consistent, themed context menu.
+- **Selection-Aware Editing** — Copy uses the current selection, while Paste replaces it or inserts text at the existing caret position without moving the caret when the menu opens.
+- **Safe Password Pasting** — Secure password fields allow Paste without exposing their contents through Copy or diagnostics.
+
+See the [full changelog](CHANGELOG.md#v370-beta11) for the technical details.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.7.0-beta.10
 
 - **Reliable Modified Addon Detection** — Rescanning now identifies edited, deleted, and newly added files in Wuddle- and GAM-managed Git addons.
 - **No Extra API Usage** — Modification detection compares against the local checked-out Git revision without contacting GitHub.
 - **Manual Addons Left Alone** — Addons without a local Git baseline are excluded from modification scanning.
 - **Clearer Warnings and Diagnostics** — Modified status is retained reliably, while prompts and privacy-safe logs better explain why an addon was flagged.
-
-See the [full changelog](CHANGELOG.md#v370-beta10) for the technical details.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.7.0-beta.9
 

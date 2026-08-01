@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use iced::widget::{
-    button, checkbox, column, container, pick_list, row, rule, scrollable, text, text_input, Space,
+    button, checkbox, column, container, pick_list, row, rule, scrollable, text, Space,
 };
 use iced::{Element, Length, Task};
 
@@ -12,6 +12,7 @@ use crate::app::App;
 use crate::components::helpers::{
     badge_tag, close_button, dialog_description, dialog_field_label, tip,
 };
+use crate::components::text_input_context::context_text_input;
 use crate::message::Message;
 use crate::service;
 use crate::theme::{self, ThemeColors};
@@ -2089,7 +2090,10 @@ fn view_add(app: &App, colors: ThemeColors) -> Element<'_, Message> {
         ),
         rule::horizontal(1).style(move |_theme| theme::update_line_style(colors)),
         dialog_field_label("MPQ URL", colors),
-        text_input(
+        context_text_input(
+            app,
+            colors,
+            "mpq-direct-url",
             "(e.g. https://example.com/patch-name.mpq)",
             &app.mpq_ui.direct_url,
         )
@@ -2179,15 +2183,27 @@ fn view_install(app: &App, colors: ThemeColors) -> Element<'_, Message> {
                 row![
                     column![
                         dialog_field_label("Friendly name", colors),
-                        text_input("Required label", &selection.display_name)
-                            .on_input(move |value| Message::SetMpqDisplayName(index, value))
+                        context_text_input(
+                            app,
+                            colors,
+                            format!("mpq-install-friendly-name-{index}"),
+                            "Required label",
+                            &selection.display_name,
+                        )
+                        .on_input(move |value| Message::SetMpqDisplayName(index, value))
                     ]
                     .spacing(3)
                     .width(Length::Fill),
                     column![
                         dialog_field_label("On-disk filename", colors),
-                        text_input("patch-name.MPQ", &selection.file_name)
-                            .on_input(move |value| Message::SetMpqFileName(index, value))
+                        context_text_input(
+                            app,
+                            colors,
+                            format!("mpq-install-file-name-{index}"),
+                            "patch-name.MPQ",
+                            &selection.file_name,
+                        )
+                        .on_input(move |value| Message::SetMpqFileName(index, value))
                     ]
                     .spacing(3)
                     .width(Length::Fill),
@@ -2906,10 +2922,23 @@ fn view_component<'a>(
         heading("Edit MPQ", "Edit this Wuddle-installed patch.", colors),
         text(path).size(11).color(colors.muted),
         dialog_field_label("Friendly name", colors),
-        text_input(display_name, edited_display_name)
+        context_text_input(
+            app,
+            colors,
+            "mpq-component-friendly-name",
+            display_name,
+            edited_display_name,
+        )
             .on_input(Message::SetMpqComponentDisplayName),
         dialog_field_label("Filename on disk", colors),
-        text_input(file_name, edited_file_name).on_input(Message::SetMpqComponentFileName),
+        context_text_input(
+            app,
+            colors,
+            "mpq-component-file-name",
+            file_name,
+            edited_file_name,
+        )
+        .on_input(Message::SetMpqComponentFileName),
         dialog_field_label("Location", colors),
         pick_list(
             destinations,
@@ -3010,8 +3039,14 @@ fn view_package<'a>(app: &'a App, dialog: &'a Dialog, colors: ThemeColors) -> El
         .enumerate()
         .map(|(index, file)| {
             let unlocked = file.editor_unlocked;
-            let friendly_input =
-                text_input(&file.display_name, &file.edited_display_name).width(Length::Fill);
+            let friendly_input = context_text_input(
+                app,
+                colors,
+                format!("mpq-package-friendly-name-{index}"),
+                &file.display_name,
+                &file.edited_display_name,
+            )
+            .width(Length::Fill);
             let friendly_input: Element<Message> = if unlocked {
                 friendly_input
                     .on_input(move |value| Message::SetMpqPackageFileDisplayName(index, value))
@@ -3019,8 +3054,14 @@ fn view_package<'a>(app: &'a App, dialog: &'a Dialog, colors: ThemeColors) -> El
             } else {
                 friendly_input.into()
             };
-            let file_name_input =
-                text_input(&file.file_name, &file.edited_file_name).width(Length::Fill);
+            let file_name_input = context_text_input(
+                app,
+                colors,
+                format!("mpq-package-file-name-{index}"),
+                &file.file_name,
+                &file.edited_file_name,
+            )
+            .width(Length::Fill);
             let file_name_input: Element<Message> = if unlocked {
                 file_name_input
                     .on_input(move |value| Message::SetMpqPackageFileName(index, value))
@@ -3136,7 +3177,13 @@ fn view_package<'a>(app: &'a App, dialog: &'a Dialog, colors: ThemeColors) -> El
             colors,
         ),
         dialog_field_label("Package name", colors),
-        text_input(display_name, edited_display_name)
+        context_text_input(
+            app,
+            colors,
+            "mpq-package-name",
+            display_name,
+            edited_display_name,
+        )
             .on_input(Message::SetMpqPackageDisplayName),
         dialog_description(
             "The package name is only a Wuddle label. Its collision-safe internal identity remains unchanged.",
@@ -3216,10 +3263,23 @@ fn view_edit_untracked_mpq<'a>(
         ),
         text(path).size(11).color(colors.muted),
         dialog_field_label("Friendly name", colors),
-        text_input(display_name, edited_display_name)
+        context_text_input(
+            app,
+            colors,
+            "untracked-mpq-friendly-name",
+            display_name,
+            edited_display_name,
+        )
             .on_input(Message::SetMpqEditorDisplayName),
         dialog_field_label("Filename on disk", colors),
-        text_input(file_name, edited_file_name).on_input(Message::SetMpqEditorFileName),
+        context_text_input(
+            app,
+            colors,
+            "untracked-mpq-file-name",
+            file_name,
+            edited_file_name,
+        )
+        .on_input(Message::SetMpqEditorFileName),
         dialog_field_label("Location", colors),
         pick_list(
             destinations,
@@ -3286,7 +3346,14 @@ fn view_manual_component<'a>(
         ),
         text(path).size(12).color(colors.muted),
         dialog_field_label("Friendly name", colors),
-        text_input(display_name, edited_display_name).on_input(Message::SetManualMpqDisplayName),
+        context_text_input(
+            app,
+            colors,
+            "manual-mpq-friendly-name",
+            display_name,
+            edited_display_name,
+        )
+        .on_input(Message::SetManualMpqDisplayName),
         error_view(app.mpq_ui.error.as_deref(), colors),
         row![
             Space::new().width(Length::Fill),
@@ -3343,7 +3410,14 @@ fn view_rename_manual_mpq<'a>(
         ),
         text(path).size(12).color(colors.muted),
         dialog_field_label("Filename on disk", colors),
-        text_input(file_name, edited_file_name).on_input(Message::SetManualMpqFileName),
+        context_text_input(
+            app,
+            colors,
+            "manual-mpq-file-name",
+            file_name,
+            edited_file_name,
+        )
+        .on_input(Message::SetManualMpqFileName),
         dialog_description(
             "Use a plain filename ending in .MPQ. Core-client names and existing files cannot be overwritten.",
             colors,

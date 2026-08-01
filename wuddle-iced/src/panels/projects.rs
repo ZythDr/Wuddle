@@ -1,11 +1,12 @@
 use iced::widget::{
     button, checkbox, column, container, mouse_area, pick_list, row, rule, scrollable, stack, text,
-    text_input, tooltip, Space,
+    tooltip, Space,
 };
 use iced::{Element, Length};
 
 use crate::anchored_overlay::AnchoredOverlay;
 use crate::components::helpers::{ctx_menu_item, ctx_menu_item_disabled_with_tooltip};
+use crate::components::text_input_context::context_text_input;
 use crate::service::is_mod;
 use crate::service::RepoRow;
 use crate::theme::name_font;
@@ -579,15 +580,21 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
         let c2 = c;
         let show_clear = !app.project_search.is_empty();
         stack![
-            text_input("Search...", &app.project_search)
-                .on_input(Message::SetProjectSearch)
-                .width(180)
-                .padding(iced::Padding {
-                    top: 4.0,
-                    right: if show_clear { 26.0 } else { 10.0 },
-                    bottom: 4.0,
-                    left: 10.0
-                }),
+            context_text_input(
+                app,
+                colors,
+                "project-search",
+                "Search...",
+                &app.project_search,
+            )
+            .on_input(Message::SetProjectSearch)
+            .width(180)
+            .padding(iced::Padding {
+                top: 4.0,
+                right: if show_clear { 26.0 } else { 10.0 },
+                bottom: 4.0,
+                left: 10.0
+            }),
             {
                 let clear_el: Element<Message> = if show_clear {
                     button(text("\u{2715}").size(12).color(c2.muted))

@@ -1,6 +1,6 @@
 [package]
 name = "wuddle-iced"
-version = "3.7.0-beta.10"
+version = "3.7.0-beta.11"
 description = "Native desktop launcher and manager for legacy World of Warcraft clients"
 edition = "2021"
 license = "MIT"

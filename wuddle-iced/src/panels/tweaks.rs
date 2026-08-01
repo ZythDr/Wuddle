@@ -1,8 +1,9 @@
 use iced::widget::{
-    button, checkbox, column, container, row, scrollable, slider, text, text_input, tooltip, Space,
+    button, checkbox, column, container, row, scrollable, slider, text, tooltip, Space,
 };
 use iced::{Element, Length};
 
+use crate::components::text_input_context::context_text_input;
 use crate::theme::{self, ThemeColors};
 use crate::{App, Message, TweakId};
 
@@ -181,6 +182,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 colors,
             ),
             tweak_row_input(
+                app,
                 "Max Camera Distance",
                 "Override maximum camera zoom-out distance (10-200).",
                 TweakId::MaxCameraDist,
@@ -206,6 +208,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
                 colors,
             ),
             tweak_row_input(
+                app,
                 "Sound Channels",
                 "Number of simultaneous sound channels (1-999).",
                 TweakId::SoundChannels,
@@ -323,6 +326,7 @@ fn tweak_row_check<'a>(
 
 /// Tweak row with checkbox + text input for numeric value
 fn tweak_row_input<'a, F>(
+    app: &'a App,
     name: &str,
     desc: &str,
     id: TweakId,
@@ -332,14 +336,14 @@ fn tweak_row_input<'a, F>(
     colors: ThemeColors,
 ) -> Element<'a, Message>
 where
-    F: 'a + Fn(String) -> Message,
+    F: 'static + Send + Sync + Fn(String) -> Message,
 {
     column![
         checkbox(checked)
             .label(String::from(name))
             .on_toggle(move |b| Message::ToggleTweak(id, b)),
         row![
-            text_input("", value_str)
+            context_text_input(app, colors, format!("tweak-input-{name}"), "", value_str,)
                 .on_input(on_change)
                 .width(80)
                 .padding([6, 8]),

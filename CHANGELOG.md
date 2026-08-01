@@ -2,6 +2,15 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.7.0-beta.11
+
+### New Features
+
+- **Text Field Context Menus**
+  - Right-click editable text fields throughout Wuddle to open a themed menu for copying selected text or pasting from the clipboard.
+  - Paste replaces the current selection or inserts at the existing caret position; opening the menu does not move the caret or alter the selection.
+  - Secure password fields allow pasting without exposing their contents through Copy or diagnostic output.
+
 ## v3.7.0-beta.10
 
 ### Bug Fixes
