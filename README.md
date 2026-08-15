@@ -30,17 +30,16 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.7.0-beta.12
+### What's New in v3.7.0
 
-- **Backup and Restore** — Export profiles, preferences, launch settings, and tracked addon/mod/patch metadata into one backup ZIP, or import a backup or older Wuddle installation. Restores are validated and staged before restart, with the previous data retained as a rollback copy.
-- **Reset Wuddle** — Start over through an explicit confirmation, with an automatic safety backup and a choice to retain or remove system-vault credentials. WoW installations and deployed addon, mod, and MPQ files remain untouched.
-- **Fixed Windows Self-Updates** — Portable updates no longer fail with `os error 32` while validating the staged executable.
-- **Responsive Backup Dialogs** — Backup and Restore workflows grow as previews and controls appear, while keeping headers and action buttons visible and making smaller layouts scrollable.
-- **Reliable Restore Staging** — Backups and older installations using SQLite WAL mode are converted into portable database snapshots before restoration.
-- **Single-Instance Activation** — Starting Wuddle again on Windows now restores or requests attention from the existing window instead of displaying a file-lock error.
-- **One-Time Manual Update May Be Required** — Windows users on an affected beta may need to download this release manually. Extract it over the existing folder, or import the old folder through Backup and Restore in the fresh copy.
+- **MPQ Patch Management** — Install, detect, organize, protect, enable, disable, update, and remove MPQ patches from the dedicated Patches tab. Local packages support `.MPQ`, `.zip`, and `.7z`, while WDM and Epoch Water are available through Quick Add.
+- **Backup, Restore, and Reset** — Export Wuddle's profiles and tracked-project data, restore a backup or older installation, or safely reset Wuddle after an automatic recovery backup. Game files and operating-system-vault credentials remain separate.
+- **Safer Project Management** — Addon, mod, and patch operations use stronger staging, conflict checks, ownership tracking, rollback, and profile isolation to protect existing installations and local changes.
+- **Faster, Smarter Updates** — Concurrent update checks, bounded Git operations, persistent schedules, real update ignoring, and optional GitHub API conservation make update checks faster and less likely to become stuck.
+- **Friendlier Everyday Use** — Added per-profile tab visibility, shared project Details, right-click text editing, window-position memory, clearer profiles, consistent icons, improved notifications, and more informative busy states.
+- **Security and Reliability** — Hardened downloads, archives, README previews, credentials, diagnostics, shutdown, launching, single-window activation, settings recovery, and Linux and Windows self-updates.
 
-See the [full changelog](CHANGELOG.md#v370-beta12) for the technical details.
+See the [full changelog](CHANGELOG.md#v370) for the complete details.
 
 <details>
 <summary><strong>v3.x Changelog</strong></summary>

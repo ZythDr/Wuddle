@@ -2,6 +2,101 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.7.0
+
+### New Features
+
+- **MPQ Patch Management**
+  - Added a dedicated Patches tab for installing and managing custom MPQ patches.
+  - Install local `.MPQ`, `.zip`, and `.7z` packages through a staged installation workflow.
+  - Detect and manage existing custom, disabled, locale-specific, and core-client MPQs.
+  - Label, rename, move, protect, enable, disable, inspect, and remove individual MPQs or complete multi-file packages.
+  - Existing files are protected by default, with conflict review, backups, rollback, and restoration when replacements are approved.
+  - Added curated installation and update support for WDM and Epoch Water, including README previews and WDM's optional companion content.
+
+- **Backup, Restore, and Reset**
+  - Export profiles, preferences, launch configuration, and tracked-project metadata into a portable Wuddle backup.
+  - Restore from a backup ZIP or import data directly from an older Wuddle installation.
+  - Restores are validated and staged before restart, with the previous data retained as a rollback copy.
+  - Added a confirmed Reset Wuddle option that automatically creates a recovery backup first.
+  - Game files and installed projects are never copied or removed. GitHub tokens and auto-login passwords remain in the operating system vault unless explicitly removed during reset.
+
+- **Per-Profile Tab Visibility**
+  - Profiles can now hide Mods, Addons, Patches, or Tweaks when those management areas are unnecessary or unsupported.
+
+- **Project Details**
+  - Mods, addons, and patches now share a Details dialog for reviewing installed files, expanding folders, and browsing their locations.
+
+- **Text Field Context Menus**
+  - Right-click editable text fields to copy selected text or paste from the clipboard.
+  - Secure password fields allow pasting without exposing their contents.
+
+### Improvements
+
+- **Safer Installs, Updates, and Removal**
+  - Addon and mod changes now use more consistent staging, validation, conflict checks, rollback, and metadata transactions.
+  - Shared files are tracked more carefully so one project cannot silently overwrite or remove another project's files.
+  - Reinstall and Repair operations prepare replacements before touching the live installation.
+  - Existing GAM layouts, Git remotes, branches, upstreams, and collection selections are preserved wherever possible.
+
+- **Faster and More Reliable Update Checks**
+  - Git repositories, release-based projects, and curated patches are checked concurrently through bounded workloads.
+  - Added deadlines and cancellation handling to prevent slow Git operations, antivirus scans, or unavailable servers from leaving Wuddle permanently busy.
+  - Ignored projects are excluded before making network requests.
+  - Infrequently updated projects retain their schedules across profile switches.
+
+- **Better GitHub API Handling**
+  - Added the optional Conserve GitHub API setting for unauthenticated users.
+  - Wuddle now clearly explains when GitHub's anonymous request limit has been reached, approximately when it resets, and how adding a token helps.
+  - Invalid and expired token errors provide clearer guidance.
+
+- **Security and Privacy Hardening**
+  - Downloads, archives, redirects, README links, and image previews now receive stricter validation and size limits.
+  - Unsafe archive paths, links, duplicate entries, excessive extraction sizes, and suspicious compression ratios are rejected before installation.
+  - Credentials are restricted to trusted hosts and stored through the operating system vault.
+  - Self-update packages receive stronger platform, architecture, size, executable, and checksum validation.
+  - Diagnostics receive additional sanitization and safer filesystem permissions.
+
+- **Friendlier Profiles and Interface**
+  - Renamed user-facing "Instance" wording to the clearer "Profile."
+  - Profile cards now switch profiles when clicked and use a separate cogwheel for editing.
+  - Redesigned Profile Settings with clearer spacing, larger text, keyboard navigation, and pinned actions around scrollable content.
+  - Added optional window size and position memory.
+  - Replaced platform-dependent cogwheel emoji with consistent themed icons.
+  - Notifications now include a smooth lifetime indicator that pauses while hovered.
+  - The busy indicator explains the current operation and elapsed time when hovered.
+
+- **Expanded Diagnostics**
+  - Verbose logging now covers more installation, update, filesystem, MPQ, mod, repository, rollback, cancellation, and shutdown activity while continuing to redact private data.
+
+- **Channel-Aware Changelogs**
+  - The About page now shows stable notes on the Stable channel and prerelease notes on the Beta channel, with clearer guidance about beta builds.
+
+### Bug Fixes
+
+- **Git Addon Changes and Updates**
+  - Rescans now detect edited, deleted, and newly added files in Wuddle- and GAM-managed Git addons without consuming GitHub API requests.
+  - Updates that would overwrite local changes now offer Cancel, Ignore Updates, or Overwrite and Update.
+  - Line-ending differences are no longer mistaken for user modifications.
+  - Repository replacements, duplicate cached update plans, and disappearing batch targets are handled without restoring an old source or aborting unrelated updates.
+
+- **Profile and Settings Reliability**
+  - Strengthened profile isolation so late background results cannot affect the wrong profile or reopen outdated dialogs.
+  - Settings are now saved atomically with recovery from a known-good backup.
+  - Profile and auto-login account removal are retry-safe and cannot silently leave mismatched metadata or credentials.
+  - Fixed partially applied database migrations preventing affected profiles from loading.
+
+- **Launching and Single-Window Behavior**
+  - Lutris, Wine, Auto, and Custom launch settings remain isolated from one another.
+  - Improved quoted argument and Windows-path handling without invoking a shell.
+  - Opening Wuddle again now more reliably focuses and restores the existing window.
+  - Closing Wuddle reliably cancels or bounds background work instead of leaving an invisible process running.
+
+- **Self-Updates**
+  - Fixed Linux AppImage updates closing Wuddle without restarting.
+  - Fixed Windows portable updates failing when staged executables were inspected while still open.
+  - Improved rollback, version selection, launcher handoff, and cleanup of older runtimes.
+
 ## v3.7.0-beta.12
 
 ### New Features
