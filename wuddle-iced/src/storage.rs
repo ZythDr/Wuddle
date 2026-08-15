@@ -16,6 +16,22 @@ pub fn app_dir() -> Result<PathBuf, String> {
     APP_DIR.get_or_init(resolve_and_initialize).clone()
 }
 
+/// Resolve the directory that contains Wuddle's stable launcher or standalone
+/// executable. User-visible recovery files belong here rather than inside the
+/// application-data directory that a reset removes.
+pub fn installation_root() -> Result<PathBuf, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("Could not locate the running Wuddle executable: {error}"))?;
+        return windows::resolve_install_root(&executable);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        crate::settings::portable_root_dir()
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn resolve_and_initialize() -> Result<PathBuf, String> {
     windows::resolve_and_initialize()
@@ -44,10 +60,19 @@ pub fn allow_legacy_tauri_import() -> bool {
     !cfg!(target_os = "windows")
 }
 
-#[cfg(any(target_os = "windows", test))]
-#[cfg_attr(test, allow(dead_code))]
+#[cfg(target_os = "windows")]
 pub fn legacy_plaintext_token_paths() -> Result<Vec<PathBuf>, String> {
     windows::legacy_plaintext_token_paths()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn legacy_plaintext_token_paths() -> Result<Vec<PathBuf>, String> {
+    let path = app_dir()?.join(".github_token");
+    Ok(if path.is_file() {
+        vec![path]
+    } else {
+        Vec::new()
+    })
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -121,7 +146,7 @@ mod windows {
         Ok(parent.join(format!(".{directory_name}{MARKER_SUFFIX}")))
     }
 
-    fn resolve_install_root(exe: &Path) -> Result<PathBuf, String> {
+    pub(super) fn resolve_install_root(exe: &Path) -> Result<PathBuf, String> {
         let exe_dir = exe.parent().ok_or_else(|| {
             format!(
                 "Wuddle executable has no parent directory: {}",

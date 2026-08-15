@@ -76,7 +76,11 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
             colors,
         ),
         tip(
-            btn_styled(&format!("Update All ({})", update_count), Message::UpdateAll, c),
+            btn_styled(
+                &format!("Update All ({})", update_count),
+                Message::UpdateAll,
+                c
+            ),
             "Download and install all available updates",
             tooltip::Position::Bottom,
             colors,
@@ -145,9 +149,13 @@ fn update_column<'a>(
 
     let body: Element<Message> = if plans.is_empty() {
         scrollable(
-            container(text(format!("No {} updates.", title.to_lowercase())).size(13).color(colors.muted))
-                .padding([12, 8])
-                .width(Length::Fill),
+            container(
+                text(format!("No {} updates.", title.to_lowercase()))
+                    .size(13)
+                    .color(colors.muted),
+            )
+            .padding([12, 8])
+            .width(Length::Fill),
         )
         .height(Length::Fill)
         .direction(theme::vscroll())
@@ -185,11 +193,16 @@ fn update_column<'a>(
     };
 
     let c2 = c;
-    container(column![header, body].spacing(0).width(Length::Fill).height(Length::Fill))
-        .width(Length::FillPortion(1))
-        .height(Length::Fill)
-        .style(move |_theme| theme::update_col_style(c2))
-        .into()
+    container(
+        column![header, body]
+            .spacing(0)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .width(Length::FillPortion(1))
+    .height(Length::Fill)
+    .style(move |_theme| theme::update_col_style(c2))
+    .into()
 }
 
 fn btn_styled<'a>(label: &str, msg: Message, colors: ThemeColors) -> Element<'a, Message> {
@@ -213,9 +226,13 @@ fn tip<'a>(
     let c = colors;
     tooltip(
         content,
-        container(text(String::from(label)).size(13).color(c.text))
-            .padding([4, 8])
-            .style(move |_theme| theme::tooltip_style(c)),
+        container(
+            text(String::from(label))
+                .size(theme::TOOLTIP_TEXT_SIZE)
+                .color(c.text),
+        )
+        .padding([4, 8])
+        .style(move |_theme| theme::tooltip_style(c)),
         position,
     )
     .gap(4.0)

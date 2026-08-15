@@ -4,10 +4,70 @@ use serde::Deserialize;
 
 use crate::model::{LatestRelease, ReleaseAsset};
 
+fn rate_limit_reset(response: &reqwest::Response) -> Option<i64> {
+    response
+        .headers()
+        .get("x-ratelimit-reset")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok())
+}
+
+fn rate_limit_error(has_token: bool, reset_epoch: Option<i64>) -> String {
+    let reset = reset_epoch
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let message = if has_token {
+        "GitHub's API limit has been reached. The saved token may be expired, invalid, or shared with other applications; re-save it in Options."
+    } else {
+        "GitHub's anonymous API limit of 60 requests per hour has been reached. Add a GitHub token in Options to raise the limit to 5,000 requests per hour."
+    };
+    format!("GITHUB_RATE_LIMIT:{reset}:{message}")
+}
+
+async fn checked_response(response: reqwest::Response, context: &str) -> Result<reqwest::Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let remaining_is_zero = response
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim() == "0");
+    let reset_epoch = rate_limit_reset(&response);
+    let body = response
+        .text()
+        .await
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if status == StatusCode::TOO_MANY_REQUESTS
+        || remaining_is_zero
+        || (status == StatusCode::FORBIDDEN && body.contains("rate limit"))
+    {
+        anyhow::bail!(rate_limit_error(
+            crate::github_token().is_some(),
+            reset_epoch
+        ));
+    }
+    if status == StatusCode::UNAUTHORIZED
+        || body.contains("bad credentials")
+        || body.contains("requires authentication")
+    {
+        anyhow::bail!(if crate::github_token().is_some() {
+            "GitHub authentication failed. Re-save or replace the saved token in Options."
+        } else {
+            "GitHub requires authentication for this request. Add a GitHub token in Options."
+        });
+    }
+    anyhow::bail!("{context}: GitHub returned HTTP {}", status.as_u16());
+}
+
 #[derive(Debug, Deserialize)]
 struct GhRelease {
     tag_name: String,
     name: Option<String>,
+    #[serde(default)]
+    prerelease: bool,
     published_at: Option<String>,
     assets: Vec<GhAsset>,
 }
@@ -83,33 +143,7 @@ impl GitHub {
             anyhow::bail!("GitHub repo/release not found (no latest release?)");
         }
 
-        if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
-            let body = resp.text().await.unwrap_or_default().to_ascii_lowercase();
-            let has_token = crate::github_token().is_some();
-            let message = if body.contains("rate limit") {
-                if has_token {
-                    "GitHub API rate limit exceeded. Your token may be invalid or expired — try re-saving it in Options."
-                } else {
-                    "GitHub API rate limit exceeded. Add a GitHub token in Options to raise the limit."
-                }
-            } else if body.contains("bad credentials") || body.contains("requires authentication") {
-                "GitHub authentication failed. Your token may be invalid or expired — try re-saving it in Options."
-            } else {
-                if has_token {
-                    "GitHub denied the request (HTTP 403). Your token may lack permissions or be expired."
-                } else {
-                    "GitHub denied the request (HTTP 403). Add a GitHub token in Options to authenticate."
-                }
-            };
-            anyhow::bail!("{}", message);
-        }
-
-        if !status.is_success() {
-            anyhow::bail!(
-                "GitHub API error (HTTP {}). The request could not be completed.",
-                status
-            );
-        }
+        let resp = checked_response(resp, "GitHub release request failed").await?;
 
         let gh: GhRelease = resp.json().await.context("invalid github json")?;
 
@@ -131,8 +165,12 @@ impl GitHub {
             Some(LatestRelease {
                 tag: gh.tag_name,
                 name: gh.name,
+                prerelease: gh.prerelease,
                 assets,
-                published_at: gh.published_at.as_deref().and_then(super::parse_rfc3339_unix),
+                published_at: gh
+                    .published_at
+                    .as_deref()
+                    .and_then(super::parse_rfc3339_unix),
             }),
             false,
         ))
@@ -150,10 +188,7 @@ pub async fn latest_release(
 }
 
 /// Fetch all releases for a GitHub repo (paginated, newest first).
-pub async fn list_releases(
-    client: &Client,
-    repo: &DetectedRepo,
-) -> Result<Vec<LatestRelease>> {
+pub async fn list_releases(client: &Client, repo: &DetectedRepo) -> Result<Vec<LatestRelease>> {
     let mut page = 1u32;
     let mut all = Vec::new();
     loop {
@@ -168,13 +203,14 @@ pub async fn list_releases(
         if let Some(token) = crate::github_token() {
             req = req.bearer_auth(token);
         }
-        let resp = req.send().await.context("github list_releases request failed")?;
+        let resp = req
+            .send()
+            .await
+            .context("github list_releases request failed")?;
         if resp.status() == StatusCode::NOT_FOUND {
             break;
         }
-        let resp = resp
-            .error_for_status()
-            .context("github list_releases error")?;
+        let resp = checked_response(resp, "GitHub release-list request failed").await?;
         let rels: Vec<GhRelease> = resp.json().await.context("invalid github json")?;
         if rels.is_empty() {
             break;
@@ -195,6 +231,7 @@ pub async fn list_releases(
             all.push(LatestRelease {
                 tag: gh.tag_name.clone(),
                 name: gh.name.clone(),
+                prerelease: gh.prerelease,
                 assets,
                 published_at: gh
                     .published_at
@@ -228,6 +265,22 @@ pub struct RepoFile {
     pub is_dir: bool,
 }
 
+fn complete_tree_files(tree: GhTreeResponse) -> Result<Vec<RepoFile>> {
+    if tree.truncated {
+        anyhow::bail!(
+            "GitHub returned an incomplete repository tree; a staged Git probe is required"
+        );
+    }
+    Ok(tree
+        .tree
+        .into_iter()
+        .map(|entry| RepoFile {
+            path: entry.path,
+            is_dir: entry.kind == "tree",
+        })
+        .collect())
+}
+
 /// Fetch all files in a repo recursively using the Tree API.
 pub async fn list_files_recursive(
     client: &Client,
@@ -256,14 +309,38 @@ pub async fn list_files_recursive(
         return Box::pin(list_files_recursive(client, owner, repo, None)).await;
     }
 
-    if !resp.status().is_success() {
-        anyhow::bail!("GitHub Tree API error: HTTP {}", resp.status());
-    }
+    let resp = checked_response(resp, "GitHub tree request failed").await?;
 
     let tree: GhTreeResponse = resp.json().await.context("invalid github tree json")?;
-    
-    Ok(tree.tree.into_iter().map(|e| RepoFile {
-        path: e.path,
-        is_dir: e.kind == "tree",
-    }).collect())
+
+    complete_tree_files(tree)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{complete_tree_files, GhTreeEntry, GhTreeResponse};
+
+    #[test]
+    fn truncated_recursive_trees_are_never_treated_as_authoritative() {
+        let truncated = GhTreeResponse {
+            tree: vec![GhTreeEntry {
+                path: "Partial/Partial.toc".to_string(),
+                kind: "blob".to_string(),
+            }],
+            truncated: true,
+        };
+        assert!(complete_tree_files(truncated).is_err());
+
+        let complete = GhTreeResponse {
+            tree: vec![GhTreeEntry {
+                path: "Complete/Complete.toc".to_string(),
+                kind: "blob".to_string(),
+            }],
+            truncated: false,
+        };
+        let files = complete_tree_files(complete).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "Complete/Complete.toc");
+        assert!(!files[0].is_dir);
+    }
 }

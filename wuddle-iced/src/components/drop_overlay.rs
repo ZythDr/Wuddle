@@ -49,5 +49,4 @@ pub fn view(colors: ThemeColors) -> Element<'static, Message> {
                 snap: true,
             }),
     )
-    .into()
 }

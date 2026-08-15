@@ -1,0 +1,50 @@
+# OS / filesystem noise
+.DS_Store
+Thumbs.db
+
+# Local planning notes (never commit)
+/.wuddle-local/
+
+# Editor / IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.code-workspace
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Rust build output
+debug
+target
+**/target/
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
+
+# Python tooling output
+__pycache__/
+*.py[cod]
+
+# Node / frontend build output
+**/node_modules/
+**/dist/
+**/dist-ssr/
+
+# Tauri generated files
+wuddle-gui/src-tauri/gen/schemas
+
+# Release artifacts
+*.AppImage
+*.deb
+*.rpm
+*.msi
+*.exe
+*.dmg
+*.zip
+*.tar.gz

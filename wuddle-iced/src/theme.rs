@@ -10,21 +10,18 @@ use iced::{Border, Color, Font, Gradient, Radians, Shadow, Theme, Vector};
 pub const LIFECRAFT: Font = Font::with_name("LifeCraft");
 pub const FRIZ: Font = Font::with_name("Friz Quadrata Std");
 pub const NOTO: Font = Font::with_name("Noto Sans");
+/// Shared text size for every hover tooltip in Wuddle.
+pub const TOOLTIP_TEXT_SIZE: f32 = 15.0;
 
 /// Wuddle's 5 custom themes, ported from the CSS variables.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WuddleTheme {
+    #[default]
     Cata,
     Obsidian,
     Emerald,
     Ashen,
     WowUi,
-}
-
-impl Default for WuddleTheme {
-    fn default() -> Self {
-        WuddleTheme::Cata
-    }
 }
 
 /// Extended color palette for Wuddle themes — covers gradients, borders, etcolors.
@@ -405,6 +402,59 @@ pub fn tab_button_hovered_style(colors: ThemeColors) -> button::Style {
     }
 }
 
+/// Compact outlined selector used for persistent choices rather than primary
+/// actions. Selected values receive a restrained theme tint; inactive values
+/// remain deliberately quieter until hovered.
+pub fn choice_button_style(
+    colors: ThemeColors,
+    selected: bool,
+    status: button::Status,
+) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered);
+    let accent = if hovered {
+        colors.title
+    } else {
+        colors.primary
+    };
+    button::Style {
+        background: if selected {
+            Some(iced::Background::Color(Color {
+                a: if hovered { 0.18 } else { 0.10 },
+                ..colors.primary
+            }))
+        } else if hovered {
+            Some(iced::Background::Color(Color {
+                a: 0.07,
+                ..colors.primary
+            }))
+        } else {
+            None
+        },
+        text_color: if selected || hovered {
+            colors.title
+        } else {
+            Color {
+                a: 0.62,
+                ..colors.muted
+            }
+        },
+        border: Border {
+            color: if selected {
+                Color { a: 0.72, ..accent }
+            } else {
+                Color {
+                    a: if hovered { 0.55 } else { 0.28 },
+                    ..colors.btn_border
+                }
+            },
+            width: 1.0,
+            radius: Radius::new(0.0),
+        },
+        shadow: Shadow::default(),
+        snap: true,
+    }
+}
+
 /// Topbar container style — subtle gradient with orange/blue tint
 pub fn topbar_style(colors: ThemeColors) -> container::Style {
     // Horizontal gradient: blue tint on left, orange tint on right (matches Tauri's radial gradients)
@@ -698,15 +748,45 @@ pub fn badge_suggested_style(colors: ThemeColors) -> container::Style {
     }
 }
 
-/// Danger button style (red border/text)
-pub fn btn_danger_style(_colors: ThemeColors) -> button::Style {
+/// Danger button style (red border/text with an explicit hover highlight).
+pub fn btn_danger_style(colors: ThemeColors, status: button::Status) -> button::Style {
+    let (background, text_color, border_alpha) = match status {
+        button::Status::Hovered => (
+            Color::from_rgba(colors.bad.r, colors.bad.g, colors.bad.b, 0.82),
+            Color::WHITE,
+            1.0,
+        ),
+        button::Status::Pressed => (
+            Color::from_rgba(colors.bad.r, colors.bad.g, colors.bad.b, 0.96),
+            Color::WHITE,
+            1.0,
+        ),
+        button::Status::Disabled => (
+            Color::from_rgba(
+                colors.bad.r * 0.22,
+                colors.bad.g * 0.14,
+                colors.bad.b * 0.14,
+                0.45,
+            ),
+            Color::from_rgba(colors.bad.r, colors.bad.g, colors.bad.b, 0.45),
+            0.30,
+        ),
+        button::Status::Active => (
+            Color::from_rgba(
+                colors.bad.r * 0.28,
+                colors.bad.g * 0.16,
+                colors.bad.b * 0.16,
+                0.72,
+            ),
+            colors.bad,
+            0.78,
+        ),
+    };
     button::Style {
-        background: Some(iced::Background::Color(Color::from_rgba(
-            0.937, 0.267, 0.267, 0.18,
-        ))),
-        text_color: Color::from_rgb8(254, 202, 202),
+        background: Some(iced::Background::Color(background)),
+        text_color,
         border: Border {
-            color: Color::from_rgba(0.937, 0.267, 0.267, 0.52),
+            color: Color::from_rgba(colors.bad.r, colors.bad.g, colors.bad.b, border_alpha),
             width: 1.0,
             radius: Radius::new(0.0),
         },

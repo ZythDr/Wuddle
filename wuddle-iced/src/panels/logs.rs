@@ -1,7 +1,10 @@
-use iced::widget::{button, checkbox, column, container, row, stack, text, text_editor, text_input, tooltip, Space};
-use iced::{Element, Font, Length};
 use iced::advanced::text::Wrapping;
+use iced::widget::{
+    button, checkbox, column, container, row, stack, text, text_editor, tooltip, Space,
+};
+use iced::{Element, Font, Length};
 
+use crate::components::text_input_context::context_text_input;
 use crate::theme::{self, ThemeColors};
 use crate::{App, LogFilter, LogLevel, Message};
 
@@ -23,7 +26,11 @@ impl iced::advanced::text::Highlighter for LogHighlighter {
     type Iterator<'a> = std::iter::Once<(std::ops::Range<usize>, Option<iced::Color>)>;
 
     fn new(settings: &Self::Settings) -> Self {
-        Self { error_color: settings.0, api_color: settings.1, current_line: 0 }
+        Self {
+            error_color: settings.0,
+            api_color: settings.1,
+            current_line: 0,
+        }
     }
     fn update(&mut self, new_settings: &Self::Settings) {
         self.error_color = new_settings.0;
@@ -51,7 +58,10 @@ fn log_to_format(
     h: &Option<iced::Color>,
     _theme: &iced::Theme,
 ) -> iced::advanced::text::highlighter::Format<Font> {
-    iced::advanced::text::highlighter::Format { color: *h, font: None }
+    iced::advanced::text::highlighter::Format {
+        color: *h,
+        font: None,
+    }
 }
 
 /// Returns true if an error message is a network/fetch error (git fetch, API call, etc.).
@@ -80,7 +90,9 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     let header = row![
         column![
             text("Logs").size(18).color(colors.title),
-            text("Action and error messages.").size(12).color(colors.muted),
+            text("Action and error messages.")
+                .size(12)
+                .color(colors.muted),
         ]
         .spacing(2),
         Space::new().width(Length::Fill),
@@ -159,7 +171,13 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
             let c2 = c;
             let show_clear = !app.log_search.is_empty();
             stack![
-                text_input("Search logs", &app.log_search)
+                context_text_input(
+                    app,
+                    colors,
+                    "log-search",
+                    "Search logs",
+                    &app.log_search,
+                )
                     .on_input(Message::SetLogSearch)
                     .width(180)
                     .padding(iced::Padding { top: 4.0, right: if show_clear { 26.0 } else { 10.0 }, bottom: 4.0, left: 10.0 }),
@@ -207,7 +225,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
             ]
             .spacing(12)
             .align_y(iced::Alignment::Center)
-            .into()
+            .into(),
         )
     } else {
         None
@@ -220,8 +238,15 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
         .size(12)
         .height(Length::Fill)
         .padding(12)
-        .wrapping(if app.log_wrap { Wrapping::Word } else { Wrapping::None })
-        .highlight_with::<LogHighlighter>((c.bad, iced::Color::from_rgb8(0, 191, 255)), log_to_format)
+        .wrapping(if app.log_wrap {
+            Wrapping::Word
+        } else {
+            Wrapping::None
+        })
+        .highlight_with::<LogHighlighter>(
+            (c.bad, iced::Color::from_rgb8(0, 191, 255)),
+            log_to_format,
+        )
         .style(move |theme, status| theme::log_editor_style(c)(theme, status));
 
     let mut col = column![header, toolbar];
@@ -251,12 +276,17 @@ pub fn build_log_text(app: &App) -> String {
 }
 
 /// Wrap any element in a tooltip with consistent styling.
-fn tip<'a>(content: impl Into<Element<'a, Message>>, tip_text: &str, pos: tooltip::Position, colors: ThemeColors) -> Element<'a, Message> {
+fn tip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    tip_text: &str,
+    pos: tooltip::Position,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
     let c = colors;
     let tip_str = String::from(tip_text);
     tooltip(
         content,
-        container(text(tip_str).size(13).color(c.text))
+        container(text(tip_str).size(theme::TOOLTIP_TEXT_SIZE).color(c.text))
             .padding([3, 8])
             .style(move |_theme| theme::tooltip_style(c)),
         pos,

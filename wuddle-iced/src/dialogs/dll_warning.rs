@@ -1,9 +1,9 @@
 //! DllCountWarning dialog — confirms how to proceed when a mod's DLL count changes between releases.
 
+use crate::components::helpers::close_button;
+use crate::{theme, Message};
 use iced::widget::{button, column, row, text, Space};
 use iced::{Element, Length};
-use crate::{Message, theme};
-use crate::components::helpers::close_button;
 use theme::ThemeColors;
 
 pub fn view<'a>(
@@ -24,7 +24,11 @@ pub fn view<'a>(
             if new_count == 1 { "" } else { "s" },
             previous_count,
             previous_count - new_count,
-            if previous_count - new_count == 1 { "" } else { "s" },
+            if previous_count - new_count == 1 {
+                ""
+            } else {
+                "s"
+            },
         )
     } else {
         format!(
@@ -42,9 +46,13 @@ pub fn view<'a>(
             close_button(c),
         ]
         .align_y(iced::Alignment::Center),
-        text(format!("\"{}\"", repo_name)).size(13).color(colors.text),
+        text(format!("\"{}\"", repo_name))
+            .size(13)
+            .color(colors.text),
         text(description).size(13).color(colors.warn),
-        text("How would you like to proceed?").size(13).color(colors.text),
+        text("How would you like to proceed?")
+            .size(13)
+            .color(colors.text),
         row![
             {
                 let c2 = c;
@@ -57,7 +65,10 @@ pub fn view<'a>(
                     ]
                     .spacing(2),
                 )
-                .on_press(Message::DllCountWarningChoice { repo_id, merge: true })
+                .on_press(Message::DllCountWarningChoice {
+                    repo_id,
+                    merge: true,
+                })
                 .padding([10, 16])
                 .width(Length::FillPortion(1))
                 .style(move |_theme, status| match status {
@@ -76,7 +87,10 @@ pub fn view<'a>(
                     ]
                     .spacing(2),
                 )
-                .on_press(Message::DllCountWarningChoice { repo_id, merge: false })
+                .on_press(Message::DllCountWarningChoice {
+                    repo_id,
+                    merge: false,
+                })
                 .padding([10, 16])
                 .width(Length::FillPortion(1))
                 .style(move |_theme, status| match status {

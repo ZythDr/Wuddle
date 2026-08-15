@@ -1,9 +1,9 @@
 //! RemoveRepo dialog — confirms removal of a tracked repository with optional file deletion.
 
+use crate::components::helpers::{close_button, tip};
+use crate::{theme, Message};
 use iced::widget::{button, checkbox, column, container, row, scrollable, text, Space};
 use iced::{Element, Length};
-use crate::{Message, theme};
-use crate::components::helpers::{close_button, tip};
 use theme::ThemeColors;
 
 pub fn view<'a>(
@@ -16,25 +16,26 @@ pub fn view<'a>(
     let c = colors;
     let rf = remove_files;
 
-    let file_rows: Vec<Element<Message>> = files.iter().map(|(path, kind)| {
-        let icon = match kind.as_str() {
-            "dll"   => "\u{2699}",  // ⚙
-            "addon" => "\u{1f4c1}", // 📁
-            _       => "\u{1f4c4}", // 📄
-        };
-        let color = if rf { colors.warn } else { colors.text_soft };
-        container(
-            text(format!("{} {}", icon, path))
-                .size(12)
-                .color(color),
-        )
-        .padding([2, 6])
-        .into()
-    })
-    .collect();
+    let file_rows: Vec<Element<Message>> = files
+        .iter()
+        .map(|(path, kind)| {
+            let icon = match kind.as_str() {
+                "dll" => "DLL",
+                "addon" => "\u{1f4c1}", // 📁
+                _ => "\u{1f4c4}",       // 📄
+            };
+            let color = if rf { colors.warn } else { colors.text_soft };
+            container(text(format!("{} {}", icon, path)).size(12).color(color))
+                .padding([2, 6])
+                .into()
+        })
+        .collect();
 
     let file_tree: Element<Message> = if files.is_empty() {
-        text("No tracked files found.").size(12).color(colors.muted).into()
+        text("No tracked files found.")
+            .size(12)
+            .color(colors.muted)
+            .into()
     } else {
         scrollable(column(file_rows).spacing(0).width(Length::Fill))
             .height(Length::Fixed(160.0))
@@ -49,7 +50,10 @@ pub fn view<'a>(
         .style(move |_t| container::Style {
             background: Some(iced::Background::Color(iced::Color { a: 0.5, ..c.card })),
             border: iced::Border {
-                color: iced::Color { a: 0.15, ..c.border },
+                color: iced::Color {
+                    a: 0.15,
+                    ..c.border
+                },
                 width: 1.0,
                 radius: 6.0.into(),
             },
@@ -65,7 +69,7 @@ pub fn view<'a>(
         ]
         .align_y(iced::Alignment::Center),
         text(format!("Remove \"{}\" from Wuddle?", name))
-            .size(13)
+            .size(14)
             .color(colors.text),
         file_section,
         checkbox(rf)
@@ -77,7 +81,7 @@ pub fn view<'a>(
         } else {
             "Wuddle will stop tracking this mod. Local files will be left on disk."
         })
-        .size(12)
+        .size(14)
         .color(if rf { colors.warn } else { colors.muted }),
         row![
             Space::new().width(Length::Fill),

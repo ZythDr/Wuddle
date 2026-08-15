@@ -2,11 +2,11 @@
 //! - `super_wow_warning` — anti-virus false-positive warning for SuperWoW
 //! - `addon_conflict`    — conflict resolution for duplicate addon sources
 
-use iced::widget::{button, column, container, row, scrollable, text, Space};
-use iced::{Element, Length};
-use iced::{Background, Border, Color};
-use crate::{Message, theme};
 use crate::components::helpers::{close_button, forge_svg_handle, tip};
+use crate::{theme, FileConflictAction, Message};
+use iced::widget::{button, column, container, row, scrollable, text, Space};
+use iced::{Background, Border, Color};
+use iced::{Element, Length};
 use theme::ThemeColors;
 
 fn action_banner_style(colors: ThemeColors, background: Color) -> iced::widget::container::Style {
@@ -49,7 +49,9 @@ fn tree_panel<'a>(
                 row![
                     text("\u{1f4e6}").size(16),
                     text(root_label).size(14).color(c.title).font(theme::FRIZ),
-                ].spacing(8).into()
+                ]
+                .spacing(8)
+                .into(),
             );
             if items.is_empty() {
                 content.push(text("   \u{21b3} none").size(13).color(c.muted).into());
@@ -60,7 +62,9 @@ fn tree_panel<'a>(
                         Space::new().width(14),
                         text(icon).size(13).color(c.muted),
                         text(item).size(13).color(c.text),
-                    ].spacing(8).into()
+                    ]
+                    .spacing(8)
+                    .into()
                 }));
             }
         }
@@ -68,7 +72,10 @@ fn tree_panel<'a>(
 
     container(
         column![
-            text(section_label).size(14).color(c.muted).font(theme::FRIZ),
+            text(section_label)
+                .size(14)
+                .color(c.muted)
+                .font(theme::FRIZ),
             container(text(summary).size(13).color(c.muted))
                 .height(Length::Fixed(52.0))
                 .width(Length::Fill),
@@ -91,7 +98,10 @@ fn tree_panel<'a>(
                 ..container::Style::default()
             }),
             container(
-                text(footer).size(13).color(c.primary_text).font(theme::FRIZ)
+                text(footer)
+                    .size(13)
+                    .color(c.primary_text)
+                    .font(theme::FRIZ)
             )
             .padding([6, 10])
             .width(Length::Fill)
@@ -102,6 +112,73 @@ fn tree_panel<'a>(
     .padding(10)
     .width(Length::Fill)
     .style(move |_theme| theme::card_style(c))
+    .into()
+}
+
+pub fn file_conflict<'a>(
+    repo_id: i64,
+    repo_name: &'a str,
+    files: &'a [String],
+    action: FileConflictAction,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
+    let c = colors;
+    let action_label = match action {
+        FileConflictAction::Install => "installation",
+        FileConflictAction::Update | FileConflictAction::UpdateApprovedLocalChanges => "update",
+        FileConflictAction::Reinstall => "reinstallation",
+    };
+    let file_rows = files.iter().map(|file| {
+        container(text(file).size(13).color(c.text))
+            .padding([5, 8])
+            .width(Length::Fill)
+            .style(move |_theme| theme::card_style(c))
+            .into()
+    });
+
+    column![
+        row![
+            text("Installation File Conflict")
+                .size(18)
+                .color(c.title),
+            Space::new().width(Length::Fill),
+            close_button(c),
+        ]
+        .align_y(iced::Alignment::Center),
+        text(format!(
+            "The {} for \"{}\" would replace existing files.",
+            action_label, repo_name
+        ))
+        .size(14)
+        .color(c.text),
+        column(file_rows).spacing(6),
+        text("If you continue, Wuddle will keep a private backup of each displaced file and restore it when this mod is removed. No live files have been changed yet.")
+            .size(13)
+            .color(c.warn),
+        row![
+            Space::new().width(Length::Fill),
+            button(text("Cancel").size(14))
+                .on_press(Message::CloseDialog)
+                .padding([8, 20])
+                .style(move |_theme, status| match status {
+                    button::Status::Hovered => theme::tab_button_hovered_style(c),
+                    _ => theme::tab_button_style(c),
+                }),
+            button(text("Back up & Continue").size(14))
+                .on_press(Message::ConfirmFileConflict {
+                    repo_id,
+                    action,
+                })
+                .padding([8, 20])
+                .style(move |_theme, status| match status {
+                    button::Status::Hovered => theme::play_button_hovered_style(c),
+                    _ => theme::play_button_style(c),
+                }),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
+    ]
+    .spacing(14)
     .into()
 }
 
@@ -194,6 +271,7 @@ pub fn av_false_positive_warning<'a>(
 }
 
 /// Addon conflict confirmation dialog.
+#[allow(clippy::too_many_arguments)]
 pub fn addon_conflict<'a>(
     url: &'a str,
     mode: &'a str,
@@ -231,7 +309,7 @@ pub fn addon_conflict<'a>(
     };
 
     // Build "New" (right) panel group showing what will be installed.
-    // We prioritize showing the actual discovered addons (selected_addons) because 
+    // We prioritize showing the actual discovered addons (selected_addons) because
     // these are the folders that Wuddle will actually create.
     let mut new_items = Vec::new();
     for name in selected_addons {
@@ -242,10 +320,9 @@ pub fn addon_conflict<'a>(
     // Then, supplement with other top-level directories from the preview if available.
     if let Some(preview) = new_repo_preview {
         for f in preview {
-            if f.is_dir && !f.name.starts_with('.') {
-                if !new_items.iter().any(|(n, _)| n == &f.name) {
-                    new_items.push((f.name.clone(), true));
-                }
+            if f.is_dir && !f.name.starts_with('.') && !new_items.iter().any(|(n, _)| n == &f.name)
+            {
+                new_items.push((f.name.clone(), true));
             }
         }
     }
@@ -276,21 +353,34 @@ pub fn addon_conflict<'a>(
 
     let header = row![
         column![
-            text("Addon Conflict").size(20).color(colors.title).font(theme::FRIZ),
-            text("Duplicate addon folders detected").size(12).color(colors.muted),
-        ].spacing(2),
+            text("Addon Conflict")
+                .size(20)
+                .color(colors.title)
+                .font(theme::FRIZ),
+            text("Duplicate addon folders detected")
+                .size(12)
+                .color(colors.muted),
+        ]
+        .spacing(2),
         Space::new().width(Length::Fill),
         close_button(c),
-    ].align_y(iced::Alignment::Center);
+    ]
+    .align_y(iced::Alignment::Center);
 
     let repo_card = container(
         row![
             text("\u{1f4e6}").size(28),
             column![
-                text(new_repo_label).size(16).color(colors.primary).font(theme::FRIZ),
+                text(new_repo_label)
+                    .size(16)
+                    .color(colors.primary)
+                    .font(theme::FRIZ),
                 text(url).size(11).color(colors.muted),
-            ].spacing(2)
-        ].spacing(16).align_y(iced::Alignment::Center)
+            ]
+            .spacing(2)
+        ]
+        .spacing(16)
+        .align_y(iced::Alignment::Center),
     )
     .width(Length::Fill)
     .padding(12)

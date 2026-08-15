@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 const ACTIVE_LOG: &str = "wuddle.log";
 const MAX_LOG_FILES: usize = 5;
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
@@ -44,12 +47,11 @@ fn init_inner(verbose: bool) -> Result<(), String> {
     let log_dir = app_dir.join("logs");
     fs::create_dir_all(&log_dir)
         .map_err(|error| format!("Could not create diagnostics directory: {error}"))?;
+    tighten_directory_permissions(&log_dir)?;
     rotate_files(&log_dir)?;
     let active_path = log_dir.join(ACTIVE_LOG);
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&active_path)
+    tighten_existing_log_permissions(&log_dir)?;
+    let file = open_private_append(&active_path)
         .map_err(|error| format!("Could not open diagnostic log: {error}"))?;
     let bytes_written = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     let logger = Arc::new(DiagnosticLogger {
@@ -154,6 +156,27 @@ pub fn register_settings_paths(settings: &crate::settings::AppSettings) {
     }
 }
 
+pub fn register_repository_rows(repositories: &[crate::service::RepoRow]) {
+    for repository in repositories {
+        register_repository_url(&repository.url);
+    }
+}
+
+pub fn register_repository_url(raw: &str) {
+    let raw = raw.trim();
+    if !raw.is_empty() {
+        // Register the complete remote as one private value. Owner/project
+        // labels are useful support identifiers and are safe to retain when
+        // Wuddle logs them explicitly, while complete remotes may contain a
+        // private host, namespace, local path, or credential material.
+        //
+        // Do not register individual path segments: common project/owner
+        // names such as "main" or "local" would otherwise corrupt unrelated
+        // diagnostic text through substring replacement.
+        register_private_value(raw, "<REPO_URL>");
+    }
+}
+
 pub fn write_app(level: crate::LogLevel, message: &str) {
     let level = match level {
         crate::LogLevel::Info => "INFO",
@@ -181,6 +204,23 @@ pub fn write_system(level: &'static str, target: &'static str, message: &str) {
     if let Some(logger) = LOGGER.get() {
         logger.write(level, target, message, false);
     }
+}
+
+pub fn flush() -> Result<(), String> {
+    let Some(logger) = LOGGER.get() else {
+        return Ok(());
+    };
+    let mut state = logger
+        .state
+        .lock()
+        .map_err(|_| "Diagnostic log lock was poisoned".to_string())?;
+    if let Some(file) = state.file.as_mut() {
+        file.flush()
+            .map_err(|error| format!("Could not flush diagnostic log: {error}"))?;
+        file.sync_data()
+            .map_err(|error| format!("Could not synchronize diagnostic log: {error}"))?;
+    }
+    Ok(())
 }
 
 pub struct OperationGuard {
@@ -240,6 +280,17 @@ pub fn build_summary(app: &crate::App) -> String {
         .filter(|repo| crate::service::is_mod(repo))
         .count();
     let addons = app.repos.len().saturating_sub(mods);
+    let busy_state = app.busy_summary().unwrap_or_else(|| "idle".to_string());
+    let active_update_progress = crate::service::active_update_check_progress();
+    let active_update_stages = if active_update_progress.is_empty() {
+        "none".to_string()
+    } else {
+        active_update_progress
+            .iter()
+            .map(|progress| format!("{}:{:?}", progress.repo_id, progress.stage))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     format!(
         concat!(
             "Wuddle diagnostic summary\n",
@@ -258,8 +309,13 @@ pub fn build_summary(app: &crate::App) -> String {
             "active_launch_method={}\n",
             "active_auto_login_enabled={}\n",
             "automatic_update_checks={}\n",
+            "conserve_github_api={}\n",
+            "github_authenticated={}\n",
             "symlink_installs={}\n",
-            "xattr_comments={}\n"
+            "xattr_comments={}\n",
+            "busy_state={}\n",
+            "active_update_check_count={}\n",
+            "active_update_check_stages={}\n"
         ),
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
@@ -276,8 +332,13 @@ pub fn build_summary(app: &crate::App) -> String {
         launch_method,
         auto_login_enabled,
         app.opt_auto_check,
+        app.opt_conserve_github_api,
+        wuddle_engine::github_token().is_some(),
         app.opt_symlinks,
         app.opt_xattr,
+        busy_state,
+        active_update_progress.len(),
+        active_update_stages,
     )
 }
 
@@ -312,7 +373,7 @@ impl DiagnosticLogger {
         if let Ok(mut values) = self.private_values.write() {
             if !values.iter().any(|(existing, _)| existing == value) {
                 values.push((value.to_string(), replacement.to_string()));
-                values.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+                values.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
             }
         }
     }
@@ -345,10 +406,7 @@ impl DiagnosticLogger {
             let _ = file.flush();
         }
         rotate_files(&self.log_dir)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.log_dir.join(ACTIVE_LOG))
+        let file = open_private_append(&self.log_dir.join(ACTIVE_LOG))
             .map_err(|error| format!("Could not rotate diagnostic log: {error}"))?;
         state.file = Some(file);
         state.bytes_written = 0;
@@ -381,7 +439,7 @@ impl DiagnosticLogger {
                 .map_err(|error| format!("Could not flush diagnostic log: {error}"))?;
         }
 
-        let output = File::create(target)
+        let output = create_private_file(target)
             .map_err(|error| format!("Could not create diagnostic bundle: {error}"))?;
         let mut archive = zip::ZipWriter::new(output);
         let options = zip::write::SimpleFileOptions::default()
@@ -415,7 +473,7 @@ impl DiagnosticLogger {
             .start_file("PRIVACY.txt", options)
             .map_err(|error| format!("Could not write privacy notice: {error}"))?;
         archive
-            .write_all(b"This bundle intentionally excludes credentials, tokens, command arguments, request headers, database contents, raw settings, and account/profile names. Private path prefixes are replaced before they are written to the logs.\n")
+            .write_all(b"This bundle intentionally excludes credentials, tokens, command arguments, request headers, database contents, raw settings, and account/profile names. Private path prefixes and complete repository remotes are replaced before they are written to the logs. Repository/project display labels and numeric IDs may remain so a failing operation can be identified.\n")
             .map_err(|error| format!("Could not write privacy notice: {error}"))?;
         archive
             .finish()
@@ -439,6 +497,58 @@ fn rotate_files(log_dir: &Path) -> Result<(), String> {
         fs::rename(&source, &destination)
             .map_err(|error| format!("Could not rotate diagnostic log: {error}"))?;
     }
+    Ok(())
+}
+
+fn open_private_append(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path)?;
+    tighten_file_permissions(path)?;
+    Ok(file)
+}
+
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path)?;
+    tighten_file_permissions(path)?;
+    Ok(file)
+}
+
+fn tighten_existing_log_permissions(log_dir: &Path) -> Result<(), String> {
+    for index in 0..MAX_LOG_FILES {
+        let path = log_dir.join(log_file_name(index));
+        if path.is_file() {
+            tighten_file_permissions(&path)
+                .map_err(|error| format!("Could not secure diagnostic log permissions: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn tighten_directory_permissions(path: &Path) -> Result<(), String> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("Could not secure diagnostics directory: {error}"))
+}
+
+#[cfg(not(unix))]
+fn tighten_directory_permissions(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn tighten_file_permissions(path: &Path) -> std::io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn tighten_file_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -543,9 +653,11 @@ fn redact_url_secrets(mut input: String) -> String {
     let mut search_from = 0;
     loop {
         let lower = input.to_ascii_lowercase();
-        let next_http = lower[search_from..].find("http://");
-        let next_https = lower[search_from..].find("https://");
-        let Some(relative) = [next_http, next_https].into_iter().flatten().min() else {
+        let relative = ["http://", "https://", "file://", "ssh://", "git://"]
+            .into_iter()
+            .filter_map(|scheme| lower[search_from..].find(scheme))
+            .min();
+        let Some(relative) = relative else {
             break;
         };
         let start = search_from + relative;
@@ -553,29 +665,79 @@ fn redact_url_secrets(mut input: String) -> String {
             .find(char::is_whitespace)
             .map(|offset| start + offset)
             .unwrap_or(input.len());
-        let mut url = input[start..end].to_string();
-        if let Some(scheme_end) = url.find("://").map(|index| index + 3) {
-            if let Some(at) = url[scheme_end..].find('@') {
-                url.replace_range(scheme_end..scheme_end + at + 1, "<REDACTED_USERINFO>@");
-            }
-        }
-        if let Some(secret_start) = url.find(['?', '#']) {
-            let trailing = url
-                .chars()
-                .rev()
-                .take_while(|ch| matches!(ch, ')' | ']' | '}' | ',' | ';'))
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>();
-            url.truncate(secret_start);
-            url.push_str("?<REDACTED_QUERY>");
-            url.push_str(&trailing);
-        }
-        input.replace_range(start..end, &url);
-        search_from = start + url.len();
+        let token = &input[start..end];
+        let trailing_len = token
+            .chars()
+            .rev()
+            .take_while(|ch| matches!(ch, ')' | ']' | '}' | '>' | ',' | ';' | '"' | '\''))
+            .map(char::len_utf8)
+            .sum::<usize>();
+        let core_end = token.len().saturating_sub(trailing_len);
+        let core = &token[..core_end];
+        let trailing = &token[core_end..];
+        let redacted = redact_one_url(core, trailing);
+        input.replace_range(start..end, &redacted);
+        search_from = start + redacted.len();
     }
+    redact_git_remote_tokens(input)
+}
+
+fn redact_one_url(core: &str, trailing: &str) -> String {
+    let Ok(parsed) = reqwest::Url::parse(core) else {
+        return format!("<REDACTED_URL>{trailing}");
+    };
+    if parsed.scheme().eq_ignore_ascii_case("file") {
+        return format!("file://<REDACTED_PATH>{trailing}");
+    }
+    let Some(host) = parsed.host_str() else {
+        return format!("<REDACTED_URL>{trailing}");
+    };
+    let mut safe = format!("{}://{}", parsed.scheme(), host);
+    if let Some(port) = parsed.port() {
+        safe.push(':');
+        safe.push_str(&port.to_string());
+    }
+    if parsed.path() != "/" && !parsed.path().is_empty() {
+        safe.push_str("/<REDACTED_PATH>");
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        safe.push_str("?<REDACTED_QUERY>");
+    }
+    safe.push_str(trailing);
+    safe
+}
+
+fn redact_git_remote_tokens(input: String) -> String {
     input
+        .split_inclusive(char::is_whitespace)
+        .map(|piece| {
+            let whitespace_start = piece.find(char::is_whitespace).unwrap_or(piece.len());
+            let (token, whitespace) = piece.split_at(whitespace_start);
+            let value_start = token
+                .rfind(['=', '(', '[', '{'])
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            let (prefix, candidate) = token.split_at(value_start);
+            let candidate = candidate
+                .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '<' | '>' | ')' | ']' | '}'));
+            let lower = candidate.to_ascii_lowercase();
+            let scp_remote = candidate
+                .rsplit_once('@')
+                .is_some_and(|(_, host_path)| host_path.contains(':'));
+            let local_git_remote = (candidate.starts_with('/')
+                || candidate.starts_with("\\\\")
+                || candidate
+                    .as_bytes()
+                    .get(1)
+                    .is_some_and(|byte| *byte == b':'))
+                && (lower.ends_with(".git") || lower.contains(".git?") || lower.contains(".git#"));
+            if scp_remote || local_git_remote {
+                format!("{prefix}<REDACTED_GIT_REMOTE>{whitespace}")
+            } else {
+                piece.to_string()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -610,11 +772,37 @@ mod tests {
     }
 
     #[test]
+    fn sanitizer_keeps_project_labels_but_redacts_complete_remotes() {
+        let temp = tempfile::tempdir().unwrap();
+        let logger = DiagnosticLogger {
+            log_dir: temp.path().to_path_buf(),
+            state: Mutex::new(FileState {
+                file: None,
+                bytes_written: 0,
+            }),
+            verbose: AtomicBool::new(true),
+            private_values: RwLock::new(Vec::new()),
+        };
+        let sanitized = logger.sanitize(
+            "Updating wow-optimize by suprepupre; remote=https://github.com/suprepupre/wow-optimize",
+        );
+        assert!(sanitized.contains("wow-optimize by suprepupre"));
+        assert!(!sanitized.contains("github.com/suprepupre"));
+        assert!(sanitized.contains("https://github.com/<REDACTED_PATH>"));
+    }
+
+    #[test]
     fn export_resanitizes_log_files() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(
             temp.path().join(ACTIVE_LOG),
-            "token=ghp_should_not_escape\npassword=Pass123\n",
+            concat!(
+                "token=ghp_should_not_escape\n",
+                "password=Pass123\n",
+                "remote=https://user:secret@example.org/private-owner/private-repo.git?token=signed\n",
+                "remote=git@example.org:private-owner/private-repo.git\n",
+                "remote=/srv/private-owner/private-repo.git\n",
+            ),
         )
         .unwrap();
         let logger = DiagnosticLogger {
@@ -638,6 +826,36 @@ mod tests {
             .unwrap();
         assert!(!log.contains("ghp_should_not_escape"));
         assert!(!log.contains("Pass123"));
+        assert!(!log.contains("private-owner"));
+        assert!(!log.contains("private-repo"));
+        assert!(!log.contains("user:secret"));
+        assert!(!log.contains("signed"));
         assert!(log.contains("<REDACTED"));
+
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(temp.path().join("diagnostics.zip"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_log_open_tightens_an_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(ACTIVE_LOG);
+        fs::write(&path, "existing log").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        drop(open_private_append(&path).unwrap());
+
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

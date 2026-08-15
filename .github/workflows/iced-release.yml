@@ -5,6 +5,16 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
+env:
+  WUDDLE_BUILD_TAG: ${{ github.ref_name }}
+
+concurrency:
+  group: iced-release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ------------------------------------------------------------------
   # Guard: build tags from main, plus prerelease tags from beta. This keeps
@@ -14,10 +24,11 @@ jobs:
   guard:
     name: Check release tag branch
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -26,7 +37,7 @@ jobs:
           set -euo pipefail
           git fetch --no-tags origin \
             +refs/heads/main:refs/remotes/origin/main \
-            +refs/heads/beta:refs/remotes/origin/beta || true
+            +refs/heads/beta:refs/remotes/origin/beta
           TAG_SHA="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
           ON_MAIN=false
           ON_BETA_PRERELEASE=false
@@ -47,25 +58,78 @@ jobs:
             echo "Tag ${GITHUB_REF_NAME} is not on main or beta prerelease — skipping Iced build."
           fi
 
+  validate-release:
+    needs: guard
+    if: needs.guard.outputs.should_build == 'true'
+    name: Validate release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
+
+      - name: Install frontend test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libfontconfig1-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libasound2-dev \
+            libssl-dev \
+            libdbus-1-dev \
+            libsecret-1-dev \
+            pkg-config
+
+      - name: Validate tag and release metadata
+        run: python3 .github/scripts/validate_release.py "${WUDDLE_BUILD_TAG}"
+
+      - name: Test release validator
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+
+      - name: Run complete test suite
+        run: |
+          cargo test --locked --manifest-path wuddle-engine/Cargo.toml
+          cargo test --locked --manifest-path wuddle-engine/Cargo.toml --features auto-login
+          cargo test --locked --manifest-path wuddle-iced/Cargo.toml
+          cargo check --locked --manifest-path wuddle-iced/Cargo.toml --no-default-features
+          cargo test --locked --manifest-path wuddle-launcher/Cargo.toml
+
+      - name: Check formatting
+        run: |
+          cargo fmt --manifest-path wuddle-engine/Cargo.toml --all -- --check
+          cargo fmt --manifest-path wuddle-iced/Cargo.toml --all -- --check
+          cargo fmt --manifest-path wuddle-launcher/Cargo.toml --all -- --check
+
   # ------------------------------------------------------------------
   # Linux portable tar.gz
   # ------------------------------------------------------------------
   build-linux:
-    needs: guard
+    needs: [guard, validate-release]
     if: needs.guard.outputs.should_build == 'true'
     name: Linux (portable tar.gz)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           workspaces: |
             wuddle-iced -> target
@@ -90,7 +154,7 @@ jobs:
             pkg-config
 
       - name: Build Wuddle (Iced)
-        run: cargo build --release --manifest-path wuddle-iced/Cargo.toml
+        run: cargo build --locked --release --manifest-path wuddle-iced/Cargo.toml
 
       - name: Show sccache stats
         run: ${SCCACHE_PATH} --show-stats || true
@@ -100,22 +164,21 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${WUDDLE_BUILD_TAG}"
+          LINUXDEPLOY_TAG="1-alpha-20251107-1"
+          LINUXDEPLOY_SHA256="c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d"
+          APPIMAGE_PLUGIN_TAG="1-alpha-20250213-1"
+          APPIMAGE_PLUGIN_SHA256="992d502a248e14ab185448ddf6f6e7d25558cb84d4623c354c3af350c25fccb3"
 
           wget -qO linuxdeploy.AppImage \
-            "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/${LINUXDEPLOY_TAG}/linuxdeploy-x86_64.AppImage"
           wget -qO linuxdeploy-plugin-appimage.AppImage \
-            "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage"
+            "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/${APPIMAGE_PLUGIN_TAG}/linuxdeploy-plugin-appimage-x86_64.AppImage"
+          echo "${LINUXDEPLOY_SHA256}  linuxdeploy.AppImage" | sha256sum --check
+          echo "${APPIMAGE_PLUGIN_SHA256}  linuxdeploy-plugin-appimage.AppImage" | sha256sum --check
           chmod +x linuxdeploy.AppImage linuxdeploy-plugin-appimage.AppImage
 
-          cat > wuddle.desktop << 'DESKTOP'
-          [Desktop Entry]
-          Name=Wuddle
-          Exec=wuddle
-          Icon=wuddle
-          Type=Application
-          Categories=Utility;
-          DESKTOP
+          cp wuddle-iced/assets/wuddle.desktop wuddle.desktop
 
           # linuxdeploy infers the icon name from the filename, so it must
           # be named wuddle.png to match the Icon= entry in the desktop file.
@@ -133,10 +196,13 @@ jobs:
       - name: Package portable tar.gz
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${WUDDLE_BUILD_TAG}"
           mkdir -p dist
           cp wuddle-iced/target/release/wuddle dist/wuddle-bin
           chmod +x dist/wuddle-bin
+          mkdir -p dist/share/applications dist/share/icons/hicolor/128x128/apps
+          cp wuddle-iced/assets/wuddle.desktop dist/share/applications/wuddle.desktop
+          cp wuddle-iced/assets/icons/128x128.png dist/share/icons/hicolor/128x128/apps/wuddle.png
 
           cat > dist/wuddle << 'LAUNCH'
           #!/usr/bin/env bash
@@ -154,18 +220,58 @@ jobs:
           LAUNCH
           chmod +x dist/wuddle
 
+          cat > dist/install-desktop-entry << 'INSTALL'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          SELF="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+          DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
+          APPLICATIONS_DIR="${DATA_HOME}/applications"
+          ICON_DIR="${DATA_HOME}/icons/hicolor/128x128/apps"
+          mkdir -p "${APPLICATIONS_DIR}" "${ICON_DIR}"
+          cp "${SELF}/share/icons/hicolor/128x128/apps/wuddle.png" "${ICON_DIR}/wuddle.png"
+          {
+            echo '[Desktop Entry]'
+            echo 'Name=Wuddle'
+            echo 'Comment=Launcher and manager for legacy World of Warcraft clients'
+            printf 'Exec="%s/wuddle"\n' "${SELF}"
+            echo 'Icon=wuddle'
+            echo 'Terminal=false'
+            echo 'Type=Application'
+            echo 'Categories=Game;Utility;'
+            echo 'StartupNotify=true'
+            echo 'StartupWMClass=wuddle'
+          } > "${APPLICATIONS_DIR}/wuddle.desktop"
+          echo "Installed ${APPLICATIONS_DIR}/wuddle.desktop"
+          INSTALL
+          chmod +x dist/install-desktop-entry
+
           cat > dist/README.txt << 'DOC'
           Wuddle Linux Portable (Iced v3)
           =====================================
           Run:        ./wuddle
           Force X11:  WUDDLE_FORCE_X11=1 ./wuddle
+          App menu:   ./install-desktop-entry
 
           App data: ~/.local/share/wuddle  (shared with Wuddle v2 — no migration needed)
           DOC
 
           tar -C dist -czf "wuddle-${TAG}-linux-x86_64.tar.gz" .
 
-      - uses: actions/upload-artifact@v4
+      - name: Smoke-test Linux packages
+        run: |
+          set -euo pipefail
+          TAG="${WUDDLE_BUILD_TAG}"
+          test -s "wuddle-${TAG}-linux-x86_64.AppImage"
+          test -x "wuddle-${TAG}-linux-x86_64.AppImage"
+          "./wuddle-${TAG}-linux-x86_64.AppImage" --appimage-version
+          tar -tzf "wuddle-${TAG}-linux-x86_64.tar.gz" > package-contents.txt
+          grep -Fx './install-desktop-entry' package-contents.txt
+          grep -Fx './share/applications/wuddle.desktop' package-contents.txt
+          grep -Fx './share/icons/hicolor/128x128/apps/wuddle.png' package-contents.txt
+          grep -Fx './wuddle' package-contents.txt
+          grep -Fx './wuddle-bin' package-contents.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: iced-linux
           path: |
@@ -177,21 +283,24 @@ jobs:
   # Windows portable zip
   # ------------------------------------------------------------------
   build-windows:
-    needs: guard
+    needs: [guard, validate-release]
     if: needs.guard.outputs.should_build == 'true'
     name: Windows (portable zip)
     runs-on: windows-latest
+    timeout-minutes: 45
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           workspaces: |
             wuddle-iced -> target
@@ -200,8 +309,14 @@ jobs:
 
       - name: Build Wuddle (Iced) and launcher
         run: |
-          cargo build --release --manifest-path wuddle-iced/Cargo.toml
-          cargo build --release --manifest-path wuddle-launcher/Cargo.toml
+          cargo test --locked --manifest-path wuddle-iced/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --manifest-path wuddle-launcher/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release --manifest-path wuddle-iced/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release --manifest-path wuddle-launcher/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Show sccache stats
         shell: pwsh
@@ -211,7 +326,7 @@ jobs:
       - name: Package portable zip
         shell: pwsh
         run: |
-          $tag = $env:GITHUB_REF_NAME
+          $tag = $env:WUDDLE_BUILD_TAG
           # Launcher-layout: Wuddle.exe is the launcher, the Iced binary lives in
           # versions/<tag>/Wuddle-bin.exe so Tauri v2's self-update flow works seamlessly.
           $versionDir = "dist\versions\$tag"
@@ -231,6 +346,14 @@ jobs:
             wuddle-data\settings.json           <- settings (created on first run)
             wuddle-data\wuddle*.sqlite          <- profile databases
 
+          Manual updates:
+            Close Wuddle, then extract the new archive over the existing Wuddle
+            folder and allow its program files to be replaced. The archive does
+            not contain wuddle-data, so your existing profiles and settings are
+            preserved. If you use a new folder instead, open Backup and Restore
+            in the new copy and choose the old Wuddle folder, or copy the old
+            wuddle-data directory into the new folder before starting Wuddle.
+
           Upgrading from Wuddle v2 (Tauri):
             If you already have a v2 portable install, just unzip this into the
             same folder. The launcher will switch to v3 automatically.
@@ -246,7 +369,28 @@ jobs:
           "@
           Compress-Archive -Path "dist\*" -DestinationPath "wuddle-$tag-windows-x86_64.zip" -Force
 
-      - uses: actions/upload-artifact@v4
+      - name: Smoke-test Windows package
+        shell: pwsh
+        run: |
+          $tag = $env:WUDDLE_BUILD_TAG
+          $archive = "wuddle-$tag-windows-x86_64.zip"
+          $smokeDir = "package-smoke"
+          Expand-Archive -Path $archive -DestinationPath $smokeDir -Force
+          $launcher = Join-Path $smokeDir "Wuddle.exe"
+          $runtime = Join-Path $smokeDir "versions\$tag\Wuddle-bin.exe"
+          if (-not (Test-Path $launcher -PathType Leaf)) { throw "Wuddle.exe is missing" }
+          if (-not (Test-Path $runtime -PathType Leaf)) { throw "Wuddle-bin.exe is missing" }
+          if ((Get-Content (Join-Path $smokeDir "current.json") | ConvertFrom-Json).current -ne $tag) {
+            throw "current.json does not select the packaged version"
+          }
+          foreach ($binary in @($launcher, $runtime)) {
+            $signature = [System.IO.File]::ReadAllBytes($binary)[0..1]
+            if ($signature[0] -ne 0x4d -or $signature[1] -ne 0x5a) {
+              throw "$binary is not a Windows PE executable"
+            }
+          }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: iced-windows
           path: wuddle-*-windows-x86_64.zip
@@ -257,14 +401,16 @@ jobs:
   # ------------------------------------------------------------------
   release:
     needs: [build-linux, build-windows]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: iced-*
           path: dist
@@ -272,23 +418,11 @@ jobs:
 
       - name: Extract changelog section
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          CHANGELOG_VERSION="${VERSION%%-*}"
-          python3 - "${CHANGELOG_VERSION}" << 'PYEOF' > dist/RELEASE_BODY.md
-          import sys, re
-          version = sys.argv[1]
-          with open('CHANGELOG.md') as f:
-              text = f.read()
-          pattern = r'## v' + re.escape(version) + r'[^\n]*\n(.*?)(?=\n## v|\Z)'
-          m = re.search(pattern, text, re.DOTALL)
-          if m:
-              sys.stdout.write(m.group(1).strip() + '\n')
-          else:
-              sys.stdout.write(f'See CHANGELOG.md for v{version} release notes.\n')
-          PYEOF
+          python3 .github/scripts/validate_release.py \
+            "${WUDDLE_BUILD_TAG}" --notes > dist/RELEASE_BODY.md
 
       - name: Publish pre-release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: false

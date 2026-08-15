@@ -6,30 +6,78 @@ use iced;
 use pelite::{FileMap, PeFile};
 use reqwest::Client;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use wuddle_engine::{CheckMode, Engine, InstallMode, InstallOptions, Repo, UpdatePlan};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RescanProgress {
+    pub operation_id: u64,
     pub stage: String,
     pub detail: String,
 }
+
+const REPOSITORY_LOAD_DEADLINE: Duration = Duration::from_secs(60);
+const FORGE_CASING_BUDGET: Duration = Duration::from_secs(5);
 
 fn rescan_progress_slot() -> &'static Mutex<Option<RescanProgress>> {
     static SLOT: OnceLock<Mutex<Option<RescanProgress>>> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))
 }
 
-pub fn set_rescan_progress(stage: impl Into<String>, detail: impl Into<String>) {
+fn next_rescan_operation_id() -> u64 {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    NEXT_ID.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+}
+
+fn begin_rescan_progress(stage: impl Into<String>, detail: impl Into<String>) -> u64 {
+    let operation_id = next_rescan_operation_id();
     let stage = stage.into();
     let detail = detail.into();
     crate::diagnostics::trace("rescan", format!("progress: stage={stage}; detail omitted"));
     if let Ok(mut guard) = rescan_progress_slot().lock() {
-        *guard = Some(RescanProgress { stage, detail });
+        *guard = Some(RescanProgress {
+            operation_id,
+            stage,
+            detail,
+        });
+    }
+    operation_id
+}
+
+fn set_rescan_progress(operation_id: u64, stage: impl Into<String>, detail: impl Into<String>) {
+    let stage = stage.into();
+    let detail = detail.into();
+    if let Ok(mut guard) = rescan_progress_slot().lock() {
+        if guard
+            .as_ref()
+            .is_some_and(|progress| progress.operation_id == operation_id)
+        {
+            crate::diagnostics::trace("rescan", format!("progress: stage={stage}; detail omitted"));
+            *guard = Some(RescanProgress {
+                operation_id,
+                stage,
+                detail,
+            });
+        }
+    }
+}
+
+fn clear_rescan_progress_for(operation_id: u64) {
+    if let Ok(mut guard) = rescan_progress_slot().lock() {
+        if guard
+            .as_ref()
+            .is_some_and(|progress| progress.operation_id == operation_id)
+        {
+            *guard = None;
+        }
     }
 }
 
@@ -44,6 +92,131 @@ pub fn latest_rescan_progress() -> Option<RescanProgress> {
         .lock()
         .ok()
         .and_then(|guard| guard.clone())
+}
+
+fn rescan_checkpoint(
+    operation_id: u64,
+    cancelled: &AtomicBool,
+    stage: impl Into<String>,
+    detail: impl Into<String>,
+) -> Result<(), String> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Repository loading was cancelled.".to_string());
+    }
+    set_rescan_progress(operation_id, stage, detail);
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Repository loading was cancelled.".to_string());
+    }
+    Ok(())
+}
+
+struct ActiveRescan {
+    operation_id: u64,
+    cancelled: Arc<AtomicBool>,
+    finished: bool,
+}
+
+impl ActiveRescan {
+    fn new(operation_id: u64, cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            operation_id,
+            cancelled,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.finished = true;
+    }
+}
+
+impl Drop for ActiveRescan {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cancelled.store(true, Ordering::Release);
+            clear_rescan_progress_for(self.operation_id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod repository_operation_tests {
+    use super::*;
+
+    #[test]
+    fn stale_rescan_progress_and_cancellation_cannot_replace_a_newer_scan() {
+        clear_rescan_progress();
+        let first = begin_rescan_progress("first", "first");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let active = ActiveRescan::new(first, Arc::clone(&cancelled));
+        let second = begin_rescan_progress("second", "second");
+
+        set_rescan_progress(first, "stale", "stale");
+        drop(active);
+
+        let progress = latest_rescan_progress().expect("newer progress remains");
+        assert_eq!(progress.operation_id, second);
+        assert_eq!(progress.stage, "second");
+        assert!(cancelled.load(Ordering::Acquire));
+        clear_rescan_progress();
+    }
+
+    #[test]
+    fn repository_mutation_locks_are_shared_per_profile_and_isolated_between_profiles() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let first_profile = Some(PathBuf::from("profile-a.sqlite"));
+            let second_profile = Some(PathBuf::from("profile-b.sqlite"));
+            let first_lock = repository_mutation_lock(&first_profile);
+            let same_lock = repository_mutation_lock(&first_profile);
+            let other_lock = repository_mutation_lock(&second_profile);
+
+            assert!(Arc::ptr_eq(&first_lock, &same_lock));
+            assert!(!Arc::ptr_eq(&first_lock, &other_lock));
+
+            let held = first_lock.lock_owned().await;
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), same_lock.lock_owned())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), other_lock.lock_owned())
+                    .await
+                    .is_ok()
+            );
+            drop(held);
+        });
+    }
+
+    #[test]
+    fn update_all_skips_a_repository_removed_after_the_batch_was_prepared() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("wuddle.sqlite");
+        let wow_dir = temp.path().join("Game");
+        std::fs::create_dir_all(&wow_dir).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let results = runtime
+            .block_on(update_all(
+                Some(db_path),
+                wow_dir.to_string_lossy().into_owned(),
+                vec![4242],
+                InstallOptions::default(),
+            ))
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].repo_id, 4242);
+        assert!(results[0].skipped);
+        assert!(results[0].error.is_none());
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +253,10 @@ pub fn is_release_url(url: &str) -> bool {
 
 pub fn is_direct_archive_url(url: &str) -> bool {
     wuddle_engine::is_direct_archive_url(url)
+}
+
+pub fn is_direct_archive_candidate(url: &str) -> bool {
+    wuddle_engine::is_direct_archive_candidate(url)
 }
 
 pub fn is_local_archive_path(path: &Path) -> bool {
@@ -185,7 +362,10 @@ mod primary_toc_tests {
         };
 
         let options = root_probe_addon_names(&probe);
-        assert_eq!(options, vec!["Questie".to_string(), "Questie-335".to_string()]);
+        assert_eq!(
+            options,
+            vec!["Questie".to_string(), "Questie-335".to_string()]
+        );
         assert_eq!(
             suggested_addon_for_expansion(&options, Some("wotlk")),
             Some("Questie-335".to_string())
@@ -206,13 +386,14 @@ fn build_collection_conflict_owner_groups(
         }
 
         for owner in &conflict.owners {
-            let group = groups.entry(owner.repo_id).or_insert_with(|| {
-                CollectionConflictOwnerGroup {
-                    repo_id: owner.repo_id,
-                    repo_label: format!("{}/{}", owner.owner, owner.name),
-                    conflicting_addons: Vec::new(),
-                }
-            });
+            let group =
+                groups
+                    .entry(owner.repo_id)
+                    .or_insert_with(|| CollectionConflictOwnerGroup {
+                        repo_id: owner.repo_id,
+                        repo_label: format!("{}/{}", owner.owner, owner.name),
+                        conflicting_addons: Vec::new(),
+                    });
 
             if !group
                 .conflicting_addons
@@ -267,12 +448,30 @@ pub struct RepoRow {
     /// Empty for non-DLL repos. More than one entry means this is a multi-DLL mod.
     pub installed_dlls: Vec<(String, bool, Option<String>)>,
     pub installed_addons: Vec<String>,
+    pub installed_mpqs: Vec<wuddle_engine::mpq::MpqInstalledFile>,
+    /// User-facing MPQ package label. The repository name remains the stable
+    /// collision-safe identity used to recognize local archive reinstalls.
+    pub mpq_package_name: Option<String>,
+    pub dependencies: Vec<(i64, String)>,
     pub selected_addons: Vec<String>,
     pub is_collection: bool,
     pub merge_installs: bool,
     pub pinned_version: Option<String>,
     pub installed_at_unix: Option<i64>,
     pub published_at_unix: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepoDetailEntry {
+    pub path: String,
+    pub kind: String,
+    pub is_directory: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepoDetailChild {
+    pub name: String,
+    pub is_directory: bool,
 }
 
 fn parse_selected_addons(raw: Option<&str>) -> Vec<String> {
@@ -312,12 +511,15 @@ impl From<Repo> for RepoRow {
                 .map(|branch| branch.to_string()),
             installed_dlls: Vec::new(),
             installed_addons: Vec::new(),
+            installed_mpqs: Vec::new(),
+            mpq_package_name: None,
+            dependencies: Vec::new(),
             selected_addons: parse_selected_addons(r.selected_addons_json.as_deref()),
             is_collection: r
                 .selected_addons_json
                 .as_deref()
                 .map(str::trim)
-                .map_or(false, |raw| !raw.is_empty()),
+                .is_some_and(|raw| !raw.is_empty()),
             merge_installs: r.merge_installs,
             pinned_version: r.pinned_version,
             installed_at_unix: r.installed_at_unix,
@@ -354,6 +556,10 @@ pub struct RepoLoadLog {
 #[derive(Debug, Clone)]
 pub struct RepoLoadResult {
     pub rows: Vec<RepoRow>,
+    pub untracked_mpqs: Vec<wuddle_engine::mpq::MpqProtectionEntry>,
+    /// Present only for an explicit Rescan. Normal repository reloads retain
+    /// the last authoritative local-change result in the frontend plan cache.
+    pub addon_git_local_changes: Option<wuddle_engine::AddonGitLocalChangeScan>,
     pub logs: Vec<RepoLoadLog>,
 }
 
@@ -365,6 +571,7 @@ pub struct ClientVersionInfo {
     pub file_version: Option<String>,
     pub product_version: Option<String>,
     pub supports_legacy_1121_tweaks: bool,
+    pub is_wotlk_335a_12340: bool,
     pub quick_add_family: ClientFamily,
 }
 
@@ -450,37 +657,197 @@ pub enum CheckUpdatesStreamEvent {
     Finished(Result<Vec<PlanRow>, String>),
 }
 
-static UPDATE_CHECK_PROGRESS: OnceLock<Mutex<Option<wuddle_engine::UpdateCheckProgress>>> =
+#[derive(Debug, Clone)]
+pub struct WdmReleaseAsset {
+    pub name: String,
+    pub download_url: String,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WdmReleaseSet {
+    pub version: String,
+    pub assets: Vec<WdmReleaseAsset>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WdmCatalog {
+    pub locale: wuddle_engine::mpq::LocaleDetection,
+    pub stable: WdmReleaseSet,
+    pub caverns: Option<WdmReleaseSet>,
+    pub addon: WdmReleaseSet,
+}
+
+pub const WDM_PATCH_URL: &str = "https://github.com/Trimitor/WDM-patch";
+pub const EPOCH_WATER_URL: &str = "https://github.com/ZythDr/EpochWater";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CuratedMpqKind {
+    Wdm,
+    EpochWater,
+}
+
+impl CuratedMpqKind {
+    pub fn readme_label(self) -> &'static str {
+        match self {
+            Self::Wdm => "WDM",
+            Self::EpochWater => "Epoch Water",
+        }
+    }
+
+    pub fn latest_label(self) -> &'static str {
+        match self {
+            Self::Wdm => "Latest WDM release",
+            Self::EpochWater => "Latest Epoch Water source revision",
+        }
+    }
+}
+
+fn curated_mpq_kind_for_url(url: &str) -> Option<CuratedMpqKind> {
+    let url = url.trim_end_matches('/');
+    if url.eq_ignore_ascii_case(WDM_PATCH_URL) {
+        Some(CuratedMpqKind::Wdm)
+    } else if url.eq_ignore_ascii_case(EPOCH_WATER_URL) {
+        Some(CuratedMpqKind::EpochWater)
+    } else {
+        None
+    }
+}
+
+pub fn curated_mpq_kind(repo: &RepoRow) -> Option<CuratedMpqKind> {
+    (repo.mode == "mpq")
+        .then(|| curated_mpq_kind_for_url(&repo.url))
+        .flatten()
+}
+
+fn curated_mpq_kind_for_repo(repo: &Repo) -> Option<CuratedMpqKind> {
+    (repo.mode == InstallMode::Mpq)
+        .then(|| curated_mpq_kind_for_url(&repo.url))
+        .flatten()
+}
+
+pub fn is_wdm_repo(repo: &RepoRow) -> bool {
+    curated_mpq_kind(repo) == Some(CuratedMpqKind::Wdm)
+}
+
+pub fn is_epoch_water_repo(repo: &RepoRow) -> bool {
+    curated_mpq_kind(repo) == Some(CuratedMpqKind::EpochWater)
+}
+
+pub fn is_curated_mpq_repo(repo: &RepoRow) -> bool {
+    curated_mpq_kind(repo).is_some()
+}
+
+impl WdmReleaseSet {
+    pub fn locale_asset(&self, locale: &str, suffix: char) -> Option<&WdmReleaseAsset> {
+        let expected = format!("patch-{locale}-{suffix}.MPQ");
+        self.assets
+            .iter()
+            .find(|asset| asset.name.eq_ignore_ascii_case(&expected))
+    }
+}
+
+static UPDATE_CHECK_PROGRESS: OnceLock<Mutex<HashMap<i64, wuddle_engine::UpdateCheckProgress>>> =
     OnceLock::new();
+static UPDATE_CHECKS_BLOCKED_FOR_SESSION: AtomicBool = AtomicBool::new(false);
+const UPDATE_CHECK_DEADLINE: Duration = Duration::from_secs(30);
+const MAX_CONCURRENT_CURATED_MPQ_CHECKS: usize = 2;
 
-fn update_check_progress_slot() -> &'static Mutex<Option<wuddle_engine::UpdateCheckProgress>> {
-    UPDATE_CHECK_PROGRESS.get_or_init(|| Mutex::new(None))
+fn update_check_progress_slot() -> &'static Mutex<HashMap<i64, wuddle_engine::UpdateCheckProgress>>
+{
+    UPDATE_CHECK_PROGRESS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn set_update_check_progress(progress: Option<wuddle_engine::UpdateCheckProgress>) {
-    if let Some(progress) = &progress {
-        crate::diagnostics::trace(
-            "update_check",
-            format!(
-                "progress: stage={:?}; mode={}; repository identity omitted",
-                progress.stage, progress.mode
-            ),
-        );
+fn set_update_check_progress(progress: wuddle_engine::UpdateCheckProgress) {
+    if UPDATE_CHECKS_BLOCKED_FOR_SESSION.load(Ordering::Acquire) {
+        return;
     }
+    crate::diagnostics::trace(
+        "update_check",
+        format!(
+            "progress: repo_id={}; stage={:?}; mode={}; repository identity omitted",
+            progress.repo_id, progress.stage, progress.mode
+        ),
+    );
     if let Ok(mut slot) = update_check_progress_slot().lock() {
-        *slot = progress;
+        if progress.stage == wuddle_engine::UpdateCheckProgressStage::Finished {
+            slot.remove(&progress.repo_id);
+        } else {
+            slot.insert(progress.repo_id, progress);
+        }
     }
 }
 
-pub fn latest_update_check_progress() -> Option<wuddle_engine::UpdateCheckProgress> {
+pub fn active_update_check_progress() -> Vec<wuddle_engine::UpdateCheckProgress> {
     update_check_progress_slot()
         .lock()
-        .ok()
-        .and_then(|slot| slot.clone())
+        .map(|slot| {
+            let mut progress = slot.values().cloned().collect::<Vec<_>>();
+            progress.sort_by_key(|item| item.repo_id);
+            progress
+        })
+        .unwrap_or_default()
 }
 
 pub fn clear_update_check_progress() {
-    set_update_check_progress(None);
+    if let Ok(mut slot) = update_check_progress_slot().lock() {
+        slot.clear();
+    }
+}
+
+#[cfg(test)]
+mod update_check_progress_tests {
+    use super::*;
+    use wuddle_engine::{UpdateCheckProgress, UpdateCheckProgressStage};
+
+    fn progress(repo_id: i64, stage: UpdateCheckProgressStage) -> UpdateCheckProgress {
+        UpdateCheckProgress {
+            repo_id,
+            owner: format!("owner-{repo_id}"),
+            name: format!("repo-{repo_id}"),
+            mode: "auto".to_string(),
+            stage,
+        }
+    }
+
+    #[test]
+    fn parallel_repository_progress_is_retained_and_finished_independently() {
+        clear_update_check_progress();
+        set_update_check_progress(progress(11, UpdateCheckProgressStage::FetchingRelease));
+        set_update_check_progress(progress(22, UpdateCheckProgressStage::VerifyingFiles));
+
+        let active = active_update_check_progress();
+        assert_eq!(
+            active
+                .iter()
+                .map(|item| (item.repo_id, item.stage))
+                .collect::<Vec<_>>(),
+            vec![
+                (11, UpdateCheckProgressStage::FetchingRelease),
+                (22, UpdateCheckProgressStage::VerifyingFiles),
+            ]
+        );
+
+        set_update_check_progress(progress(11, UpdateCheckProgressStage::Finished));
+        let active = active_update_check_progress();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].repo_id, 22);
+        assert_eq!(active[0].stage, UpdateCheckProgressStage::VerifyingFiles);
+        clear_update_check_progress();
+    }
+
+    #[tokio::test]
+    async fn cancellation_waiter_observes_the_shared_deadline_signal() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let waiter = tokio::spawn(wait_for_update_check_cancellation(Arc::clone(&cancelled)));
+
+        cancelled.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_millis(100), waiter)
+            .await
+            .expect("cancellation waiter should stop promptly")
+            .expect("cancellation waiter task should not panic");
+    }
 }
 
 fn first_existing_game_executable(dir: &Path) -> Option<PathBuf> {
@@ -596,6 +963,7 @@ pub async fn detect_tweak_client(
         let supports_legacy_1121_tweaks = version_tuple
             .map(|(major, minor, patch, _)| (major, minor, patch) == (1, 12, 1))
             .unwrap_or(false);
+        let is_wotlk_335a_12340 = version_tuple == Some((3, 3, 5, 12340));
 
         Ok(ClientVersionInfo {
             executable_path: exe_path.to_string_lossy().to_string(),
@@ -607,6 +975,7 @@ pub async fn detect_tweak_client(
             file_version,
             product_version,
             supports_legacy_1121_tweaks,
+            is_wotlk_335a_12340,
             quick_add_family: classify_legacy_client(version_tuple),
         })
     })
@@ -648,6 +1017,50 @@ pub fn is_mod(repo: &RepoRow) -> bool {
     !matches!(repo.mode.as_str(), "addon" | "addon_git" | "manual")
 }
 
+fn supports_release_version_listing_mode(mode: &str) -> bool {
+    !matches!(mode, "addon" | "addon_git" | "manual" | "mpq")
+}
+
+/// Whether the repository can populate the release-version picker through the
+/// generic forge API.
+///
+/// MPQs are displayed alongside other managed projects in a few shared views,
+/// but generic/local MPQ packages have no remote release source. Curated MPQs
+/// such as WDM and Epoch Water use their dedicated update resolvers instead.
+pub fn supports_release_version_listing(repo: &RepoRow) -> bool {
+    supports_release_version_listing_mode(&repo.mode)
+}
+
+#[cfg(test)]
+mod release_version_listing_tests {
+    use super::supports_release_version_listing_mode;
+
+    #[test]
+    fn generic_release_versions_exclude_every_mpq_package() {
+        assert!(!supports_release_version_listing_mode("mpq"));
+    }
+
+    #[test]
+    fn generic_release_versions_keep_supported_mod_modes() {
+        for mode in ["auto", "dll", "mixed", "raw"] {
+            assert!(
+                supports_release_version_listing_mode(mode),
+                "{mode} should use generic release-version loading"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_release_versions_exclude_non_release_project_modes() {
+        for mode in ["addon", "addon_git", "manual"] {
+            assert!(
+                !supports_release_version_listing_mode(mode),
+                "{mode} should not use generic release-version loading"
+            );
+        }
+    }
+}
+
 fn open_engine(db_path: Option<&Path>) -> Result<Engine, String> {
     match db_path {
         Some(p) => Engine::open(p).map_err(|e| e.to_string()),
@@ -673,6 +1086,986 @@ pub async fn initialize_profile_database(
     .map_err(|e| e.to_string())?
 }
 
+fn sqlite_family_paths(database: &Path) -> Vec<PathBuf> {
+    ["", "-wal", "-shm", "-journal"]
+        .into_iter()
+        .map(|suffix| {
+            let mut path = database.as_os_str().to_os_string();
+            path.push(suffix);
+            PathBuf::from(path)
+        })
+        .collect()
+}
+
+fn delete_profile_database_files_blocking(database: &Path) -> Result<(), String> {
+    let existing = sqlite_family_paths(database)
+        .into_iter()
+        .filter(|path| path.exists() || path.is_symlink())
+        .collect::<Vec<_>>();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    let parent = database
+        .parent()
+        .ok_or_else(|| "The profile database has no parent directory.".to_string())?;
+    let quarantine = tempfile::Builder::new()
+        .prefix(".wuddle-profile-delete-")
+        .tempdir_in(parent)
+        .map_err(|error| format!("Could not stage profile database deletion: {error}"))?;
+    let mut moved = Vec::<(PathBuf, PathBuf)>::new();
+
+    for source in existing {
+        let Some(name) = source.file_name() else {
+            continue;
+        };
+        let destination = quarantine.path().join(name);
+        if let Err(error) = fs::rename(&source, &destination) {
+            let mut rollback_failures = 0usize;
+            for (original, staged) in moved.iter().rev() {
+                if fs::rename(staged, original).is_err() {
+                    rollback_failures += 1;
+                }
+            }
+            return Err(format!(
+                "Could not stage profile database deletion ({:?}). {} rollback operation(s) failed.",
+                error.kind(),
+                rollback_failures
+            ));
+        }
+        moved.push((source, destination));
+    }
+
+    if let Err(error) = fs::remove_dir_all(quarantine.path()) {
+        let mut rollback_failures = 0usize;
+        for (original, staged) in moved.iter().rev() {
+            if staged.exists() && fs::rename(staged, original).is_err() {
+                rollback_failures += 1;
+            }
+        }
+        return Err(format!(
+            "Could not finalize profile database deletion ({:?}). {} rollback operation(s) failed.",
+            error.kind(),
+            rollback_failures
+        ));
+    }
+    Ok(())
+}
+
+pub async fn delete_profile_database_files(database: PathBuf) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("delete_profile_database_files");
+    tokio::task::spawn_blocking(move || delete_profile_database_files_blocking(&database))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[cfg(test)]
+mod profile_database_deletion_tests {
+    use super::*;
+
+    #[test]
+    fn deletion_removes_the_complete_sqlite_file_family() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("profile.sqlite");
+        let family = sqlite_family_paths(&database);
+        for path in &family {
+            fs::write(path, b"test").unwrap();
+        }
+
+        delete_profile_database_files_blocking(&database).unwrap();
+
+        assert!(family.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn deleting_an_already_absent_database_is_retry_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("missing.sqlite");
+
+        delete_profile_database_files_blocking(&database).unwrap();
+        delete_profile_database_files_blocking(&database).unwrap();
+    }
+}
+
+pub async fn inspect_local_mpq(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    source: PathBuf,
+) -> Result<wuddle_engine::mpq::MpqInspection, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("inspect_local_mpq");
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.inspect_local_mpq_source(Path::new(&wow_dir), &source)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn install_local_mpq(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    source: PathBuf,
+    selections: Vec<wuddle_engine::mpq::MpqInstallSelection>,
+    set_xattr_comment: bool,
+) -> Result<i64, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("install_local_mpq");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.install_local_mpq_package(Path::new(&wow_dir), &source, &selections, set_xattr_comment)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn preview_local_mpq_targets(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    source: PathBuf,
+    selections: Vec<wuddle_engine::mpq::MpqInstallSelection>,
+) -> Result<Vec<wuddle_engine::mpq::MpqTargetPreview>, String> {
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.preview_local_mpq_targets(Path::new(&wow_dir), &source, &selections)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn load_mpq_protection(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+) -> Result<Vec<wuddle_engine::mpq::MpqProtectionEntry>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("load_mpq_protection");
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.list_mpq_protection(Path::new(&wow_dir))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn detect_mpq_locale(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+) -> Result<Option<String>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("detect_mpq_locale");
+    tokio::task::spawn_blocking(move || {
+        let engine = open_engine(db_path.as_deref())?;
+        let detection = engine.detect_wow_locale(Path::new(&wow_dir));
+        if detection.ambiguous {
+            return Ok(None);
+        }
+        Ok(detection
+            .recommended
+            .or_else(|| (detection.candidates.len() == 1).then(|| detection.candidates[0].clone())))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn rescan_mpqs(db_path: Option<PathBuf>, wow_dir: String) -> Result<usize, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("rescan_mpqs");
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.list_mpq_protection(Path::new(&wow_dir))
+            .map(|entries| entries.len())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn change_mpq_protection(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    protected: bool,
+) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("change_mpq_protection");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_mpq_protected(Path::new(&wow_dir), &path, protected)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn set_untracked_mpq_editor_unlocked(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    editor_unlocked: bool,
+) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("set_untracked_mpq_editor_unlocked");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    crate::diagnostics::trace(
+        "service.mpq",
+        format!("editor lock requested: tracked=false; editor_unlocked={editor_unlocked}"),
+    );
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_untracked_mpq_editor_unlocked(Path::new(&wow_dir), &path, editor_unlocked)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn set_tracked_mpq_editor_unlocked(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    repo_id: i64,
+    path: String,
+    editor_unlocked: bool,
+) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("set_tracked_mpq_editor_unlocked");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    crate::diagnostics::trace(
+        "service.mpq",
+        format!(
+            "editor lock requested: tracked=true; repo_id={repo_id}; editor_unlocked={editor_unlocked}"
+        ),
+    );
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_tracked_mpq_editor_unlocked(repo_id, Path::new(&wow_dir), &path, editor_unlocked)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn change_mpq_classification(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    core: bool,
+) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("change_mpq_classification");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_mpq_core_classification(Path::new(&wow_dir), &path, core)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn set_untracked_mpq_enabled(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("set_untracked_mpq_enabled");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    crate::diagnostics::trace(
+        "service.mpq",
+        format!("untracked MPQ state requested: enabled={enabled}; path omitted"),
+    );
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_untracked_mpq_enabled(Path::new(&wow_dir), &path, enabled)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn rename_untracked_mpq(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    display_name: String,
+    set_xattr_comment: bool,
+) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("rename_untracked_mpq");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.rename_untracked_mpq_display_name(
+            Path::new(&wow_dir),
+            &path,
+            &display_name,
+            set_xattr_comment,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+// Keep each MPQ edit request as one atomic service operation.
+#[allow(clippy::too_many_arguments)]
+pub async fn edit_untracked_mpq(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    display_name: String,
+    file_name: String,
+    destination: wuddle_engine::mpq::MpqDestination,
+    core: bool,
+    set_xattr_comment: bool,
+) -> Result<String, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("edit_untracked_mpq");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.edit_untracked_mpq(
+            Path::new(&wow_dir),
+            &path,
+            &display_name,
+            &file_name,
+            &destination,
+            core,
+            set_xattr_comment,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn rename_untracked_mpq_file(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    path: String,
+    file_name: String,
+) -> Result<String, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("rename_untracked_mpq_file");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.rename_untracked_mpq_file(Path::new(&wow_dir), &path, &file_name)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+// Keep each MPQ edit request as one atomic service operation.
+#[allow(clippy::too_many_arguments)]
+pub async fn rename_mpq_component(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    repo_id: i64,
+    path: String,
+    display_name: String,
+    file_name: String,
+    destination: wuddle_engine::mpq::MpqDestination,
+    set_xattr_comment: bool,
+) -> Result<String, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("rename_mpq_component");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.edit_tracked_mpq(
+            repo_id,
+            Path::new(&wow_dir),
+            &path,
+            &display_name,
+            &file_name,
+            &destination,
+            set_xattr_comment,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn edit_mpq_package(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    repo_id: i64,
+    display_name: String,
+    edits: Vec<wuddle_engine::mpq::MpqPackageFileEdit>,
+    set_xattr_comment: bool,
+) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("edit_mpq_package");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.edit_tracked_mpq_package(
+            repo_id,
+            Path::new(&wow_dir),
+            &display_name,
+            &edits,
+            set_xattr_comment,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn remove_mpq_component(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    repo_id: i64,
+    path: String,
+    force_modified: bool,
+) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("remove_mpq_component");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.remove_mpq_component(repo_id, &path, Path::new(&wow_dir), force_modified)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn set_mpq_enabled(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    repo_id: i64,
+    path: Option<String>,
+    enabled: bool,
+) -> Result<usize, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("set_mpq_enabled");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    crate::diagnostics::trace(
+        "service.mpq",
+        format!(
+            "tracked MPQ state requested: repo_id={repo_id}; scope={}; enabled={enabled}; path omitted",
+            if path.is_some() { "component" } else { "package" }
+        ),
+    );
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.set_mpq_enabled(repo_id, path.as_deref(), enabled, Path::new(&wow_dir))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn protect_modified_mpq(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    repo_id: i64,
+    path: String,
+) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("protect_modified_mpq");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        eng.protect_modified_mpq(repo_id, &path, Path::new(&wow_dir))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn wdm_release_set(release: &wuddle_engine::LatestRelease, suffix: char) -> Option<WdmReleaseSet> {
+    let assets = release
+        .assets
+        .iter()
+        .filter(|asset| {
+            let lower = asset.name.to_ascii_lowercase();
+            lower.starts_with("patch-")
+                && lower.ends_with(&format!("-{suffix}.mpq").to_ascii_lowercase())
+        })
+        .map(|asset| WdmReleaseAsset {
+            name: asset.name.clone(),
+            download_url: asset.download_url.clone(),
+            size: asset.size,
+            sha256: asset.sha256.clone(),
+        })
+        .collect::<Vec<_>>();
+    (!assets.is_empty()).then(|| WdmReleaseSet {
+        version: release.tag.clone(),
+        assets,
+    })
+}
+
+async fn resolve_wdm_stable(
+    eng: &Engine,
+) -> Result<(WdmReleaseSet, Vec<wuddle_engine::LatestRelease>), String> {
+    let patch_releases = eng
+        .list_releases(WDM_PATCH_URL)
+        .await
+        .map_err(|error| error.to_string())?;
+    let stable = patch_releases
+        .iter()
+        .filter(|release| !release.prerelease)
+        .find_map(|release| wdm_release_set(release, 'M'))
+        .ok_or_else(|| "WDM has no stable locale-specific M patch release.".to_string())?;
+    Ok((stable, patch_releases))
+}
+
+#[cfg(test)]
+mod wdm_recipe_tests {
+    use super::*;
+
+    fn asset(name: &str) -> wuddle_engine::ReleaseAsset {
+        wuddle_engine::ReleaseAsset {
+            id: None,
+            name: name.to_string(),
+            download_url: format!("https://example.invalid/{name}"),
+            size: None,
+            content_type: None,
+            sha256: None,
+        }
+    }
+
+    #[test]
+    fn selects_only_exact_locale_letter_assets() {
+        let release = wuddle_engine::LatestRelease {
+            tag: "current".to_string(),
+            name: None,
+            prerelease: false,
+            assets: vec![
+                asset("patch-enUS-M.MPQ"),
+                asset("patch-deDE-M.MPQ"),
+                asset("patch-enUS-N.MPQ"),
+                asset("notes.zip"),
+            ],
+            published_at: None,
+        };
+        let main = wdm_release_set(&release, 'M').unwrap();
+        assert_eq!(main.assets.len(), 2);
+        assert_eq!(
+            main.locale_asset("ENus", 'M')
+                .map(|asset| asset.name.as_str()),
+            Some("patch-enUS-M.MPQ")
+        );
+        assert!(main.locale_asset("frFR", 'M').is_none());
+    }
+
+    #[test]
+    fn update_checks_use_the_main_wdm_patch_version_even_when_disabled() {
+        let installs = [
+            (
+                "Data/enUS/patch-enUS-N.MPQ",
+                Some("WDM Caverns & Mines"),
+                Some("caverns-preview"),
+            ),
+            (
+                "Data/enUS/renamed-main.MPQ.disabled",
+                Some("WDM Dungeon Maps"),
+                Some("v1.4.0"),
+            ),
+        ];
+        assert_eq!(
+            installed_wdm_main_version(installs).as_deref(),
+            Some("v1.4.0")
+        );
+    }
+
+    #[test]
+    fn curated_updates_preserve_a_user_selected_target_name_and_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::open(&temp.path().join("wuddle.sqlite")).unwrap();
+        let repo_id = engine
+            .add_repo(WDM_PATCH_URL, InstallMode::Mpq, None, None)
+            .unwrap();
+        engine
+            .db()
+            .add_install_with_hash(
+                repo_id,
+                "Data/enUS/patch-enUS-X.MPQ",
+                "mpq",
+                None,
+                Some("v1.4.0"),
+            )
+            .unwrap();
+        engine
+            .db()
+            .set_install_display_name(repo_id, "Data/enUS/patch-enUS-X.MPQ", "WDM Dungeon Maps")
+            .unwrap();
+
+        assert_eq!(
+            saved_curated_mpq_target(&engine, WDM_PATCH_URL, "WDM Dungeon Maps"),
+            Some((
+                "patch-enUS-X.MPQ".to_string(),
+                wuddle_engine::mpq::MpqDestination::Locale("enUS".to_string()),
+            ))
+        );
+    }
+
+    #[test]
+    fn recognizes_the_supported_curated_mpq_sources() {
+        assert_eq!(
+            curated_mpq_kind_for_url("https://github.com/Trimitor/WDM-patch/"),
+            Some(CuratedMpqKind::Wdm)
+        );
+        assert_eq!(
+            curated_mpq_kind_for_url("https://github.com/ZythDr/EpochWater"),
+            Some(CuratedMpqKind::EpochWater)
+        );
+        assert_eq!(
+            curated_mpq_kind_for_url("https://github.com/example/other-patch"),
+            None
+        );
+    }
+}
+
+pub async fn resolve_wdm(db_path: Option<PathBuf>, wow_dir: String) -> Result<WdmCatalog, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("resolve_wdm");
+    let eng = open_engine(db_path.as_deref())?;
+    let locale = eng.detect_wow_locale(Path::new(&wow_dir));
+    let (stable, patch_releases) = resolve_wdm_stable(&eng).await?;
+    let caverns = patch_releases
+        .iter()
+        .filter(|release| release.prerelease)
+        .find_map(|release| wdm_release_set(release, 'N'));
+
+    let addon_releases = eng
+        .list_releases("https://github.com/Trimitor/WDM-addons")
+        .await
+        .map_err(|error| error.to_string())?;
+    let addon_release = addon_releases
+        .iter()
+        .find(|release| !release.prerelease)
+        .or_else(|| addon_releases.first())
+        .ok_or_else(|| "WDM-addons has no release.".to_string())?;
+    let addon_asset = addon_release
+        .assets
+        .iter()
+        .find(|asset| asset.name.eq_ignore_ascii_case("WDM.zip"))
+        .ok_or_else(|| "The latest WDM-addons release has no WDM.zip asset.".to_string())?;
+    let addon = WdmReleaseSet {
+        version: addon_release.tag.clone(),
+        assets: vec![WdmReleaseAsset {
+            name: addon_asset.name.clone(),
+            download_url: addon_asset.download_url.clone(),
+            size: addon_asset.size,
+            sha256: addon_asset.sha256.clone(),
+        }],
+    };
+    Ok(WdmCatalog {
+        locale,
+        stable,
+        caverns,
+        addon,
+    })
+}
+
+fn saved_curated_mpq_target(
+    engine: &Engine,
+    repository_url: &str,
+    display_name: &str,
+) -> Option<(String, wuddle_engine::mpq::MpqDestination)> {
+    let repo = engine.db().list_repos().ok()?.into_iter().find(|repo| {
+        repo.mode == InstallMode::Mpq
+            && repo
+                .url
+                .trim_end_matches('/')
+                .eq_ignore_ascii_case(repository_url.trim_end_matches('/'))
+    })?;
+    let install = engine
+        .db()
+        .list_installs(repo.id)
+        .ok()?
+        .into_iter()
+        .find(|entry| {
+            entry.kind == "mpq"
+                && entry
+                    .display_name
+                    .as_deref()
+                    .map(|name| name.eq_ignore_ascii_case(display_name))
+                    .unwrap_or(false)
+        })?;
+    let enabled_path = install
+        .path
+        .strip_suffix(".disabled")
+        .unwrap_or(&install.path);
+    let path = Path::new(enabled_path);
+    let file_name = path.file_name()?.to_str()?.to_string();
+    let parts = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    let destination = if parts.len() >= 3 && parts[0].eq_ignore_ascii_case("Data") {
+        wuddle_engine::mpq::normalize_locale(parts[1])
+            .map(wuddle_engine::mpq::MpqDestination::Locale)
+            .unwrap_or(wuddle_engine::mpq::MpqDestination::DataRoot)
+    } else {
+        wuddle_engine::mpq::MpqDestination::DataRoot
+    };
+    Some((file_name, destination))
+}
+
+pub async fn install_wdm(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    catalog: WdmCatalog,
+    locale: String,
+    include_caverns: bool,
+    install_addon: bool,
+    options: InstallOptions,
+) -> Result<i64, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("install_wdm");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    let eng = open_engine(db_path.as_deref())?;
+    let wow_path = Path::new(&wow_dir);
+    let locale = wuddle_engine::mpq::normalize_locale(&locale)
+        .ok_or_else(|| "Choose a supported WoW locale.".to_string())?;
+    let main = catalog
+        .stable
+        .locale_asset(&locale, 'M')
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "WDM {} has no patch-{locale}-M.MPQ asset.",
+                catalog.stable.version
+            )
+        })?;
+    let caverns = if include_caverns {
+        Some(
+            catalog
+                .caverns
+                .as_ref()
+                .and_then(|release| {
+                    release
+                        .locale_asset(&locale, 'N')
+                        .map(|asset| (release, asset))
+                })
+                .ok_or_else(|| format!("No Caverns & Mines patch is available for {locale}."))?,
+        )
+    } else {
+        None
+    };
+    if include_caverns && !install_addon {
+        return Err("The WDM addon is required by Caverns & Mines.".to_string());
+    }
+
+    let addon_url = "https://github.com/Trimitor/WDM-addons";
+    let existing_addon = eng
+        .db()
+        .list_repos()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|repo| {
+            repo.url
+                .trim_end_matches('/')
+                .eq_ignore_ascii_case(addon_url)
+        });
+    let mut newly_installed_addon = None;
+    if install_addon && existing_addon.is_none() {
+        let addon_id = eng
+            .add_repo(
+                addon_url,
+                InstallMode::Addon,
+                Some(r"(?i)^WDM\.zip$".to_string()),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        if let Err(error) = eng.reinstall_repo(addon_id, wow_path, None, options).await {
+            let _ = eng.remove_repo(addon_id, Some(wow_path), true);
+            return Err(format!(
+                "The WDM companion addon could not be installed: {error}"
+            ));
+        }
+        newly_installed_addon = Some(addon_id);
+    }
+
+    let destination = wuddle_engine::mpq::MpqDestination::Locale(locale.clone());
+    let main_target = saved_curated_mpq_target(&eng, WDM_PATCH_URL, "WDM Dungeon Maps");
+    let caverns_target = saved_curated_mpq_target(&eng, WDM_PATCH_URL, "WDM Caverns & Mines");
+    let mut assets = vec![wuddle_engine::mpq::MpqRemoteAsset {
+        asset_name: main.name.clone(),
+        target_file_name: main_target.as_ref().map(|(name, _)| name.clone()),
+        download_url: main.download_url.clone(),
+        size: main.size,
+        sha256: main.sha256.clone(),
+        display_name: "WDM Dungeon Maps".to_string(),
+        destination: main_target
+            .as_ref()
+            .map(|(_, destination)| destination.clone())
+            .unwrap_or_else(|| destination.clone()),
+        replace_unprotected: true,
+        version: Some(catalog.stable.version.clone()),
+    }];
+    if let Some((release, asset)) = caverns {
+        assets.push(wuddle_engine::mpq::MpqRemoteAsset {
+            asset_name: asset.name.clone(),
+            target_file_name: caverns_target.as_ref().map(|(name, _)| name.clone()),
+            download_url: asset.download_url.clone(),
+            size: asset.size,
+            sha256: asset.sha256.clone(),
+            display_name: "WDM Caverns & Mines".to_string(),
+            destination: caverns_target
+                .as_ref()
+                .map(|(_, destination)| destination.clone())
+                .unwrap_or(destination),
+            replace_unprotected: true,
+            version: Some(release.version.clone()),
+        });
+    }
+    let package = wuddle_engine::mpq::MpqRemotePackage {
+        url: WDM_PATCH_URL.to_string(),
+        forge: "github".to_string(),
+        host: "github.com".to_string(),
+        owner: "Trimitor".to_string(),
+        name: "WDM".to_string(),
+    };
+    let mpq_repo_id = match eng
+        .install_remote_mpq_package(wow_path, package, &assets, options.set_xattr_comment)
+        .await
+    {
+        Ok(repo_id) => repo_id,
+        Err(error) => {
+            if let Some(addon_id) = newly_installed_addon {
+                let _ = eng.remove_repo(addon_id, Some(wow_path), true);
+            }
+            return Err(error.to_string());
+        }
+    };
+
+    if !include_caverns {
+        let stale = eng
+            .list_installed_mpqs(mpq_repo_id, wow_path)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|entry| entry.path.to_ascii_lowercase().ends_with("-n.mpq"));
+        if let Some(stale) = stale {
+            eng.remove_mpq_component(mpq_repo_id, &stale.path, wow_path, false)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    if let Some(addon_id) = newly_installed_addon {
+        eng.record_repo_dependency(mpq_repo_id, addon_id, "wdm-companion")
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(mpq_repo_id)
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubSourceFile {
+    #[serde(rename = "type")]
+    kind: String,
+    name: String,
+    sha: String,
+    size: u64,
+    download_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct EpochWaterSource {
+    version: String,
+    download_url: String,
+    size: u64,
+}
+
+async fn resolve_epoch_water_source() -> Result<EpochWaterSource, String> {
+    const API_URL: &str =
+        "https://api.github.com/repos/ZythDr/EpochWater/contents/patch-W.mpq?ref=main";
+    const FALLBACK_DOWNLOAD_URL: &str =
+        "https://raw.githubusercontent.com/ZythDr/EpochWater/main/patch-W.mpq";
+
+    let mut request = Client::new()
+        .get(API_URL)
+        .header(
+            "User-Agent",
+            format!("Wuddle/{}", env!("CARGO_PKG_VERSION")),
+        )
+        .header("Accept", "application/vnd.github+json");
+    if let Some(token) = wuddle_engine::github_token() {
+        request = request.bearer_auth(token);
+    }
+    let source = request
+        .send()
+        .await
+        .map_err(|error| format!("Could not look up Epoch Water: {error}"))?;
+    let source = crate::github_api::checked_response(source)
+        .await
+        .map_err(|error| format!("Could not look up Epoch Water: {error}"))?
+        .json::<GithubSourceFile>()
+        .await
+        .map_err(|error| format!("Could not read Epoch Water source metadata: {error}"))?;
+    if source.kind != "file" || !source.name.eq_ignore_ascii_case("patch-W.mpq") {
+        return Err("Epoch Water's patch-W.mpq source file was not found.".to_string());
+    }
+    if source.sha.trim().is_empty() || source.size == 0 {
+        return Err("Epoch Water's patch-W.mpq source file is invalid.".to_string());
+    }
+    Ok(EpochWaterSource {
+        version: source.sha,
+        download_url: source
+            .download_url
+            .unwrap_or_else(|| FALLBACK_DOWNLOAD_URL.to_string()),
+        size: source.size,
+    })
+}
+
+pub async fn install_epoch_water(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    options: InstallOptions,
+) -> Result<i64, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("install_epoch_water");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    let source = resolve_epoch_water_source().await?;
+    let eng = open_engine(db_path.as_deref())?;
+    let saved_target = saved_curated_mpq_target(&eng, EPOCH_WATER_URL, "Epoch Water");
+    let assets = [wuddle_engine::mpq::MpqRemoteAsset {
+        asset_name: "patch-W.mpq".to_string(),
+        target_file_name: saved_target.as_ref().map(|(name, _)| name.clone()),
+        download_url: source.download_url,
+        size: Some(source.size),
+        // GitHub's source blob ID is not a SHA-256 checksum of the download.
+        // Keep it as the installed version and let the engine validate the MPQ.
+        sha256: None,
+        display_name: "Epoch Water".to_string(),
+        destination: saved_target
+            .map(|(_, destination)| destination)
+            .unwrap_or(wuddle_engine::mpq::MpqDestination::DataRoot),
+        replace_unprotected: true,
+        version: Some(source.version),
+    }];
+    let package = wuddle_engine::mpq::MpqRemotePackage {
+        url: EPOCH_WATER_URL.to_string(),
+        forge: "github".to_string(),
+        host: "github.com".to_string(),
+        owner: "ZythDr".to_string(),
+        name: "Epoch Water".to_string(),
+    };
+    eng.install_remote_mpq_package(
+        Path::new(&wow_dir),
+        package,
+        &assets,
+        options.set_xattr_comment,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+pub async fn remove_wdm(
+    db_path: Option<PathBuf>,
+    wow_dir: String,
+    mpq_repo_id: i64,
+    addon_repo_id: i64,
+    remove_addon: bool,
+) -> Result<(), String> {
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        let wow = Path::new(&wow_dir);
+        eng.remove_mpq_package(mpq_repo_id, wow, false)
+            .map_err(|error| error.to_string())?;
+        let addon_exists = { eng.db().get_repo(addon_repo_id).is_ok() };
+        if remove_addon && addon_exists {
+            eng.remove_repo(addon_repo_id, Some(wow), true)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 // ---------------------------------------------------------------------------
 // Repo queries
 // ---------------------------------------------------------------------------
@@ -681,10 +2074,11 @@ pub async fn initialize_profile_database(
 /// Called during rescan so repos lowercased by the v4 migration get corrected.
 /// Only queries the API for repos whose owner or name are entirely lowercase
 /// (indicating they were likely lowercased by the v4 migration).
-fn fix_repo_casing_from_forges(eng: &Engine) {
+fn fix_repo_casing_from_forges(eng: &Engine, cancelled: &AtomicBool) -> bool {
+    let started = Instant::now();
     let repos = match eng.db().list_repos() {
         Ok(r) => r,
-        Err(_) => return,
+        Err(_) => return false,
     };
 
     // Only fix repos that look like they were lowercased by the migration.
@@ -700,17 +2094,20 @@ fn fix_repo_casing_from_forges(eng: &Engine) {
         .collect();
 
     if needs_fix.is_empty() {
-        return;
+        return true;
     }
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(2))
         .build()
         .unwrap_or_default();
     let ua = format!("Wuddle/{}", env!("CARGO_PKG_VERSION"));
     let gh_token = wuddle_engine::github_token();
 
     for repo in &needs_fix {
+        if cancelled.load(Ordering::Acquire) || started.elapsed() >= FORGE_CASING_BUDGET {
+            return false;
+        }
         let (new_owner, new_name) = match repo.forge.as_str() {
             "github" => {
                 let api_url = format!("https://api.github.com/repos/{}/{}", repo.owner, repo.name);
@@ -790,9 +2187,15 @@ fn fix_repo_casing_from_forges(eng: &Engine) {
             let _ = eng.db().update_repo_casing(repo.id, &new_owner, &new_name);
         }
 
-        // Rate limit: 1.5s delay between requests to avoid hammering APIs
-        std::thread::sleep(Duration::from_millis(1500));
+        // Rate limit without making cancellation wait for one large sleep.
+        for _ in 0..15 {
+            if cancelled.load(Ordering::Acquire) || started.elapsed() >= FORGE_CASING_BUDGET {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
+    true
 }
 
 pub async fn list_repos(
@@ -801,35 +2204,147 @@ pub async fn list_repos(
     fix_casing: bool,
 ) -> Result<RepoLoadResult, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("list_repos");
-    clear_rescan_progress();
-    set_rescan_progress("Repository load", "Resolving WoW directory...");
+    let deadline_started = tokio::time::Instant::now();
+    let operation_id = begin_rescan_progress(
+        "Repository load",
+        "Waiting for active repository operations...",
+    );
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut active_rescan = ActiveRescan::new(operation_id, Arc::clone(&cancelled));
+    let mutation = match tokio::time::timeout(
+        REPOSITORY_LOAD_DEADLINE,
+        serialize_repository_mutation(&db_path),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Err(format!(
+                "Repository loading timed out after {} seconds while waiting for another repository operation to finish.",
+                REPOSITORY_LOAD_DEADLINE.as_secs()
+            ));
+        }
+    };
+    set_rescan_progress(
+        operation_id,
+        "Repository load",
+        "Resolving WoW directory...",
+    );
+    let worker_cancelled = Arc::clone(&cancelled);
+
+    let worker = tokio::task::spawn_blocking(move || {
+        // If the UI deadline expires, the cooperative cancellation flag asks
+        // the worker to stop between phases. Retain the per-profile mutation
+        // guard until the worker has actually exited so a slow blocking phase
+        // cannot overlap a later install, update, removal, or rescan.
+        let _mutation = mutation;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("Could not start repository scan: {error}"))?;
+        runtime.block_on(list_repos_inner(
+            db_path,
+            wow_dir,
+            fix_casing,
+            operation_id,
+            worker_cancelled,
+        ))
+    });
+
+    let remaining = REPOSITORY_LOAD_DEADLINE.saturating_sub(deadline_started.elapsed());
+    let result = match tokio::time::timeout(remaining, worker).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(format!("Repository scan worker failed: {error}")),
+        Err(_) => {
+            cancelled.store(true, Ordering::Release);
+            crate::diagnostics::write_system(
+                "ERROR",
+                "rescan",
+                &format!(
+                    "repository scan exceeded {}s deadline",
+                    REPOSITORY_LOAD_DEADLINE.as_secs()
+                ),
+            );
+            Err(format!(
+                "Repository loading timed out after {} seconds. No completed scan result was applied; please try Rescan again.",
+                REPOSITORY_LOAD_DEADLINE.as_secs()
+            ))
+        }
+    };
+    active_rescan.finish();
+    if result.is_err() {
+        clear_rescan_progress_for(operation_id);
+    }
+    result
+}
+
+async fn list_repos_inner(
+    db_path: Option<PathBuf>,
+    wow_dir: Option<String>,
+    fix_casing: bool,
+    operation_id: u64,
+    cancelled: Arc<AtomicBool>,
+) -> Result<RepoLoadResult, String> {
+    rescan_checkpoint(
+        operation_id,
+        &cancelled,
+        "Repository load",
+        "Resolving WoW directory...",
+    )?;
 
     // No wow_dir means no WoW installation configured — return empty list
     let dir = match wow_dir.as_deref() {
         Some(d) if !d.trim().is_empty() => d,
         _ => {
-            clear_rescan_progress();
+            set_rescan_progress(
+                operation_id,
+                "Repository load",
+                "No WoW directory configured.",
+            );
             return Ok(RepoLoadResult {
                 rows: Vec::new(),
+                untracked_mpqs: Vec::new(),
+                addon_git_local_changes: None,
                 logs: Vec::new(),
             });
         }
     };
     let wow_path_buf = PathBuf::from(dir);
     let db_existed_before_open = db_path.as_ref().map(|p| p.exists()).unwrap_or(true);
-    set_rescan_progress("Repository load", "Opening profile database...");
+    rescan_checkpoint(
+        operation_id,
+        &cancelled,
+        "Repository load",
+        "Opening profile database...",
+    )?;
     let eng = open_engine(db_path.as_deref())?;
     let mut logs = Vec::new();
 
-    set_rescan_progress("Repository load", "Checking tracked repositories...");
+    rescan_checkpoint(
+        operation_id,
+        &cancelled,
+        "Repository load",
+        "Checking tracked repositories...",
+    )?;
     let repo_count = eng.db().list_repos().map_err(|e| e.to_string())?.len();
     if !db_existed_before_open || repo_count == 0 {
-        set_rescan_progress("Repository load", "Importing existing addon folders...");
+        rescan_checkpoint(
+            operation_id,
+            &cancelled,
+            "Repository load",
+            "Importing existing addon folders...",
+        )?;
         let imported = eng
             .import_existing_addons_with_progress(&wow_path_buf, |detail| {
-                set_rescan_progress("Repository import", detail);
+                set_rescan_progress(operation_id, "Repository import", detail);
             })
             .map_err(|e| e.to_string())?;
+        rescan_checkpoint(
+            operation_id,
+            &cancelled,
+            "Repository load",
+            "Finished importing existing addon folders.",
+        )?;
         if !db_existed_before_open || imported > 0 {
             let text = if !db_existed_before_open {
                 format!(
@@ -849,11 +2364,26 @@ pub async fn list_repos(
     // Cheap tracked-link verification runs on normal refresh/load.
     // Full repair/reconciliation stays behind explicit Rescan only.
     if !fix_casing {
-        set_rescan_progress("Repository load", "Verifying tracked addon links...");
-        let eng_clone = eng.clone();
+        rescan_checkpoint(
+            operation_id,
+            &cancelled,
+            "Repository load",
+            "Verifying tracked addon links...",
+        )?;
+        let eng_clone = eng.try_reopen().map_err(|error| error.to_string())?;
         let verify_path = wow_path_buf.clone();
-        let repaired = tokio::task::spawn_blocking(move || {
-            eng_clone.verify_and_repair_tracked_addon_links(&verify_path)
+        let verify_cancelled = Arc::clone(&cancelled);
+        let repaired = tokio::task::spawn_blocking(move || -> Result<usize, String> {
+            if verify_cancelled.load(Ordering::Acquire) {
+                return Err("Repository loading was cancelled.".to_string());
+            }
+            let result = eng_clone
+                .verify_and_repair_tracked_addon_links(&verify_path)
+                .map_err(|error| error.to_string())?;
+            if verify_cancelled.load(Ordering::Acquire) {
+                return Err("Repository loading was cancelled.".to_string());
+            }
+            Ok(result)
         })
         .await
         .map_err(|e| e.to_string())?
@@ -872,7 +2402,12 @@ pub async fn list_repos(
     // Perform authoritative repairs only if explicitly requested via Rescan.
     // This handles casing, symlinks, and missing files/repos.
     if fix_casing {
-        set_rescan_progress("Rescan", "Repairing broken installations...");
+        rescan_checkpoint(
+            operation_id,
+            &cancelled,
+            "Rescan",
+            "Repairing broken installations...",
+        )?;
         logs.push(RepoLoadLog {
             level: LogLevel::Info,
             text: "Rescan: repairing broken installations...".to_string(),
@@ -896,15 +2431,33 @@ pub async fn list_repos(
                 ),
             }),
         }
+        rescan_checkpoint(
+            operation_id,
+            &cancelled,
+            "Rescan",
+            "Finished repairing broken installations.",
+        )?;
     }
 
+    let background_cancelled = Arc::clone(&cancelled);
     let mut background_logs = tokio::task::spawn_blocking(move || {
         let wow_path = wow_path_buf.as_path();
         let mut logs = Vec::new();
 
-        set_rescan_progress("Repository load", "Cleaning casing collisions...");
+        rescan_checkpoint(
+            operation_id,
+            &background_cancelled,
+            "Repository load",
+            "Cleaning casing collisions...",
+        )?;
         let started = Instant::now();
         let cleaned = eng.cleanup_casing_collisions(wow_path).unwrap_or(0);
+        rescan_checkpoint(
+            operation_id,
+            &background_cancelled,
+            "Repository load",
+            "Finished cleaning casing collisions.",
+        )?;
         logs.push(RepoLoadLog {
             level: LogLevel::Info,
             text: format!(
@@ -921,7 +2474,12 @@ pub async fn list_repos(
         // This keeps the standard launch and refresh cycles fast and prevents
         // deleted repos from being automatically re-imported.
         if fix_casing || eng.db().needs_casing_fix() {
-            set_rescan_progress("Rescan", "Pruning missing repositories...");
+            rescan_checkpoint(
+                operation_id,
+                &background_cancelled,
+                "Rescan",
+                "Pruning missing repositories...",
+            )?;
             let started = Instant::now();
             // Prune repos whose files no longer exist on disk
             let pruned = eng.prune_missing_repos(wow_path).unwrap_or(0);
@@ -934,14 +2492,25 @@ pub async fn list_repos(
                 ),
             });
 
-            set_rescan_progress("Rescan", "Importing newly discovered addon repos...");
+            rescan_checkpoint(
+                operation_id,
+                &background_cancelled,
+                "Rescan",
+                "Importing newly discovered addon repos...",
+            )?;
             let started = Instant::now();
             // Auto-import newly discovered addon git repos
             let imported = eng
                 .import_existing_addons_with_progress(wow_path, |detail| {
-                    set_rescan_progress("Rescan import", detail);
+                    set_rescan_progress(operation_id, "Rescan import", detail);
                 })
                 .unwrap_or(0);
+            rescan_checkpoint(
+                operation_id,
+                &background_cancelled,
+                "Rescan",
+                "Finished importing newly discovered addon repos.",
+            )?;
             logs.push(RepoLoadLog {
                 level: LogLevel::Info,
                 text: format!(
@@ -951,7 +2520,12 @@ pub async fn list_repos(
                 ),
             });
 
-            set_rescan_progress("Rescan", "Removing duplicate addon repo records...");
+            rescan_checkpoint(
+                operation_id,
+                &background_cancelled,
+                "Rescan",
+                "Removing duplicate addon repo records...",
+            )?;
             let started = Instant::now();
             // Remove duplicate tracking entries
             let deduped = eng.dedup_addon_repos_by_folder(wow_path).unwrap_or(0);
@@ -968,22 +2542,88 @@ pub async fn list_repos(
         // Fix repo owner/name casing from forge APIs (best-effort).
         // On first launch after the v4 migration (needs_casing_fix), always run.
         // Otherwise only run when explicitly requested (manual rescan).
-        // Spawning in a background thread to avoid blocking the main rescan loop.
+        // Keep this within the controlled rescan worker so it cannot outlive the
+        // operation and race later database mutations.
         if fix_casing || eng.db().needs_casing_fix() {
-            let db_clone = db_path.clone();
-            std::thread::spawn(move || {
-                if let Ok(e) = open_engine(db_clone.as_deref()) {
-                    fix_repo_casing_from_forges(&e);
-                    let _ = e.db().mark_casing_fixed();
-                }
-            });
+            rescan_checkpoint(
+                operation_id,
+                &background_cancelled,
+                "Rescan",
+                "Restoring repository name casing...",
+            )?;
+            let casing_complete = fix_repo_casing_from_forges(&eng, &background_cancelled);
+            if casing_complete && !background_cancelled.load(Ordering::Acquire) {
+                let _ = eng.db().mark_casing_fixed();
+            } else if !background_cancelled.load(Ordering::Acquire) {
+                logs.push(RepoLoadLog {
+                    level: LogLevel::Info,
+                    text: "Repository casing recovery paused at its time budget and will continue on a later scan.".to_string(),
+                });
+            }
+            rescan_checkpoint(
+                operation_id,
+                &background_cancelled,
+                "Rescan",
+                if casing_complete {
+                    "Finished restoring repository name casing."
+                } else {
+                    "Paused repository name casing recovery at its time budget."
+                },
+            )?;
         }
-        set_rescan_progress("Repository load", "Reading repository records...");
+
+        let addon_git_local_changes = if fix_casing {
+            rescan_checkpoint(
+                operation_id,
+                &background_cancelled,
+                "Rescan",
+                "Comparing tracked Git addon files with their checked-out revisions...",
+            )?;
+            let started = Instant::now();
+            let scan = eng
+                .scan_addon_git_local_changes(wow_path)
+                .map_err(|error| error.to_string())?;
+            logs.push(RepoLoadLog {
+                level: if scan.failed > 0 {
+                    LogLevel::Error
+                } else {
+                    LogLevel::Info
+                },
+                text: format!(
+                    "Rescan: local Git comparison finished in {}ms ({} inspected, {} modified, {} failed).",
+                    started.elapsed().as_millis(),
+                    scan.inspected,
+                    scan.modified.len(),
+                    scan.failed
+                ),
+            });
+            rescan_checkpoint(
+                operation_id,
+                &background_cancelled,
+                "Rescan",
+                "Finished comparing tracked Git addon files.",
+            )?;
+            Some(scan)
+        } else {
+            None
+        };
+
+        rescan_checkpoint(
+            operation_id,
+            &background_cancelled,
+            "Repository load",
+            "Reading repository records...",
+        )?;
         let repos = eng.db().list_repos().map_err(|e| e.to_string())?;
 
         // Legacy Vanilla launchers use dlls.txt. Later clients load proxy DLLs
         // directly, so their disabled state is represented by a .disabled suffix.
-        set_rescan_progress("Repository load", "Reading installed DLL state...");
+        rescan_checkpoint(
+            operation_id,
+            &background_cancelled,
+            "Repository load",
+            "Reading installed DLL state...",
+        )?;
         let dlls_txt_path = wow_path.join("dlls.txt");
         let uses_dlls_txt = dlls_txt_path.is_file();
         let dlls_txt = std::fs::read_to_string(&dlls_txt_path).unwrap_or_default();
@@ -993,9 +2633,17 @@ pub async fn list_repos(
             .map(|l| l.trim().to_lowercase())
             .collect();
 
-        set_rescan_progress("Repository load", "Building repository rows...");
+        rescan_checkpoint(
+            operation_id,
+            &background_cancelled,
+            "Repository load",
+            "Building repository rows...",
+        )?;
         let mut rows: Vec<RepoRow> = Vec::with_capacity(repos.len());
         for repo in repos {
+            if background_cancelled.load(Ordering::Acquire) {
+                return Err("Repository loading was cancelled.".to_string());
+            }
             let mut row = RepoRow::from(repo);
             let installs = eng.db().list_installs(row.id).unwrap_or_default();
             row.installed_dlls = installs
@@ -1030,17 +2678,51 @@ pub async fn list_repos(
                 .sort_by_key(|name| name.to_ascii_lowercase());
             row.installed_addons
                 .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+            if row.mode == "mpq" {
+                row.installed_mpqs = eng
+                    .list_installed_mpqs(row.id, wow_path)
+                    .unwrap_or_default();
+                row.mpq_package_name = eng.mpq_package_display_name(row.id).ok();
+                row.dependencies = eng.repo_dependencies(row.id).unwrap_or_default();
+            }
             rows.push(row);
         }
-        Ok::<RepoLoadResult, String>(RepoLoadResult { rows, logs })
+        rescan_checkpoint(
+            operation_id,
+            &background_cancelled,
+            "Repository load",
+            "Scanning custom MPQs...",
+        )?;
+        let untracked_mpqs = eng
+            .list_mpq_protection(wow_path)
+            .map_err(|error| error.to_string())?;
+        rescan_checkpoint(
+            operation_id,
+            &background_cancelled,
+            "Repository load",
+            "Finished scanning custom MPQs.",
+        )?;
+        Ok::<RepoLoadResult, String>(RepoLoadResult {
+            rows,
+            untracked_mpqs,
+            addon_git_local_changes,
+            logs,
+        })
     })
     .await
     .map_err(|e| e.to_string())??;
 
     logs.append(&mut background_logs.logs);
-    set_rescan_progress("Repository load", "Finished loading repositories.");
+    rescan_checkpoint(
+        operation_id,
+        &cancelled,
+        "Repository load",
+        "Finished loading repositories.",
+    )?;
     Ok(RepoLoadResult {
         rows: background_logs.rows,
+        untracked_mpqs: background_logs.untracked_mpqs,
+        addon_git_local_changes: background_logs.addon_git_local_changes,
         logs,
     })
 }
@@ -1054,6 +2736,223 @@ pub async fn check_updates(
     check_updates_skip(db_path, wow_dir, mode, std::collections::HashSet::new()).await
 }
 
+async fn build_wdm_update_plan(eng: &Engine, repo: Repo) -> PlanRow {
+    let installs = eng.db().list_installs(repo.id).unwrap_or_default();
+    let current =
+        installed_wdm_main_version(installs.iter().filter(|entry| entry.kind == "mpq").map(
+            |entry| {
+                (
+                    entry.path.as_str(),
+                    entry.display_name.as_deref(),
+                    entry.version.as_deref(),
+                )
+            },
+        ));
+    match resolve_wdm_stable(eng).await {
+        Ok((stable, _)) => {
+            let has_update = current.as_deref() != Some(stable.version.as_str());
+            PlanRow {
+                repo_id: repo.id,
+                owner: repo.owner,
+                name: repo.name,
+                current,
+                latest: stable.version,
+                asset_name: "Locale-specific WDM patch".to_string(),
+                has_update,
+                repair_needed: false,
+                externally_modified: false,
+                not_modified: !has_update,
+                mode: "mpq".to_string(),
+                host: repo.host,
+                error: None,
+                previous_dll_count: 0,
+                new_dll_count: 0,
+            }
+        }
+        Err(error) => PlanRow {
+            repo_id: repo.id,
+            owner: repo.owner,
+            name: repo.name,
+            current,
+            latest: String::new(),
+            asset_name: String::new(),
+            has_update: false,
+            repair_needed: false,
+            externally_modified: false,
+            not_modified: false,
+            mode: "mpq".to_string(),
+            host: repo.host,
+            error: Some(error),
+            previous_dll_count: 0,
+            new_dll_count: 0,
+        },
+    }
+}
+
+async fn build_epoch_water_update_plan(repo: Repo) -> PlanRow {
+    let current = repo.last_version.clone();
+    match resolve_epoch_water_source().await {
+        Ok(source) => {
+            let has_update = current.as_deref() != Some(source.version.as_str());
+            PlanRow {
+                repo_id: repo.id,
+                owner: repo.owner,
+                name: repo.name,
+                current,
+                latest: source.version,
+                asset_name: "patch-W.mpq".to_string(),
+                has_update,
+                repair_needed: false,
+                externally_modified: false,
+                not_modified: !has_update,
+                mode: "mpq".to_string(),
+                host: repo.host,
+                error: None,
+                previous_dll_count: 0,
+                new_dll_count: 0,
+            }
+        }
+        Err(error) => PlanRow {
+            repo_id: repo.id,
+            owner: repo.owner,
+            name: repo.name,
+            current,
+            latest: String::new(),
+            asset_name: String::new(),
+            has_update: false,
+            repair_needed: false,
+            externally_modified: false,
+            not_modified: false,
+            mode: "mpq".to_string(),
+            host: repo.host,
+            error: Some(error),
+            previous_dll_count: 0,
+            new_dll_count: 0,
+        },
+    }
+}
+
+async fn wait_for_update_check_cancellation(cancelled: Arc<AtomicBool>) {
+    while !cancelled.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn check_one_curated_update_plan(
+    eng: &Engine,
+    repo: Repo,
+    kind: CuratedMpqKind,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<PlanRow, String> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Update check cancelled after reaching its deadline".to_string());
+    }
+
+    set_update_check_progress(wuddle_engine::UpdateCheckProgress {
+        repo_id: repo.id,
+        owner: repo.owner.clone(),
+        name: repo.name.clone(),
+        mode: repo.mode.as_str().to_string(),
+        stage: wuddle_engine::UpdateCheckProgressStage::FetchingRelease,
+    });
+    let curated_started = Instant::now();
+    let row = match kind {
+        CuratedMpqKind::Wdm => {
+            tokio::select! {
+                _ = wait_for_update_check_cancellation(Arc::clone(cancelled)) => {
+                    return Err("Update check cancelled after reaching its deadline".to_string());
+                }
+                row = build_wdm_update_plan(eng, repo) => row,
+            }
+        }
+        CuratedMpqKind::EpochWater => {
+            tokio::select! {
+                _ = wait_for_update_check_cancellation(Arc::clone(cancelled)) => {
+                    return Err("Update check cancelled after reaching its deadline".to_string());
+                }
+                row = build_epoch_water_update_plan(repo) => row,
+            }
+        }
+    };
+    crate::diagnostics::debug(
+        "update_check",
+        format!(
+            "curated update check: repo_id={}; elapsed_ms={}; outcome={}",
+            row.repo_id,
+            curated_started.elapsed().as_millis(),
+            if row.error.is_some() {
+                "error"
+            } else {
+                "completed"
+            }
+        ),
+    );
+    set_update_check_progress(wuddle_engine::UpdateCheckProgress {
+        repo_id: row.repo_id,
+        owner: row.owner.clone(),
+        name: row.name.clone(),
+        mode: row.mode.clone(),
+        stage: wuddle_engine::UpdateCheckProgressStage::Finished,
+    });
+    Ok(row)
+}
+
+async fn check_curated_update_plans(
+    eng: &Engine,
+    repos: Vec<(Repo, CuratedMpqKind)>,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<Vec<PlanRow>, String> {
+    let mut rows = Vec::with_capacity(repos.len());
+
+    // There are currently two curated MPQ sources. Run both together while
+    // retaining a small explicit ceiling for future catalog additions.
+    for chunk in repos.chunks(MAX_CONCURRENT_CURATED_MPQ_CHECKS) {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("Update check cancelled after reaching its deadline".to_string());
+        }
+        match chunk {
+            [(repo, kind)] => {
+                rows.push(check_one_curated_update_plan(eng, repo.clone(), *kind, cancelled).await?)
+            }
+            [(left_repo, left_kind), (right_repo, right_kind)] => {
+                let (left, right) = tokio::join!(
+                    check_one_curated_update_plan(eng, left_repo.clone(), *left_kind, cancelled),
+                    check_one_curated_update_plan(eng, right_repo.clone(), *right_kind, cancelled)
+                );
+                // Both futures have completed before propagating either error,
+                // so no in-flight request is detached from the owned runtime.
+                rows.push(left?);
+                rows.push(right?);
+            }
+            _ => unreachable!("curated MPQ update chunks are bounded to two"),
+        }
+    }
+
+    Ok(rows)
+}
+
+fn installed_wdm_main_version<'a>(
+    installs: impl IntoIterator<Item = (&'a str, Option<&'a str>, Option<&'a str>)>,
+) -> Option<String> {
+    let mut legacy_match = None;
+    for (path, display_name, version) in installs {
+        if display_name
+            .map(|name| name.eq_ignore_ascii_case("WDM Dungeon Maps"))
+            .unwrap_or(false)
+        {
+            return version.map(str::to_string);
+        }
+        if legacy_match.is_none() {
+            let path = path.to_ascii_lowercase();
+            let enabled_path = path.strip_suffix(".disabled").unwrap_or(&path);
+            if enabled_path.ends_with("-m.mpq") {
+                legacy_match = version.map(str::to_string);
+            }
+        }
+    }
+    legacy_match
+}
+
 pub async fn check_updates_skip(
     db_path: Option<PathBuf>,
     wow_dir: Option<String>,
@@ -1061,40 +2960,132 @@ pub async fn check_updates_skip(
     skip_repo_ids: std::collections::HashSet<i64>,
 ) -> Result<Vec<PlanRow>, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("check_updates_skip");
+    if UPDATE_CHECKS_BLOCKED_FOR_SESSION.load(Ordering::Acquire) {
+        return Err(
+            "Update checks are disabled for this Wuddle session because a previous check timed out. Restart Wuddle before trying again."
+                .to_string(),
+        );
+    }
     clear_update_check_progress();
-    tokio::task::spawn_blocking(move || {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = Arc::clone(&cancelled);
+    let mut worker = tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
+        let curated_repos = eng
+            .db()
+            .list_repos()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter_map(|repo| curated_mpq_kind_for_repo(&repo).map(|kind| (repo, kind)))
+            .filter(|(repo, _)| !skip_repo_ids.contains(&repo.id))
+            .collect::<Vec<_>>();
+        // Curated MPQs use their own source/release selection, so keep them out
+        // of the generic forge updater and append purpose-built plans below.
+        let mut engine_skip_repo_ids = skip_repo_ids.clone();
+        for (repo, _) in &curated_repos {
+            engine_skip_repo_ids.insert(repo.id);
+        }
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let progress_forwarder = std::thread::spawn(move || {
             while let Some(progress) = progress_rx.blocking_recv() {
-                set_update_check_progress(Some(progress));
+                set_update_check_progress(progress);
             }
         });
-        let plans = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| e.to_string())?
-            .block_on(async {
-                eng.check_updates_with_wow_skip_progress(
+            .map_err(|e| e.to_string())?;
+        let (plans, curated_rows) = runtime.block_on(async {
+            tokio::join!(
+                eng.check_updates_with_wow_skip_progress_cancel(
                     wow_dir.as_deref().map(Path::new),
                     mode,
-                    &skip_repo_ids,
+                    &engine_skip_repo_ids,
                     progress_tx,
-                )
-                .await
-            })
-            .map_err(|e| e.to_string())?;
+                    Arc::clone(&worker_cancelled),
+                ),
+                check_curated_update_plans(&eng, curated_repos, &worker_cancelled),
+            )
+        });
+        let plans = plans.map_err(|error| error.to_string())?;
+        let curated_rows = curated_rows?;
+        let mut rows = plans.into_iter().map(PlanRow::from).collect::<Vec<_>>();
+        rows.extend(curated_rows);
+        // Every nested Git worker is joined by the engine before this runtime
+        // is dropped. The short timeout remains a defensive bound for unrelated
+        // runtime bookkeeping rather than a way to abandon libgit2 work.
+        runtime.shutdown_timeout(Duration::from_secs(1));
         let _ = progress_forwarder.join();
         clear_update_check_progress();
-        Ok(plans.into_iter().map(PlanRow::from).collect())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+        Ok(rows)
+    });
+
+    match tokio::time::timeout(UPDATE_CHECK_DEADLINE, &mut worker).await {
+        Ok(result) => result.map_err(|error| error.to_string())?,
+        Err(_) => {
+            UPDATE_CHECKS_BLOCKED_FOR_SESSION.store(true, Ordering::Release);
+            cancelled.store(true, Ordering::Release);
+            clear_update_check_progress();
+            crate::diagnostics::write_system(
+                "ERROR",
+                "update_check",
+                &format!(
+                    "Update check deadline exceeded after {}s; cancellation requested and waiting for owned workers to exit.",
+                    UPDATE_CHECK_DEADLINE.as_secs()
+                ),
+            );
+            // Do not detach the blocking task: that previously allowed libgit2
+            // to retain resources after the UI declared the operation over.
+            // Transport deadlines and callback cancellation bound this wait.
+            let cleanup_started = Instant::now();
+            let cleanup_result = worker.await;
+            crate::diagnostics::write_system(
+                if cleanup_result.is_ok() { "WARN" } else { "ERROR" },
+                "update_check",
+                &format!(
+                    "Timed-out update worker exited after cancellation; cleanup_ms={}; worker_joined={}",
+                    cleanup_started.elapsed().as_millis(),
+                    cleanup_result.is_ok()
+                ),
+            );
+            Err(format!(
+                "Update checking timed out after {} seconds. Further checks are disabled for this Wuddle session to prevent repeated stalls. Restart Wuddle before trying again.",
+                UPDATE_CHECK_DEADLINE.as_secs()
+            ))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Mutations
 // ---------------------------------------------------------------------------
+
+type RepositoryMutationLock = tokio::sync::Mutex<()>;
+type RepositoryMutationLocks = HashMap<Option<PathBuf>, Weak<RepositoryMutationLock>>;
+
+fn repository_mutation_locks() -> &'static Mutex<RepositoryMutationLocks> {
+    static LOCKS: OnceLock<Mutex<RepositoryMutationLocks>> = OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn repository_mutation_lock(db_path: &Option<PathBuf>) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = repository_mutation_locks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(db_path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(db_path.clone(), Arc::downgrade(&lock));
+    lock
+}
+
+async fn serialize_repository_mutation(
+    db_path: &Option<PathBuf>,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    repository_mutation_lock(db_path).lock_owned().await
+}
 
 pub async fn add_repo(
     db_path: Option<PathBuf>,
@@ -1104,6 +3095,7 @@ pub async fn add_repo(
     selected_addons: Option<Vec<String>>,
 ) -> Result<i64, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("add_repo");
+    let _mutation = serialize_repository_mutation(&db_path).await;
     crate::diagnostics::trace(
         "service",
         format!(
@@ -1114,8 +3106,8 @@ pub async fn add_repo(
     );
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
-        let install_mode = InstallMode::from_str(&mode).unwrap_or(InstallMode::Auto);
-        if wuddle_engine::is_direct_archive_url(&url) {
+        let install_mode = InstallMode::parse(&mode).unwrap_or(InstallMode::Auto);
+        if wuddle_engine::is_direct_archive_candidate(&url) {
             return eng.add_direct_archive_url(&url).map_err(|e| e.to_string());
         }
         eng.add_repo(&url, install_mode, asset_regex, selected_addons)
@@ -1130,6 +3122,7 @@ pub async fn add_local_archive_file(
     path: PathBuf,
 ) -> Result<i64, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("add_local_archive_file");
+    let _mutation = serialize_repository_mutation(&db_path).await;
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         eng.add_local_archive_file(&path).map_err(|e| e.to_string())
@@ -1138,6 +3131,7 @@ pub async fn add_local_archive_file(
     .map_err(|e| e.to_string())?
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn update_collection_selection(
     db_path: Option<PathBuf>,
     repo_id: i64,
@@ -1146,6 +3140,7 @@ pub async fn update_collection_selection(
     opts: InstallOptions,
 ) -> Result<String, CollectionSelectionError> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("update_collection_selection");
+    let _mutation = serialize_repository_mutation(&db_path).await;
     crate::diagnostics::trace(
         "service",
         format!(
@@ -1253,7 +3248,7 @@ pub async fn probe_conflicts_on_branch(
                     Path::new(&wow_dir),
                     preferred_branch.as_deref(),
                 )
-                    .await
+                .await
             })
             .map_err(|e| e.to_string())
     })
@@ -1325,8 +3320,9 @@ pub async fn remove_repo(
     id: i64,
     wow_dir: Option<String>,
     remove_local_files: bool,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("remove_repo");
+    let _mutation = serialize_repository_mutation(&db_path).await;
     crate::diagnostics::trace(
         "service",
         format!("remove_repo: repo_id={id}; remove_local_files={remove_local_files}"),
@@ -1334,8 +3330,7 @@ pub async fn remove_repo(
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         eng.remove_repo(id, wow_dir.as_deref().map(Path::new), remove_local_files)
-            .map_err(|e| e.to_string())?;
-        Ok(())
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1347,23 +3342,31 @@ pub async fn set_repo_enabled(
     enabled: bool,
     wow_dir: String,
     use_dlls_txt: bool,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("set_repo_enabled");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    crate::diagnostics::trace(
+        "service",
+        format!(
+            "repository state requested: repo_id={id}; enabled={enabled}; mechanism={}",
+            if use_dlls_txt {
+                "dlls_txt"
+            } else {
+                "filesystem"
+            }
+        ),
+    );
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let wow_path = (!wow_dir.trim().is_empty()).then(|| Path::new(&wow_dir));
         eng.set_repo_enabled(id, enabled, wow_path, use_dlls_txt)
-            .map_err(|e| e.to_string())?;
-        Ok(())
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-pub async fn is_awesome_wotlk_repo(
-    db_path: Option<PathBuf>,
-    repo_id: i64,
-) -> bool {
+pub async fn is_awesome_wotlk_repo(db_path: Option<PathBuf>, repo_id: i64) -> bool {
     tokio::task::spawn_blocking(move || {
         let Ok(engine) = open_engine(db_path.as_deref()) else {
             return false;
@@ -1394,19 +3397,104 @@ pub async fn list_repo_installs(
     .map_err(|e| e.to_string())?
 }
 
+pub async fn load_repo_details(
+    db_path: Option<PathBuf>,
+    repo_id: i64,
+    wow_dir: PathBuf,
+) -> Result<Vec<RepoDetailEntry>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("load_repo_details");
+    tokio::task::spawn_blocking(move || {
+        let eng = open_engine(db_path.as_deref())?;
+        let mut entries = eng
+            .db()
+            .list_installs(repo_id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|entry| {
+                let is_directory = wow_dir.join(&entry.path).is_dir();
+                RepoDetailEntry {
+                    path: entry.path,
+                    kind: entry.kind,
+                    is_directory,
+                }
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            left.path
+                .to_ascii_lowercase()
+                .cmp(&right.path.to_ascii_lowercase())
+        });
+        Ok(entries)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn load_game_directory_children(
+    wow_dir: PathBuf,
+    relative_path: String,
+) -> Result<Vec<RepoDetailChild>, String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("load_game_directory_children");
+    tokio::task::spawn_blocking(move || {
+        let relative = Path::new(&relative_path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err("The selected game path is invalid.".to_string());
+        }
+        let directory = wow_dir.join(relative);
+        if !directory.is_dir() {
+            return Err("The tracked directory could not be found.".to_string());
+        }
+        let mut children = std::fs::read_dir(directory)
+            .map_err(|error| error.to_string())?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().to_str()?.to_string();
+                let is_directory = entry.file_type().ok()?.is_dir();
+                Some(RepoDetailChild { name, is_directory })
+            })
+            .collect::<Vec<_>>();
+        children.sort_by(|left, right| {
+            right.is_directory.cmp(&left.is_directory).then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
+        });
+        Ok(children)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 pub async fn set_dll_enabled(
     db_path: Option<PathBuf>,
     wow_dir: String,
+    repo_id: i64,
     dll_name: String,
     enabled: bool,
     use_dlls_txt: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("set_dll_enabled");
+    let _mutation = serialize_repository_mutation(&db_path).await;
+    crate::diagnostics::trace(
+        "service",
+        format!(
+            "DLL state requested: repo_id={repo_id}; enabled={enabled}; mechanism={}; filename omitted",
+            if use_dlls_txt {
+                "dlls_txt"
+            } else {
+                "filesystem"
+            }
+        ),
+    );
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         eng.set_dll_enabled(&dll_name, enabled, Path::new(&wow_dir), use_dlls_txt)
-            .map_err(|e| e.to_string())?;
-        Ok(())
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1418,6 +3506,9 @@ pub struct UpdateOneResult {
     pub repo_id: i64,
     pub owner: String,
     pub name: String,
+    /// True when the repository disappeared after the UI prepared the batch.
+    /// This is not an update failure; the stale item should be forgotten.
+    pub skipped: bool,
     /// The updated plan, or None if already up to date.
     pub plan: Option<PlanRow>,
     /// Verbose log lines for this repo.
@@ -1427,7 +3518,8 @@ pub struct UpdateOneResult {
 }
 
 /// Update only the repos in `ids_to_update` (already filtered: has_update && !ignored && enabled).
-/// Repos are updated in parallel. Returns one result per repo.
+/// Updates are deliberately serialized because two repositories can touch the
+/// same addon, DLL, or launcher-owned metadata.
 pub async fn update_all(
     db_path: Option<PathBuf>,
     wow_dir: String,
@@ -1435,6 +3527,7 @@ pub async fn update_all(
     opts: InstallOptions,
 ) -> Result<Vec<UpdateOneResult>, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("update_all");
+    let _mutation = serialize_repository_mutation(&db_path).await;
     crate::diagnostics::trace(
         "service",
         format!("update_all: requested_count={}", ids_to_update.len()),
@@ -1443,16 +3536,36 @@ pub async fn update_all(
         return Ok(Vec::new());
     }
 
-    let mut set = tokio::task::JoinSet::new();
-
+    let mut results = Vec::with_capacity(ids_to_update.len());
     for id in ids_to_update {
         let db = db_path.clone();
         let wow = wow_dir.clone();
-        let opts = opts.clone();
-
-        set.spawn_blocking(move || -> Result<UpdateOneResult, String> {
+        let result = tokio::task::spawn_blocking(move || -> Result<UpdateOneResult, String> {
             let eng = open_engine(db.as_deref())?;
-            let repo = eng.db().get_repo(id).map_err(|e| e.to_string())?;
+            let Some(repo) = eng
+                .db()
+                .get_repo_optional(id)
+                .map_err(|e| e.to_string())?
+            else {
+                crate::diagnostics::trace(
+                    "service",
+                    format!(
+                        "update_all: skipped stale repository entry; repo_id={id}"
+                    ),
+                );
+                return Ok(UpdateOneResult {
+                    repo_id: id,
+                    owner: String::new(),
+                    name: format!("repository #{id}"),
+                    skipped: true,
+                    plan: None,
+                    log_lines: vec![
+                        "The repository is no longer tracked by this profile; the stale update entry was skipped."
+                            .to_string(),
+                    ],
+                    error: None,
+                });
+            };
             let owner = repo.owner.clone();
             let name = repo.name.clone();
             let mut log: Vec<String> = Vec::new();
@@ -1478,6 +3591,7 @@ pub async fn update_all(
                         repo_id: id,
                         owner,
                         name,
+                        skipped: false,
                         plan: None,
                         log_lines: log,
                         error: Some(err),
@@ -1489,6 +3603,7 @@ pub async fn update_all(
                         repo_id: id,
                         owner,
                         name,
+                        skipped: false,
                         plan: None,
                         log_lines: log,
                         error: None,
@@ -1508,22 +3623,17 @@ pub async fn update_all(
                         repo_id: plan.repo_id,
                         owner: plan.owner.clone(),
                         name: plan.name.clone(),
+                        skipped: false,
                         plan: Some(PlanRow::from(plan)),
                         log_lines: log,
                         error: None,
                     })
                 }
             }
-        });
-    }
-
-    let mut results = Vec::new();
-    while let Some(task) = set.join_next().await {
-        match task {
-            Err(e) => return Err(format!("Update task panicked: {}", e)),
-            Ok(Err(e)) => return Err(e),
-            Ok(Ok(r)) => results.push(r),
-        }
+        })
+        .await
+        .map_err(|error| format!("Update task failed: {error}"))??;
+        results.push(result);
     }
     Ok(results)
 }
@@ -1538,6 +3648,7 @@ pub async fn install_new_repo(
     opts: InstallOptions,
 ) -> Result<String, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("install_new_repo");
+    let _mutation = serialize_repository_mutation(&db_path).await;
     crate::diagnostics::trace("service", format!("install_new_repo: repo_id={id}"));
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
@@ -1548,7 +3659,7 @@ pub async fn install_new_repo(
             .map_err(|e| e.to_string())?;
 
         let update_result = runtime
-            .block_on(async { eng.update_repo(id, wow_path, None, opts.clone()).await })
+            .block_on(async { eng.update_repo(id, wow_path, None, opts).await })
             .map_err(|e| e.to_string())?;
 
         if let Some(plan) = update_result {
@@ -1571,6 +3682,7 @@ pub async fn update_repo(
     opts: InstallOptions,
 ) -> Result<Option<PlanRow>, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("update_repo");
+    let _mutation = serialize_repository_mutation(&db_path).await;
     crate::diagnostics::trace("service", format!("update_repo: repo_id={id}"));
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
@@ -1593,6 +3705,7 @@ pub async fn reinstall_repo(
     opts: InstallOptions,
 ) -> Result<PlanRow, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("reinstall_repo");
+    let _mutation = serialize_repository_mutation(&db_path).await;
     crate::diagnostics::trace("service", format!("reinstall_repo: repo_id={id}"));
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
@@ -1619,6 +3732,7 @@ pub async fn reinstall_repo_with_selection(
     selected_addon: String,
 ) -> Result<PlanRow, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("reinstall_repo_with_selection");
+    let _mutation = serialize_repository_mutation(&db_path).await;
     crate::diagnostics::trace(
         "service",
         format!("reinstall_repo_with_selection: repo_id={id}"),
@@ -1683,6 +3797,7 @@ pub async fn set_repo_branch(
     branch: String,
 ) -> Result<i64, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("set_repo_branch");
+    let _mutation = serialize_repository_mutation(&db_path).await;
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let branch_opt = if branch.is_empty() {
@@ -1704,6 +3819,7 @@ pub async fn set_merge_installs(
     merge: bool,
 ) -> Result<i64, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("set_merge_installs");
+    let _mutation = serialize_repository_mutation(&db_path).await;
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         eng.set_repo_merge_installs(repo_id, merge)
@@ -1720,6 +3836,7 @@ pub async fn set_pinned_version(
     version: Option<String>,
 ) -> Result<i64, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("set_pinned_version");
+    let _mutation = serialize_repository_mutation(&db_path).await;
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         eng.set_repo_pinned_version(repo_id, version)
@@ -1764,9 +3881,8 @@ pub async fn fetch_latest_release_archive_options(
     db_path: Option<PathBuf>,
     repo_url: String,
 ) -> Result<Vec<ReleaseAssetOption>, String> {
-    let _diagnostic = crate::diagnostics::OperationGuard::new(
-        "fetch_latest_release_archive_options",
-    );
+    let _diagnostic =
+        crate::diagnostics::OperationGuard::new("fetch_latest_release_archive_options");
     tokio::task::spawn_blocking(move || {
         let eng = open_engine(db_path.as_deref())?;
         let releases = tokio::runtime::Handle::current()
@@ -1830,10 +3946,23 @@ pub async fn open_repo_folder(
         }
 
         // 2. Try first valid install path (for release/manual mods)
-        if let Some(first) = installs.first() {
+        let preferred_install = installs
+            .iter()
+            .min_by_key(|entry| match entry.kind.as_str() {
+                "dll" => 0,
+                "raw" => 1,
+                "addon" => 2,
+                _ => 1,
+            });
+        if let Some(first) = preferred_install {
             let full_path = wow_dir.join(&first.path);
-            if full_path.exists() {
-                let _ = open::that(full_path);
+            let target = if full_path.is_dir() {
+                Some(full_path.as_path())
+            } else {
+                full_path.parent().filter(|parent| parent.is_dir())
+            };
+            if let Some(target) = target {
+                open::that(target).map_err(|error| error.to_string())?;
                 return Ok(());
             }
         }
@@ -1860,6 +3989,36 @@ pub async fn open_repo_folder(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+pub async fn open_game_path_folder(wow_dir: PathBuf, relative_path: String) -> Result<(), String> {
+    let _diagnostic = crate::diagnostics::OperationGuard::new("open_game_path_folder");
+    tokio::task::spawn_blocking(move || {
+        let relative = std::path::Path::new(&relative_path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err("The selected game path is invalid.".to_string());
+        }
+
+        let full_path = wow_dir.join(relative);
+        let target = if full_path.is_dir() {
+            full_path
+        } else {
+            full_path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or(wow_dir)
+        };
+        if !target.is_dir() {
+            return Err("The containing game directory could not be found.".to_string());
+        }
+        open::that(target).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 pub async fn open_addon_folder(
@@ -1972,14 +4131,113 @@ fn resolve_launch_target(
         })
 }
 
-fn parse_arg_string(raw: &str) -> Vec<String> {
-    raw.split_whitespace().map(|s| s.to_string()).collect()
+/// Parse a command-line argument field without invoking a shell.
+///
+/// Single and double quotes group whitespace and may create an empty argument.
+/// Outside single quotes, a backslash escapes whitespace, quotes, or another
+/// backslash; other backslashes remain literal so Windows paths are preserved.
+fn parse_arg_string(raw: &str) -> Result<Vec<String>, String> {
+    #[derive(Clone, Copy)]
+    enum Quote {
+        Single,
+        Double,
+    }
+
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut started = false;
+    let mut chars = raw.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(Quote::Single) => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            Some(Quote::Double) => match ch {
+                '"' => quote = None,
+                '\\' => match chars.peek().copied() {
+                    Some(next) if next == '"' || next == '\\' || next.is_whitespace() => {
+                        if let Some(escaped) = chars.next() {
+                            current.push(escaped);
+                        }
+                    }
+                    _ => current.push('\\'),
+                },
+                _ => current.push(ch),
+            },
+            None => match ch {
+                ch if ch.is_whitespace() => {
+                    if started {
+                        args.push(std::mem::take(&mut current));
+                        started = false;
+                    }
+                }
+                '\'' => {
+                    quote = Some(Quote::Single);
+                    started = true;
+                }
+                '"' => {
+                    quote = Some(Quote::Double);
+                    started = true;
+                }
+                '\\' => {
+                    started = true;
+                    match chars.peek().copied() {
+                        Some(next)
+                            if next == '\''
+                                || next == '"'
+                                || next == '\\'
+                                || next.is_whitespace() =>
+                        {
+                            if let Some(escaped) = chars.next() {
+                                current.push(escaped);
+                            }
+                        }
+                        _ => current.push('\\'),
+                    }
+                }
+                _ => {
+                    started = true;
+                    current.push(ch);
+                }
+            },
+        }
+    }
+
+    if quote.is_some() {
+        return Err(
+            "Launch arguments contain an unclosed quote. Close the quote or remove it.".to_string(),
+        );
+    }
+    if started {
+        args.push(current);
+    }
+    Ok(args)
 }
 
 fn spawn_launch_command(program: &str, args: &[String], cwd: &Path) -> Result<(), String> {
     let mut cmd = Command::new(program);
     cmd.args(args);
     spawn_command(cmd, program, cwd)
+}
+
+fn lutris_launch_spec(target: &str) -> Result<(&'static str, Vec<String>), String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err(
+            "Lutris launch target is empty (expected e.g. lutris:rungameid/2).".to_string(),
+        );
+    }
+
+    // Launch methods retain their own settings when the user switches between
+    // them. A Lutris launch must therefore never consult the hidden Custom
+    // command or argument fields.
+    Ok(("lutris", vec![target.to_string()]))
 }
 
 fn spawn_command(mut cmd: Command, program: &str, cwd: &Path) -> Result<(), String> {
@@ -2092,19 +4350,7 @@ pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, S
         };
 
         if method == "lutris" {
-            let command = if cfg.custom_command.trim().is_empty() {
-                "lutris"
-            } else {
-                cfg.custom_command.trim()
-            };
-            let target_arg = cfg.lutris_target.trim();
-            if target_arg.is_empty() {
-                return Err(
-                    "Lutris launch target is empty (expected e.g. lutris:rungameid/2).".to_string(),
-                );
-            }
-            let mut args = vec![target_arg.to_string()];
-            args.extend(parse_arg_string(&cfg.custom_args));
+            let (command, args) = lutris_launch_spec(&cfg.lutris_target)?;
             spawn_launch_command(command, &args, &wow_path)?;
             return Ok(format!("Launched {} via {}.", target_name, command));
         }
@@ -2115,7 +4361,7 @@ pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, S
             } else {
                 cfg.wine_command.trim()
             };
-            let args = parse_arg_string(&cfg.wine_args);
+            let args = parse_arg_string(&cfg.wine_args)?;
             let mut launch = Command::new(command);
             launch.args(&args).arg(&target_str);
             #[cfg(feature = "auto-login")]
@@ -2131,7 +4377,7 @@ pub async fn launch_game(wow_dir: String, cfg: LaunchConfig) -> Result<String, S
             if command.is_empty() {
                 return Err("Custom launch command is empty.".to_string());
             }
-            let mut args = parse_arg_string(&cfg.custom_args);
+            let mut args = parse_arg_string(&cfg.custom_args)?;
             let mut inserted_exe = false;
             for arg in &mut args {
                 if arg.contains("{exe}") {
@@ -2198,7 +4444,10 @@ pub async fn launch_wow_root_tool(
     tokio::task::spawn_blocking(move || {
         let wow_path = PathBuf::from(wow_dir.trim());
         if !wow_path.is_dir() {
-            return Err(format!("WoW path is not a directory: {}", wow_path.display()));
+            return Err(format!(
+                "WoW path is not a directory: {}",
+                wow_path.display()
+            ));
         }
         let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
         let tool = first_existing_file(&wow_path, &candidate_refs).ok_or_else(|| {
@@ -2229,7 +4478,7 @@ pub async fn launch_wow_root_tool(
             } else {
                 cfg.wine_command.trim()
             };
-            let mut args = parse_arg_string(&cfg.wine_args);
+            let mut args = parse_arg_string(&cfg.wine_args)?;
             args.push(tool.to_string_lossy().to_string());
             spawn_launch_command(command, &args, &wow_path)?;
         }
@@ -2298,7 +4547,7 @@ pub async fn patch_wow_with_awesome_wotlk(
             };
             let mut command_process = Command::new(command);
             command_process
-                .args(parse_arg_string(&cfg.wine_args))
+                .args(parse_arg_string(&cfg.wine_args)?)
                 .arg(&patcher)
                 .arg(&wow_exe)
                 .current_dir(&wow_path);
@@ -2343,6 +4592,14 @@ const KEYCHAIN_SERVICE: &str = "wuddle";
 const KEYCHAIN_ACCOUNT: &str = "github_token";
 const KEYCHAIN_TIMEOUT_MS: u64 = 2500;
 
+fn github_token_mutation_guard() -> std::sync::MutexGuard<'static, ()> {
+    static MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    MUTATION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn keychain_call_with_timeout<T, F>(label: &'static str, f: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -2364,22 +4621,6 @@ where
     }
 }
 
-fn token_file_path() -> Result<PathBuf, String> {
-    Ok(crate::settings::app_dir()?.join(".github_token"))
-}
-
-fn read_file_token() -> Result<Option<String>, String> {
-    let path = token_file_path()?;
-    match std::fs::read_to_string(&path) {
-        Ok(s) => {
-            let t = s.trim().to_string();
-            Ok(if t.is_empty() { None } else { Some(t) })
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
 fn read_keychain_token() -> Result<Option<String>, String> {
     keychain_call_with_timeout("reading token", || {
         let entry =
@@ -2396,31 +4637,37 @@ fn read_keychain_token() -> Result<Option<String>, String> {
 }
 
 fn write_keychain_token(token: &str) -> Result<(), String> {
-    let token = token.to_string();
-    keychain_call_with_timeout("saving token", move || {
-        let entry =
-            keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())?;
-        entry.set_password(&token).map_err(|e| e.to_string())
-    })
+    let entry =
+        keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())?;
+    entry.set_password(token).map_err(|e| e.to_string())
 }
 
 fn delete_keychain_token() -> Result<(), String> {
-    keychain_call_with_timeout("clearing token", || {
-        let entry =
-            keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())?;
-        if let Err(e) = entry.delete_credential() {
-            if !matches!(e, keyring::Error::NoEntry) {
-                return Err(e.to_string());
-            }
+    let entry =
+        keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())?;
+    if let Err(e) = entry.delete_credential() {
+        if !matches!(e, keyring::Error::NoEntry) {
+            return Err(e.to_string());
         }
-        Ok(())
-    })
+    }
+    Ok(())
 }
 
-#[cfg(any(target_os = "windows", test))]
-#[cfg_attr(test, allow(dead_code))]
 fn import_legacy_plaintext_token() -> Result<(), String> {
+    let _mutation = github_token_mutation_guard();
     let paths = crate::storage::legacy_plaintext_token_paths()?;
+    import_legacy_plaintext_token_from_paths(paths, read_keychain_token, write_keychain_token)
+}
+
+fn import_legacy_plaintext_token_from_paths<R, W>(
+    paths: Vec<PathBuf>,
+    mut read_vault: R,
+    mut write_vault: W,
+) -> Result<(), String>
+where
+    R: FnMut() -> Result<Option<String>, String>,
+    W: FnMut(&str) -> Result<(), String>,
+{
     if paths.is_empty() {
         return Ok(());
     }
@@ -2445,26 +4692,24 @@ fn import_legacy_plaintext_token() -> Result<(), String> {
                 .join(", ")
         ));
     }
-    let Some(token) = tokens.pop() else {
-        return Ok(());
-    };
-
-    match read_keychain_token()? {
-        Some(stored) if stored != token => {
-            return Err(
-                "A legacy portable GitHub token differs from the token already stored in Windows Credential Manager. The plaintext file was left untouched."
-                    .to_string(),
-            );
+    if let Some(token) = tokens.pop() {
+        match read_vault()? {
+            Some(stored) if stored != token => {
+                return Err(
+                    "A legacy portable GitHub token differs from the token already stored in the system credential vault. The plaintext file was left untouched."
+                        .to_string(),
+                );
+            }
+            Some(_) => {}
+            None => write_vault(&token)?,
         }
-        Some(_) => {}
-        None => write_keychain_token(&token)?,
+        verify_stored_token(&token, read_vault()?)?;
     }
-    verify_stored_token(&token, read_keychain_token()?)?;
 
     for path in paths {
         std::fs::remove_file(&path).map_err(|e| {
             format!(
-                "The GitHub token was imported into Windows Credential Manager, but the legacy plaintext copy could not be removed from {}: {e}",
+                "The GitHub token was imported into the system credential vault, but the legacy plaintext copy could not be removed from {}: {e}",
                 path.display()
             )
         })?;
@@ -2473,17 +4718,6 @@ fn import_legacy_plaintext_token() -> Result<(), String> {
 }
 
 fn read_stored_token() -> Result<Option<String>, String> {
-    #[cfg(target_os = "windows")]
-    {
-        return read_keychain_token();
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    if crate::settings::portable_mode_enabled() {
-        return read_file_token();
-    }
-
-    #[cfg(not(target_os = "windows"))]
     read_keychain_token()
 }
 
@@ -2495,25 +4729,38 @@ fn environment_github_token() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitHubTokenSource {
+    None,
+    Stored,
+    Environment,
+}
+
 /// Load a persisted token, falling back to an environment variable. Returning
 /// an error is important: callers must not silently report anonymous API
 /// access as an authenticated saved-token session when the system credential
 /// store could not be read.
-pub fn sync_github_token() -> Result<(), String> {
-    #[cfg(target_os = "windows")]
+pub fn sync_github_token() -> Result<GitHubTokenSource, String> {
     if let Err(error) = import_legacy_plaintext_token() {
-        wuddle_engine::set_github_token(environment_github_token());
+        let environment = environment_github_token();
+        wuddle_engine::set_github_token(environment);
         return Err(format!("Could not migrate the saved GitHub token: {error}"));
     }
 
     match read_stored_token() {
         Ok(Some(token)) => {
             wuddle_engine::set_github_token(Some(token));
-            Ok(())
+            Ok(GitHubTokenSource::Stored)
         }
         Ok(None) => {
-            wuddle_engine::set_github_token(environment_github_token());
-            Ok(())
+            let environment = environment_github_token();
+            let source = if environment.is_some() {
+                GitHubTokenSource::Environment
+            } else {
+                GitHubTokenSource::None
+            };
+            wuddle_engine::set_github_token(environment);
+            Ok(source)
         }
         Err(error) => {
             // An environment token still permits authenticated use, but retain
@@ -2523,6 +4770,46 @@ pub fn sync_github_token() -> Result<(), String> {
             Err(format!("Could not read the saved GitHub token: {error}"))
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitHubTokenValidation {
+    Valid,
+    Invalid,
+    Unverified(String),
+}
+
+fn classify_github_token_validation_status(status: reqwest::StatusCode) -> GitHubTokenValidation {
+    match status {
+        reqwest::StatusCode::OK => GitHubTokenValidation::Valid,
+        reqwest::StatusCode::UNAUTHORIZED => GitHubTokenValidation::Invalid,
+        status => GitHubTokenValidation::Unverified(format!(
+            "GitHub returned HTTP {}, so the token has not been verified.",
+            status.as_u16()
+        )),
+    }
+}
+
+pub async fn validate_github_token() -> GitHubTokenValidation {
+    let Some(token) = wuddle_engine::github_token() else {
+        return GitHubTokenValidation::Invalid;
+    };
+    let response = reqwest::Client::new()
+        .get("https://api.github.com/user")
+        .header("User-Agent", concat!("Wuddle/", env!("CARGO_PKG_VERSION")))
+        .header("Accept", "application/vnd.github+json")
+        .bearer_auth(token)
+        .send()
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(_) => {
+            return GitHubTokenValidation::Unverified(
+                "GitHub could not be reached, so the token has not been verified.".to_string(),
+            );
+        }
+    };
+    classify_github_token_validation_status(response.status())
 }
 
 fn verify_stored_token(expected: &str, stored: Option<String>) -> Result<(), String> {
@@ -2541,7 +4828,12 @@ fn verify_stored_token(expected: &str, stored: Option<String>) -> Result<(), Str
 
 #[cfg(test)]
 mod github_token_tests {
-    use super::verify_stored_token;
+    use super::{
+        classify_github_token_validation_status, import_legacy_plaintext_token_from_paths,
+        verify_stored_token, GitHubTokenValidation,
+    };
+    use std::cell::RefCell;
+    use std::fs;
 
     #[test]
     fn token_readback_requires_an_exact_match() {
@@ -2549,11 +4841,65 @@ mod github_token_tests {
         assert!(verify_stored_token("secret", Some("different".to_string())).is_err());
         assert!(verify_stored_token("secret", None).is_err());
     }
+
+    #[test]
+    fn github_authentication_status_is_not_inferred_from_vault_presence() {
+        assert_eq!(
+            classify_github_token_validation_status(reqwest::StatusCode::OK),
+            GitHubTokenValidation::Valid
+        );
+        assert_eq!(
+            classify_github_token_validation_status(reqwest::StatusCode::UNAUTHORIZED),
+            GitHubTokenValidation::Invalid
+        );
+        assert!(matches!(
+            classify_github_token_validation_status(reqwest::StatusCode::SERVICE_UNAVAILABLE),
+            GitHubTokenValidation::Unverified(_)
+        ));
+    }
+
+    #[test]
+    fn legacy_plaintext_token_is_deleted_only_after_verified_vault_import() {
+        let temp = tempfile::tempdir().unwrap();
+        let plaintext = temp.path().join(".github_token");
+        fs::write(&plaintext, "secret\n").unwrap();
+        let vault = RefCell::new(None::<String>);
+
+        import_legacy_plaintext_token_from_paths(
+            vec![plaintext.clone()],
+            || Ok(vault.borrow().clone()),
+            |token| {
+                *vault.borrow_mut() = Some(token.to_string());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(vault.into_inner().as_deref(), Some("secret"));
+        assert!(!plaintext.exists());
+    }
+
+    #[test]
+    fn failed_vault_import_never_deletes_the_plaintext_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let plaintext = temp.path().join(".github_token");
+        fs::write(&plaintext, "secret").unwrap();
+
+        let error = import_legacy_plaintext_token_from_paths(
+            vec![plaintext.clone()],
+            || Ok(None),
+            |_| Err("vault unavailable".to_string()),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("vault unavailable"));
+        assert!(plaintext.exists());
+    }
 }
 
 #[cfg(test)]
 mod launch_target_tests {
-    use super::resolve_launch_target;
+    use super::{lutris_launch_spec, parse_arg_string, resolve_launch_target};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2572,40 +4918,74 @@ mod launch_target_tests {
         fs::write(&expected, []).unwrap();
 
         let target = resolve_launch_target(&dir, Some("WoW.ExE")).unwrap();
-        assert_eq!(target, expected);
+        assert!(target.is_file());
+        assert!(target
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("wow.exe")));
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn launch_arguments_preserve_quotes_empty_values_escapes_and_windows_paths() {
+        assert_eq!(
+            parse_arg_string(
+                r#"--prefix "C:\Games\WoW Prefix" --label 'two words' "" escaped\ value C:\Games\WoW"#
+            )
+            .unwrap(),
+            vec![
+                "--prefix",
+                r#"C:\Games\WoW Prefix"#,
+                "--label",
+                "two words",
+                "",
+                "escaped value",
+                r#"C:\Games\WoW"#,
+            ]
+        );
+        assert_eq!(
+            parse_arg_string(r#"--message "say \"hello\"""#).unwrap(),
+            vec!["--message", r#"say "hello""#]
+        );
+    }
+
+    #[test]
+    fn launch_arguments_reject_unclosed_quotes() {
+        let error = parse_arg_string(r#"--prefix "unfinished"#).unwrap_err();
+        assert!(error.contains("unclosed quote"));
+    }
+
+    #[test]
+    fn lutris_launch_uses_only_the_lutris_target() {
+        let (command, args) = lutris_launch_spec("  lutris:rungameid/16  ").unwrap();
+
+        assert_eq!(command, "lutris");
+        assert_eq!(args, vec!["lutris:rungameid/16"]);
+    }
+
+    #[test]
+    fn lutris_launch_rejects_an_empty_target() {
+        let error = lutris_launch_spec(" \t ").unwrap_err();
+
+        assert!(error.contains("Lutris launch target is empty"));
     }
 }
 
 pub async fn save_github_token(token: String) -> Result<(), String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("save_github_token");
     tokio::task::spawn_blocking(move || {
+        let _mutation = github_token_mutation_guard();
         let token = token.trim().to_string();
         if token.is_empty() {
             return Err("Token is empty.".to_string());
         }
-        #[cfg(not(target_os = "windows"))]
-        if crate::settings::portable_mode_enabled() {
-            let path = token_file_path()?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            std::fs::write(&path, &token).map_err(|e| e.to_string())?;
-        } else {
-            write_keychain_token(&token)?;
-        }
-
-        #[cfg(target_os = "windows")]
         write_keychain_token(&token)?;
 
         // A successful write alone is not enough: some credential-store
         // backends can accept a write yet fail on the next process/read. Only
-        // report success once Wuddle can read the exact credential back.
         let stored = read_stored_token()?;
         verify_stored_token(&token, stored)?;
 
-        #[cfg(target_os = "windows")]
         for path in crate::storage::legacy_plaintext_token_paths()? {
             std::fs::remove_file(&path).map_err(|e| {
                 format!(
@@ -2622,21 +5002,11 @@ pub async fn save_github_token(token: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-pub async fn clear_github_token() -> Result<(), String> {
+pub async fn clear_github_token() -> Result<GitHubTokenSource, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("clear_github_token");
     tokio::task::spawn_blocking(|| {
-        #[cfg(not(target_os = "windows"))]
-        if crate::settings::portable_mode_enabled() {
-            let path = token_file_path()?;
-            if path.exists() {
-                std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-            }
-        } else {
-            delete_keychain_token()?;
-        }
-
-        #[cfg(target_os = "windows")]
         {
+            let _mutation = github_token_mutation_guard();
             delete_keychain_token()?;
             for path in crate::storage::legacy_plaintext_token_paths()? {
                 std::fs::remove_file(&path).map_err(|e| {
@@ -2701,7 +5071,23 @@ pub struct ForgeInfo {
 }
 
 pub fn parse_forge_url(url: &str) -> Option<ForgeInfo> {
-    let trimmed = url.trim().trim_end_matches('/');
+    let candidate = if url.trim().contains("://") {
+        url.trim().to_string()
+    } else {
+        format!("https://{}", url.trim())
+    };
+    let mut parsed = reqwest::Url::parse(&candidate).ok()?;
+    if !matches!(parsed.scheme(), "https" | "http")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    let normalized = parsed.to_string();
+    let trimmed = normalized.trim_end_matches('/');
     let without_scheme = trimmed
         .strip_prefix("https://")
         .map(|s| ("https", s))
@@ -2765,10 +5151,8 @@ mod forge_url_tests {
 
     #[test]
     fn gitlab_nested_namespace_is_not_truncated() {
-        let parsed = parse_forge_url(
-            "https://gitlab.com/group/subgroup/addons/project.git",
-        )
-        .unwrap();
+        let parsed =
+            parse_forge_url("https://gitlab.com/group/subgroup/addons/project.git").unwrap();
         assert_eq!(parsed.forge, "gitlab");
         assert_eq!(parsed.owner, "group/subgroup/addons");
         assert_eq!(parsed.repo, "project");
@@ -2776,12 +5160,16 @@ mod forge_url_tests {
 
     #[test]
     fn gitlab_browse_suffix_is_not_part_of_identity() {
-        let parsed = parse_forge_url(
-            "https://gitlab.com/group/subgroup/project/-/tree/main/Addon",
-        )
-        .unwrap();
+        let parsed =
+            parse_forge_url("https://gitlab.com/group/subgroup/project/-/tree/main/Addon").unwrap();
         assert_eq!(parsed.owner, "group/subgroup");
         assert_eq!(parsed.repo, "project");
+    }
+
+    #[test]
+    fn credential_bearing_forge_urls_are_rejected() {
+        assert!(parse_forge_url("https://user:secret@gitea.example.org/team/project").is_none());
+        assert!(parse_forge_url("https://token@github.com/team/project").is_none());
     }
 }
 
@@ -2876,16 +5264,16 @@ pub fn convert_html_images_to_markdown(markdown: &str) -> String {
         }
     }
     // Strip <p>, </p>, <br>, <br/>, <br /> tags that GitHub wraps around images
-    let result = result
+
+    result
         .replace("<p>", "")
         .replace("</p>", "")
         .replace("<br>", "\n")
         .replace("<br/>", "\n")
-        .replace("<br />", "\n");
-    result
+        .replace("<br />", "\n")
 }
 
-fn extract_attr<'a>(tag: &'a str, attr_name: &str) -> Option<String> {
+fn extract_attr(tag: &str, attr_name: &str) -> Option<String> {
     let needle = format!("{}=", attr_name);
     let attr_pos = tag.find(&needle)?;
     let after = &tag[attr_pos + needle.len()..];
@@ -2918,6 +5306,58 @@ pub fn resolve_image_url(url: &str, raw_base_url: &str) -> String {
 /// Handles are created once here so their IDs are fixed — iced can then cache the decoded
 /// pixels across renders without re-decoding on every frame.
 /// Limits: max 12 images, 5 MB each, 20 MB total.
+const README_IMAGE_MAX_BYTES: usize = 5_000_000;
+const README_IMAGE_TOTAL_BYTES: usize = 20_000_000;
+const README_IMAGE_MAX_DIMENSION: u32 = 8_192;
+const README_IMAGE_MAX_PIXELS: u64 = 20_000_000;
+const README_GIF_MAX_FRAMES: usize = 120;
+const README_GIF_MAX_DECODED_BYTES: u64 = 128 * 1024 * 1024;
+
+fn image_dimensions_are_safe(width: u32, height: u32) -> bool {
+    width > 0
+        && height > 0
+        && width <= README_IMAGE_MAX_DIMENSION
+        && height <= README_IMAGE_MAX_DIMENSION
+        && u64::from(width) * u64::from(height) <= README_IMAGE_MAX_PIXELS
+}
+
+fn validate_readme_image(bytes: &[u8], is_gif: bool) -> bool {
+    use image::{AnimationDecoder, ImageDecoder};
+    use std::io::Cursor;
+
+    if is_gif {
+        let Ok(decoder) = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)) else {
+            return false;
+        };
+        let (width, height) = decoder.dimensions();
+        if !image_dimensions_are_safe(width, height) {
+            return false;
+        }
+        let decoded_per_frame = u64::from(width) * u64::from(height) * 4;
+        let mut frame_count = 0usize;
+        for frame in decoder.into_frames() {
+            if frame.is_err() {
+                return false;
+            }
+            frame_count += 1;
+            if frame_count > README_GIF_MAX_FRAMES
+                || decoded_per_frame.saturating_mul(frame_count as u64)
+                    > README_GIF_MAX_DECODED_BYTES
+            {
+                return false;
+            }
+        }
+        return frame_count > 0;
+    }
+
+    let Ok(reader) = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format() else {
+        return false;
+    };
+    reader
+        .into_dimensions()
+        .is_ok_and(|(width, height)| image_dimensions_are_safe(width, height))
+}
+
 async fn fetch_images(
     client: &Client,
     image_urls: &[String],
@@ -2936,7 +5376,7 @@ async fn fetch_images(
         resolve_github_user_attachments(client, raw_base_url, image_urls).await;
 
     for url in image_urls.iter().take(12) {
-        if total_bytes > 20_000_000 {
+        if total_bytes >= README_IMAGE_TOTAL_BYTES {
             break;
         }
 
@@ -2948,38 +5388,39 @@ async fn fetch_images(
             .cloned()
             .unwrap_or_else(|| abs_url.clone());
 
-        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let mut req = client.get(&fetch_url);
-            // Non-signed private-user-images URLs may need a GitHub token.
-            if fetch_url.contains("private-user-images.githubusercontent.com")
-                && !fetch_url.contains("?jwt=")
-            {
-                if let Some(token) = wuddle_engine::github_token() {
-                    req = req.bearer_auth(token);
-                }
-            }
-            let resp = req.send().await?;
-            let ct = resp
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("(none)")
-                .to_string();
-            if !resp.status().is_success() {
-                return Err(reqwest::Error::from(resp.error_for_status().unwrap_err()));
-            }
-            if !ct.starts_with("image/") {
-                return Ok((Default::default(), false));
-            }
-            let is_gif =
-                ct == "image/gif" || fetch_url.split('?').next().unwrap_or("").ends_with(".gif");
-            resp.bytes().await.map(|b| (b, is_gif))
-        })
+        let remaining = README_IMAGE_TOTAL_BYTES - total_bytes;
+        let max_bytes = remaining.min(README_IMAGE_MAX_BYTES) as u64;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::network::fetch_public_bytes(&fetch_url, max_bytes, |requested_url| {
+                github_image_request_needs_token(requested_url)
+                    .then(wuddle_engine::github_token)
+                    .flatten()
+            }),
+        )
         .await;
 
-        if let Ok(Ok((bytes, is_gif))) = result {
-            if !bytes.is_empty() && bytes.len() <= 5_000_000 {
-                total_bytes += bytes.len();
+        if let Ok(Ok(download)) = result {
+            let is_image = download
+                .content_type
+                .as_deref()
+                .is_some_and(|content_type| {
+                    content_type.to_ascii_lowercase().starts_with("image/")
+                });
+            let is_gif = download
+                .content_type
+                .as_deref()
+                .is_some_and(|content_type| {
+                    content_type.to_ascii_lowercase().starts_with("image/gif")
+                })
+                || download
+                    .final_url
+                    .path()
+                    .to_ascii_lowercase()
+                    .ends_with(".gif");
+            let bytes = download.bytes;
+            total_bytes += bytes.len();
+            if is_image && !bytes.is_empty() && validate_readme_image(&bytes, is_gif) {
                 if is_gif {
                     // Decode animated GIF frames for iced_gif widget.
                     if let Ok(frames) = iced_gif::Frames::from_bytes(bytes.to_vec()) {
@@ -2987,13 +5428,6 @@ async fn fetch_images(
                         gif_cache.insert(url.clone(), frames.clone());
                         if abs_url != *url {
                             gif_cache.insert(abs_url, frames);
-                        }
-                    } else {
-                        // Fall back to static handle if decoding fails.
-                        let handle = iced::widget::image::Handle::from_bytes(bytes);
-                        image_cache.insert(url.clone(), handle.clone());
-                        if abs_url != *url {
-                            image_cache.insert(abs_url, handle);
                         }
                     }
                 } else {
@@ -3010,6 +5444,72 @@ async fn fetch_images(
         }
     }
     (image_cache, gif_cache)
+}
+
+fn github_image_request_needs_token(url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+
+    url.scheme() == "https"
+        && url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("private-user-images.githubusercontent.com")
+        })
+        && matches!(url.port(), None | Some(443))
+        && url.username().is_empty()
+        && url.password().is_none()
+        && !url
+            .query_pairs()
+            .any(|(name, _)| name.eq_ignore_ascii_case("jwt"))
+}
+
+#[cfg(test)]
+mod github_image_auth_tests {
+    use super::{github_image_request_needs_token, image_dimensions_are_safe};
+
+    #[test]
+    fn authenticates_only_unsigned_urls_on_the_exact_github_image_host() {
+        assert!(github_image_request_needs_token(
+            "https://private-user-images.githubusercontent.com/123/image.png"
+        ));
+        assert!(github_image_request_needs_token(
+            "https://PRIVATE-USER-IMAGES.GITHUBUSERCONTENT.COM:443/123/image.png"
+        ));
+
+        assert!(!github_image_request_needs_token(
+            "https://private-user-images.githubusercontent.com/123/image.png?jwt=signed"
+        ));
+        assert!(!github_image_request_needs_token(
+            "https://private-user-images.githubusercontent.com/123/image.png?other=1&JWT=signed"
+        ));
+    }
+
+    #[test]
+    fn never_authenticates_lookalike_or_untrusted_image_urls() {
+        let urls = [
+            "https://attacker.example/private-user-images.githubusercontent.com/collect.png",
+            "https://private-user-images.githubusercontent.com.attacker.example/collect.png",
+            "https://private-user-images.githubusercontent.com@attacker.example/collect.png",
+            "http://private-user-images.githubusercontent.com/collect.png",
+            "https://private-user-images.githubusercontent.com:8443/collect.png",
+            "not a url containing private-user-images.githubusercontent.com",
+        ];
+
+        for url in urls {
+            assert!(
+                !github_image_request_needs_token(url),
+                "unexpectedly trusted {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_readme_images_with_excessive_decoded_dimensions() {
+        assert!(image_dimensions_are_safe(1_920, 1_080));
+        assert!(!image_dimensions_are_safe(0, 1_080));
+        assert!(!image_dimensions_are_safe(9_000, 100));
+        assert!(!image_dimensions_are_safe(8_000, 8_000));
+    }
 }
 
 /// Resolve `github.com/user-attachments/assets/UUID` URLs to time-limited signed CDN URLs.
@@ -3129,7 +5629,7 @@ async fn fetch_files(
     owner: &str,
     repo: &str,
     scheme: &str,
-) -> Vec<RepoFileEntry> {
+) -> Result<Vec<RepoFileEntry>, String> {
     match forge {
         "github" => {
             let url = format!("https://api.github.com/repos/{}/{}/contents/", owner, repo);
@@ -3139,20 +5639,20 @@ async fn fetch_files(
             if let Some(token) = wuddle_engine::github_token() {
                 req = req.bearer_auth(token);
             }
-            match req.send().await {
-                Ok(r) if r.status().is_success() => r
-                    .json::<Vec<ContentEntry>>()
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|e| RepoFileEntry {
-                        is_dir: e.kind == "dir",
-                        path: e.name.clone(),
-                        name: e.name,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            }
+            let response = req.send().await.map_err(|error| error.to_string())?;
+            let entries = crate::github_api::checked_response(response)
+                .await?
+                .json::<Vec<ContentEntry>>()
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|e| RepoFileEntry {
+                    is_dir: e.kind == "dir",
+                    path: e.name.clone(),
+                    name: e.name,
+                })
+                .collect();
+            Ok(entries)
         }
         "gitlab" => {
             let encoded = format!("{}/{}", owner, repo).replace('/', "%2F");
@@ -3160,7 +5660,7 @@ async fn fetch_files(
                 "https://gitlab.com/api/v4/projects/{}/repository/tree?per_page=50",
                 encoded
             );
-            match client.get(&url).send().await {
+            Ok(match client.get(&url).send().await {
                 Ok(r) if r.status().is_success() => r
                     .json::<Vec<ContentEntry>>()
                     .await
@@ -3173,14 +5673,14 @@ async fn fetch_files(
                     })
                     .collect(),
                 _ => Vec::new(),
-            }
+            })
         }
         _ => {
             let url = format!(
                 "{}://{}/api/v1/repos/{}/{}/contents/",
                 scheme, host, owner, repo
             );
-            match client.get(&url).send().await {
+            Ok(match client.get(&url).send().await {
                 Ok(r) if r.status().is_success() => r
                     .json::<Vec<ContentEntry>>()
                     .await
@@ -3193,7 +5693,7 @@ async fn fetch_files(
                     })
                     .collect(),
                 _ => Vec::new(),
-            }
+            })
         }
     }
 }
@@ -3224,20 +5724,19 @@ pub async fn fetch_dir_contents(
             if let Some(token) = wuddle_engine::github_token() {
                 req = req.bearer_auth(token);
             }
-            match req.send().await {
-                Ok(r) if r.status().is_success() => r
-                    .json::<Vec<ContentEntry>>()
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|e| RepoFileEntry {
-                        is_dir: e.kind == "dir",
-                        path: format!("{}/{}", dir_path, e.name),
-                        name: e.name,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            }
+            let response = req.send().await.map_err(|error| error.to_string())?;
+            crate::github_api::checked_response(response)
+                .await?
+                .json::<Vec<ContentEntry>>()
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|e| RepoFileEntry {
+                    is_dir: e.kind == "dir",
+                    path: format!("{}/{}", dir_path, e.name),
+                    name: e.name,
+                })
+                .collect()
         }
         "gitlab" => {
             let encoded = format!("{}/{}", fi.owner, fi.repo).replace('/', "%2F");
@@ -3335,10 +5834,9 @@ async fn fetch_github_preview(
     if let Some(token) = wuddle_engine::github_token() {
         req = req.bearer_auth(token);
     }
-    let info: GhRepoInfo = req
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
+    let info_response = req.send().await.map_err(|e| e.to_string())?;
+    let info: GhRepoInfo = crate::github_api::checked_response(info_response)
+        .await?
         .json()
         .await
         .map_err(|e| e.to_string())?;
@@ -3351,8 +5849,13 @@ async fn fetch_github_preview(
         readme_req = readme_req.bearer_auth(token);
     }
     let readme_text = match readme_req.send().await {
-        Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
-        _ => String::new(),
+        Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => String::new(),
+        Ok(response) => crate::github_api::checked_response(response)
+            .await?
+            .text()
+            .await
+            .map_err(|error| error.to_string())?,
+        Err(error) => return Err(error.to_string()),
     };
 
     let raw_base = format!("https://raw.githubusercontent.com/{}/{}/HEAD/", owner, repo);
@@ -3363,7 +5866,7 @@ async fn fetch_github_preview(
     let image_urls: Vec<String> = md_content.images().iter().cloned().collect();
     let (image_cache, gif_cache) = fetch_images(client, &image_urls, &raw_base).await;
 
-    let files = fetch_files(client, "github", "github.com", owner, repo, "https").await;
+    let files = fetch_files(client, "github", "github.com", owner, repo, "https").await?;
 
     let license = info.license.and_then(|l| l.spdx_id).unwrap_or_default();
     let license = if license == "NOASSERTION" || license.is_empty() {
@@ -3432,7 +5935,7 @@ async fn fetch_gitlab_preview(
     let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
     let image_urls: Vec<String> = md_content.images().iter().cloned().collect();
     let (image_cache, gif_cache) = fetch_images(client, &image_urls, &raw_base).await;
-    let files = fetch_files(client, "gitlab", "gitlab.com", owner, repo, "https").await;
+    let files = fetch_files(client, "gitlab", "gitlab.com", owner, repo, "https").await?;
 
     Ok(RepoPreviewInfo {
         name: info.name.unwrap_or_else(|| repo.to_string()),
@@ -3504,7 +6007,7 @@ async fn fetch_gitea_preview(
     let readme_items: Vec<iced::widget::markdown::Item> = md_content.items().to_vec();
     let image_urls: Vec<String> = md_content.images().iter().cloned().collect();
     let (image_cache, gif_cache) = fetch_images(client, &image_urls, &raw_base).await;
-    let files = fetch_files(client, "gitea", host, owner, repo, scheme).await;
+    let files = fetch_files(client, "gitea", host, owner, repo, scheme).await?;
 
     Ok(RepoPreviewInfo {
         name: info.name.unwrap_or_else(|| repo.to_string()),
@@ -3681,14 +6184,15 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
             if let Some(token) = wuddle_engine::github_token() {
                 req = req.bearer_auth(token);
             }
-            let releases: Vec<GhRelease> =
-                tokio::time::timeout(std::time::Duration::from_secs(15), req.send())
-                    .await
-                    .map_err(|_| "Timed out fetching releases".to_string())?
-                    .map_err(|e| e.to_string())?
-                    .json()
-                    .await
-                    .map_err(|e| e.to_string())?;
+            let response = tokio::time::timeout(std::time::Duration::from_secs(15), req.send())
+                .await
+                .map_err(|_| "Timed out fetching releases".to_string())?
+                .map_err(|e| e.to_string())?;
+            let releases: Vec<GhRelease> = crate::github_api::checked_response(response)
+                .await?
+                .json()
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(releases
                 .into_iter()
                 .map(|r| {
@@ -3698,10 +6202,7 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
                         .to_vec();
                     ReleaseItem {
                         tag_name: r.tag_name.clone(),
-                        name: r
-                            .name
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| r.tag_name),
+                        name: r.name.filter(|s| !s.is_empty()).unwrap_or(r.tag_name),
                         published_at: r.published_at.unwrap_or_default(),
                         body,
                         items,
@@ -3737,10 +6238,7 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
                         .to_vec();
                     ReleaseItem {
                         tag_name: r.tag_name.clone(),
-                        name: r
-                            .name
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| r.tag_name),
+                        name: r.name.filter(|s| !s.is_empty()).unwrap_or(r.tag_name),
                         published_at: r.released_at.unwrap_or_default(),
                         body,
                         items,
@@ -3780,10 +6278,7 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
                         .to_vec();
                     ReleaseItem {
                         tag_name: r.tag_name.clone(),
-                        name: r
-                            .name
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| r.tag_name),
+                        name: r.name.filter(|s| !s.is_empty()).unwrap_or(r.tag_name),
                         published_at: r.published_at.unwrap_or_default(),
                         body,
                         items,
@@ -3802,11 +6297,89 @@ pub async fn fetch_releases(forge_url: String) -> Result<Vec<ReleaseItem>, Strin
 const WUDDLE_RELEASE_API_LATEST: &str =
     "https://api.github.com/repos/ZythDr/Wuddle/releases/latest";
 const WUDDLE_RELEASE_API_ALL: &str =
-    "https://api.github.com/repos/ZythDr/Wuddle/releases?per_page=5";
+    "https://api.github.com/repos/ZythDr/Wuddle/releases?per_page=100";
+const WUDDLE_BETA_CHANGELOG_API: &str =
+    "https://api.github.com/repos/ZythDr/Wuddle/releases?per_page=20";
 const CHANGELOG_URL: &str = "https://raw.githubusercontent.com/ZythDr/Wuddle/main/CHANGELOG.md";
+const BETA_CHANGELOG_URL: &str =
+    "https://raw.githubusercontent.com/ZythDr/Wuddle/beta/CHANGELOG.md";
 const CHANGELOG_EMBEDDED: &str = include_str!("../../CHANGELOG.md");
 
-pub async fn fetch_changelog() -> Result<String, String> {
+#[derive(Debug, Deserialize)]
+struct GhChangelogRelease {
+    tag_name: String,
+    body: Option<String>,
+    prerelease: bool,
+    draft: bool,
+}
+
+fn strip_changelog_preamble(markdown: &str) -> String {
+    let lines = markdown.lines().collect::<Vec<_>>();
+    let first_release = lines.iter().position(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("## ") && !trimmed.starts_with("### ")
+    });
+    first_release
+        .map(|index| lines[index..].join("\n"))
+        .unwrap_or_else(|| markdown.trim().to_string())
+}
+
+fn strip_matching_release_heading<'a>(body: &'a str, tag: &str) -> &'a str {
+    let trimmed = body.trim();
+    let (first_line, remainder) = trimmed.split_once('\n').unwrap_or((trimmed, ""));
+    let heading = first_line.trim().trim_start_matches('#').trim();
+    if first_line.trim_start().starts_with('#')
+        && heading
+            .to_ascii_lowercase()
+            .contains(&tag.trim().to_ascii_lowercase())
+    {
+        remainder.trim_start()
+    } else {
+        trimmed
+    }
+}
+
+fn format_beta_changelog(releases: Vec<GhChangelogRelease>) -> Option<String> {
+    let sections = releases
+        .into_iter()
+        .filter(|release| release.prerelease && !release.draft)
+        .map(|release| {
+            let tag = release.tag_name.trim();
+            let body = release
+                .body
+                .as_deref()
+                .map(str::trim)
+                .filter(|body| !body.is_empty())
+                .unwrap_or("No release notes were provided for this beta.");
+            let body = strip_matching_release_heading(body, tag);
+            format!("## {tag}\n\n{body}")
+        })
+        .collect::<Vec<_>>();
+
+    if sections.is_empty() {
+        None
+    } else {
+        Some(sections.join("\n\n---\n\n"))
+    }
+}
+
+async fn fetch_beta_changelog(client: &Client) -> Result<String, String> {
+    let mut request = client
+        .get(WUDDLE_BETA_CHANGELOG_API)
+        .header("Accept", "application/vnd.github+json");
+    if let Some(token) = wuddle_engine::github_token() {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    let releases = crate::github_api::checked_response(response)
+        .await?
+        .json::<Vec<GhChangelogRelease>>()
+        .await
+        .map_err(|error| error.to_string())?;
+    format_beta_changelog(releases).ok_or_else(|| "No beta release notes found".to_string())
+}
+
+pub async fn fetch_changelog(beta_channel: bool) -> Result<String, String> {
     let _diagnostic = crate::diagnostics::OperationGuard::new("fetch_changelog");
     let client = Client::builder()
         .user_agent(concat!("wuddle/", env!("CARGO_PKG_VERSION")))
@@ -3814,9 +6387,24 @@ pub async fn fetch_changelog() -> Result<String, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    match client.get(CHANGELOG_URL).send().await {
-        Ok(resp) if resp.status().is_success() => resp.text().await.map_err(|e| e.to_string()),
-        _ => Ok(CHANGELOG_EMBEDDED.to_string()),
+    if beta_channel {
+        if let Ok(changelog) = fetch_beta_changelog(&client).await {
+            return Ok(changelog);
+        }
+    }
+
+    let fallback_url = if beta_channel {
+        BETA_CHANGELOG_URL
+    } else {
+        CHANGELOG_URL
+    };
+    match client.get(fallback_url).send().await {
+        Ok(resp) if resp.status().is_success() => resp
+            .text()
+            .await
+            .map(|text| strip_changelog_preamble(&text))
+            .map_err(|e| e.to_string()),
+        _ => Ok(strip_changelog_preamble(CHANGELOG_EMBEDDED)),
     }
 }
 
@@ -3847,109 +6435,69 @@ pub struct SelfUpdateStatus {
 struct GhReleaseAsset {
     name: String,
     browser_download_url: String,
+    size: u64,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GhReleaseFull {
     tag_name: String,
     assets: Vec<GhReleaseAsset>,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    draft: bool,
 }
 
 fn normalize_tag(raw: &str) -> String {
     raw.trim().trim_start_matches(['v', 'V']).trim().to_string()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PreReleaseIdentifier {
-    Numeric(u64),
-    Text(String),
-}
-
-/// Parse the SemVer parts needed by the updater. Build metadata is deliberately
-/// ignored, while the individual pre-release identifiers remain significant:
-/// `3.6.0-beta.3` must sort after `3.6.0-beta.2`.
-fn parse_version_parts(raw: &str) -> (Vec<u64>, Option<Vec<PreReleaseIdentifier>>) {
-    let tag = normalize_tag(raw);
-    let without_build = tag.split_once('+').map_or(tag.as_str(), |(version, _)| version);
-    let (core_raw, pre_raw) = without_build
-        .split_once('-')
-        .map_or((without_build, None), |(core, pre)| (core, Some(pre)));
-    let core = core_raw
-        .split('.')
-        .map(|part| part.parse::<u64>().unwrap_or(0))
-        .collect();
-    let prerelease = pre_raw.map(|pre| {
-        pre.split('.')
-            .filter(|part| !part.is_empty())
-            .map(|part| match part.parse::<u64>() {
-                Ok(number) => PreReleaseIdentifier::Numeric(number),
-                Err(_) => PreReleaseIdentifier::Text(part.to_ascii_lowercase()),
-            })
-            .collect()
-    });
-    (core, prerelease)
-}
-
-fn compare_pre_release_identifier(
-    left: &PreReleaseIdentifier,
-    right: &PreReleaseIdentifier,
-) -> std::cmp::Ordering {
-    use PreReleaseIdentifier::{Numeric, Text};
-
-    match (left, right) {
-        (Numeric(a), Numeric(b)) => a.cmp(b),
-        // SemVer specifies that numeric identifiers have lower precedence than
-        // non-numeric identifiers.
-        (Numeric(_), Text(_)) => std::cmp::Ordering::Less,
-        (Text(_), Numeric(_)) => std::cmp::Ordering::Greater,
-        (Text(a), Text(b)) => a.cmp(b),
-    }
+fn parse_release_version(raw: &str) -> Option<semver::Version> {
+    semver::Version::parse(&normalize_tag(raw)).ok()
 }
 
 fn is_version_newer(latest: &str, current: &str) -> bool {
-    let (latest_core, latest_pre) = parse_version_parts(latest);
-    let (current_core, current_pre) = parse_version_parts(current);
-    let max = latest_core.len().max(current_core.len());
-    for i in 0..max {
-        let latest_part = *latest_core.get(i).unwrap_or(&0);
-        let current_part = *current_core.get(i).unwrap_or(&0);
-        match latest_part.cmp(&current_part) {
-            std::cmp::Ordering::Greater => return true,
-            std::cmp::Ordering::Less => return false,
-            std::cmp::Ordering::Equal => {}
-        }
-    }
-
-    match (latest_pre, current_pre) {
-        // A final release is newer than a pre-release with the same core.
-        (None, Some(_)) => true,
-        (Some(_), None) | (None, None) => false,
-        (Some(latest_pre), Some(current_pre)) => {
-            let max = latest_pre.len().max(current_pre.len());
-            for i in 0..max {
-                match (latest_pre.get(i), current_pre.get(i)) {
-                    // A longer matching pre-release identifier list has higher
-                    // precedence, e.g. `beta.1.1` > `beta.1`.
-                    (Some(_), None) => return true,
-                    (None, Some(_)) => return false,
-                    (Some(latest_identifier), Some(current_identifier)) => {
-                        match compare_pre_release_identifier(latest_identifier, current_identifier) {
-                            std::cmp::Ordering::Greater => return true,
-                            std::cmp::Ordering::Less => return false,
-                            std::cmp::Ordering::Equal => {}
-                        }
-                    }
-                    (None, None) => break,
-                }
-            }
-            false
-        }
+    match (
+        parse_release_version(latest),
+        parse_release_version(current),
+    ) {
+        (Some(latest), Some(current)) => latest > current,
+        _ => false,
     }
 }
 
 #[cfg(test)]
 mod self_update_version_tests {
-    use super::is_version_newer;
+    use super::{
+        asset_sha256, canonical_windows_version_name, expected_platform_asset_name,
+        finish_update_sha256, format_beta_changelog, github_release_request, is_version_newer,
+        pick_platform_asset_for, select_beta_channel_release, strip_changelog_preamble,
+        verified_platform_asset_for, GhChangelogRelease, GhReleaseAsset, GhReleaseFull,
+    };
+    use reqwest::header::AUTHORIZATION;
+    use sha2::{Digest, Sha256};
+
+    fn asset(name: &str) -> GhReleaseAsset {
+        GhReleaseAsset {
+            name: name.to_string(),
+            browser_download_url: format!(
+                "https://github.com/ZythDr/Wuddle/releases/download/v3.7.0-beta.7/{name}"
+            ),
+            size: 123,
+            digest: Some(format!("sha256:{}", "ab".repeat(32))),
+        }
+    }
+
+    fn release(tag: &str, prerelease: bool, draft: bool) -> GhReleaseFull {
+        GhReleaseFull {
+            tag_name: tag.to_string(),
+            assets: Vec::new(),
+            prerelease,
+            draft,
+        }
+    }
 
     #[test]
     fn beta_sequence_is_compared() {
@@ -3965,13 +6513,224 @@ mod self_update_version_tests {
     }
 
     #[test]
+    fn beta_changelog_contains_only_published_prereleases() {
+        let changelog = format_beta_changelog(vec![
+            GhChangelogRelease {
+                tag_name: "v3.7.0-beta.2".to_string(),
+                body: Some("## v3.7.0-beta.2\n\nBeta two changes".to_string()),
+                prerelease: true,
+                draft: false,
+            },
+            GhChangelogRelease {
+                tag_name: "v3.7.0".to_string(),
+                body: Some("Stable changes".to_string()),
+                prerelease: false,
+                draft: false,
+            },
+            GhChangelogRelease {
+                tag_name: "v3.8.0-beta.1".to_string(),
+                body: Some("Unpublished changes".to_string()),
+                prerelease: true,
+                draft: true,
+            },
+        ])
+        .unwrap();
+
+        assert!(changelog.contains("## v3.7.0-beta.2"));
+        assert!(changelog.contains("Beta two changes"));
+        assert_eq!(changelog.matches("v3.7.0-beta.2").count(), 1);
+        assert!(!changelog.contains("Stable changes"));
+        assert!(!changelog.contains("Unpublished changes"));
+    }
+
+    #[test]
+    fn changelog_document_preamble_is_not_rendered_inside_the_dialog() {
+        let markdown = "# Changelog\n\nAll notable changes are documented here.\n\n## v3.7.0\n\n### New Features\n\n- A feature";
+        let visible = strip_changelog_preamble(markdown);
+
+        assert!(visible.starts_with("## v3.7.0"));
+        assert!(!visible.contains("# Changelog\n"));
+        assert!(!visible.contains("All notable changes"));
+    }
+
+    #[test]
     fn build_metadata_does_not_affect_precedence() {
         assert!(!is_version_newer(
             "3.6.0-beta.3+linux.x86_64",
             "3.6.0-beta.3"
         ));
         assert!(is_version_newer("3.6.1-beta.1", "3.6.0-beta.2"));
+        assert!(!is_version_newer("not-a-version", "3.6.0"));
     }
+
+    #[test]
+    fn windows_version_directories_and_pointers_use_the_release_tag_form() {
+        assert_eq!(
+            canonical_windows_version_name("3.7.0-beta.6"),
+            "v3.7.0-beta.6"
+        );
+        assert_eq!(canonical_windows_version_name("v3.7.0"), "v3.7.0");
+    }
+
+    #[test]
+    fn beta_channel_selects_the_highest_eligible_semver_not_api_order() {
+        let selected = select_beta_channel_release(vec![
+            release("v3.7.0-beta.9", true, false),
+            release("v99.0.0", false, true),
+            release("nightly", true, false),
+            release("v3.7.0-beta.10", true, false),
+            release("v3.7.0-beta.11", false, false),
+            release("v3.6.1", false, false),
+        ])
+        .unwrap();
+
+        assert_eq!(selected.tag_name, "v3.7.0-beta.10");
+    }
+
+    #[test]
+    fn beta_channel_can_promote_a_prerelease_to_its_stable_release() {
+        let selected = select_beta_channel_release(vec![
+            release("v3.7.0-beta.10", true, false),
+            release("v3.7.0", false, false),
+        ])
+        .unwrap();
+
+        assert_eq!(selected.tag_name, "v3.7.0");
+    }
+
+    #[test]
+    fn updater_assets_require_exact_tag_platform_and_architecture_identity() {
+        let mut release = release("v3.7.0-beta.7", true, false);
+        release.assets = vec![
+            asset("wuddle-v3.7.0-beta.7-linux-aarch64.AppImage"),
+            asset("wuddle-v3.7.0-beta.7-linux-x86_64.tar.gz"),
+            asset("wuddle-v3.7.0-beta.6-linux-x86_64.AppImage"),
+            asset("wuddle-v3.7.0-beta.7-linux-x86_64.AppImage"),
+            asset("wuddle-v3.7.0-beta.7-windows-x86_64.zip"),
+        ];
+
+        assert_eq!(
+            pick_platform_asset_for(&release, "linux", "x86_64")
+                .unwrap()
+                .name,
+            "wuddle-v3.7.0-beta.7-linux-x86_64.AppImage"
+        );
+        assert_eq!(
+            pick_platform_asset_for(&release, "windows", "x86_64")
+                .unwrap()
+                .name,
+            "wuddle-v3.7.0-beta.7-windows-x86_64.zip"
+        );
+        assert!(pick_platform_asset_for(&release, "linux", "aarch64").is_none());
+        assert!(expected_platform_asset_name("../tag", "linux", "x86_64").is_none());
+    }
+
+    #[test]
+    fn updater_requires_a_strict_github_sha256_digest() {
+        let mut release = release("v3.7.0-beta.7", true, false);
+        release
+            .assets
+            .push(asset("wuddle-v3.7.0-beta.7-linux-x86_64.AppImage"));
+        let expected = "ab".repeat(32);
+        assert_eq!(asset_sha256(&release.assets[0]), Some(expected.clone()));
+        assert!(verified_platform_asset_for(&release, "linux", "x86_64").is_some());
+
+        release.assets[0].digest = Some(format!("sha512:{}", "ab".repeat(64)));
+        assert_eq!(asset_sha256(&release.assets[0]), None);
+        release.assets[0].digest = Some(format!("sha256:{}", "ab".repeat(31)));
+        assert_eq!(asset_sha256(&release.assets[0]), None);
+        release.assets[0].digest = Some(format!("sha256:{}z", "ab".repeat(31)));
+        assert_eq!(asset_sha256(&release.assets[0]), None);
+        release.assets[0].digest = None;
+        assert_eq!(asset_sha256(&release.assets[0]), None);
+
+        release.assets[0].digest = Some(format!("sha256:{}", "ab".repeat(32)));
+        release.assets[0].browser_download_url =
+            "https://example.invalid/update.AppImage".to_string();
+        assert!(pick_platform_asset_for(&release, "linux", "x86_64").is_some());
+        assert!(verified_platform_asset_for(&release, "linux", "x86_64").is_none());
+    }
+
+    #[test]
+    fn updater_rejects_bytes_that_do_not_match_release_metadata() {
+        let expected = format!("{:x}", Sha256::digest(b"expected package"));
+        let mut matching = Sha256::new();
+        matching.update(b"expected package");
+        assert!(finish_update_sha256(matching, &expected).is_ok());
+
+        let mut altered = Sha256::new();
+        altered.update(b"altered package");
+        assert!(finish_update_sha256(altered, &expected).is_err());
+    }
+
+    #[test]
+    fn self_update_release_request_uses_the_saved_github_token() {
+        let client = reqwest::Client::new();
+        let authenticated = github_release_request(
+            &client,
+            "https://api.github.com/releases",
+            Some("test-token"),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            authenticated
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            authenticated
+                .headers()
+                .get("X-GitHub-Api-Version")
+                .and_then(|value| value.to_str().ok()),
+            Some("2022-11-28")
+        );
+
+        let anonymous = github_release_request(&client, "https://api.github.com/releases", None)
+            .build()
+            .unwrap();
+        assert!(anonymous.headers().get(AUTHORIZATION).is_none());
+    }
+}
+
+fn github_release_request(
+    client: &Client,
+    url: &str,
+    token: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let request = client
+        .get(url)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    match token {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    }
+}
+
+fn eligible_release_version(release: &GhReleaseFull) -> Option<semver::Version> {
+    if release.draft {
+        return None;
+    }
+    let version = parse_release_version(&release.tag_name)?;
+    let tag_is_prerelease = !version.pre.is_empty();
+    if tag_is_prerelease != release.prerelease {
+        return None;
+    }
+    Some(version)
+}
+
+fn select_beta_channel_release(releases: Vec<GhReleaseFull>) -> Option<GhReleaseFull> {
+    releases
+        .into_iter()
+        .filter_map(|release| {
+            let version = eligible_release_version(&release)?;
+            Some((version, release))
+        })
+        .max_by(|(left, _), (right, _)| left.cmp(right))
+        .map(|(_, release)| release)
 }
 
 async fn fetch_release_full(beta_channel: bool) -> Result<GhReleaseFull, String> {
@@ -3986,33 +6745,54 @@ async fn fetch_release_full(beta_channel: bool) -> Result<GhReleaseFull, String>
         .build()
         .map_err(|e| e.to_string())?;
 
+    let token = wuddle_engine::github_token();
     let resp = tokio::time::timeout(
         Duration::from_secs(25),
-        client
-            .get(url)
-            .header("Accept", "application/vnd.github+json")
-            .send(),
+        github_release_request(&client, url, token.as_deref()).send(),
     )
     .await
     .map_err(|_| "Timed out fetching release".to_string())?
     .map_err(|e| e.to_string())?;
 
-    if !resp.status().is_success() {
-        return Err(format!("GitHub API error: HTTP {}", resp.status()));
-    }
+    let resp = crate::github_api::checked_response(resp).await?;
 
     if beta_channel {
         let releases: Vec<GhReleaseFull> = resp.json().await.map_err(|e| e.to_string())?;
-        releases
-            .into_iter()
-            .next()
-            .ok_or_else(|| "No releases found".to_string())
+        select_beta_channel_release(releases)
+            .ok_or_else(|| "No eligible Wuddle releases found".to_string())
     } else {
-        resp.json().await.map_err(|e| e.to_string())
+        let release: GhReleaseFull = resp.json().await.map_err(|e| e.to_string())?;
+        eligible_release_version(&release)
+            .filter(|version| version.pre.is_empty())
+            .map(|_| release)
+            .ok_or_else(|| "The latest stable release has invalid version metadata".to_string())
     }
 }
 
-async fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
+const SELF_UPDATE_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+fn finish_update_sha256(digest: Sha256, expected_sha256: &str) -> Result<(), String> {
+    let actual_sha256 = format!("{:x}", digest.finalize());
+    if actual_sha256 == expected_sha256 {
+        Ok(())
+    } else {
+        Err("Update package integrity verification failed; no files were changed.".to_string())
+    }
+}
+
+async fn download_update_to_temp(
+    url: &str,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<tempfile::NamedTempFile, String> {
+    use std::io::Write;
+
+    if expected_size > SELF_UPDATE_MAX_BYTES {
+        return Err("Update package exceeds Wuddle's download limit".to_string());
+    }
+    if expected_size == 0 {
+        return Err("Update package has no verified size metadata".to_string());
+    }
     let client = Client::builder()
         .user_agent(concat!("wuddle/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(120))
@@ -4029,10 +6809,50 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
     if !resp.status().is_success() {
         return Err(format!("download HTTP {}", resp.status()));
     }
-    resp.bytes()
+    if resp
+        .content_length()
+        .is_some_and(|length| length > SELF_UPDATE_MAX_BYTES)
+    {
+        return Err("Update package exceeds Wuddle's download limit".to_string());
+    }
+
+    let mut response = resp;
+    let mut staged = tempfile::Builder::new()
+        .prefix("wuddle-update-")
+        .tempfile()
+        .map_err(|error| format!("Failed to create update staging file: {error}"))?;
+    let mut received = 0u64;
+    let mut digest = Sha256::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map(|b| b.to_vec())
-        .map_err(|e| e.to_string())
+        .map_err(|error| format!("download: {error}"))?
+    {
+        received = received
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| "Update package size overflowed".to_string())?;
+        if received > SELF_UPDATE_MAX_BYTES {
+            return Err("Update package exceeds Wuddle's download limit".to_string());
+        }
+        staged
+            .write_all(&chunk)
+            .map_err(|error| format!("Failed to stage update: {error}"))?;
+        digest.update(&chunk);
+    }
+    if expected_size != 0 && received != expected_size {
+        return Err(format!(
+            "Update package size mismatch: expected {expected_size} bytes, received {received}"
+        ));
+    }
+    finish_update_sha256(digest, expected_sha256)?;
+    staged
+        .flush()
+        .map_err(|error| format!("Failed to flush update staging file: {error}"))?;
+    staged
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("Failed to sync update staging file: {error}"))?;
+    Ok(staged)
 }
 
 /// Check whether self-update is supported and whether an update is available.
@@ -4048,19 +6868,22 @@ pub async fn check_self_update_full(beta_channel: bool) -> Result<SelfUpdateStat
     let release = match fetch_release_full(beta_channel).await {
         Ok(r) => r,
         Err(e) => {
+            if crate::github_api::rate_limit_notice(&e).is_some() {
+                return Err(e);
+            }
             return Ok(SelfUpdateStatus {
                 supported,
                 update_available: false,
                 assets_pending: false,
                 latest_version: None,
                 message: format!("Version check failed: {}", e),
-            })
+            });
         }
     };
 
     let latest = normalize_tag(&release.tag_name);
     let newer = !latest.is_empty() && is_version_newer(&latest, current);
-    let has_asset = newer && pick_platform_asset(&release).is_some();
+    let has_asset = newer && verified_platform_asset(&release).is_some();
 
     let message = if !supported {
         format!(
@@ -4069,7 +6892,7 @@ pub async fn check_self_update_full(beta_channel: bool) -> Result<SelfUpdateStat
         )
     } else if newer && !has_asset {
         format!(
-            "v{} available but assets still building — try again shortly",
+            "v{} available but its package or integrity metadata is still building — try again shortly",
             latest
         )
     } else if newer {
@@ -4096,11 +6919,13 @@ pub async fn check_self_update_full(beta_channel: bool) -> Result<SelfUpdateStat
 fn is_self_update_supported() -> bool {
     #[cfg(target_os = "linux")]
     {
-        return is_appimage().is_some();
+        is_appimage().is_some()
     }
     #[cfg(target_os = "windows")]
     {
-        return detect_launcher_root().map(|r| r.1).unwrap_or(false);
+        return crate::self_update::detect_windows_launcher_root()
+            .map(|result| result.1)
+            .unwrap_or(false);
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
@@ -4108,25 +6933,80 @@ fn is_self_update_supported() -> bool {
     }
 }
 
-fn pick_platform_asset(release: &GhReleaseFull) -> Option<&GhReleaseAsset> {
-    #[cfg(target_os = "linux")]
+fn expected_platform_asset_name(tag: &str, os: &str, arch: &str) -> Option<String> {
+    let tag = tag.trim();
+    if tag.is_empty()
+        || !tag
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
     {
-        release.assets.iter().find(|a| {
-            let lower = a.name.to_ascii_lowercase();
-            lower.ends_with(".appimage")
-        })
+        return None;
     }
-    #[cfg(target_os = "windows")]
+    match (os, arch) {
+        ("linux", "x86_64") => Some(format!("wuddle-{tag}-linux-x86_64.AppImage")),
+        ("windows", "x86_64") => Some(format!("wuddle-{tag}-windows-x86_64.zip")),
+        _ => None,
+    }
+}
+
+fn pick_platform_asset_for<'a>(
+    release: &'a GhReleaseFull,
+    os: &str,
+    arch: &str,
+) -> Option<&'a GhReleaseAsset> {
+    let expected = expected_platform_asset_name(&release.tag_name, os, arch)?;
+    release.assets.iter().find(|asset| asset.name == expected)
+}
+
+fn asset_sha256(asset: &GhReleaseAsset) -> Option<String> {
+    let digest = asset.digest.as_deref()?.strip_prefix("sha256:")?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(digest.to_ascii_lowercase())
+}
+
+fn is_expected_self_update_url(release: &GhReleaseFull, asset: &GhReleaseAsset) -> bool {
+    let Ok(url) = reqwest::Url::parse(&asset.browser_download_url) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !matches!(url.port(), None | Some(443))
+        || url.query().is_some()
+        || url.fragment().is_some()
     {
-        release.assets.iter().find(|a| {
-            let lower = a.name.to_ascii_lowercase();
-            lower.contains("windows") && lower.ends_with(".zip")
-        })
+        return false;
     }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        None
+    let Some(segments) = url.path_segments().map(Iterator::collect::<Vec<_>>) else {
+        return false;
+    };
+    segments.len() == 6
+        && segments[0].eq_ignore_ascii_case("ZythDr")
+        && segments[1].eq_ignore_ascii_case("Wuddle")
+        && segments[2] == "releases"
+        && segments[3] == "download"
+        && segments[4] == release.tag_name
+        && segments[5] == asset.name
+}
+
+fn verified_platform_asset_for<'a>(
+    release: &'a GhReleaseFull,
+    os: &str,
+    arch: &str,
+) -> Option<(&'a GhReleaseAsset, String)> {
+    let asset = pick_platform_asset_for(release, os, arch)?;
+    if asset.size == 0 || !is_expected_self_update_url(release, asset) {
+        return None;
     }
+    let digest = asset_sha256(asset)?;
+    Some((asset, digest))
+}
+
+fn verified_platform_asset(release: &GhReleaseFull) -> Option<(&GhReleaseAsset, String)> {
+    verified_platform_asset_for(release, std::env::consts::OS, std::env::consts::ARCH)
 }
 
 /// Download and apply the latest release. Returns a status message.
@@ -4143,22 +7023,27 @@ pub async fn apply_self_update(beta_channel: bool) -> Result<String, String> {
         return Ok(format!("Already up to date (v{}).", current));
     }
 
-    let asset = pick_platform_asset(&release)
-        .ok_or_else(|| "No compatible asset found in release".to_string())?;
+    let (asset, expected_sha256) = verified_platform_asset(&release).ok_or_else(|| {
+        "No compatible update package with verified SHA-256 metadata was found in the release"
+            .to_string()
+    })?;
     let url = asset.browser_download_url.clone();
     let asset_name = asset.name.clone();
+    let expected_size = asset.size;
 
-    let bytes = download_bytes(&url).await?;
+    let downloaded = download_update_to_temp(&url, expected_size, &expected_sha256).await?;
 
     // Apply in a blocking task (filesystem I/O)
     let latest_clone = latest.clone();
-    tokio::task::spawn_blocking(move || apply_downloaded_update(&bytes, &asset_name, &latest_clone))
-        .await
-        .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || {
+        apply_downloaded_update(downloaded.path(), &asset_name, &latest_clone)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn apply_downloaded_update(
-    bytes: &[u8],
+    downloaded_path: &Path,
     _asset_name: &str,
     latest: &str,
 ) -> Result<String, String> {
@@ -4166,91 +7051,27 @@ fn apply_downloaded_update(
     {
         let appimage_path = is_appimage()
             .ok_or_else(|| "Not running as AppImage; self-update unavailable.".to_string())?;
-
-        // Clean up stale temp files
-        if let Some(parent) = appimage_path.parent() {
-            if let Some(stem) = appimage_path.file_stem().and_then(|s| s.to_str()) {
-                if let Ok(entries) = std::fs::read_dir(parent) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name = name.to_string_lossy();
-                        if name.starts_with(stem) && name.contains(".tmp-") {
-                            let _ = std::fs::remove_file(entry.path());
-                        }
-                    }
-                }
-            }
-        }
-
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let tmp_path = appimage_path.with_extension(format!("tmp-{}", stamp));
-
-        std::fs::write(&tmp_path, bytes).map_err(|e| format!("Failed to write temp file: {e}"))?;
-
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("Failed to chmod: {e}"))?;
-
-        std::fs::rename(&tmp_path, &appimage_path)
-            .map_err(|e| format!("Failed to replace AppImage: {e}"))?;
+        crate::self_update::install_linux_appimage_update(&appimage_path, downloaded_path)?;
 
         Ok(format!("Updated to v{}. Restart to apply.", latest))
     }
 
     #[cfg(target_os = "windows")]
     {
-        let (root, launcher_layout) =
-            detect_launcher_root().map_err(|e| format!("Cannot detect install layout: {e}"))?;
+        let (root, launcher_layout) = crate::self_update::detect_windows_launcher_root()
+            .map_err(|e| format!("Cannot detect install layout: {e}"))?;
         if !launcher_layout {
             return Err("Launcher layout not detected. Install the latest portable package once to enable in-app updates.".to_string());
         }
 
-        // Extract Wuddle-bin.exe from the zip into versions/<tag>/
-        let cursor = std::io::Cursor::new(bytes);
-        let mut archive =
-            zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to open zip: {e}"))?;
-
-        let sanitized = sanitize_version_name(latest);
-        let version_dir = root.join("versions").join(&sanitized);
-        std::fs::create_dir_all(&version_dir).map_err(|e| e.to_string())?;
-
-        let mut found_runtime = false;
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
-            if file.is_dir() {
-                continue;
-            }
-            let name = file.name().replace('\\', "/");
-            let lower = name.to_ascii_lowercase();
-            if lower.ends_with("/wuddle-bin.exe") || lower == "wuddle-bin.exe" {
-                let target = version_dir.join("Wuddle-bin.exe");
-                let mut out = std::fs::File::create(&target).map_err(|e| e.to_string())?;
-                std::io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
-                found_runtime = true;
-                break;
-            }
-        }
-        if !found_runtime {
-            return Err("Wuddle-bin.exe not found in update zip".to_string());
-        }
-
-        // Update current.json
-        let current_json = serde_json::json!({ "current": format!("v{}", sanitized) });
-        std::fs::write(
-            root.join("current.json"),
-            current_json.to_string().as_bytes(),
-        )
-        .map_err(|e| format!("Failed to write current.json: {e}"))?;
+        crate::self_update::stage_windows_portable_update(&root, downloaded_path, latest)?;
 
         Ok(format!("Staged v{}. Restart to apply.", latest))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
-        let _ = (bytes, _asset_name, latest);
+        let _ = (downloaded_path, _asset_name, latest);
         Err("Self-update not supported on this platform".to_string())
     }
 }
@@ -4261,9 +7082,22 @@ pub fn restart_app() -> Result<(), String> {
     {
         let appimage_path =
             is_appimage().ok_or_else(|| "Not running as AppImage; cannot restart.".to_string())?;
-        Command::new(&appimage_path)
+        if let Err(error) = Command::new(&appimage_path)
+            .env(
+                crate::single_instance::RESTART_PARENT_PID_ENV,
+                std::process::id().to_string(),
+            )
             .spawn()
-            .map_err(|e| format!("Failed to relaunch: {e}"))?;
+        {
+            return match crate::self_update::rollback_linux_appimage_update(&appimage_path) {
+                Ok(()) => Err(format!(
+                    "Failed to relaunch the updated AppImage, so Wuddle restored the previous version: {error}"
+                )),
+                Err(rollback_error) => Err(format!(
+                    "Failed to relaunch the updated AppImage ({error}), and restoring the previous version also failed: {rollback_error}"
+                )),
+            };
+        }
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(200));
             std::process::exit(0);
@@ -4273,16 +7107,9 @@ pub fn restart_app() -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        let (root, _) =
-            detect_launcher_root().map_err(|e| format!("Cannot detect launcher: {e}"))?;
-        let launcher = root.join("Wuddle.exe");
-        if !launcher.is_file() {
-            return Err(format!("Launcher not found at {}", launcher.display()));
-        }
-        Command::new(&launcher)
-            .current_dir(&root)
-            .spawn()
-            .map_err(|e| format!("Failed to relaunch: {e}"))?;
+        let (root, _) = crate::self_update::detect_windows_launcher_root()
+            .map_err(|e| format!("Cannot detect launcher: {e}"))?;
+        crate::self_update::restart_windows_portable(&root)?;
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(200));
             std::process::exit(0);
@@ -4305,28 +7132,6 @@ fn is_appimage() -> Option<PathBuf> {
     } else {
         None
     }
-}
-
-#[cfg(target_os = "windows")]
-fn detect_launcher_root() -> Result<(PathBuf, bool), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    // Walk up to find the root that contains Wuddle.exe (launcher) and versions/
-    let mut dir = exe.parent().map(|p| p.to_path_buf());
-    for _ in 0..4 {
-        if let Some(ref d) = dir {
-            let launcher = d.join("Wuddle.exe");
-            let versions = d.join("versions");
-            if launcher.is_file() && versions.is_dir() {
-                return Ok((d.clone(), true));
-            }
-            dir = d.parent().map(|p| p.to_path_buf());
-        } else {
-            break;
-        }
-    }
-    // No launcher layout found
-    let root = exe.parent().unwrap_or(Path::new(".")).to_path_buf();
-    Ok((root, false))
 }
 
 // ---------------------------------------------------------------------------
@@ -4370,17 +7175,7 @@ pub async fn fetch_github_rate_limit() -> Option<GitHubRateInfo> {
     })
 }
 
-#[cfg(target_os = "windows")]
-fn sanitize_version_name(raw: &str) -> String {
-    let mut out = String::new();
-    for ch in raw.trim().chars() {
-        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
-            out.push(ch);
-        }
-    }
-    if out.is_empty() {
-        "latest".to_string()
-    } else {
-        out
-    }
+#[cfg(any(target_os = "windows", test))]
+fn canonical_windows_version_name(raw: &str) -> String {
+    crate::self_update::canonical_windows_version_name(raw)
 }

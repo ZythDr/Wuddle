@@ -34,6 +34,7 @@ fn cache_key(repo: &DetectedRepo) -> String {
         ForgeKind::GitHub => "github",
         ForgeKind::GitLab => "gitlab",
         ForgeKind::Gitea => "gitea",
+        ForgeKind::Generic => "git",
     };
     format!(
         "{}|{}|{}",
@@ -80,6 +81,7 @@ pub enum ForgeKind {
     GitHub,
     GitLab,
     Gitea, // includes Codeberg (Gitea)
+    Generic,
 }
 
 #[derive(Debug, Clone)]
@@ -118,45 +120,9 @@ pub fn detect_repo(input: &str) -> Result<DetectedRepo> {
         anyhow::bail!("URL path is empty");
     }
 
-    // normalize common suffixes
-    // GitHub/Gitea: /owner/repo/releases[/...]
-    if segs.len() >= 3 && segs[2].eq_ignore_ascii_case("releases") {
-        segs.truncate(2);
-    }
-    // GitLab: /group/sub/project/-/releases
-    if segs.len() >= 3 {
-        // remove trailing "latest" or similar after /releases
-        while segs
-            .last()
-            .map(|s| s.eq_ignore_ascii_case("latest"))
-            .unwrap_or(false)
-        {
-            segs.pop();
-        }
-        // if ends with ... /-/releases
-        if segs.len() >= 2
-            && segs[segs.len() - 2] == "-"
-            && segs[segs.len() - 1].eq_ignore_ascii_case("releases")
-        {
-            segs.truncate(segs.len() - 2);
-        }
-        // if ends with ... /-/tags or /tags
-        if segs.len() >= 2
-            && segs[segs.len() - 2] == "-"
-            && segs[segs.len() - 1].eq_ignore_ascii_case("tags")
-        {
-            segs.truncate(segs.len() - 2);
-        }
-        if segs
-            .last()
-            .map(|s| s.eq_ignore_ascii_case("tags"))
-            .unwrap_or(false)
-        {
-            segs.pop();
-        }
-    }
-
-    // determine forge kind
+    // Recognize only hosts whose release API contract Wuddle explicitly
+    // supports. Unknown/self-hosted servers remain generic Git rather than
+    // being guessed from path syntax.
     let kind = if host.eq_ignore_ascii_case("github.com") {
         ForgeKind::GitHub
     } else if host.eq_ignore_ascii_case("gitlab.com") {
@@ -164,13 +130,42 @@ pub fn detect_repo(input: &str) -> Result<DetectedRepo> {
     } else if host.eq_ignore_ascii_case("codeberg.org") {
         ForgeKind::Gitea
     } else {
-        // heuristic: if the URL contains "/-/" anywhere, treat as GitLab-ish
-        if url.path().contains("/-/") {
-            ForgeKind::GitLab
-        } else {
-            ForgeKind::Gitea
-        }
+        ForgeKind::Generic
     };
+
+    // Normalize only the known forge-specific browsing suffixes. A generic
+    // repository may legitimately contain segments named `-`, `releases`, or
+    // `tags`, so its complete namespace must be preserved.
+    match kind {
+        ForgeKind::GitHub | ForgeKind::Gitea => {
+            if segs.len() >= 3 && segs[2].eq_ignore_ascii_case("releases") {
+                segs.truncate(2);
+            }
+        }
+        ForgeKind::GitLab => {
+            while segs
+                .last()
+                .map(|s| s.eq_ignore_ascii_case("latest"))
+                .unwrap_or(false)
+            {
+                segs.pop();
+            }
+            if segs.len() >= 2
+                && segs[segs.len() - 2] == "-"
+                && (segs[segs.len() - 1].eq_ignore_ascii_case("releases")
+                    || segs[segs.len() - 1].eq_ignore_ascii_case("tags"))
+            {
+                segs.truncate(segs.len() - 2);
+            } else if segs
+                .last()
+                .map(|s| s.eq_ignore_ascii_case("tags"))
+                .unwrap_or(false)
+            {
+                segs.pop();
+            }
+        }
+        ForgeKind::Generic => {}
+    }
 
     match kind {
         ForgeKind::GitHub | ForgeKind::Gitea => {
@@ -203,14 +198,14 @@ pub fn detect_repo(input: &str) -> Result<DetectedRepo> {
                 project_path,
             })
         }
-        ForgeKind::GitLab => {
+        ForgeKind::GitLab | ForgeKind::Generic => {
             if segs.len() < 2 {
                 anyhow::bail!(
-                    "Expected URL like https://host/group/project (got path {})",
+                    "Expected URL like https://host/namespace/project (got path {})",
                     url.path()
                 );
             }
-            // GitLab allows subgroups: group/sub/project
+            // GitLab and generic Git both allow arbitrarily nested namespaces.
             let mut project_segs = segs.clone();
             // strip trailing .git
             if let Some(last) = project_segs.last_mut() {
@@ -227,7 +222,11 @@ pub fn detect_repo(input: &str) -> Result<DetectedRepo> {
             let canonical_url = format!("{scheme}://{host}/{project_path}");
             Ok(DetectedRepo {
                 kind,
-                forge_str: "gitlab",
+                forge_str: if kind == ForgeKind::GitLab {
+                    "gitlab"
+                } else {
+                    "git"
+                },
                 host,
                 owner,
                 name,
@@ -253,6 +252,11 @@ pub async fn latest_release(
         ForgeKind::GitHub => github::latest_release(client, repo, etag).await,
         ForgeKind::GitLab => gitlab::latest_release(client, repo, etag).await,
         ForgeKind::Gitea => gitea::latest_release(client, repo, etag).await,
+        ForgeKind::Generic => {
+            anyhow::bail!(
+                "This generic Git host has no configured release API. Add it as a Git addon or use a direct archive URL."
+            )
+        }
     }?;
 
     if let Some(rel) = out.1.clone() {
@@ -263,14 +267,16 @@ pub async fn latest_release(
 }
 
 /// Fetch all releases for a repo (all pages, newest first).
-pub async fn list_releases(
-    client: &Client,
-    repo: &DetectedRepo,
-) -> Result<Vec<LatestRelease>> {
+pub async fn list_releases(client: &Client, repo: &DetectedRepo) -> Result<Vec<LatestRelease>> {
     match repo.kind {
         ForgeKind::GitHub => github::list_releases(client, repo).await,
         ForgeKind::GitLab => gitlab::list_releases(client, repo).await,
         ForgeKind::Gitea => gitea::list_releases(client, repo).await,
+        ForgeKind::Generic => {
+            anyhow::bail!(
+                "This generic Git host has no configured release API. Add it as a Git addon or use a direct archive URL."
+            )
+        }
     }
 }
 
@@ -303,19 +309,33 @@ pub(crate) fn parse_rfc3339_unix(s: &str) -> Option<i64> {
     let b = s.as_bytes();
 
     let year: i64 = s.get(0..4)?.parse().ok()?;
-    if *b.get(4)? != b'-' { return None; }
+    if *b.get(4)? != b'-' {
+        return None;
+    }
     let month: i64 = s.get(5..7)?.parse().ok()?;
-    if *b.get(7)? != b'-' { return None; }
+    if *b.get(7)? != b'-' {
+        return None;
+    }
     let day: i64 = s.get(8..10)?.parse().ok()?;
-    if *b.get(10)? != b'T' { return None; }
+    if *b.get(10)? != b'T' {
+        return None;
+    }
     let hour: i64 = s.get(11..13)?.parse().ok()?;
-    if *b.get(13)? != b':' { return None; }
+    if *b.get(13)? != b':' {
+        return None;
+    }
     let min: i64 = s.get(14..16)?.parse().ok()?;
-    if *b.get(16)? != b':' { return None; }
+    if *b.get(16)? != b':' {
+        return None;
+    }
     let sec: i64 = s.get(17..19)?.parse().ok()?;
 
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) { return None; }
-    if hour > 23 || min > 59 || sec > 60 { return None; }
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    if hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
 
     // Civil date to Unix days (Howard Hinnant algorithm)
     let y = if month <= 2 { year - 1 } else { year };
@@ -338,4 +358,38 @@ fn handle_304(
         return Some((etag.map(|s| s.to_string()), None, true));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{detect_repo, ForgeKind};
+
+    #[test]
+    fn unknown_hosts_are_generic_and_preserve_nested_namespaces() {
+        let repo = detect_repo("https://git.example.invalid/team/subgroup/-/releases/Project.git")
+            .unwrap();
+
+        assert_eq!(repo.kind, ForgeKind::Generic);
+        assert_eq!(repo.forge_str, "git");
+        assert_eq!(repo.owner, "team/subgroup/-/releases");
+        assert_eq!(repo.name, "Project");
+        assert_eq!(repo.project_path, "team/subgroup/-/releases/Project");
+        assert_eq!(
+            repo.canonical_url,
+            "https://git.example.invalid/team/subgroup/-/releases/Project"
+        );
+    }
+
+    #[test]
+    fn known_forge_browse_suffixes_are_still_normalized() {
+        let github = detect_repo("https://github.com/Owner/Project/releases/latest").unwrap();
+        assert_eq!(github.kind, ForgeKind::GitHub);
+        assert_eq!(github.owner, "Owner");
+        assert_eq!(github.name, "Project");
+
+        let gitlab = detect_repo("https://gitlab.com/group/subgroup/Project/-/releases").unwrap();
+        assert_eq!(gitlab.kind, ForgeKind::GitLab);
+        assert_eq!(gitlab.owner, "group/subgroup");
+        assert_eq!(gitlab.name, "Project");
+    }
 }

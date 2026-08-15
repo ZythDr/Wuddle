@@ -1,11 +1,11 @@
 //! Shared UI helper functions and widgets used across multiple panels and dialogs.
 
-use iced::widget::{button, canvas, column, container, text};
-use iced::{Element, Length, Theme};
-use crate::{Dialog, Message, Tab};
-use std::sync::OnceLock;
-use crate::theme::{self, ThemeColors};
 use crate::service::{self, is_mod};
+use crate::theme::{self, ThemeColors};
+use crate::{Dialog, Message, Tab};
+use iced::widget::{button, canvas, column, container, row, text};
+use iced::{Element, Font, Length, Theme};
+use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // Tooltip wrapper
@@ -21,7 +21,7 @@ pub fn tip<'a>(
     let tip_str = String::from(tip_text);
     iced::widget::tooltip(
         content,
-        container(text(tip_str).size(13).color(c.text))
+        container(text(tip_str).size(theme::TOOLTIP_TEXT_SIZE).color(c.text))
             .padding([3, 8])
             .style(move |_theme| theme::tooltip_style(c)),
         pos,
@@ -65,6 +65,33 @@ pub fn close_button<'a>(colors: ThemeColors) -> Element<'a, Message> {
 }
 
 // ---------------------------------------------------------------------------
+// Shared dialog typography
+// ---------------------------------------------------------------------------
+
+/// Prominent label for a dialog field or settings section.
+pub fn dialog_field_label(
+    label: impl Into<String>,
+    colors: ThemeColors,
+) -> Element<'static, Message> {
+    text(label.into())
+        .size(16)
+        .font(Font {
+            weight: iced::font::Weight::Semibold,
+            ..Font::DEFAULT
+        })
+        .color(colors.text)
+        .into()
+}
+
+/// Supporting dialog copy and field hints.
+pub fn dialog_description(
+    description: impl Into<String>,
+    colors: ThemeColors,
+) -> Element<'static, Message> {
+    text(description.into()).size(14).color(colors.muted).into()
+}
+
+// ---------------------------------------------------------------------------
 // Small colored badge label
 // ---------------------------------------------------------------------------
 
@@ -73,22 +100,23 @@ pub fn badge_tag<'a>(
     text_color: iced::Color,
     base_color: iced::Color,
 ) -> Element<'a, Message> {
-    container(
-        text(label).size(14).color(text_color)
-    )
-    .padding([2, 6])
-    .style(move |_t| container::Style {
-        background: Some(iced::Background::Color(
-            iced::Color::from_rgba(base_color.r, base_color.g, base_color.b, 0.18)
-        )),
-        border: iced::Border {
-            color: iced::Color::from_rgba(base_color.r, base_color.g, base_color.b, 0.45),
-            width: 1.0,
-            radius: 5.0.into(),
-        },
-        ..Default::default()
-    })
-    .into()
+    container(text(label).size(14).color(text_color))
+        .padding([2, 6])
+        .style(move |_t| container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgba(
+                base_color.r,
+                base_color.g,
+                base_color.b,
+                0.18,
+            ))),
+            border: iced::Border {
+                color: iced::Color::from_rgba(base_color.r, base_color.g, base_color.b, 0.45),
+                width: 1.0,
+                radius: 5.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +142,138 @@ pub fn ctx_menu_item<'a>(label: &str, msg: Message, colors: ThemeColors) -> Elem
         .into()
 }
 
+/// Platform-independent cogwheel rendered from Wuddle's bundled SVG asset.
+pub fn dim_icon_color(color: iced::Color) -> iced::Color {
+    const FACTOR: f32 = 0.72;
+    iced::Color {
+        r: color.r * FACTOR,
+        g: color.g * FACTOR,
+        b: color.b * FACTOR,
+        a: 1.0,
+    }
+}
+
+pub fn cogwheel_icon<'a>(
+    size: f32,
+    idle_color: iced::Color,
+    hovered_color: iced::Color,
+) -> Element<'a, Message> {
+    iced::widget::svg(iced::widget::svg::Handle::from_memory(include_bytes!(
+        "../../assets/icons/settings.svg"
+    )))
+    .width(size)
+    .height(size)
+    .style(move |_theme, status| iced::widget::svg::Style {
+        color: Some(match status {
+            iced::widget::svg::Status::Hovered => hovered_color,
+            iced::widget::svg::Status::Idle => idle_color,
+        }),
+    })
+    .into()
+}
+
+/// Cogwheel whose SVG hitbox fills a button while its visible path remains
+/// inset. Hovering any part of the button therefore highlights the icon.
+pub fn cogwheel_button_icon<'a>(
+    hitbox_size: f32,
+    idle_color: iced::Color,
+    hovered_color: iced::Color,
+) -> Element<'a, Message> {
+    static PADDED_SETTINGS_SVG: OnceLock<&'static [u8]> = OnceLock::new();
+    let padded_svg = *PADDED_SETTINGS_SVG.get_or_init(|| {
+        let bytes = include_str!("../../assets/icons/settings.svg")
+            .replacen("viewBox=\"0 0 24 24\"", "viewBox=\"-6 -6 36 36\"", 1)
+            .into_bytes()
+            .into_boxed_slice();
+        Box::leak(bytes)
+    });
+    iced::widget::svg(iced::widget::svg::Handle::from_memory(padded_svg))
+        .width(hitbox_size)
+        .height(hitbox_size)
+        .style(move |_theme, status| iced::widget::svg::Style {
+            color: Some(match status {
+                iced::widget::svg::Status::Hovered => hovered_color,
+                iced::widget::svg::Status::Idle => idle_color,
+            }),
+        })
+        .into()
+}
+
+pub fn cogwheel_label<'a>(
+    label: &'a str,
+    icon_size: f32,
+    text_size: u32,
+    color: iced::Color,
+) -> Element<'a, Message> {
+    row![
+        cogwheel_icon(icon_size, dim_icon_color(color), color),
+        text(label).size(text_size).color(color),
+    ]
+    .spacing(4)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+pub fn ctx_menu_item_with_cog<'a>(
+    label: &'a str,
+    msg: Message,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
+    let c = colors;
+    button(
+        row![
+            cogwheel_icon(13.0, dim_icon_color(c.text), c.title),
+            text(label).size(12),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center),
+    )
+    .on_press(msg)
+    .padding([6, 12])
+    .width(Length::Fill)
+    .style(move |_theme, status| match status {
+        button::Status::Hovered => theme::tab_button_hovered_style(c),
+        _ => button::Style {
+            background: None,
+            text_color: c.text,
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        },
+    })
+    .into()
+}
+
+pub fn ctx_menu_item_disabled<'a>(label: &str, colors: ThemeColors) -> Element<'a, Message> {
+    button(text(String::from(label)).size(12))
+        .padding([6, 12])
+        .width(Length::Fill)
+        .style(move |_theme, _status| button::Style {
+            background: None,
+            text_color: iced::Color {
+                a: 0.38,
+                ..colors.muted
+            },
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        })
+        .into()
+}
+
+pub fn ctx_menu_item_disabled_with_tooltip<'a>(
+    label: &str,
+    tooltip: &str,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
+    tip(
+        ctx_menu_item_disabled(label, colors),
+        tooltip,
+        iced::widget::tooltip::Position::Left,
+        colors,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Inline context menu for a repo row
 // ---------------------------------------------------------------------------
@@ -135,10 +295,135 @@ pub fn inline_context_menu<'a>(
 
     let mut items: Vec<Element<Message>> = Vec::new();
 
-    if has_update && !update_ignored {
-        items.push(ctx_menu_item("\u{2193} Update", Message::UpdateRepo(rid), c));
+    if repo.mode == "mpq" {
+        let package_name = repo
+            .mpq_package_name
+            .clone()
+            .unwrap_or_else(|| repo.name.clone());
+        items.push(ctx_menu_item(
+            "Details\u{2026}",
+            Message::OpenDialog(Dialog::RepoDetails {
+                id: Some(rid),
+                name: package_name.clone(),
+                files: Vec::new(),
+                loading: true,
+                expanded_paths: Default::default(),
+                loading_paths: Default::default(),
+                children: Default::default(),
+            }),
+            c,
+        ));
+        if let Some(entry) = repo
+            .installed_mpqs
+            .first()
+            .filter(|_| repo.installed_mpqs.len() == 1)
+        {
+            items.push(ctx_menu_item(
+                "Browse\u{2026}",
+                Message::BrowseGamePath(entry.path.clone()),
+                c,
+            ));
+            if entry.editor_unlocked {
+                items.push(ctx_menu_item(
+                    "Edit MPQ…",
+                    Message::OpenDialog(crate::mpq::component_dialog(rid, entry)),
+                    c,
+                ));
+            } else {
+                items.push(ctx_menu_item_disabled_with_tooltip(
+                    "Edit MPQ…",
+                    "Unlock this MPQ in Manage MPQs before editing it here.",
+                    c,
+                ));
+            }
+        }
+        if repo.installed_mpqs.len() > 1 {
+            items.push(ctx_menu_item(
+                "Edit package\u{2026}",
+                Message::OpenDialog(crate::mpq::package_dialog(repo)),
+                c,
+            ));
+        }
+        if repo
+            .url
+            .trim_end_matches('/')
+            .eq_ignore_ascii_case("https://github.com/Trimitor/WDM-patch")
+        {
+            items.push(ctx_menu_item("Manage WDM\u{2026}", Message::OpenWdm, c));
+        }
+        items.push(ctx_menu_item(
+            "Manage MPQs\u{2026}",
+            Message::OpenMpqProtection,
+            c,
+        ));
+        let remove_dialog = repo
+            .dependencies
+            .iter()
+            .find(|(_, relationship)| relationship == "wdm-companion")
+            .map(|(addon_repo_id, _)| Dialog::RemoveWdm {
+                repo_id: rid,
+                addon_repo_id: *addon_repo_id,
+                remove_addon: true,
+            })
+            .unwrap_or_else(|| Dialog::RemoveRepo {
+                id: rid,
+                name: package_name,
+                remove_files: true,
+                files: Vec::new(),
+            });
+        items.push(
+            button(text("Remove package").size(12).color(c.bad))
+                .on_press(Message::OpenDialog(remove_dialog))
+                .padding([6, 12])
+                .width(Length::Fill)
+                .style(move |_theme, status| {
+                    let mut style = match status {
+                        button::Status::Hovered => theme::tab_button_hovered_style(c),
+                        _ => button::Style {
+                            background: None,
+                            text_color: c.text,
+                            border: iced::Border::default(),
+                            shadow: iced::Shadow::default(),
+                            snap: true,
+                        },
+                    };
+                    style.text_color = c.bad;
+                    style
+                })
+                .into(),
+        );
+        return container(column(items).spacing(2))
+            .padding(6)
+            .width(200)
+            .style(move |_theme| theme::context_menu_style(c))
+            .into();
     }
-    items.push(ctx_menu_item("Reinstall / Repair", Message::ReinstallRepo(rid), c));
+
+    if has_update && !update_ignored {
+        items.push(ctx_menu_item(
+            "\u{2193} Update",
+            Message::UpdateRepo(rid),
+            c,
+        ));
+    }
+    items.push(ctx_menu_item(
+        "Details\u{2026}",
+        Message::OpenDialog(Dialog::RepoDetails {
+            id: Some(rid),
+            name: repo.name.clone(),
+            files: Vec::new(),
+            loading: true,
+            expanded_paths: Default::default(),
+            loading_paths: Default::default(),
+            children: Default::default(),
+        }),
+        c,
+    ));
+    items.push(ctx_menu_item(
+        "Reinstall / Repair",
+        Message::ReinstallRepo(rid),
+        c,
+    ));
     if let Some(addon_name) = collection_addon {
         items.push(ctx_menu_item(
             "Manage Collection\u{2026}",
@@ -164,24 +449,56 @@ pub fn inline_context_menu<'a>(
         items.push(ctx_menu_item("Browse\u{2026}", Message::BrowseRepo(rid), c));
     }
     if crate::panels::projects::is_dxvk_repo(&repo.name) {
-        items.push(ctx_menu_item("\u{2699} Configure DXVK\u{2026}", Message::OpenDxvkConfig, c));
+        items.push(ctx_menu_item_with_cog(
+            "Configure DXVK\u{2026}",
+            Message::OpenDxvkConfig,
+            c,
+        ));
     }
     if crate::panels::projects::is_wow_optimize_repo(&repo.name) {
-        items.push(ctx_menu_item("⚙ Configure wow-optimize", Message::LaunchWowOptimize, c));
+        items.push(ctx_menu_item_with_cog(
+            "Configure wow-optimize",
+            Message::LaunchWowOptimize,
+            c,
+        ));
     }
     if crate::panels::projects::is_awesome_wotlk_repo(&repo.name) {
-        items.push(ctx_menu_item("Patch WoW.exe\u{2026}", Message::PromptAwesomeWotlkPatch, c));
+        items.push(ctx_menu_item(
+            "Patch WoW.exe\u{2026}",
+            Message::PromptAwesomeWotlkPatch,
+            c,
+        ));
     }
     if is_mod_val {
         let label = if enabled { "Disable" } else { "Enable" };
-        items.push(ctx_menu_item(label, Message::ToggleRepoEnabled(rid, !enabled), c));
+        items.push(ctx_menu_item(
+            label,
+            Message::ToggleRepoEnabled(rid, !enabled),
+            c,
+        ));
     }
-    let ignore_label = if update_ignored { "Unignore Updates" } else { "Ignore Updates" };
-    items.push(ctx_menu_item(ignore_label, Message::ToggleIgnoreUpdates(rid), c));
+    let ignore_label = if update_ignored {
+        "Unignore Updates"
+    } else {
+        "Ignore Updates"
+    };
+    items.push(ctx_menu_item(
+        ignore_label,
+        Message::ToggleIgnoreUpdates(rid),
+        c,
+    ));
 
     if is_mod_val {
-        let merge_label = if repo.merge_installs { "\u{2713} Merge Updates" } else { "Merge Updates" };
-        items.push(ctx_menu_item(merge_label, Message::ToggleMergeInstalls(rid, !repo.merge_installs), c));
+        let merge_label = if repo.merge_installs {
+            "\u{2713} Merge Updates"
+        } else {
+            "Merge Updates"
+        };
+        items.push(ctx_menu_item(
+            merge_label,
+            Message::ToggleMergeInstalls(rid, !repo.merge_installs),
+            c,
+        ));
     }
 
     let c3 = c;
@@ -233,10 +550,7 @@ pub fn inline_context_menu<'a>(
 
 /// Wraps an element (typically a code block) in a stack with a "Copy" button
 /// overlaid at the top-right corner.
-pub fn with_copy_button<'a>(
-    block: Element<'a, Message>,
-    code: String,
-) -> Element<'a, Message> {
+pub fn with_copy_button<'a>(block: Element<'a, Message>, code: String) -> Element<'a, Message> {
     let copy_btn = container(
         button(text("Copy").size(11))
             .on_press(Message::CopyToClipboard(code))
@@ -247,7 +561,10 @@ pub fn with_copy_button<'a>(
                         1.0, 1.0, 1.0, 0.15,
                     ))),
                     text_color: iced::Color::WHITE,
-                    border: iced::Border { radius: 3.0.into(), ..Default::default() },
+                    border: iced::Border {
+                        radius: 3.0.into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 _ => button::Style {
@@ -255,7 +572,10 @@ pub fn with_copy_button<'a>(
                         1.0, 1.0, 1.0, 0.07,
                     ))),
                     text_color: iced::Color::from_rgb8(0xb0, 0xc4, 0xde),
-                    border: iced::Border { radius: 3.0.into(), ..Default::default() },
+                    border: iced::Border {
+                        radius: 3.0.into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
             }),
@@ -292,7 +612,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
                 let _ = cb.set().wait_until(deadline).text(text_owned);
             }
         });
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -314,6 +634,59 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
 pub struct SpinnerCanvas {
     pub tick: usize,
     pub color: iced::Color,
+}
+
+/// A thin toast lifetime indicator clipped to the lower rounded corners of its
+/// notification card. Regular progress bars draw above their parent border,
+/// which makes a flush timer appear to square off the card.
+pub struct ToastTimerCanvas {
+    pub progress: f32,
+    pub bar_color: iced::Color,
+    pub background_color: iced::Color,
+}
+
+impl<Message> canvas::Program<Message> for ToastTimerCanvas {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let lower_radius = iced::border::Radius {
+            top_left: 0.0,
+            top_right: 0.0,
+            bottom_right: 4.0,
+            bottom_left: 4.0,
+        };
+        let full =
+            canvas::Path::rounded_rectangle(iced::Point::ORIGIN, bounds.size(), lower_radius);
+        frame.fill(&full, self.background_color);
+
+        let active_width = bounds.width * self.progress.clamp(0.0, 1.0);
+        if active_width > 0.0 {
+            let active_radius = iced::border::Radius {
+                bottom_right: if active_width >= bounds.width {
+                    4.0
+                } else {
+                    0.0
+                },
+                ..lower_radius
+            };
+            let active = canvas::Path::rounded_rectangle(
+                iced::Point::ORIGIN,
+                iced::Size::new(active_width, bounds.height),
+                active_radius,
+            );
+            frame.fill(&active, self.bar_color);
+        }
+
+        vec![frame.into_geometry()]
+    }
 }
 
 /// A single-line label that gently scrolls only while it is hovered and the
@@ -359,8 +732,7 @@ impl<Message> canvas::Program<Message> for HoverMarqueeCanvas {
             } else if step < edge_pause * 2 + travel_ticks {
                 -overflow
             } else {
-                -overflow
-                    + ((step - edge_pause * 2 - travel_ticks) as f32 * speed).min(overflow)
+                -overflow + ((step - edge_pause * 2 - travel_ticks) as f32 * speed).min(overflow)
             }
         } else {
             0.0
@@ -402,7 +774,10 @@ impl<Message> canvas::Program<Message> for SpinnerCanvas {
         frame.stroke(
             &bg_circle,
             canvas::Stroke::default()
-                .with_color(iced::Color { a: 0.18, ..self.color })
+                .with_color(iced::Color {
+                    a: 0.18,
+                    ..self.color
+                })
                 .with_width(stroke_width),
         );
 
@@ -441,29 +816,29 @@ pub fn is_silenced_git_error(raw: &str) -> bool {
 /// Converts a verbose libgit2/network error chain into a short human-readable
 /// message, appending the numeric error code when one is present.
 pub fn simplify_git_error(raw: &str) -> String {
-    let error_code: Option<String> = raw
-        .find("code=")
-        .and_then(|i| {
-            let after = &raw[i..];
-            let lparen = after.find('(')?;
-            let rparen = after.find(')')?;
-            if rparen > lparen {
-                let num = after[lparen + 1..rparen].trim();
-                if num.chars().all(|c| c.is_ascii_digit() || c == '-') {
-                    return Some(num.to_string());
-                }
+    let error_code: Option<String> = raw.find("code=").and_then(|i| {
+        let after = &raw[i..];
+        let lparen = after.find('(')?;
+        let rparen = after.find(')')?;
+        if rparen > lparen {
+            let num = after[lparen + 1..rparen].trim();
+            if num.chars().all(|c| c.is_ascii_digit() || c == '-') {
+                return Some(num.to_string());
             }
-            None
-        });
+        }
+        None
+    });
 
     let mut inner = raw;
     while let Some(pos) = inner.find("): ") {
         inner = &inner[pos + 3..];
     }
     if let Some(start) = inner.find("(auth failed: ") {
-        inner = inner[start + 14..].trim_end_matches(|c: char| c == ')' || c == ' ');
+        inner = inner[start + 14..].trim_end_matches([')', ' ']);
     }
-    inner = inner.strip_prefix("Git sync check failed: ").unwrap_or(inner);
+    inner = inner
+        .strip_prefix("Git sync check failed: ")
+        .unwrap_or(inner);
 
     let lower = inner.to_lowercase();
     let msg = if lower.contains("authentication required")
@@ -505,7 +880,10 @@ pub fn chrono_now_fmt(use_12h: bool) -> String {
     let s = secs % 60;
     if use_12h {
         let ampm = if h24 < 12 { "AM" } else { "PM" };
-        let h12 = match h24 % 12 { 0 => 12, h => h };
+        let h12 = match h24 % 12 {
+            0 => 12,
+            h => h,
+        };
         format!("{:02}:{:02}:{:02} {}", h12, mins, s, ampm)
     } else {
         format!("{:02}:{:02}:{:02}", h24, mins, s)
@@ -546,12 +924,14 @@ pub fn infrequent_skip_ids(
         return std::collections::HashSet::new();
     }
 
-    let has_update: std::collections::HashSet<i64> = plans.iter()
+    let has_update: std::collections::HashSet<i64> = plans
+        .iter()
         .filter(|p| p.has_update)
         .map(|p| p.repo_id)
         .collect();
 
-    repos.iter()
+    repos
+        .iter()
         .filter(|r| {
             if has_update.contains(&r.id) {
                 return false;
@@ -680,10 +1060,7 @@ pub fn notification_icon_path() -> &'static str {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("notification-icon.png");
         if !path.exists()
-            || std::fs::metadata(&path)
-                .map(|m| m.len())
-                .unwrap_or(0)
-                != icon_bytes.len() as u64
+            || std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) != icon_bytes.len() as u64
         {
             let _ = std::fs::write(&path, icon_bytes);
         }

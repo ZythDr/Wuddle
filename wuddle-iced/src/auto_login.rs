@@ -1,13 +1,13 @@
 use iced::widget::{
-    button, checkbox, column, container, mouse_area, pick_list, row, scrollable, text,
-    text_input, Space,
+    button, checkbox, column, container, mouse_area, pick_list, row, scrollable, text, Space,
 };
-use iced::{Color, Element, Length, Task};
+use iced::{Element, Length, Task};
 use wuddle_engine::auto_login::{
     AccountDetails, AccountId, AccountRef, AutoLoginService, CredentialInput, SecretText,
 };
 
-use crate::components::helpers::close_button;
+use crate::components::helpers::{close_button, dialog_field_label};
+use crate::components::text_input_context::context_text_input;
 use crate::theme::{self, ThemeColors};
 use crate::{App, Dialog, LogLevel, Message, ToastKind};
 
@@ -262,7 +262,7 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 .iter_mut()
                 .find(|profile| profile.id == app.active_profile_id)
             {
-                let valid = account_id.as_ref().map_or(true, |selected| {
+                let valid = account_id.as_ref().is_none_or(|selected| {
                     profile
                         .auto_login_accounts
                         .iter()
@@ -307,20 +307,19 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                 return Some(Task::none());
             };
             let profile_id = app.active_profile_id.clone();
-            Some(Task::perform(
-                delete_account(profile_id.clone(), account_id.clone()),
-                move |result| Message::DeleteAutoLoginAccountResult {
-                    profile_id: profile_id.clone(),
-                    account_id: account_id.clone(),
-                    result,
-                },
-            ))
+            stage_account_deletion(app, profile_id, account_id)
         }
+        Message::RetryDeleteAutoLoginAccount {
+            profile_id,
+            account_id,
+        } => stage_account_deletion(app, profile_id, account_id),
         Message::DeleteAutoLoginAccountResult {
             profile_id,
             account_id,
             result,
         } => {
+            app.auto_login_deletions_in_progress
+                .remove(&(profile_id.clone(), account_id.as_str().to_string()));
             match result {
                 Ok(()) => {
                     if let Some(profile) = app
@@ -334,19 +333,27 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         if profile.selected_auto_login_account_id.as_ref() == Some(&account_id) {
                             profile.selected_auto_login_account_id = None;
                         }
+                        profile
+                            .pending_auto_login_deletion_ids
+                            .retain(|pending| pending != account_id.as_str());
                     }
                     if let Err(error) = app.try_save_settings() {
-                        app.log(LogLevel::Error, &format!("Credential was removed, but account metadata could not be saved: {error}"));
+                        app.log(LogLevel::Error, &format!("Credential was removed, but its retry tombstone could not be finalized: {error}"));
                         app.show_toast(
-                            format!(
-                                "Credential was removed, but settings could not be saved: {error}"
-                            ),
-                            ToastKind::Error,
+                            "The credential was removed. Wuddle will finish its account metadata cleanup after restart.",
+                            ToastKind::Warn,
                         );
-                        app.dialog = Some(Dialog::AutoLoginAccounts);
                         return Some(Task::none());
                     }
-                    app.dialog = Some(Dialog::AutoLoginAccounts);
+                    if matches!(
+                        app.dialog.as_ref(),
+                        Some(Dialog::DeleteAutoLoginAccount {
+                            account_id: current,
+                            ..
+                        }) if current == &account_id
+                    ) {
+                        app.dialog = Some(Dialog::AutoLoginAccounts);
+                    }
                     app.log(
                         LogLevel::Info,
                         "Auto-login account removed from secure storage.",
@@ -359,7 +366,9 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
                         &format!("Could not remove auto-login account: {error}"),
                     );
                     app.show_toast(
-                        format!("Could not remove auto-login account: {error}"),
+                        format!(
+                            "Could not remove auto-login account: {error}\n\nThe deletion remains pending and can be retried."
+                        ),
                         ToastKind::Error,
                     );
                 }
@@ -368,6 +377,90 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         }
         _ => None,
     }
+}
+
+fn stage_account_deletion(
+    app: &mut App,
+    profile_id: String,
+    account_id: AccountId,
+) -> Option<Task<Message>> {
+    let operation_key = (profile_id.clone(), account_id.as_str().to_string());
+    if app
+        .auto_login_deletions_in_progress
+        .contains(&operation_key)
+    {
+        return Some(Task::none());
+    }
+
+    let Some(profile_index) = app
+        .profiles
+        .iter()
+        .position(|profile| profile.id == profile_id)
+    else {
+        return Some(Task::none());
+    };
+    let account_id_text = account_id.as_str().to_string();
+    let inserted = if app.profiles[profile_index]
+        .pending_auto_login_deletion_ids
+        .iter()
+        .any(|pending| pending == &account_id_text)
+    {
+        false
+    } else {
+        app.profiles[profile_index]
+            .pending_auto_login_deletion_ids
+            .push(account_id_text.clone());
+        true
+    };
+    if inserted {
+        if let Err(error) = app.try_save_settings() {
+            app.profiles[profile_index]
+                .pending_auto_login_deletion_ids
+                .retain(|pending| pending != &account_id_text);
+            app.log(
+                LogLevel::Error,
+                &format!("Could not stage auto-login account deletion: {error}"),
+            );
+            app.show_toast(
+                "Account removal was stopped because Wuddle could not save its retry state.",
+                ToastKind::Error,
+            );
+            return Some(Task::none());
+        }
+    }
+
+    app.auto_login_deletions_in_progress.insert(operation_key);
+    Some(Task::perform(
+        delete_account(profile_id.clone(), account_id.clone()),
+        move |result| Message::DeleteAutoLoginAccountResult {
+            profile_id: profile_id.clone(),
+            account_id: account_id.clone(),
+            result,
+        },
+    ))
+}
+
+pub fn pending_deletion_tasks(app: &mut App) -> Vec<Task<Message>> {
+    let mut tasks = Vec::new();
+    let mut invalid_ids = 0usize;
+    for profile in &app.profiles {
+        for account_id in &profile.pending_auto_login_deletion_ids {
+            match AccountId::parse(account_id.clone()) {
+                Ok(account_id) => tasks.push(Task::done(Message::RetryDeleteAutoLoginAccount {
+                    profile_id: profile.id.clone(),
+                    account_id,
+                })),
+                Err(_) => invalid_ids += 1,
+            }
+        }
+    }
+    if invalid_ids > 0 {
+        app.log(
+            LogLevel::Error,
+            &format!("Ignored {invalid_ids} invalid pending auto-login deletion identifier(s)."),
+        );
+    }
+    tasks
 }
 
 fn save_editor(app: &mut App) -> Option<Task<Message>> {
@@ -479,6 +572,35 @@ pub async fn delete_profile_accounts(
     .map_err(|error| error.to_string())?
 }
 
+pub async fn delete_profile_credentials_for_reset(
+    profile_id: String,
+    accounts: Vec<AccountRef>,
+    pending_account_ids: Vec<String>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let service = AutoLoginService::system();
+        let mut account_ids = accounts
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>();
+        for pending in pending_account_ids {
+            if let Ok(account_id) = AccountId::parse(pending) {
+                if !account_ids.iter().any(|known| known == &account_id) {
+                    account_ids.push(account_id);
+                }
+            }
+        }
+        for account_id in account_ids {
+            service
+                .delete_account(&profile_id, &account_id)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 pub fn account_picker<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> {
     let profile = app.active_profile().cloned().unwrap_or_default();
     if !profile.auto_login_enabled {
@@ -506,7 +628,7 @@ pub fn account_picker<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Mess
     let selector_tooltip: Element<'a, Message> = if app.auto_login_account_picker_tooltip_visible {
         container(
             text("Select account for auto-login. Requires 'Awesome WotLK'.")
-                .size(13)
+                .size(theme::TOOLTIP_TEXT_SIZE)
                 .color(c.text),
         )
         .padding([6, 10])
@@ -517,9 +639,11 @@ pub fn account_picker<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Mess
     };
     let account_selector = iced::widget::tooltip(
         mouse_area(
-            pick_list(choices, selected, |choice| Message::SelectAutoLoginAccount(choice.id))
-                .text_size(12)
-                .width(150),
+            pick_list(choices, selected, |choice| {
+                Message::SelectAutoLoginAccount(choice.id)
+            })
+            .text_size(12)
+            .width(150),
         )
         .on_enter(Message::SetAutoLoginAccountPickerTooltipVisible(true))
         .on_exit(Message::SetAutoLoginAccountPickerTooltipVisible(false)),
@@ -527,46 +651,42 @@ pub fn account_picker<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Mess
         iced::widget::tooltip::Position::Top,
     )
     .padding(0);
+    let idle_cog = crate::dim_icon_color(c.muted);
     let manage_accounts = iced::widget::tooltip(
-        button(
-            container(text("⚙").size(20))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
+        button(crate::cogwheel_button_icon(30.0, idle_cog, c.primary_text))
+            .on_press(Message::OpenAutoLoginAccounts)
+            .padding(0)
+            .width(30)
+            .height(30)
+            .style(move |_theme, status| match status {
+                button::Status::Hovered | button::Status::Pressed => button::Style {
+                    background: None,
+                    text_color: c.primary_text,
+                    border: iced::Border::default(),
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                },
+                _ => button::Style {
+                    background: None,
+                    text_color: idle_cog,
+                    border: iced::Border::default(),
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                },
+            }),
+        container(
+            text("Manage auto-login accounts")
+                .size(theme::TOOLTIP_TEXT_SIZE)
+                .color(c.text),
         )
-        .on_press(Message::OpenAutoLoginAccounts)
-        .padding(0)
-        .width(30)
-        .height(30)
-        .style(move |_theme, status| match status {
-            button::Status::Hovered | button::Status::Pressed => button::Style {
-                background: None,
-                text_color: c.primary_text,
-                border: iced::Border::default(),
-                shadow: iced::Shadow::default(),
-                snap: true,
-            },
-            _ => button::Style {
-                background: None,
-                text_color: Color { a: 0.62, ..c.text },
-                border: iced::Border::default(),
-                shadow: iced::Shadow::default(),
-                snap: true,
-            },
-        }),
-        container(text("Manage auto-login accounts").size(13).color(c.text))
-            .padding([6, 10])
-            .style(move |_theme| theme::tooltip_style(c)),
+        .padding([6, 10])
+        .style(move |_theme| theme::tooltip_style(c)),
         iced::widget::tooltip::Position::Top,
     );
-    row![
-        account_selector,
-        manage_accounts,
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center)
-    .into()
+    row![account_selector, manage_accounts,]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+        .into()
 }
 
 pub fn view_dialog<'a>(
@@ -604,7 +724,7 @@ fn accounts_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
                     button(text("Remove").size(12))
                         .on_press(Message::DeleteAutoLoginAccount(delete_id))
                         .padding([5, 10])
-                        .style(move |_theme, _| theme::btn_danger_style(c)),
+                        .style(move |_theme, status| theme::btn_danger_style(c, status)),
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
@@ -616,8 +736,8 @@ fn accounts_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
     }
     if rows.is_empty() {
         rows.push(
-            text("No auto-login accounts saved for this instance.")
-                .size(13)
+            text("No auto-login accounts saved for this profile.")
+                .size(14)
                 .color(colors.muted)
                 .into(),
         );
@@ -631,17 +751,17 @@ fn accounts_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message
         ]
         .align_y(iced::Alignment::Center),
         text("Credentials are stored in your system vault. They are passed to the game as command-line arguments and may be readable by same-user or administrator tools while the game runs.")
-            .size(12)
+            .size(14)
             .color(colors.warn),
         text("This requires Awesome WotLK or another compatible client modification. Only use it where the server permits modified clients.")
-            .size(12)
+            .size(14)
             .color(colors.muted),
         scrollable(column(rows).spacing(6)).height(Length::Shrink),
         row![
             Space::new().width(Length::Fill),
             button(text("Add Account").size(13))
                 .on_press(Message::AddAutoLoginAccount)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, _| theme::tab_button_active_style(c)),
         ],
     ]
@@ -658,7 +778,7 @@ fn editor_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> 
                 close_button(colors),
             ],
             text("Loading from secure storage…")
-                .size(13)
+                .size(14)
                 .color(colors.muted),
         ]
         .spacing(12)
@@ -672,7 +792,7 @@ fn editor_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> 
     };
     let warning: Element<Message> = if app.auto_login_warning_acknowledged {
         text("No terminal window is opened. The credential is still visible in the game process command line to sufficiently privileged local tools.")
-            .size(11)
+            .size(14)
             .color(colors.warn)
             .into()
     } else {
@@ -689,7 +809,7 @@ fn editor_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> 
         })
         .size(13),
     )
-    .padding([7, 14]);
+    .padding([6, 14]);
     let save = if app.auto_login_ui.saving {
         save
     } else {
@@ -709,27 +829,57 @@ fn editor_dialog<'a>(app: &'a App, colors: ThemeColors) -> Element<'a, Message> 
             close_button(colors),
         ]
         .align_y(iced::Alignment::Center),
-        text("Account label").size(13).color(colors.text),
-        text_input("Main account", &editor.label)
-            .on_input(Message::SetAutoLoginLabel)
-            .padding([8, 12]),
-        text("Login").size(13).color(colors.text),
-        text_input("Account name or email", editor.login.expose())
-            .on_input(|value| Message::SetAutoLoginLogin(SecretText::new(value)))
-            .padding([8, 12]),
-        text("Password").size(13).color(colors.text),
-        text_input(password_hint, editor.password.expose())
-            .secure(true)
-            .on_input(|value| Message::SetAutoLoginPassword(SecretText::new(value)))
-            .padding([8, 12]),
-        text("Realmlist (optional)").size(13).color(colors.text),
-        text_input("logon.example.com", editor.realmlist.expose())
-            .on_input(|value| Message::SetAutoLoginRealmlist(SecretText::new(value)))
-            .padding([8, 12]),
-        text("Realm name (optional)").size(13).color(colors.text),
-        text_input("Realm Name", editor.realm_name.expose())
-            .on_input(|value| Message::SetAutoLoginRealmName(SecretText::new(value)))
-            .padding([8, 12]),
+        dialog_field_label("Account label", colors),
+        context_text_input(
+            app,
+            colors,
+            "auto-login-label",
+            "Main account",
+            &editor.label,
+        )
+        .on_input(Message::SetAutoLoginLabel)
+        .padding([8, 12]),
+        dialog_field_label("Login", colors),
+        context_text_input(
+            app,
+            colors,
+            "auto-login-name",
+            "Account name or email",
+            editor.login.expose(),
+        )
+        .on_input(|value| Message::SetAutoLoginLogin(SecretText::new(value)))
+        .padding([8, 12]),
+        dialog_field_label("Password", colors),
+        context_text_input(
+            app,
+            colors,
+            "auto-login-password",
+            password_hint,
+            editor.password.expose(),
+        )
+        .secure(true)
+        .on_input(|value| Message::SetAutoLoginPassword(SecretText::new(value)))
+        .padding([8, 12]),
+        dialog_field_label("Realmlist (optional)", colors),
+        context_text_input(
+            app,
+            colors,
+            "auto-login-realmlist",
+            "logon.example.com",
+            editor.realmlist.expose(),
+        )
+        .on_input(|value| Message::SetAutoLoginRealmlist(SecretText::new(value)))
+        .padding([8, 12]),
+        dialog_field_label("Realm name (optional)", colors),
+        context_text_input(
+            app,
+            colors,
+            "auto-login-realm-name",
+            "Realm Name",
+            editor.realm_name.expose(),
+        )
+        .on_input(|value| Message::SetAutoLoginRealmName(SecretText::new(value)))
+        .padding([8, 12]),
         warning,
         row![
             Space::new().width(Length::Fill),
@@ -749,18 +899,18 @@ fn delete_dialog<'a>(label: &'a str, colors: ThemeColors) -> Element<'a, Message
         text(format!(
             "Remove ‘{label}’ from secure storage? This cannot be undone."
         ))
-        .size(13)
+        .size(14)
         .color(colors.text),
         row![
             Space::new().width(Length::Fill),
             button(text("Cancel").size(13))
                 .on_press(Message::OpenAutoLoginAccounts)
-                .padding([7, 14])
+                .padding([6, 14])
                 .style(move |_theme, _| theme::tab_button_style(c)),
             button(text("Remove").size(13))
                 .on_press(Message::ConfirmDeleteAutoLoginAccount)
-                .padding([7, 14])
-                .style(move |_theme, _| theme::btn_danger_style(c)),
+                .padding([6, 14])
+                .style(move |_theme, status| theme::btn_danger_style(c, status)),
         ]
         .spacing(8),
     ]

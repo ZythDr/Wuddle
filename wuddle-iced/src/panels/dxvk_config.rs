@@ -1,11 +1,12 @@
 use iced::widget::{
-    button, column, container, pick_list, row, rule, scrollable, text, text_editor, text_input,
-    toggler, tooltip, Space,
+    button, column, container, pick_list, row, rule, scrollable, text, text_editor, toggler,
+    tooltip, Space,
 };
 use iced::{Element, Font, Length};
 
+use crate::components::text_input_context::context_text_input;
 use crate::theme::{self, ThemeColors};
-use crate::{AnisotropyLevel, DxvkConfig, DxvkField, Message, PresentInterval, TriState};
+use crate::{AnisotropyLevel, App, DxvkConfig, DxvkField, Message, PresentInterval, TriState};
 
 // ---------------------------------------------------------------------------
 // Config generator (pure function — no Iced dependency)
@@ -31,14 +32,21 @@ pub fn generate_conf(cfg: &DxvkConfig) -> String {
     }
 
     s.push('\n');
-    let latency: u32 = cfg.max_frame_latency.trim().parse().unwrap_or(1).clamp(1, 16);
+    let latency: u32 = cfg
+        .max_frame_latency
+        .trim()
+        .parse()
+        .unwrap_or(1)
+        .clamp(1, 16);
     s.push_str("# Frames the GPU may buffer ahead. Fewer frames = lower input latency (1 is recommended).\n");
     s.push_str(&format!("d3d9.maxFrameLatency = {}\n", latency));
 
     match cfg.latency_sleep {
         TriState::Auto => {} // DXVK default — omit
         TriState::True => {
-            s.push_str("\n# Enable NVAPI/Reflex latency sleep for reduced input latency on NVIDIA GPUs.\n");
+            s.push_str(
+                "\n# Enable NVAPI/Reflex latency sleep for reduced input latency on NVIDIA GPUs.\n",
+            );
             s.push_str("dxvk.latencySleep = True\n");
         }
         TriState::False => {
@@ -53,8 +61,12 @@ pub fn generate_conf(cfg: &DxvkConfig) -> String {
     s.push_str("############################\n\n");
 
     if cfg.enable_async {
-        s.push_str("# Enable asynchronous shader compilation — the primary fix for D3D9 stutter in WoW.\n");
-        s.push_str("# Requires the gplasync/async fork of DXVK. Has no effect on vanilla DXVK builds.\n");
+        s.push_str(
+            "# Enable asynchronous shader compilation — the primary fix for D3D9 stutter in WoW.\n",
+        );
+        s.push_str(
+            "# Requires the gplasync/async fork of DXVK. Has no effect on vanilla DXVK builds.\n",
+        );
         s.push_str("dxvk.enableAsync = true\n");
     } else {
         s.push_str("# dxvk.enableAsync = true  # Async disabled; enable for gplasync builds.\n");
@@ -75,7 +87,9 @@ pub fn generate_conf(cfg: &DxvkConfig) -> String {
     match cfg.enable_gpl {
         TriState::Auto => {} // DXVK default — omit
         TriState::True => {
-            s.push_str("# Use the Graphics Pipeline Library extension to reduce shader compile stutter.\n");
+            s.push_str(
+                "# Use the Graphics Pipeline Library extension to reduce shader compile stutter.\n",
+            );
             s.push_str("# Warning: True may cause crashes or rendering issues on some clients or server setups. Auto is recommended.\n");
             s.push_str("dxvk.enableGraphicsPipelineLibrary = True\n");
             s.push('\n');
@@ -126,7 +140,9 @@ pub fn generate_conf(cfg: &DxvkConfig) -> String {
             s.push('\n');
         }
         PresentInterval::Vsync => {
-            s.push_str("# Force VSync on regardless of in-game setting (adds ~1 frame of latency).\n");
+            s.push_str(
+                "# Force VSync on regardless of in-game setting (adds ~1 frame of latency).\n",
+            );
             s.push_str("d3d9.presentInterval = 1\n");
             s.push('\n');
         }
@@ -164,7 +180,9 @@ pub fn generate_conf(cfg: &DxvkConfig) -> String {
             s.push('\n');
         }
         AnisotropyLevel::X2 => {
-            s.push_str("# Force 2x anisotropic filtering — sharpens textures viewed at shallow angles.\n");
+            s.push_str(
+                "# Force 2x anisotropic filtering — sharpens textures viewed at shallow angles.\n",
+            );
             s.push_str("d3d9.samplerAnisotropy = 2\n");
             s.push('\n');
         }
@@ -174,7 +192,9 @@ pub fn generate_conf(cfg: &DxvkConfig) -> String {
             s.push('\n');
         }
         AnisotropyLevel::X8 => {
-            s.push_str("# Force 8x anisotropic filtering — high quality, minimal performance impact.\n");
+            s.push_str(
+                "# Force 8x anisotropic filtering — high quality, minimal performance impact.\n",
+            );
             s.push_str("d3d9.samplerAnisotropy = 8\n");
             s.push('\n');
         }
@@ -337,7 +357,10 @@ fn conf_highlight_format(
     h: &Option<iced::Color>,
     _theme: &iced::Theme,
 ) -> iced::advanced::text::highlighter::Format<Font> {
-    iced::advanced::text::highlighter::Format { color: *h, font: None }
+    iced::advanced::text::highlighter::Format {
+        color: *h,
+        font: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +368,7 @@ fn conf_highlight_format(
 // ---------------------------------------------------------------------------
 
 pub fn view<'a>(
+    app: &'a App,
     cfg: &'a DxvkConfig,
     wow_dir: &str,
     show_preview: bool,
@@ -395,6 +419,7 @@ pub fn view<'a>(
                     "Performance & Latency",
                     column![
                         num_row_tip(
+                            app,
                             "Max Frame Rate",
                             "Limits the frame rate (FPS). 0 = Unlimited, Recommended: Match monitor\u{2019}s refresh rate for energy savings, or set a custom limit up to 240 FPS*",
                             "* Frame rates above 240 may increase the chances of weird behavior such as invisible Player & NPC models in some situations. This issue can still occur below 240 FPS, but is more likely to occur at higher frame rates.",
@@ -403,6 +428,7 @@ pub fn view<'a>(
                             c,
                         ),
                         num_row(
+                            app,
                             "Max Frame Latency",
                             "How many frames the GPU may buffer ahead (1-16). Fewer frames means lower input latency. 1 is recommended for the most responsive feel.",
                             &cfg.max_frame_latency,
@@ -432,6 +458,7 @@ pub fn view<'a>(
                             c,
                         ),
                         num_row(
+                            app,
                             "Compiler Threads",
                             "Number of background threads dedicated to compiling graphics pipelines. 0 = use all available CPU cores. Reducing this can free cores for the game but may increase compile stutter.",
                             &cfg.num_compiler_threads,
@@ -551,13 +578,14 @@ pub fn view<'a>(
                     "Logging & HUD",
                     column![
                         input_row(
+                            app,
                             "Log Path",
                             "Directory where dxvk.log is written. Use \".\" to write it next to the game executable. Leave empty to disable DXVK file logging (errors still go to stderr).",
                             &cfg.log_path,
                             |s| Message::SetDxvkField(DxvkField::LogPath(s)),
                             c,
                         ),
-                        hud_row(&cfg.hud, c),
+                        hud_row(app, &cfg.hud, c),
                     ]
                     .spacing(16),
                     c,
@@ -589,11 +617,9 @@ pub fn view<'a>(
             })
     } else {
         let icon_color = c2.text;
-        let file_icon = iced::widget::svg(
-            iced::widget::svg::Handle::from_memory(
-                include_bytes!("../../assets/icons/file.svg").to_vec(),
-            ),
-        )
+        let file_icon = iced::widget::svg(iced::widget::svg::Handle::from_memory(
+            include_bytes!("../../assets/icons/file.svg").to_vec(),
+        ))
         .width(14)
         .height(14)
         .style(move |_t, _s| iced::widget::svg::Style {
@@ -645,31 +671,54 @@ pub fn view<'a>(
         }
     };
 
-    let preview_tip = if show_preview { "Go back to DXVK settings" } else { "Preview the generated dxvk.conf file" };
+    let preview_tip = if show_preview {
+        "Go back to DXVK settings"
+    } else {
+        "Preview the generated dxvk.conf file"
+    };
     let preview_toggle_btn = tooltip(
         preview_toggle_btn,
-        container(text(String::from(preview_tip)).size(13).color(c.text))
-            .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(c)),
+        container(
+            text(String::from(preview_tip))
+                .size(theme::TOOLTIP_TEXT_SIZE)
+                .color(c.text),
+        )
+        .padding([3, 8])
+        .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Top,
-    ).gap(4.0);
+    )
+    .gap(4.0);
 
     let copy_btn = tooltip(
         copy_btn,
-        container(text("Copy the DXVK config to clipboard").size(13).color(c.text))
-            .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(c)),
+        container(
+            text("Copy the DXVK config to clipboard")
+                .size(theme::TOOLTIP_TEXT_SIZE)
+                .color(c.text),
+        )
+        .padding([3, 8])
+        .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Top,
-    ).gap(4.0);
+    )
+    .gap(4.0);
 
-    let save_tip = if has_wow_dir { "Write dxvk.conf to your WoW directory" } else { "Set a WoW directory in Options first" };
+    let save_tip = if has_wow_dir {
+        "Write dxvk.conf to your WoW directory"
+    } else {
+        "Set a WoW directory in Options first"
+    };
     let save_btn = tooltip(
         save_btn,
-        container(text(String::from(save_tip)).size(13).color(c.text))
-            .padding([3, 8])
-            .style(move |_theme| theme::tooltip_style(c)),
+        container(
+            text(String::from(save_tip))
+                .size(theme::TOOLTIP_TEXT_SIZE)
+                .color(c.text),
+        )
+        .padding([3, 8])
+        .style(move |_theme| theme::tooltip_style(c)),
         tooltip::Position::Top,
-    ).gap(4.0);
+    )
+    .gap(4.0);
 
     let footer = row![
         preview_toggle_btn,
@@ -737,10 +786,14 @@ fn with_tip<'a>(
     tip: &str,
     c: ThemeColors,
 ) -> Element<'a, Message> {
-    let tip_box = container(text(String::from(tip)).size(13).color(c.text))
-        .max_width(360)
-        .padding([6, 10])
-        .style(move |_t| theme::tooltip_style(c));
+    let tip_box = container(
+        text(String::from(tip))
+            .size(theme::TOOLTIP_TEXT_SIZE)
+            .color(c.text),
+    )
+    .max_width(360)
+    .padding([6, 10])
+    .style(move |_t| theme::tooltip_style(c));
     container(tooltip(content, tip_box, tooltip::Position::Bottom))
         .width(Length::Fill)
         .into()
@@ -806,6 +859,7 @@ where
 
 /// Number text-input row.
 fn num_row<'a, F>(
+    app: &'a App,
     label: &str,
     desc: &str,
     value: &str,
@@ -813,13 +867,13 @@ fn num_row<'a, F>(
     colors: ThemeColors,
 ) -> Element<'a, Message>
 where
-    F: 'a + Fn(String) -> Message,
+    F: 'static + Send + Sync + Fn(String) -> Message,
 {
     let c = colors;
     let inner = row![
         label_desc(label, desc, colors),
         Space::new().width(Length::FillPortion(3)),
-        text_input("", value)
+        context_text_input(app, colors, format!("dxvk-input-{label}"), "", value)
             .on_input(on_input)
             .width(80)
             .padding([5, 8]),
@@ -831,6 +885,7 @@ where
 
 /// Number text-input row with a separate tooltip text (different from the inline description).
 fn num_row_tip<'a, F>(
+    app: &'a App,
     label: &str,
     desc: &str,
     tip: &str,
@@ -839,13 +894,13 @@ fn num_row_tip<'a, F>(
     colors: ThemeColors,
 ) -> Element<'a, Message>
 where
-    F: 'a + Fn(String) -> Message,
+    F: 'static + Send + Sync + Fn(String) -> Message,
 {
     let c = colors;
     let inner = row![
         label_desc(label, desc, colors),
         Space::new().width(Length::FillPortion(3)),
-        text_input("", value)
+        context_text_input(app, colors, format!("dxvk-input-{label}"), "", value)
             .on_input(on_input)
             .width(80)
             .padding([5, 8]),
@@ -857,6 +912,7 @@ where
 
 /// Text-input row (for string fields like logPath / hud).
 fn input_row<'a, F>(
+    app: &'a App,
     label: &str,
     desc: &str,
     value: &str,
@@ -864,13 +920,13 @@ fn input_row<'a, F>(
     colors: ThemeColors,
 ) -> Element<'a, Message>
 where
-    F: 'a + Fn(String) -> Message,
+    F: 'static + Send + Sync + Fn(String) -> Message,
 {
     let c = colors;
     let inner = row![
         label_desc(label, desc, colors),
         Space::new().width(Length::FillPortion(3)),
-        text_input("", value)
+        context_text_input(app, colors, format!("dxvk-input-{label}"), "", value)
             .on_input(on_input)
             .width(120)
             .padding([5, 8]),
@@ -976,7 +1032,7 @@ where
 }
 
 /// HUD row with a label, description, text input, and quick-preset buttons.
-fn hud_row<'a>(value: &str, colors: ThemeColors) -> Element<'a, Message> {
+fn hud_row<'a>(app: &'a App, value: &str, colors: ThemeColors) -> Element<'a, Message> {
     let c = colors;
     let desc = "On-screen performance overlay. Combine tokens: fps, memory, devinfo, pipelines. Leave empty to disable.";
 
@@ -994,7 +1050,7 @@ fn hud_row<'a>(value: &str, colors: ThemeColors) -> Element<'a, Message> {
     let inner = column![
         label_desc("HUD", desc, colors),
         row![
-            text_input("e.g. fps,memory", value)
+            context_text_input(app, colors, "dxvk-input-hud", "e.g. fps,memory", value,)
                 .on_input(|s| Message::SetDxvkField(DxvkField::Hud(s)))
                 .width(Length::Fill)
                 .padding([5, 8]),

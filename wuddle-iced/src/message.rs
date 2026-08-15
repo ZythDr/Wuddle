@@ -3,7 +3,54 @@ use crate::settings::{self, UpdateChannel};
 use crate::theme::WuddleTheme;
 use crate::tweaks;
 use crate::types::*;
+use iced::Point;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct TextInputAction(Arc<dyn Fn(String) -> Message + Send + Sync>);
+
+impl std::fmt::Debug for TextInputAction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TextInputAction(<redacted>)")
+    }
+}
+
+impl TextInputAction {
+    pub fn new(action: impl Fn(String) -> Message + Send + Sync + 'static) -> Self {
+        Self(Arc::new(action))
+    }
+
+    pub fn apply(&self, value: String) -> Message {
+        (self.0)(value)
+    }
+}
+
+#[derive(Clone)]
+pub struct TextInputContext {
+    pub key: String,
+    pub value: String,
+    pub selection: Option<(usize, usize)>,
+    pub cursor: usize,
+    pub position: Point,
+    pub widget_id: iced::widget::Id,
+    pub action: Option<TextInputAction>,
+    pub secure: bool,
+}
+
+impl std::fmt::Debug for TextInputContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TextInputContext")
+            .field("key", &self.key)
+            .field("value", &"<redacted>")
+            .field("selection", &self.selection)
+            .field("cursor", &self.cursor)
+            .field("position", &self.position)
+            .field("secure", &self.secure)
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -19,16 +66,18 @@ pub enum Message {
         mode: String,
     },
     OpenModFileInfo(String),
-    FetchDllDescriptionResult(Result<(String, String), String>),
+    FetchDllDescriptionResult(u64, Result<(String, String), String>),
 
     // Options toggles
     ToggleAutoCheck(bool),
+    ToggleConserveGithubApi(bool),
     SetAutoCheckMinutes(String),
     ToggleDesktopNotify(bool),
     ToggleSymlinks(bool),
     ToggleXattr(bool),
     ToggleClock12(bool),
     ToggleFrizFont(bool),
+    ToggleRememberWindowGeometry(bool),
     SetUiScaleMode(settings::UiScaleMode),
     SetGithubTokenInput(String),
 
@@ -48,27 +97,182 @@ pub enum Message {
     DiagnosticsExportPathSelected(Option<PathBuf>),
     DiagnosticsExported(Result<(), String>),
 
+    // Full settings/profile backup and restore
+    OpenBackupRestore,
+    OpenWuddleBackupExport,
+    OpenWuddleBackupImport,
+    CloseWuddleBackupWorkflow,
+    ExportWuddleBackup,
+    WuddleBackupExportPathSelected(Option<PathBuf>),
+    WuddleBackupExported(Result<crate::backup_restore::ExportSummary, String>),
+    PickWuddleBackupArchive,
+    PickOldWuddleFolder,
+    WuddleBackupSourcePicked {
+        path: Option<PathBuf>,
+        directory: bool,
+    },
+    WuddleBackupInspected(Result<crate::backup_restore::BackupPreview, String>),
+    ToggleWuddleBackupSection(crate::backup_restore::PreviewSection),
+    RequestWuddleRestore,
+    CancelWuddleRestore,
+    ConfirmWuddleRestore,
+    WuddleRestoreStaged(Result<crate::backup_restore::RestoreSchedule, String>),
+    WuddleRestoreRestarted(Result<(), String>),
+    RequestWuddleReset,
+    CancelWuddleReset,
+    ToggleWuddleResetCredentials(bool),
+    ConfirmWuddleReset,
+    WuddleResetPrepared(Result<(), String>),
+    WuddleResetRestarted(Result<(), String>),
+
     // Toast notifications
     DismissToast(usize),
+    ToastHovered(usize, bool),
     ToastAnimationTick,
+    OpenGithubTokenOptions,
 
     // Dialogs
     OpenDialog(Dialog),
     CloseDialog,
+    FocusNextDialogField,
+    FocusPreviousDialogField,
     ToggleModsWarningDoNotShow(bool),
     AcceptModsWarning,
+    TogglePatchesWarningDoNotShow(bool),
+    AcceptPatchesWarning,
     RequestExit,
+    ShutdownTick,
+    WindowMoved(iced::Point),
+    WindowResized(iced::Size),
     ConsumeDialogClick,
+
+    // MPQ patch management
+    OpenMpqAdd,
+    SetMpqDirectUrl(String),
+    RescanMpqs,
+    MpqRescanFinished(Result<usize, String>),
+    OpenMpqInstall,
+    PickMpqSource,
+    MpqSourcePicked {
+        request_id: u64,
+        scope: ProfileOperationScope,
+        path: Option<PathBuf>,
+    },
+    MpqInspectionFinished {
+        operation_id: u64,
+        result: ProfileScoped<Result<wuddle_engine::mpq::MpqInspection, String>>,
+    },
+    SetMpqDisplayName(usize, String),
+    SetMpqFileName(usize, String),
+    SetMpqDestination(usize, wuddle_engine::mpq::MpqDestination),
+    ToggleMpqReplacement(usize, bool),
+    InstallMpqPackage,
+    MpqTargetsReviewed {
+        operation_id: u64,
+        result: ProfileScoped<Result<Vec<wuddle_engine::mpq::MpqTargetPreview>, String>>,
+    },
+    MpqInstallFinished {
+        operation_id: u64,
+        result: ProfileScoped<Result<i64, String>>,
+    },
+    ToggleMpqPackageEnabled(i64, bool),
+    ToggleMpqEnabled(i64, String, bool),
+    MpqEnabledChanged {
+        repo_id: i64,
+        target_name: String,
+        package: bool,
+        enabled: bool,
+        result: ProfileScoped<Result<usize, String>>,
+    },
+    OpenMpqProtection,
+    MpqProtectionLoaded(Result<Vec<wuddle_engine::mpq::MpqProtectionEntry>, String>),
+    MpqLocaleDetected(Result<Option<String>, String>),
+    SetUntrackedMpqEditorUnlocked(String, bool),
+    SetTrackedMpqEditorUnlocked(i64, String, bool),
+    MpqEditorLockChanged {
+        repo_id: Option<i64>,
+        target_name: String,
+        editor_unlocked: bool,
+        result: ProfileScoped<Result<(), String>>,
+    },
+    ToggleUntrackedMpqEnabled(String, bool),
+    UntrackedMpqEnabledChanged {
+        target_name: String,
+        enabled: bool,
+        result: ProfileScoped<Result<(), String>>,
+    },
+    SetMpqEditorDisplayName(String),
+    SetMpqEditorFileName(String),
+    SetMpqEditorDestination(wuddle_engine::mpq::MpqDestination),
+    SetMpqEditorCore(bool),
+    SaveMpqEditor,
+    MpqEditorSaved(Result<String, String>),
+    SetManualMpqDisplayName(String),
+    SaveManualMpqDisplayName,
+    ManualMpqDisplayNameSaved(Result<(), String>),
+    SetManualMpqFileName(String),
+    SaveManualMpqFileName,
+    ManualMpqFileRenamed(String, Result<String, String>),
+    SetMpqComponentDisplayName(String),
+    SetMpqComponentFileName(String),
+    SetMpqComponentDestination(wuddle_engine::mpq::MpqDestination),
+    SaveMpqComponentDisplayName,
+    MpqComponentDisplayNameSaved(Result<String, String>),
+    SetMpqPackageDisplayName(String),
+    SetMpqPackageFileDisplayName(usize, String),
+    SetMpqPackageFileName(usize, String),
+    SetMpqPackageFileDestination(usize, wuddle_engine::mpq::MpqDestination),
+    SetMpqPackageFileEnabled(usize, bool),
+    SaveMpqPackage,
+    MpqPackageSaved(ProfileScoped<Result<(), String>>),
+    RemoveMpqComponent(bool),
+    MpqComponentRemoved(Result<(), String>),
+    KeepModifiedMpqProtected,
+    ModifiedMpqProtected(Result<(), String>),
+    OpenWdm,
+    WdmResolved {
+        operation_id: u64,
+        result: ProfileScoped<Result<service::WdmCatalog, String>>,
+    },
+    SetWdmLocale(String),
+    ToggleWdmCaverns(bool),
+    ToggleWdmAddon(bool),
+    InstallWdm,
+    WdmInstallFinished {
+        operation_id: u64,
+        result: ProfileScoped<Result<i64, String>>,
+    },
+    ToggleRemoveWdmAddon(bool),
+    ConfirmRemoveWdm,
+    WdmRemoved {
+        operation_id: u64,
+        result: ProfileScoped<Result<(), String>>,
+    },
+    OpenWdmReadme,
+    WdmReadmeLoaded(u64, Result<service::RepoPreviewInfo, String>),
+    InstallEpochWater,
+    EpochWaterInstalled {
+        operation_id: u64,
+        result: ProfileScoped<Result<i64, String>>,
+    },
+    OpenEpochWaterReadme,
+    EpochWaterReadmeLoaded(u64, Result<service::RepoPreviewInfo, String>),
+    UpdateAllPatches,
 
     // Context menu
     ToggleMenu(String),
     CloseMenu,
     ToggleAddNewMenu,
+    OpenTextInputContext(TextInputContext),
+    CloseTextInputContext,
+    CopyTextInputSelection,
+    PasteIntoTextInput,
+    TextInputClipboardRead(Option<String>),
 
     // Engine data (Phase 2)
-    ReposLoaded(Result<RepoLoadResult, String>),
-    PlansLoaded(Result<Vec<PlanRow>, String>),
-    SettingsLoaded(settings::AppSettings),
+    ReposLoaded(ProfileScoped<Result<RepoLoadResult, String>>),
+    PlansLoaded(ProfileScoped<Result<Vec<PlanRow>, String>>),
+    SettingsLoaded(settings::LoadedSettings),
 
     // Operations (Phase 3)
     CheckUpdates,
@@ -77,28 +281,38 @@ pub enum Message {
     LocalArchiveHovered(PathBuf),
     LocalArchiveHoverLeft,
     PickLocalAddonArchive,
-    LocalArchivePicked(Option<PathBuf>),
+    LocalArchivePicked {
+        request_id: u64,
+        scope: ProfileOperationScope,
+        dialog_url: String,
+        dialog_mode: String,
+        path: Option<PathBuf>,
+    },
     LocalArchiveDropped(PathBuf),
-    CheckUpdatesResult(Result<Vec<PlanRow>, String>),
-    UpdateCheckRateLimitResult(CheckStats, Option<service::GitHubRateInfo>),
+    CheckUpdatesResult(ProfileScoped<Result<Vec<PlanRow>, String>>),
+    UpdateCheckRateLimitResult(ProfileScoped<(CheckStats, Option<service::GitHubRateInfo>)>),
     GithubRateInfoResult(Option<service::GitHubRateInfo>),
     AddRepoSubmit,
-    AddRepoResult(Result<i64, String>),
+    AddRepoResult(ProfileScoped<Result<i64, String>>),
     /// Result of the lightweight pre-install conflict check that runs after add_repo.
     PreInstallConflictResult {
         repo_id: i64,
-        result: Result<service::PreInstallConflictInfo, String>,
+        result: ProfileScoped<Result<service::PreInstallConflictInfo, String>>,
     },
     /// Result of the install that fires immediately after a repo is added.
     /// Carries `repo_id` so the conflict handler can force-reinstall the right repo.
     InstallAfterAddResult {
         repo_id: i64,
-        result: Result<String, String>,
+        result: ProfileScoped<Result<String, String>>,
     },
     /// Fires when the user confirms overwriting file conflicts for a repo that is
     /// already in the DB (the initial install attempt raised ADDON_CONFLICT).
     InstallConflictOverride {
         repo_id: i64,
+    },
+    ConfirmFileConflict {
+        repo_id: i64,
+        action: crate::types::FileConflictAction,
     },
     /// Fires when the user clicks Cancel on the conflict dialog for a freshly-added
     /// repo. Removes the repo from the DB so it doesn't remain tracked.
@@ -107,38 +321,71 @@ pub enum Message {
     },
     CancelConflictInstallResult {
         repo_id: i64,
-        result: Result<(), String>,
+        result: ProfileScoped<Result<(), String>>,
     },
     RemoveRepoConfirm(i64, bool),
     ToggleRemoveFiles(bool),
-    RemoveRepoFilesLoaded(Result<Vec<(String, String)>, String>),
-    RemoveRepoResult(Result<(), String>),
+    RemoveRepoFilesLoaded(ProfileScoped<Result<Vec<(String, String)>, String>>),
+    RepoDetailsLoaded(ProfileScoped<Result<Vec<service::RepoDetailEntry>, String>>),
+    ToggleRepoDetailsPath(String),
+    RepoDetailsChildrenLoaded(
+        ProfileScoped<(String, Result<Vec<service::RepoDetailChild>, String>)>,
+    ),
+    RemoveRepoResult {
+        repo_id: i64,
+        repo_name: String,
+        remove_files: bool,
+        result: ProfileScoped<Result<usize, String>>,
+    },
     ToggleRepoEnabled(i64, bool),
-    ToggleRepoEnabledResult(Result<(), String>),
+    ToggleRepoEnabledResult {
+        repo_id: i64,
+        enabled: bool,
+        result: ProfileScoped<Result<usize, String>>,
+    },
     ToggleRepoExpanded(i64),
     ToggleDllEnabled(i64, String, bool),
-    ToggleDllEnabledResult(Result<(), String>),
+    ToggleDllEnabledResult {
+        repo_id: i64,
+        dll_name: String,
+        enabled: bool,
+        result: ProfileScoped<Result<bool, String>>,
+    },
     UpdateAll,
-    UpdateAllResult(Result<Vec<service::UpdateOneResult>, String>),
+    UpdateAllResult {
+        repo_ids: Vec<i64>,
+        result: ProfileScoped<Result<Vec<service::UpdateOneResult>, String>>,
+    },
     UpdateRepo(i64),
-    UpdateRepoResult(Result<Option<PlanRow>, String>),
+    UpdateRepoResult {
+        repo_id: i64,
+        replace_local_changes: bool,
+        result: ProfileScoped<Result<Option<PlanRow>, String>>,
+    },
+    ConfirmAddonLocalChangesUpdate(Vec<i64>),
+    IgnoreAddonLocalChangesUpdates(Vec<i64>),
     ReinstallRepo(i64),
     ReinstallRepoProbeResult {
         repo_id: i64,
-        result: Result<wuddle_engine::AddonProbeResult, String>,
+        result: ProfileScoped<Result<wuddle_engine::AddonProbeResult, String>>,
     },
-    ReinstallRepoResult(Result<PlanRow, String>),
+    ReinstallRepoResult {
+        repo_id: i64,
+        result: ProfileScoped<Result<PlanRow, String>>,
+    },
     FetchBranches(i64),
     GithubRateTick,
-    FetchBranchesResult((i64, Result<Vec<String>, String>)),
+    FetchBranchesResult(ProfileScoped<(i64, Result<Vec<String>, String>)>),
     SetRepoBranch(i64, String),
-    SetRepoBranchResult(Result<i64, String>),
+    SetRepoBranchResult(ProfileScoped<Result<i64, String>>),
     RefreshRepos,
     SaveSettings,
 
     // Shared actions
     OpenUrl(String),
     OpenDirectory(String),
+    BrowseGamePath(String),
+    BrowseGamePathResult(Result<(), String>),
     BrowseRepo(i64),
     BrowseAddonInstall {
         repo_id: i64,
@@ -195,6 +442,11 @@ pub enum Message {
     #[cfg(feature = "auto-login")]
     ConfirmDeleteAutoLoginAccount,
     #[cfg(feature = "auto-login")]
+    RetryDeleteAutoLoginAccount {
+        profile_id: String,
+        account_id: wuddle_engine::auto_login::AccountId,
+    },
+    #[cfg(feature = "auto-login")]
     DeleteAutoLoginAccountResult {
         profile_id: String,
         account_id: wuddle_engine::auto_login::AccountId,
@@ -204,7 +456,9 @@ pub enum Message {
     // Collection addon management
     OpenCollectionManager(i64),
     FetchCollectionProbe(String),
-    FetchCollectionProbeResult(String, Result<wuddle_engine::AddonProbeResult, String>),
+    FetchCollectionProbeResult(
+        ProfileScoped<(String, Result<wuddle_engine::AddonProbeResult, String>)>,
+    ),
     SetAddRepoCollectionMode(bool),
     SetCollectionSelection(Vec<String>),
     ToggleCollectionFolder(String),
@@ -214,7 +468,7 @@ pub enum Message {
         repo_id: i64,
         selected_addons: Vec<String>,
     },
-    SaveCollectionSelectionResult(Result<String, service::CollectionSelectionError>),
+    SaveCollectionSelectionResult(ProfileScoped<Result<String, service::CollectionSelectionError>>),
     SetAddRepoPrimaryAddon(String),
     FetchReleaseAssetOptions(String),
     FetchReleaseAssetOptionsResult(String, Result<Vec<service::ReleaseAssetOption>, String>),
@@ -231,21 +485,30 @@ pub enum Message {
     // GitHub token
     SaveGithubToken,
     SaveGithubTokenResult(Result<(), String>),
+    ValidateGithubTokenResult {
+        generation: u64,
+        result: service::GitHubTokenValidation,
+    },
     ForgetGithubToken,
-    ForgetGithubTokenResult(Result<(), String>),
+    ForgetGithubTokenResult(Result<service::GitHubTokenSource, String>),
 
     // Instance settings
     SaveInstanceSettings,
     UpdateInstanceField(InstanceField),
     SwitchProfile(String),
     RemoveProfile(String),
-    RemoveProfileResult(String, Result<Option<String>, String>),
+    RemoveProfileResult(String, Result<(), String>),
     InitializeProfileDbResult(String, Result<usize, String>),
 
     // File dialog
     PickWowDirectory,
     PickWowExecutable,
-    WowPathPicked(Option<PathBuf>),
+    WowPathPicked {
+        request_id: u64,
+        scope: ProfileOperationScope,
+        dialog_profile_id: Option<String>,
+        path: Option<PathBuf>,
+    },
 
     // Tweaks
     SetTweakFov(f32),
@@ -254,7 +517,12 @@ pub enum Message {
     SetTweakNameplateDist(f32),
     SetTweakMaxCameraDist(String),
     SetTweakSoundChannels(String),
-    DetectTweakClientResult(Result<service::ClientVersionInfo, String>),
+    DetectTweakClientResult {
+        profile_id: String,
+        wow_dir: String,
+        auto_launch_exe: Option<String>,
+        result: Result<service::ClientVersionInfo, String>,
+    },
     ReadTweaks,
     ReadTweaksResult(Result<tweaks::ReadTweakValues, String>),
     ApplyTweaks,
@@ -267,11 +535,11 @@ pub enum Message {
 
     // Merge installs / version pinning
     ToggleMergeInstalls(i64, bool),
-    ToggleMergeInstallsResult(Result<i64, String>),
+    ToggleMergeInstallsResult(ProfileScoped<Result<i64, String>>),
     FetchVersions(i64),
-    FetchVersionsResult((i64, Result<Vec<service::VersionItem>, String>)),
+    FetchVersionsResult(ProfileScoped<(i64, Result<Vec<service::VersionItem>, String>)>),
     SetPinnedVersion(i64, Option<String>),
-    SetPinnedVersionResult(Result<i64, String>),
+    SetPinnedVersionResult(ProfileScoped<Result<i64, String>>),
 
     // DLL count change warning
     /// User chose merge (keep existing DLLs) or clean (replace all) from the warning dialog.
@@ -287,25 +555,30 @@ pub enum Message {
     ApplySelfUpdateResult(Result<String, String>),
     RestartAfterUpdate,
     ShowChangelog,
-    ChangelogLoaded(Result<String, String>),
+    ChangelogLoaded(u64, Result<String, String>),
 
     // Add-repo preview
     QuickInstallPreset(String),
     SetAddRepoUrl(String),
-    DebouncedResolveAddRepoUrl { generation: u64, url: String },
+    DebouncedResolveAddRepoUrl {
+        generation: u64,
+        url: String,
+    },
     RefocusAddRepoUrl,
     ResolveAddRepoUrl,
     FetchRepoPreview(String),
-    FetchRepoPreviewResult(String, Result<service::RepoPreviewInfo, String>),
+    FetchRepoPreviewResult(u64, String, Result<service::RepoPreviewInfo, String>),
+    OpenRepoReadmePreview(String, String),
+    RepoReadmePreviewLoaded(u64, Result<service::RepoPreviewInfo, String>),
     ToggleAddRepoDir(String),
     PreviewRepoFile(String),
-    PreviewRepoFileResult(Result<(String, String), String>),
+    PreviewRepoFileResult(u64, Result<(String, String), String>),
     FetchDirContents(String, String),
-    FetchDirContentsResult(Result<(String, Vec<service::RepoFileEntry>), String>),
+    FetchDirContentsResult(u64, Result<(String, Vec<service::RepoFileEntry>), String>),
 
     // Release notes (in-app)
     FetchReleaseNotes,
-    FetchReleaseNotesResult(Result<Vec<service::ReleaseItem>, String>),
+    FetchReleaseNotesResult(u64, Result<Vec<service::ReleaseItem>, String>),
     ShowReadme,
 
     // Auto-check tick
@@ -327,7 +600,7 @@ pub enum Message {
     LaunchWowOptimize,
     LaunchWowOptimizeResult(Result<String, String>),
     PromptAwesomeWotlkPatch,
-    PromptAwesomeWotlkPatchIfInstalled(bool),
+    PromptAwesomeWotlkPatchIfInstalled(ProfileScoped<bool>),
     RunAwesomeWotlkPatch,
     RunAwesomeWotlkPatchResult(Result<String, String>),
     SetDxvkField(DxvkField),

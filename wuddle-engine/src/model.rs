@@ -15,6 +15,10 @@ pub enum InstallMode {
     AddonGit,
     Dll,
     Mixed,
+    /// Manually managed MPQ patch archives installed into Data/ or Data/<locale>/.
+    /// MPQ packages are tracked for integrity and removal but are not included in
+    /// automatic update checks.
+    Mpq,
     Raw, // downloads asset to a chosen folder (no extraction)
     Manual,
 }
@@ -27,18 +31,20 @@ impl InstallMode {
             InstallMode::AddonGit => "addon_git",
             InstallMode::Dll => "dll",
             InstallMode::Mixed => "mixed",
+            InstallMode::Mpq => "mpq",
             InstallMode::Raw => "raw",
             InstallMode::Manual => "manual",
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "auto" => Some(InstallMode::Auto),
             "addon" => Some(InstallMode::Addon),
             "addon_git" | "addongit" | "git_addon" => Some(InstallMode::AddonGit),
             "dll" => Some(InstallMode::Dll),
             "mixed" => Some(InstallMode::Mixed),
+            "mpq" => Some(InstallMode::Mpq),
             "raw" => Some(InstallMode::Raw),
             "manual" => Some(InstallMode::Manual),
             _ => None,
@@ -81,6 +87,9 @@ pub struct Repo {
 pub struct LatestRelease {
     pub tag: String,
     pub name: Option<String>,
+    /// True when the forge marks this release as a prerelease. Curated recipes
+    /// use this instead of guessing from tag names.
+    pub prerelease: bool,
     pub assets: Vec<ReleaseAsset>,
     pub published_at: Option<i64>, // unix epoch seconds from forge API
 }

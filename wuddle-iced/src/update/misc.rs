@@ -1,14 +1,38 @@
-use crate::{App, LogLevel, Message, ToastKind};
 use crate::components::helpers::copy_to_clipboard;
 use crate::service;
+use crate::{App, LogLevel, Message, ToastKind};
 use iced::Task;
 use std::time::{Duration, Instant};
 
 const MINIMUM_LAUNCH_FEEDBACK: Duration = Duration::from_secs(1);
 
+fn validated_external_web_url(raw: &str) -> Result<reqwest::Url, &'static str> {
+    let parsed =
+        reqwest::Url::parse(raw.trim()).map_err(|_| "This link is not a valid web address.")?;
+    if !matches!(parsed.scheme(), "https" | "http") || parsed.host_str().is_none() {
+        return Err("For safety, Wuddle only opens HTTP and HTTPS web links.");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("For safety, Wuddle will not open links containing credentials.");
+    }
+    Ok(parsed)
+}
+
 pub fn open_url(app: &mut App, url: String) -> Task<Message> {
-    if let Err(e) = open::that(&url) {
-        app.log(LogLevel::Error, &format!("Failed to open URL: {}", e));
+    let url = match validated_external_web_url(&url) {
+        Ok(url) => url,
+        Err(message) => {
+            app.log(LogLevel::Error, message);
+            app.show_toast(message, ToastKind::Warn);
+            return Task::none();
+        }
+    };
+    if open::that(url.as_str()).is_err() {
+        // Platform errors can echo the full URL. Keep signed query parameters
+        // out of logs while still giving the user an actionable result.
+        let message = "The web link could not be opened by your system.";
+        app.log(LogLevel::Error, message);
+        app.show_toast(message, ToastKind::Error);
     }
     Task::none()
 }
@@ -42,7 +66,9 @@ pub fn launch_game(app: &mut App) -> Task<Message> {
         app.log(LogLevel::Error, "Set a WoW directory in Options first.");
         Task::none()
     } else {
-        let active = app.profiles.iter()
+        let active = app
+            .profiles
+            .iter()
             .find(|p| p.id == app.active_profile_id)
             .cloned()
             .unwrap_or_default();
@@ -63,12 +89,16 @@ pub fn launch_game(app: &mut App) -> Task<Message> {
                 .then(|| active.selected_auto_login_account_id.clone())
                 .flatten(),
         };
-        app.log(LogLevel::Info, &format!(
-            "Launching game (method: {})...", cfg.method
-        ));
+        app.log(
+            LogLevel::Info,
+            &format!("Launching game (method: {})...", cfg.method),
+        );
         app.launch_in_progress = true;
         let wow = app.wow_dir.clone();
-        Task::perform(launch_game_with_minimum_feedback(wow, cfg), Message::LaunchGameResult)
+        Task::perform(
+            launch_game_with_minimum_feedback(wow, cfg),
+            Message::LaunchGameResult,
+        )
     }
 }
 
@@ -111,7 +141,11 @@ fn focus_existing_window() -> Task<Message> {
     })
 }
 
-fn launch_root_tool(app: &mut App, candidates: &[&str], result: fn(Result<String, String>) -> Message) -> Task<Message> {
+fn launch_root_tool(
+    app: &mut App,
+    candidates: &[&str],
+    result: fn(Result<String, String>) -> Message,
+) -> Task<Message> {
     if app.wow_dir.is_empty() {
         app.show_toast("Set a WoW directory in Options first.", ToastKind::Warn);
         return Task::none();
@@ -160,15 +194,12 @@ pub fn spinner_tick(app: &mut App) -> Task<Message> {
     if app.collection_marquee_hovered {
         app.collection_marquee_tick = app.collection_marquee_tick.wrapping_add(1);
     }
-    // Auto-dismiss visible toasts. Entering and exiting transitions do not
-    // consume any of the notification's readable lifetime.
-    for toast in &mut app.toasts {
-        if matches!(toast.animation, crate::ToastAnimation::Visible) {
-            toast.ttl = toast.ttl.saturating_sub(1);
-            if toast.ttl == 0 {
-                toast.animation = crate::ToastAnimation::Exiting(0);
-            }
-        }
+    Task::none()
+}
+
+pub fn set_toast_hovered(app: &mut App, id: usize, hovered: bool) -> Task<Message> {
+    if let Some(toast) = app.toasts.iter_mut().find(|toast| toast.id == id) {
+        toast.set_hovered(hovered);
     }
     Task::none()
 }
@@ -184,6 +215,12 @@ pub fn dismiss_toast(app: &mut App, id: usize) -> Task<Message> {
 
 pub fn toast_animation_tick(app: &mut App) -> Task<Message> {
     for toast in &mut app.toasts {
+        // The same ~60 FPS clock drives both the smooth lifetime bar and the
+        // enter/exit transitions. Paused notifications retain a full bar.
+        if toast.tick_lifetime() {
+            toast.animation = crate::ToastAnimation::Exiting(0);
+            continue;
+        }
         toast.animation = match toast.animation {
             crate::ToastAnimation::Entering(tick)
                 if tick.saturating_add(1) >= crate::TOAST_ANIMATION_TICKS =>
@@ -210,6 +247,15 @@ pub fn toast_animation_tick(app: &mut App) -> Task<Message> {
 
 pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
     match message {
+        Message::WindowMoved(position) => {
+            app.window_geometry
+                .remember_position(position.x, position.y);
+            Some(Task::none())
+        }
+        Message::WindowResized(size) => {
+            app.window_geometry.remember_size(size.width, size.height);
+            Some(Task::none())
+        }
         Message::OpenUrl(url) => Some(open_url(app, url)),
         Message::OpenDirectory(path) => Some(open_directory(app, path)),
         Message::CopyToClipboard(text) => Some(copy_to_clipboard_handler(app, text)),
@@ -257,7 +303,31 @@ pub fn update(app: &mut App, message: Message) -> Option<Task<Message>> {
         Message::RunAwesomeWotlkPatchResult(res) => Some(launch_tool_result(app, res)),
         Message::SpinnerTick => Some(spinner_tick(app)),
         Message::DismissToast(id) => Some(dismiss_toast(app, id)),
+        Message::ToastHovered(id, hovered) => Some(set_toast_hovered(app, id, hovered)),
         Message::ToastAnimationTick => Some(toast_animation_tick(app)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::validated_external_web_url;
+
+    #[test]
+    fn external_links_allow_only_credential_free_web_urls() {
+        assert!(validated_external_web_url("https://example.org/readme").is_ok());
+        assert!(validated_external_web_url("http://example.org/readme").is_ok());
+        for unsafe_url in [
+            "file:///home/alice/private.txt",
+            "javascript:alert(1)",
+            "steam://run/123",
+            "https://token@example.org/private",
+            "mailto:alice@example.org",
+        ] {
+            assert!(
+                validated_external_web_url(unsafe_url).is_err(),
+                "{unsafe_url} should be rejected"
+            );
+        }
     }
 }

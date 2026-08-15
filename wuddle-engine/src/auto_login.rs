@@ -9,7 +9,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::process::Command;
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -246,22 +246,25 @@ impl CredentialBackend for SystemCredentialBackend {
     fn set(&self, account: &str, secret: &str) -> Result<(), AutoLoginError> {
         let account = account.to_string();
         let secret = Zeroizing::new(secret.to_string());
-        keychain_call("saving a credential", move || {
-            let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &account).map_err(vault_error)?;
-            entry.set_password(&secret).map_err(vault_error)
-        })
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &account).map_err(vault_error)?;
+        entry.set_password(&secret).map_err(vault_error)
     }
 
     fn delete(&self, account: &str) -> Result<(), AutoLoginError> {
-        let account = account.to_string();
-        keychain_call("deleting a credential", move || {
-            let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &account).map_err(vault_error)?;
-            match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-                Err(error) => Err(vault_error(error)),
-            }
-        })
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(vault_error)?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(vault_error(error)),
+        }
     }
+}
+
+fn credential_mutation_guard() -> MutexGuard<'static, ()> {
+    static MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    MUTATION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn keychain_call<T, F>(operation: &'static str, call: F) -> Result<T, AutoLoginError>
@@ -329,6 +332,10 @@ impl<B: CredentialBackend> AutoLoginService<B> {
         input: CredentialInput,
     ) -> Result<(), AutoLoginError> {
         let _diagnostic = crate::diagnostics::OperationGuard::new("auto_login_save_account");
+        // Keep the complete read/write/verify/rollback sequence indivisible.
+        // Serializing only writes would still allow an older save to roll back
+        // a newer value after interleaved verification.
+        let _mutation = credential_mutation_guard();
         let key = credential_key(profile_id, account_id)?;
         let existing = self.read_stored_by_key(&key)?;
         let previous_encoded = existing
@@ -393,6 +400,7 @@ impl<B: CredentialBackend> AutoLoginService<B> {
         account_id: &AccountId,
     ) -> Result<(), AutoLoginError> {
         let _diagnostic = crate::diagnostics::OperationGuard::new("auto_login_delete_account");
+        let _mutation = credential_mutation_guard();
         let key = credential_key(profile_id, account_id)?;
         self.backend.delete(&key)?;
         if self.backend.get(&key)?.is_some() {
@@ -535,7 +543,7 @@ fn reject_nul(value: &str, field: &'static str) -> Result<(), AutoLoginError> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone, Default)]
@@ -826,6 +834,54 @@ mod tests {
                 operation: "testing a credential"
             }
         ));
+    }
+
+    #[test]
+    fn credential_mutation_transactions_are_serialized() {
+        #[derive(Clone, Default)]
+        struct ObservedBackend {
+            inner: MemoryBackend,
+            active_writes: Arc<AtomicUsize>,
+            maximum_writes: Arc<AtomicUsize>,
+        }
+
+        impl CredentialBackend for ObservedBackend {
+            fn get(&self, account: &str) -> Result<Option<String>, AutoLoginError> {
+                self.inner.get(account)
+            }
+
+            fn set(&self, account: &str, secret: &str) -> Result<(), AutoLoginError> {
+                let active = self.active_writes.fetch_add(1, Ordering::SeqCst) + 1;
+                self.maximum_writes.fetch_max(active, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(15));
+                let result = self.inner.set(account, secret);
+                self.active_writes.fetch_sub(1, Ordering::SeqCst);
+                result
+            }
+
+            fn delete(&self, account: &str) -> Result<(), AutoLoginError> {
+                self.inner.delete(account)
+            }
+        }
+
+        let backend = ObservedBackend::default();
+        let maximum = backend.maximum_writes.clone();
+        let first_backend = backend.clone();
+        let second_backend = backend;
+        let first = std::thread::spawn(move || {
+            AutoLoginService::with_backend(first_backend)
+                .save_account("profile", &AccountId::new(), input(Some("first")))
+                .unwrap();
+        });
+        let second = std::thread::spawn(move || {
+            AutoLoginService::with_backend(second_backend)
+                .save_account("profile", &AccountId::new(), input(Some("second")))
+                .unwrap();
+        });
+
+        first.join().unwrap();
+        second.join().unwrap();
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
     }
 
     #[test]

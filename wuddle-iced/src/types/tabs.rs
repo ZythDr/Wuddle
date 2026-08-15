@@ -4,6 +4,7 @@ pub enum Tab {
     Home,
     Mods,
     Addons,
+    Patches,
     Tweaks,
     Options,
     Logs,
@@ -15,6 +16,7 @@ impl Tab {
         Tab::Home,
         Tab::Mods,
         Tab::Addons,
+        Tab::Patches,
         Tab::Tweaks,
         Tab::Options,
         Tab::Logs,
@@ -25,6 +27,7 @@ impl Tab {
         match self {
             Tab::Home => "Home",
             Tab::Mods => "Mods",
+            Tab::Patches => "Patches",
             Tab::Addons => "Addons",
             Tab::Tweaks => "Tweaks",
             Tab::Options => "Options",
@@ -35,9 +38,10 @@ impl Tab {
 
     pub fn icon_label(self) -> &'static str {
         match self {
-            Tab::Options => "\u{2699}",  // ⚙
-            Tab::Logs => "\u{2630}",    // ☰
-            Tab::About => "\u{24D8}",   // ⓘ
+            // Options uses its dedicated vector icon in every rendered tab bar.
+            Tab::Options => "",
+            Tab::Logs => "\u{2630}",  // ☰
+            Tab::About => "\u{24D8}", // ⓘ
             _ => "",
         }
     }
@@ -46,6 +50,7 @@ impl Tab {
         match self {
             Tab::Home => "Home",
             Tab::Mods => "Mods",
+            Tab::Patches => "MPQ Patches",
             Tab::Addons => "Addons",
             Tab::Tweaks => "Tweaks",
             Tab::Options => "Options",

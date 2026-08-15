@@ -1,10 +1,12 @@
 use iced::widget::{
     button, checkbox, column, container, mouse_area, pick_list, row, rule, scrollable, stack, text,
-    text_input, tooltip, Space,
+    tooltip, Space,
 };
 use iced::{Element, Length};
 
 use crate::anchored_overlay::AnchoredOverlay;
+use crate::components::helpers::{ctx_menu_item, ctx_menu_item_disabled_with_tooltip};
+use crate::components::text_input_context::context_text_input;
 use crate::service::is_mod;
 use crate::service::RepoRow;
 use crate::theme::name_font;
@@ -22,7 +24,24 @@ const COL_ENABLED: u32 = 64;
 const COL_STATUS: u32 = 130;
 const COL_ACTIONS: u32 = 96;
 const COL_BRANCH: u32 = 200;
+const COL_FILES: u32 = 100;
 const PROJECT_ROW_HEIGHT: u32 = 62;
+
+fn expand_chevron_icon(expanded: bool, colors: ThemeColors) -> Element<'static, Message> {
+    let bytes: &[u8] = if expanded {
+        include_bytes!("../../assets/icons/chevron-down.svg")
+    } else {
+        include_bytes!("../../assets/icons/chevron-right.svg")
+    };
+    let handle = iced::widget::svg::Handle::from_memory(bytes);
+    iced::widget::svg(handle)
+        .width(14)
+        .height(14)
+        .style(move |_theme, _status| iced::widget::svg::Style {
+            color: Some(colors.muted),
+        })
+        .into()
+}
 
 // WEIRD_UTILS_DLLS moved to components::presets
 
@@ -41,6 +60,63 @@ struct AddonDisplayRow<'a> {
     is_collection_parent: bool,
     /// True for repos that are not collections but have >1 installed module.
     is_modular_parent: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PatchDisplayRow<'a> {
+    Managed(&'a RepoRow),
+    Manual(&'a wuddle_engine::mpq::MpqProtectionEntry),
+}
+
+impl PatchDisplayRow<'_> {
+    fn name(&self) -> String {
+        match self {
+            Self::Managed(repo) => repo
+                .installed_mpqs
+                .first()
+                .filter(|_| repo.installed_mpqs.len() == 1)
+                .map(|entry| entry.display_name.clone())
+                .unwrap_or_else(|| {
+                    repo.mpq_package_name
+                        .clone()
+                        .unwrap_or_else(|| repo.name.clone())
+                }),
+            Self::Manual(entry) => manual_mpq_name(entry),
+        }
+    }
+
+    fn status_rank(&self) -> u8 {
+        match self {
+            Self::Managed(repo) => match aggregate_mpq_status(repo) {
+                wuddle_engine::mpq::MpqFileStatus::Modified => 0,
+                wuddle_engine::mpq::MpqFileStatus::Missing => 1,
+                wuddle_engine::mpq::MpqFileStatus::Installed => 2,
+            },
+            Self::Manual(_) => 3,
+        }
+    }
+}
+
+fn manual_mpq_name(entry: &wuddle_engine::mpq::MpqProtectionEntry) -> String {
+    if let Some(display_name) = entry
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        return display_name.to_string();
+    }
+    let mut name = entry.file_name.as_str();
+    if name.to_ascii_lowercase().ends_with(".disabled") {
+        name = &name[..name.len() - ".disabled".len()];
+    }
+    if name.to_ascii_lowercase().ends_with(".mpq") {
+        name = &name[..name.len() - ".mpq".len()];
+    }
+    name.replace(['_', '-'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn addon_display_rows<'a>(app: &'a App) -> Vec<AddonDisplayRow<'a>> {
@@ -134,20 +210,47 @@ fn separated_project_row<'a>(
 pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, Message> {
     let c = colors;
     let is_mods_tab = label == "Mods";
+    let is_patches_tab = label == "Patches";
+    let is_repo_tab = is_mods_tab || is_patches_tab;
 
-    let addon_rows = if is_mods_tab {
+    let addon_rows = if is_repo_tab {
         Vec::new()
     } else {
         addon_display_rows(app)
     };
 
     // Filter repos for this tab
-    let filtered_repos: Vec<&RepoRow> = if is_mods_tab {
+    let filtered_repos: Vec<&RepoRow> = if is_repo_tab {
         app.repos
             .iter()
-            .filter(|r| is_mod(r))
+            .filter(|r| {
+                if is_patches_tab {
+                    r.mode == "mpq"
+                } else {
+                    is_mod(r) && r.mode != "mpq"
+                }
+            })
             .filter(|r| match app.filter {
                 Filter::All => true,
+                Filter::Updates if is_patches_tab => {
+                    r.installed_mpqs
+                        .iter()
+                        .any(|entry| entry.status == wuddle_engine::mpq::MpqFileStatus::Missing)
+                        || app
+                            .plans
+                            .iter()
+                            .any(|plan| plan.repo_id == r.id && plan.has_update)
+                }
+                Filter::Errors if is_patches_tab => {
+                    r.installed_mpqs
+                        .iter()
+                        .any(|entry| entry.status == wuddle_engine::mpq::MpqFileStatus::Modified)
+                        || app
+                            .plans
+                            .iter()
+                            .any(|plan| plan.repo_id == r.id && plan.error.is_some())
+                }
+                Filter::Ignored if is_patches_tab => false,
                 Filter::Updates => {
                     app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
                         && !app.ignored_update_ids.contains(&r.id)
@@ -162,26 +265,51 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
                 Filter::Ignored => !r.enabled || app.ignored_update_ids.contains(&r.id),
             })
             .filter(|r| {
-                app.project_search.is_empty()
-                    || r.name
-                        .to_lowercase()
-                        .contains(&app.project_search.to_lowercase())
-                    || r.owner
-                        .to_lowercase()
-                        .contains(&app.project_search.to_lowercase())
+                if app.project_search.is_empty() {
+                    return true;
+                }
+                let query = app.project_search.to_lowercase();
+                r.name.to_lowercase().contains(&query)
+                    || r.mpq_package_name
+                        .as_deref()
+                        .is_some_and(|name| name.to_lowercase().contains(&query))
+                    || r.owner.to_lowercase().contains(&query)
+                    || (is_patches_tab
+                        && r.installed_mpqs.iter().any(|entry| {
+                            entry.display_name.to_lowercase().contains(&query)
+                                || entry.path.to_lowercase().contains(&query)
+                        }))
             })
             .collect()
     } else {
         Vec::new()
     };
 
-    let filtered_addon_rows: Vec<AddonDisplayRow> = if is_mods_tab {
+    let filtered_manual_mpqs: Vec<&wuddle_engine::mpq::MpqProtectionEntry> = if is_patches_tab {
+        app.untracked_mpqs
+            .iter()
+            .filter(|entry| !entry.core)
+            .filter(|_| app.filter == Filter::All)
+            .filter(|entry| {
+                if app.project_search.is_empty() {
+                    return true;
+                }
+                let query = app.project_search.to_lowercase();
+                manual_mpq_name(entry).to_lowercase().contains(&query)
+                    || entry.file_name.to_lowercase().contains(&query)
+                    || entry.path.to_lowercase().contains(&query)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let filtered_addon_rows: Vec<AddonDisplayRow> = if is_repo_tab {
         Vec::new()
     } else {
         addon_rows
             .iter()
-            .cloned()
-            .filter(|row| match app.filter {
+            .filter(|&row| match app.filter {
                 Filter::All => true,
                 Filter::Updates => {
                     app.plans
@@ -200,7 +328,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
                     !row.repo.enabled || app.ignored_update_ids.contains(&row.repo.id)
                 }
             })
-            .filter(|row| {
+            .filter(|&row| {
                 if app.project_search.is_empty() {
                     return true;
                 }
@@ -229,39 +357,76 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
                 }
                 false
             })
+            .cloned()
             .collect()
     };
 
-    let total = if is_mods_tab {
-        app.repos.iter().filter(|r| is_mod(r)).count()
+    let total = if is_patches_tab {
+        app.repos.iter().filter(|r| r.mode == "mpq").count()
+            + app
+                .untracked_mpqs
+                .iter()
+                .filter(|entry| !entry.core)
+                .count()
+    } else if is_mods_tab {
+        app.repos
+            .iter()
+            .filter(|r| is_mod(r) && r.mode != "mpq")
+            .count()
     } else {
         addon_rows.len()
     };
-    let update_count = if is_mods_tab {
+    let update_count =
+        if is_patches_tab {
+            app.repos
+                .iter()
+                .filter(|r| {
+                    r.mode == "mpq"
+                        && (r.installed_mpqs.iter().any(|entry| {
+                            entry.status == wuddle_engine::mpq::MpqFileStatus::Missing
+                        }) || app
+                            .plans
+                            .iter()
+                            .any(|plan| plan.repo_id == r.id && plan.has_update))
+                })
+                .count()
+        } else if is_mods_tab {
+            app.repos
+                .iter()
+                .filter(|r| {
+                    is_mod(r)
+                        && r.mode != "mpq"
+                        && app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
+                        && !app.ignored_update_ids.contains(&r.id)
+                })
+                .count()
+        } else {
+            addon_rows
+                .iter()
+                .filter(|row| {
+                    app.plans
+                        .iter()
+                        .any(|p| p.repo_id == row.repo.id && p.has_update)
+                        && !app.ignored_update_ids.contains(&row.repo.id)
+                })
+                .count()
+        };
+    let error_count = if is_patches_tab {
+        app.repos
+            .iter()
+            .filter(|r| {
+                r.mode == "mpq"
+                    && r.installed_mpqs
+                        .iter()
+                        .any(|entry| entry.status == wuddle_engine::mpq::MpqFileStatus::Modified)
+            })
+            .count()
+    } else if is_mods_tab {
         app.repos
             .iter()
             .filter(|r| {
                 is_mod(r)
-                    && app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
-                    && !app.ignored_update_ids.contains(&r.id)
-            })
-            .count()
-    } else {
-        addon_rows
-            .iter()
-            .filter(|row| {
-                app.plans
-                    .iter()
-                    .any(|p| p.repo_id == row.repo.id && p.has_update)
-                    && !app.ignored_update_ids.contains(&row.repo.id)
-            })
-            .count()
-    };
-    let error_count = if is_mods_tab {
-        app.repos
-            .iter()
-            .filter(|r| {
-                is_mod(r)
+                    && r.mode != "mpq"
                     && app
                         .plans
                         .iter()
@@ -285,7 +450,11 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
     let ignored_count = if is_mods_tab {
         app.repos
             .iter()
-            .filter(|r| is_mod(r) && (!r.enabled || app.ignored_update_ids.contains(&r.id)))
+            .filter(|r| {
+                is_mod(r)
+                    && r.mode != "mpq"
+                    && (!r.enabled || app.ignored_update_ids.contains(&r.id))
+            })
             .count()
     } else {
         addon_rows
@@ -295,109 +464,137 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
     };
 
     // Toolbar: filters on left, search + buttons on right, all on one row
-    let filters_part = row![
-        filter_button(&format!("All ({})", total), Filter::All, app.filter, c),
-        filter_button(
-            &format!("Updates ({})", update_count),
-            Filter::Updates,
-            app.filter,
-            c
-        ),
-        filter_button(
-            &format!("Errors ({})", error_count),
-            Filter::Errors,
-            app.filter,
-            c
-        ),
-        filter_button(
-            &format!(
-                "{} ({})",
-                if is_mods_tab { "Disabled" } else { "Ignored" },
-                ignored_count
+    let filters_part: Element<Message> = if is_patches_tab {
+        row![
+            filter_button(&format!("All ({})", total), Filter::All, app.filter, c),
+            filter_button(
+                &format!("Updates ({})", update_count),
+                Filter::Updates,
+                app.filter,
+                c
             ),
-            Filter::Ignored,
-            app.filter,
-            c
-        ),
-        Space::new().width(8),
-        {
-            let c2 = c;
-            let has_token = wuddle_engine::github_token().is_some();
-            let has_errors = app.plans.iter().any(|p| {
-                p.error
-                    .as_deref()
-                    .map(|e| {
-                        let e = e.to_lowercase();
-                        e.contains("rate") || e.contains("403") || e.contains("429")
-                    })
-                    .unwrap_or(false)
-            });
-            // Only count partial errors for repos that aren't ignored/disabled
-            let partial_errors = !has_errors
-                && app.plans.iter().any(|p| {
-                    p.error.is_some()
-                        && !app.ignored_update_ids.contains(&p.repo_id)
-                        && app.repos.iter().any(|r| r.id == p.repo_id && r.enabled)
+            filter_button(
+                &format!("Modified ({})", error_count),
+                Filter::Errors,
+                app.filter,
+                c
+            ),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center)
+        .into()
+    } else {
+        row![
+            filter_button(&format!("All ({})", total), Filter::All, app.filter, c),
+            filter_button(
+                &format!("Updates ({})", update_count),
+                Filter::Updates,
+                app.filter,
+                c
+            ),
+            filter_button(
+                &format!("Errors ({})", error_count),
+                Filter::Errors,
+                app.filter,
+                c
+            ),
+            filter_button(
+                &format!(
+                    "{} ({})",
+                    if is_mods_tab { "Disabled" } else { "Ignored" },
+                    ignored_count
+                ),
+                Filter::Ignored,
+                app.filter,
+                c
+            ),
+            Space::new().width(8),
+            {
+                let c2 = c;
+                let has_token = wuddle_engine::github_token().is_some();
+                let has_errors = app.plans.iter().any(|p| {
+                    p.error
+                        .as_deref()
+                        .map(|e| {
+                            let e = e.to_lowercase();
+                            e.contains("rate") || e.contains("403") || e.contains("429")
+                        })
+                        .unwrap_or(false)
                 });
-            let (api_label, api_color) = if has_errors {
-                ("API status: rate limited", colors.bad)
-            } else if partial_errors {
-                ("API status: partial errors", colors.warn)
-            } else if has_token {
-                ("API status: authenticated", colors.good)
-            } else {
-                ("API status: anonymous", colors.muted)
-            };
+                // Only count partial errors for repos that aren't ignored/disabled
+                let partial_errors = !has_errors
+                    && app.plans.iter().any(|p| {
+                        p.error.is_some()
+                            && !app.ignored_update_ids.contains(&p.repo_id)
+                            && app.repos.iter().any(|r| r.id == p.repo_id && r.enabled)
+                    });
+                let (api_label, api_color) = if has_errors {
+                    ("API status: rate limited", colors.bad)
+                } else if partial_errors {
+                    ("API status: partial errors", colors.warn)
+                } else if has_token {
+                    ("API status: authenticated", colors.good)
+                } else {
+                    ("API status: anonymous", colors.muted)
+                };
 
-            // Build tooltip with rate limit details
-            let tip_text = if let Some(info) = &app.github_rate_info {
-                let now_epoch = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                let reset_secs = info.reset_epoch - now_epoch;
-                let reset_mins = (reset_secs / 60).max(0);
-                format!(
-                    "GitHub API: {}/{} requests remaining\nResets in {} min",
-                    info.remaining, info.limit, reset_mins,
+                // Build tooltip with rate limit details
+                let tip_text = if let Some(info) = &app.github_rate_info {
+                    let now_epoch = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    let reset_secs = info.reset_epoch - now_epoch;
+                    let reset_mins = (reset_secs / 60).max(0);
+                    format!(
+                        "GitHub API: {}/{} requests remaining\nResets in {} min",
+                        info.remaining, info.limit, reset_mins,
+                    )
+                } else if has_token {
+                    "GitHub API: authenticated (5,000 req/hr)".to_string()
+                } else {
+                    "GitHub API: anonymous (60 req/hr)\nAdd a token in Options for higher limits"
+                        .to_string()
+                };
+
+                let tip_str = tip_text;
+                let label: Element<Message> = tooltip(
+                    text(api_label).size(12).color(api_color),
+                    container(text(tip_str).size(theme::TOOLTIP_TEXT_SIZE).color(c2.text))
+                        .padding([4, 8])
+                        .style(move |_theme| crate::theme::tooltip_style(c2)),
+                    tooltip::Position::Bottom,
                 )
-            } else if has_token {
-                "GitHub API: authenticated (5,000 req/hr)".to_string()
-            } else {
-                "GitHub API: anonymous (60 req/hr)\nAdd a token in Options for higher limits"
-                    .to_string()
-            };
-
-            let tip_str = tip_text;
-            let label: Element<Message> = tooltip(
-                text(api_label).size(12).color(api_color),
-                container(text(tip_str).size(12).color(c2.text))
-                    .padding([4, 8])
-                    .style(move |_theme| crate::theme::tooltip_style(c2)),
-                tooltip::Position::Bottom,
-            )
-            .gap(4.0)
-            .into();
-            label
-        },
-    ]
-    .spacing(4)
-    .align_y(iced::Alignment::Center);
+                .gap(4.0)
+                .into();
+                label
+            },
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center)
+        .into()
+    };
 
     let mut action_items: Vec<Element<Message>> = Vec::new();
     action_items.push({
         let c2 = c;
         let show_clear = !app.project_search.is_empty();
         stack![
-            text_input("Search...", &app.project_search)
-                .on_input(Message::SetProjectSearch)
-                .width(180)
-                .padding(iced::Padding {
-                    top: 4.0,
-                    right: if show_clear { 26.0 } else { 10.0 },
-                    bottom: 4.0,
-                    left: 10.0
-                }),
+            context_text_input(
+                app,
+                colors,
+                "project-search",
+                "Search...",
+                &app.project_search,
+            )
+            .on_input(Message::SetProjectSearch)
+            .width(180)
+            .padding(iced::Padding {
+                top: 4.0,
+                right: if show_clear { 26.0 } else { 10.0 },
+                bottom: 4.0,
+                left: 10.0
+            }),
             {
                 let clear_el: Element<Message> = if show_clear {
                     button(text("\u{2715}").size(12).color(c2.muted))
@@ -430,7 +627,7 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
         .width(180)
         .into()
     });
-    if !is_mods_tab {
+    if !is_repo_tab {
         let c2 = c;
         action_items.push(tip(
             button(text("\u{27F2}").size(14)) // ⟲ rescan
@@ -445,25 +642,60 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
             colors,
         ));
     }
+    if is_patches_tab {
+        let c2 = c;
+        action_items.push(tip(
+            button(text("\u{27F2}").size(14))
+                .on_press(Message::RescanMpqs)
+                .padding([4, 10])
+                .style(move |_theme, status| match status {
+                    button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                    _ => theme::tab_button_style(c2),
+                }),
+            "Rescan Data and locale folders for MPQ changes",
+            tooltip::Position::Bottom,
+            colors,
+        ));
+        let c2 = c;
+        action_items.push(tip(
+            button(text("Manage MPQs...").size(12))
+                .on_press(Message::OpenMpqProtection)
+                .padding([4, 10])
+                .style(move |_theme, status| match status {
+                    button::Status::Hovered => theme::tab_button_hovered_style(c2),
+                    _ => theme::tab_button_style(c2),
+                }),
+            "Review active MPQ classifications and protection",
+            tooltip::Position::Bottom,
+            colors,
+        ));
+    }
     {
         let c2 = c;
-        let add_tip = if is_mods_tab {
+        let add_tip = if is_patches_tab {
+            "Install a local MPQ patch or curated package"
+        } else if is_mods_tab {
             "Add a new mod repository"
         } else {
             "Add a new addon repository"
         };
+        let add_message = if is_patches_tab {
+            Message::OpenMpqAdd
+        } else {
+            Message::OpenDialog(Dialog::AddRepo {
+                url: String::new(),
+                mode: if is_mods_tab {
+                    String::from("auto")
+                } else {
+                    String::from("addon_git")
+                },
+                is_addons: !is_mods_tab,
+                advanced: false,
+            })
+        };
         action_items.push(tip(
             button(text("+ Add").size(13))
-                .on_press(Message::OpenDialog(Dialog::AddRepo {
-                    url: String::new(),
-                    mode: if is_mods_tab {
-                        String::from("auto")
-                    } else {
-                        String::from("addon_git")
-                    },
-                    is_addons: !is_mods_tab,
-                    advanced: false,
-                }))
+                .on_press(add_message)
                 .padding([4, 14])
                 .style(move |_theme, status| match status {
                     button::Status::Hovered => theme::tab_button_hovered_style(c2),
@@ -520,6 +752,14 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
                 hdr_cell(status_hdr, COL_STATUS),
                 hdr_cell(text("Actions").size(13).color(colors.muted), COL_ACTIONS),
             ]
+        } else if is_patches_tab {
+            row![
+                name_hdr,
+                hdr_cell(text("Files").size(13).color(colors.muted), COL_FILES),
+                hdr_cell(text("Enabled").size(13).color(colors.muted), COL_ENABLED),
+                hdr_cell(status_hdr, COL_STATUS),
+                hdr_cell(text("Actions").size(13).color(colors.muted), COL_ACTIONS),
+            ]
         } else {
             row![
                 name_hdr,
@@ -534,8 +774,8 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
                 .width(Length::Fill)
                 .padding([10, 12]),
         )
-            .width(Length::Fill)
-            .style(move |_theme| theme::table_head_style(c2))
+        .width(Length::Fill)
+        .style(move |_theme| theme::table_head_style(c2))
     };
 
     // Sort filtered repos
@@ -555,6 +795,40 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
                 cmp.reverse()
             } else {
                 cmp
+            }
+        });
+    }
+
+    // Managed packages and custom files detected outside Wuddle share one
+    // alphabetically/sort-key ordered Patches list. Origin is communicated by
+    // the row status, not by splitting the page into separate sections.
+    let mut filtered_patch_rows = if is_patches_tab {
+        filtered_repos
+            .iter()
+            .map(|repo| PatchDisplayRow::Managed(repo))
+            .chain(
+                filtered_manual_mpqs
+                    .iter()
+                    .map(|entry| PatchDisplayRow::Manual(entry)),
+            )
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if is_patches_tab {
+        let descending = app.sort_dir == SortDir::Desc;
+        filtered_patch_rows.sort_by(|left, right| {
+            let comparison = match app.sort_key {
+                SortKey::Name => left
+                    .name()
+                    .to_ascii_lowercase()
+                    .cmp(&right.name().to_ascii_lowercase()),
+                SortKey::Status => left.status_rank().cmp(&right.status_rank()),
+            };
+            if descending {
+                comparison.reverse()
+            } else {
+                comparison
             }
         });
     }
@@ -584,7 +858,9 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
     }
 
     // Table body
-    let body: Element<Message> = if if is_mods_tab {
+    let body: Element<Message> = if if is_patches_tab {
+        filtered_patch_rows.is_empty()
+    } else if is_repo_tab {
         filtered_repos.is_empty()
     } else {
         filtered_addon_rows.is_empty()
@@ -593,9 +869,15 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
             text(if app.loading {
                 format!("Loading {}...", label.to_lowercase())
             } else if app.filter == Filter::All {
-                format!("No {} yet. Click \"+ Add\".", label.to_lowercase())
+                if is_patches_tab {
+                    "No MPQ patches yet. Click \"+ Add\" to install one.".to_string()
+                } else {
+                    format!("No {} yet. Click \"+ Add\".", label.to_lowercase())
+                }
             } else {
                 let filter_name = match app.filter {
+                    Filter::Updates if is_patches_tab => "Updates",
+                    Filter::Errors if is_patches_tab => "Modified",
                     Filter::Updates => "Updates",
                     Filter::Errors => "Errors",
                     Filter::Ignored => {
@@ -623,11 +905,31 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
         .into()
     } else {
         let mut rows: Vec<Element<Message>> = Vec::new();
-        if is_mods_tab {
+        if is_patches_tab {
+            for patch in &filtered_patch_rows {
+                match patch {
+                    PatchDisplayRow::Managed(repo) => {
+                        rows.push(mpq_parent_row(app, repo, colors));
+                        if repo.installed_mpqs.len() > 1 && app.expanded_repo_ids.contains(&repo.id)
+                        {
+                            for mpq in &repo.installed_mpqs {
+                                rows.push(mpq_child_row(app, repo.id, mpq, colors));
+                            }
+                        }
+                    }
+                    PatchDisplayRow::Manual(entry) => {
+                        rows.push(manual_mpq_row(app, entry, colors));
+                    }
+                }
+            }
+        } else if is_repo_tab {
             for repo in filtered_repos.iter() {
                 rows.push(mod_row(app, repo, colors));
                 // Inject child DLL rows when expanded
-                if repo.installed_dlls.len() > 1 && app.expanded_repo_ids.contains(&repo.id) {
+                if is_mods_tab
+                    && repo.installed_dlls.len() > 1
+                    && app.expanded_repo_ids.contains(&repo.id)
+                {
                     for (dll_name, dll_enabled, dll_version) in &repo.installed_dlls {
                         rows.push(dll_child_row(
                             repo.id,
@@ -699,10 +1001,10 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
                 }
             }
         }
-        let scroll_id = if label == "Mods" {
-            iced::widget::Id::new("mods_projects_scrollable")
-        } else {
-            iced::widget::Id::new("addons_projects_scrollable")
+        let scroll_id = match label {
+            "Mods" => iced::widget::Id::new("mods_projects_scrollable"),
+            "Patches" => iced::widget::Id::new("patches_projects_scrollable"),
+            _ => iced::widget::Id::new("addons_projects_scrollable"),
         };
 
         scrollable(column(rows).spacing(0).width(Length::Fill))
@@ -730,21 +1032,38 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
         Some(t) => format!("Last checked: {}", t),
         None => "Last checked: never".into(),
     };
-    let total_update_count = app
-        .repos
-        .iter()
-        .filter(|r| {
-            app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
-                && !app.ignored_update_ids.contains(&r.id)
-        })
-        .count();
+    let total_update_count = if is_patches_tab {
+        app.repos
+            .iter()
+            .filter(|repo| {
+                crate::service::is_curated_mpq_repo(repo)
+                    && app
+                        .plans
+                        .iter()
+                        .any(|plan| plan.repo_id == repo.id && plan.has_update)
+            })
+            .count()
+    } else {
+        app.repos
+            .iter()
+            .filter(|r| {
+                !crate::service::is_curated_mpq_repo(r)
+                    && app.plans.iter().any(|p| p.repo_id == r.id && p.has_update)
+                    && !app.ignored_update_ids.contains(&r.id)
+            })
+            .count()
+    };
     let update_all_btn: Element<Message> = {
         let c2 = c;
         let b = button(text("Update All").size(13)).padding([6, 14]);
         let btn_el: Element<Message> = if total_update_count > 0 {
-            b.on_press(Message::UpdateAll)
-                .style(move |_t, _s| theme::tab_button_active_style(c2))
-                .into()
+            b.on_press(if is_patches_tab {
+                Message::UpdateAllPatches
+            } else {
+                Message::UpdateAll
+            })
+            .style(move |_t, _s| theme::tab_button_active_style(c2))
+            .into()
         } else {
             b.style(move |_t, _s| {
                 let mut s = theme::tab_button_style(c2);
@@ -763,19 +1082,34 @@ pub fn view<'a>(app: &'a App, colors: ThemeColors, label: &str) -> Element<'a, M
 
     let check_btn = tip(
         btn("Check for updates", Message::CheckUpdates, c),
-        "Fetch the latest versions for all addons and mods",
+        "Fetch the latest versions for addons, mods, and curated patches",
         tooltip::Position::Top,
         colors,
     );
 
-    let footer = row![
-        text(last_checked_text).size(12).color(colors.muted),
-        Space::new().width(Length::Fill),
-        check_btn,
-        update_all_btn,
-    ]
-    .spacing(8)
-    .align_y(iced::Alignment::Center);
+    let footer: Element<Message> = if is_patches_tab {
+        row![
+            text("Generic MPQs remain manual; curated patches are checked for updates.")
+                .size(12)
+                .color(colors.warn),
+            Space::new().width(Length::Fill),
+            check_btn,
+            update_all_btn,
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .into()
+    } else {
+        row![
+            text(last_checked_text).size(12).color(colors.muted),
+            Space::new().width(Length::Fill),
+            check_btn,
+            update_all_btn,
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .into()
+    };
 
     column![card, footer]
         .spacing(8)
@@ -805,7 +1139,9 @@ fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: ThemeColors) -> Element<
     let update_ignored = app.ignored_update_ids.contains(&repo.id);
     let is_multi_dll = repo.installed_dlls.len() > 1;
     let is_expanded = app.expanded_repo_ids.contains(&repo.id);
-    let is_infrequent = app.infrequent_repo_ids.contains(&repo.id);
+    let is_infrequent = app.opt_auto_check
+        && app.opt_conserve_github_api
+        && app.infrequent_repo_ids.contains(&repo.id);
     let name_col = name_cell_with_expand(repo, is_multi_dll, is_expanded, is_infrequent, colors);
     let menu_key = format!("repo:{}", repo.id);
     let is_menu_open = app.open_menu.as_deref() == Some(menu_key.as_str());
@@ -843,6 +1179,7 @@ fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: ThemeColors) -> Element<
                 repo,
                 menu_key,
                 has_update && !update_ignored,
+                true,
                 is_menu_open,
                 menu_content,
                 c
@@ -855,6 +1192,462 @@ fn mod_row<'a>(app: &'a App, repo: &'a RepoRow, colors: ThemeColors) -> Element<
     .height(PROJECT_ROW_HEIGHT)
     .align_y(iced::Alignment::Center);
 
+    separated_project_row(row_content, c)
+}
+
+fn mpq_status_badge(
+    status: wuddle_engine::mpq::MpqFileStatus,
+    enabled: bool,
+    colors: ThemeColors,
+) -> Element<'static, Message> {
+    let (label, color) = if !enabled && status == wuddle_engine::mpq::MpqFileStatus::Installed {
+        ("Disabled", colors.muted)
+    } else {
+        let color = match status {
+            wuddle_engine::mpq::MpqFileStatus::Installed => colors.good,
+            wuddle_engine::mpq::MpqFileStatus::Missing => colors.bad,
+            wuddle_engine::mpq::MpqFileStatus::Modified => colors.warn,
+        };
+        (status.label(), color)
+    };
+    mpq_named_status_badge(label, color)
+}
+
+fn mpq_named_status_badge(label: &'static str, color: iced::Color) -> Element<'static, Message> {
+    container(text(label).size(11).color(color))
+        .padding([2, 8])
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(iced::Color { a: 0.18, ..color })),
+            border: iced::Border {
+                color: iced::Color { a: 0.45, ..color },
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+fn mpq_package_status_badge(repo: &RepoRow, colors: ThemeColors) -> Element<'static, Message> {
+    let status = aggregate_mpq_status(repo);
+    if status != wuddle_engine::mpq::MpqFileStatus::Installed {
+        return mpq_status_badge(status, true, colors);
+    }
+    let enabled_count = repo
+        .installed_mpqs
+        .iter()
+        .filter(|entry| entry.enabled)
+        .count();
+    if enabled_count == 0 {
+        mpq_named_status_badge("Disabled", colors.muted)
+    } else if enabled_count < repo.installed_mpqs.len() {
+        mpq_named_status_badge("Partially enabled", colors.warn)
+    } else {
+        mpq_named_status_badge("Installed", colors.good)
+    }
+}
+
+fn aggregate_mpq_status(repo: &RepoRow) -> wuddle_engine::mpq::MpqFileStatus {
+    if repo
+        .installed_mpqs
+        .iter()
+        .any(|entry| entry.status == wuddle_engine::mpq::MpqFileStatus::Modified)
+    {
+        wuddle_engine::mpq::MpqFileStatus::Modified
+    } else if repo
+        .installed_mpqs
+        .iter()
+        .any(|entry| entry.status == wuddle_engine::mpq::MpqFileStatus::Missing)
+    {
+        wuddle_engine::mpq::MpqFileStatus::Missing
+    } else {
+        wuddle_engine::mpq::MpqFileStatus::Installed
+    }
+}
+
+fn manual_mpq_row<'a>(
+    app: &'a App,
+    entry: &'a wuddle_engine::mpq::MpqProtectionEntry,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
+    let c = colors;
+    let enabled_path = entry.path.clone();
+    let display_name = manual_mpq_name(entry);
+    let badge = container(text("MPQ").size(10).color(c.link))
+        .padding([1, 5])
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(iced::Color { a: 0.12, ..c.link })),
+            border: iced::Border {
+                color: iced::Color { a: 0.3, ..c.link },
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        });
+    let enabled: Element<Message> = checkbox(entry.enabled)
+        .on_toggle(move |value| Message::ToggleUntrackedMpqEnabled(enabled_path.clone(), value))
+        .into();
+    let manual_status = tip(
+        mpq_named_status_badge("Manual", colors.muted),
+        "Wuddle detected this MPQ, but does not recognize its installation source because Wuddle did not install it.",
+        tooltip::Position::Top,
+        colors,
+    );
+    let menu_key = format!("manual-mpq:{}", entry.path);
+    let is_menu_open = app.open_menu.as_deref() == Some(menu_key.as_str());
+    let mut menu_items: Vec<Element<Message>> = Vec::new();
+    menu_items.push(ctx_menu_item(
+        "Details\u{2026}",
+        Message::OpenDialog(crate::Dialog::RepoDetails {
+            id: None,
+            name: display_name.clone(),
+            files: vec![crate::service::RepoDetailEntry {
+                path: entry.path.clone(),
+                kind: "mpq".to_string(),
+                is_directory: false,
+            }],
+            loading: false,
+            expanded_paths: Default::default(),
+            loading_paths: Default::default(),
+            children: Default::default(),
+        }),
+        c,
+    ));
+    menu_items.push(ctx_menu_item(
+        "Browse\u{2026}",
+        Message::BrowseGamePath(entry.path.clone()),
+        c,
+    ));
+    if entry.editor_unlocked {
+        menu_items.push(ctx_menu_item(
+            "Edit MPQ…",
+            Message::OpenDialog(crate::mpq::untracked_component_dialog(entry)),
+            c,
+        ));
+    } else {
+        menu_items.push(ctx_menu_item_disabled_with_tooltip(
+            "Edit MPQ…",
+            "Unlock this MPQ in Manage MPQs before editing it here.",
+            c,
+        ));
+    }
+    menu_items.push(ctx_menu_item("Manage MPQs…", Message::OpenMpqProtection, c));
+    let menu_content = container(column(menu_items).spacing(2))
+        .padding(6)
+        .width(200)
+        .style(move |_theme| theme::context_menu_style(c))
+        .into();
+    let row_content = row![
+        name_cell_slot(
+            column![
+                row![
+                    text(display_name)
+                        .size(19)
+                        .font(name_font(colors))
+                        .color(c.title),
+                    Space::new().width(7),
+                    badge,
+                ]
+                .align_y(iced::Alignment::Center),
+                text(&entry.path).size(11).color(c.muted),
+            ]
+            .spacing(2)
+        ),
+        col_cell(text("1 file").size(11).color(c.muted), COL_FILES),
+        col_cell(enabled, COL_ENABLED),
+        col_cell(manual_status, COL_STATUS),
+        col_cell(
+            action_menu_button(menu_key, is_menu_open, menu_content, c),
+            COL_ACTIONS,
+        ),
+    ]
+    .spacing(0)
+    .width(Length::Fill)
+    .height(PROJECT_ROW_HEIGHT)
+    .align_y(iced::Alignment::Center);
+    separated_project_row(row_content, c)
+}
+
+fn mpq_parent_row<'a>(
+    app: &'a App,
+    repo: &'a RepoRow,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
+    let c = colors;
+    let curated_kind = crate::service::curated_mpq_kind(repo);
+    let supports_online_updates = curated_kind.is_some();
+    let plan = app.plans.iter().find(|plan| plan.repo_id == repo.id);
+    let has_update = supports_online_updates && plan.map(|plan| plan.has_update).unwrap_or(false);
+    let multiple = repo.installed_mpqs.len() > 1;
+    let expanded = app.expanded_repo_ids.contains(&repo.id);
+    let title = if supports_online_updates || multiple {
+        repo.mpq_package_name
+            .clone()
+            .unwrap_or_else(|| repo.name.clone())
+    } else {
+        repo.installed_mpqs
+            .first()
+            .map(|entry| entry.display_name.clone())
+            .unwrap_or_else(|| repo.name.clone())
+    };
+    let subtitle = if multiple {
+        format!("{} managed MPQs", repo.installed_mpqs.len())
+    } else {
+        repo.installed_mpqs
+            .first()
+            .map(|entry| entry.path.clone())
+            .unwrap_or_else(|| "No tracked MPQ files".to_string())
+    };
+    let badge = container(text("MPQ").size(10).color(c.link))
+        .padding([1, 5])
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(iced::Color { a: 0.12, ..c.link })),
+            border: iced::Border {
+                color: iced::Color { a: 0.3, ..c.link },
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        });
+    let title_element: Element<Message> = if supports_online_updates {
+        button(iced::widget::rich_text::<(), _, _, _>([
+            iced::widget::span(title)
+                .underline(true)
+                .color(c.link)
+                .font(name_font(colors))
+                .size(19.0_f32),
+        ]))
+        .on_press(Message::OpenUrl(repo.url.clone()))
+        .padding(0)
+        .style(move |_theme, _status| button::Style {
+            background: None,
+            text_color: c.link,
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        })
+        .into()
+    } else {
+        text(title)
+            .size(19)
+            .font(name_font(colors))
+            .color(c.title)
+            .into()
+    };
+    let mut title_items: Vec<Element<Message>> = vec![title_element];
+    if multiple {
+        title_items.push(Space::new().width(6).into());
+        let repo_id = repo.id;
+        title_items.push(
+            button(expand_chevron_icon(expanded, colors))
+                .on_press(Message::ToggleRepoExpanded(repo_id))
+                .padding(0)
+                .style(move |_theme, _status| button::Style {
+                    background: None,
+                    text_color: c.muted,
+                    border: iced::Border::default(),
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                })
+                .into(),
+        );
+        title_items.push(Space::new().width(6).into());
+    } else {
+        title_items.push(Space::new().width(7).into());
+    }
+    title_items.push(badge.into());
+    if let Some(kind) = curated_kind {
+        let help_handle =
+            iced::widget::svg::Handle::from_memory(include_bytes!("../../assets/icons/help.svg"));
+        let help_icon =
+            iced::widget::svg(help_handle)
+                .width(16)
+                .height(16)
+                .style(move |_theme, _status| iced::widget::svg::Style {
+                    color: Some(c.muted),
+                });
+        title_items.push(Space::new().width(6).into());
+        title_items.push(tip(
+            button(help_icon)
+                .on_press(match kind {
+                    crate::service::CuratedMpqKind::Wdm => Message::OpenWdmReadme,
+                    crate::service::CuratedMpqKind::EpochWater => Message::OpenEpochWaterReadme,
+                })
+                .padding(0)
+                .style(move |_theme, _status| button::Style {
+                    background: None,
+                    text_color: c.muted,
+                    border: iced::Border::default(),
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                }),
+            &format!("Preview the {} README", kind.readme_label()),
+            tooltip::Position::Top,
+            colors,
+        ));
+    }
+    let name_content = container(
+        column![
+            row(title_items).align_y(iced::Alignment::Center),
+            text(subtitle).size(11).color(c.muted),
+        ]
+        .spacing(2),
+    )
+    .width(Length::Fill)
+    .height(PROJECT_ROW_HEIGHT)
+    .center_y(PROJECT_ROW_HEIGHT);
+    let name_content: Element<Message> = if multiple {
+        stack![
+            button(Space::new().width(Length::Fill).height(PROJECT_ROW_HEIGHT))
+                .on_press(Message::ToggleRepoExpanded(repo.id))
+                .padding(0)
+                .width(Length::Fill)
+                .height(PROJECT_ROW_HEIGHT)
+                .style(move |_theme, _status| button::Style {
+                    background: None,
+                    text_color: c.text,
+                    border: iced::Border::default(),
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                }),
+            name_content,
+        ]
+        .into()
+    } else {
+        name_content.into()
+    };
+    let file_count = repo.installed_mpqs.len();
+    let file_count_label = format!(
+        "{} {}",
+        file_count,
+        if file_count == 1 { "file" } else { "files" }
+    );
+    let menu_key = format!("repo:{}", repo.id);
+    let is_menu_open = app.open_menu.as_deref() == Some(menu_key.as_str());
+    let menu_content = crate::inline_context_menu(app, repo, None, c);
+    let status: Element<Message> = if has_update {
+        tip(
+            mpq_named_status_badge("Update available", colors.warn),
+            &format!(
+                "{}: {}",
+                curated_kind
+                    .map(|kind| kind.latest_label())
+                    .unwrap_or("Latest curated patch"),
+                plan.map(|plan| plan.latest.as_str()).unwrap_or("unknown")
+            ),
+            tooltip::Position::Top,
+            colors,
+        )
+    } else if let Some(error) = plan
+        .and_then(|plan| plan.error.as_deref())
+        .filter(|_| supports_online_updates)
+    {
+        tip(
+            mpq_named_status_badge("Check failed", colors.bad),
+            error,
+            tooltip::Position::Top,
+            colors,
+        )
+    } else {
+        mpq_package_status_badge(repo, colors)
+    };
+    let row_content = row![
+        name_cell_slot(name_content),
+        col_cell(text(file_count_label).size(11).color(c.muted), COL_FILES),
+        col_cell(
+            checkbox(repo.installed_mpqs.iter().all(|entry| entry.enabled))
+                .on_toggle(move |enabled| Message::ToggleMpqPackageEnabled(repo.id, enabled)),
+            COL_ENABLED,
+        ),
+        col_cell(status, COL_STATUS),
+        col_cell(
+            action_buttons(
+                repo,
+                menu_key,
+                has_update,
+                supports_online_updates,
+                is_menu_open,
+                menu_content,
+                c,
+            ),
+            COL_ACTIONS,
+        ),
+    ]
+    .spacing(0)
+    .width(Length::Fill)
+    .height(PROJECT_ROW_HEIGHT)
+    .align_y(iced::Alignment::Center);
+    separated_project_row(row_content, c)
+}
+
+fn mpq_child_row<'a>(
+    app: &'a App,
+    repo_id: i64,
+    entry: &'a wuddle_engine::mpq::MpqInstalledFile,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
+    let c = colors;
+    let dialog = crate::mpq::component_dialog(repo_id, entry);
+    let menu_key = format!("mpq-component:{repo_id}:{}", entry.path);
+    let is_menu_open = app.open_menu.as_deref() == Some(menu_key.as_str());
+    let edit_item = if entry.editor_unlocked {
+        ctx_menu_item("Edit MPQ…", Message::OpenDialog(dialog), c)
+    } else {
+        ctx_menu_item_disabled_with_tooltip(
+            "Edit MPQ…",
+            "Unlock this MPQ in Manage MPQs before editing it here.",
+            c,
+        )
+    };
+    let browse_item = ctx_menu_item(
+        "Browse\u{2026}",
+        Message::BrowseGamePath(entry.path.clone()),
+        c,
+    );
+    let menu_content = container(column![browse_item, edit_item])
+        .padding(6)
+        .width(180)
+        .style(move |_theme| theme::context_menu_style(c))
+        .into();
+    let row_content = row![
+        name_cell_slot(
+            row![
+                Space::new().width(22),
+                column![
+                    text(format!("\u{21b3} {}", entry.display_name))
+                        .size(13)
+                        .color(c.text),
+                    text(&entry.path).size(10).color(c.muted),
+                ]
+                .spacing(2),
+            ]
+            .align_y(iced::Alignment::Center)
+        ),
+        col_cell(
+            text(entry.version.as_deref().unwrap_or("Local file"))
+                .size(11)
+                .color(c.muted),
+            COL_FILES,
+        ),
+        col_cell(
+            checkbox(entry.enabled).on_toggle(move |enabled| {
+                Message::ToggleMpqEnabled(repo_id, entry.path.clone(), enabled)
+            }),
+            COL_ENABLED,
+        ),
+        col_cell(
+            mpq_status_badge(entry.status, entry.enabled, colors),
+            COL_STATUS
+        ),
+        col_cell(
+            action_menu_button(menu_key, is_menu_open, menu_content, c),
+            COL_ACTIONS,
+        ),
+    ]
+    .spacing(0)
+    .width(Length::Fill)
+    .height(PROJECT_ROW_HEIGHT)
+    .align_y(iced::Alignment::Center);
     separated_project_row(row_content, c)
 }
 
@@ -1043,20 +1836,8 @@ fn addon_collection_name_cell<'a>(
 
     let rid = repo.id;
 
-    let chevron_bytes: &[u8] = if is_expanded {
-        include_bytes!("../../assets/icons/chevron-down.svg")
-    } else {
-        include_bytes!("../../assets/icons/chevron-right.svg")
-    };
-    let chevron_handle = iced::widget::svg::Handle::from_memory(chevron_bytes);
-    let chevron_icon = iced::widget::svg(chevron_handle)
-        .width(14)
-        .height(14)
-        .style(move |_t, _s| iced::widget::svg::Style {
-            color: Some(c.muted),
-        });
     let c_chev = c;
-    let chevron_btn = button(chevron_icon)
+    let chevron_btn = button(expand_chevron_icon(is_expanded, colors))
         .on_press(Message::ToggleRepoExpanded(rid))
         .padding(0)
         .style(move |_theme, _status| button::Style {
@@ -1132,7 +1913,6 @@ fn addon_collection_name_cell<'a>(
             tooltip::Position::Top,
             colors,
         )
-        .into()
     } else {
         title_row
     };
@@ -1180,7 +1960,9 @@ fn addon_collection_parent_row<'a>(
     let latest_str = plan.map(|p| p.latest.clone()).unwrap_or_default();
     let enabled = repo.enabled;
     let update_ignored = app.ignored_update_ids.contains(&repo.id);
-    let is_infrequent = app.infrequent_repo_ids.contains(&repo.id);
+    let is_infrequent = app.opt_auto_check
+        && app.opt_conserve_github_api
+        && app.infrequent_repo_ids.contains(&repo.id);
     let rid = repo.id;
 
     let name_col = addon_collection_name_cell(
@@ -1242,6 +2024,7 @@ fn addon_collection_parent_row<'a>(
                 repo,
                 menu_key,
                 has_update && !update_ignored,
+                true,
                 is_menu_open,
                 menu_content,
                 c
@@ -1326,7 +2109,6 @@ fn addon_name_cell<'a>(
             tooltip::Position::Top,
             colors,
         )
-        .into()
     } else {
         title_row
     };
@@ -1378,7 +2160,9 @@ fn addon_row<'a>(
         .or_else(|| repo.installed_branch.clone())
         .unwrap_or_else(|| "default".to_string());
     let update_ignored = app.ignored_update_ids.contains(&repo.id);
-    let is_infrequent = app.infrequent_repo_ids.contains(&repo.id);
+    let is_infrequent = app.opt_auto_check
+        && app.opt_conserve_github_api
+        && app.infrequent_repo_ids.contains(&repo.id);
     let name_col = addon_name_cell(
         repo,
         addon_name.clone(),
@@ -1457,6 +2241,7 @@ fn addon_row<'a>(
                 repo,
                 menu_key,
                 has_update && !update_ignored,
+                true,
                 is_menu_open,
                 menu_content,
                 c
@@ -1513,18 +2298,6 @@ fn name_cell_with_expand<'a>(
     let show_wow_optimize_badge = is_wow_optimize_repo(&repo.name);
 
     let title_row: Element<Message> = if is_multi_dll {
-        let chevron_bytes: &[u8] = match is_expanded {
-            true => include_bytes!("../../assets/icons/chevron-down.svg"),
-            false => include_bytes!("../../assets/icons/chevron-right.svg"),
-        };
-        let chevron_handle = iced::widget::svg::Handle::from_memory(chevron_bytes);
-        let chevron_icon = iced::widget::svg(chevron_handle)
-            .width(14)
-            .height(14)
-            .style(move |_t, _s| iced::widget::svg::Style {
-                color: Some(c.muted),
-            });
-
         let badge_label = format!("{} DLLs", dll_count);
         let badge = container(text(badge_label).size(10).color(c.muted))
             .padding([1, 5])
@@ -1540,12 +2313,11 @@ fn name_cell_with_expand<'a>(
         let mut title_items: Vec<Element<Message>> = vec![
             title_btn.into(),
             Space::new().width(6).into(),
-            chevron_icon.into(),
+            expand_chevron_icon(is_expanded, colors),
             Space::new().width(14).into(),
             badge.into(),
-            // Help button for WeirdUtils parent row
-            if is_weird_utils_item(&repo.url, &repo.name)
-                || is_weird_utils_item(&repo.url, "weirdutils.dll")
+            // README preview for the complete multi-DLL project. This is a
+            // read-only action and must not enter the Add Mod workflow.
             {
                 let help_bytes = include_bytes!("../../assets/icons/help.svg");
                 let help_handle = iced::widget::svg::Handle::from_memory(help_bytes);
@@ -1558,12 +2330,10 @@ fn name_cell_with_expand<'a>(
                         });
 
                 let help_btn: Element<Message> = button(help_icon)
-                    .on_press(Message::OpenDialog(Dialog::AddRepo {
-                        url: repo.url.clone(),
-                        mode: repo.mode.clone(),
-                        is_addons: false,
-                        advanced: false,
-                    }))
+                    .on_press(Message::OpenRepoReadmePreview(
+                        repo.name.clone(),
+                        repo.url.clone(),
+                    ))
                     .padding(0)
                     .style(move |_theme, _status| button::Style {
                         background: None,
@@ -1573,16 +2343,19 @@ fn name_cell_with_expand<'a>(
                         snap: true,
                     })
                     .into();
-                row![Space::new().width(8), help_btn].into()
-            } else {
-                Space::new().width(0).into()
+                tip(
+                    row![Space::new().width(8), help_btn],
+                    &format!("Preview the {} README", repo.name),
+                    tooltip::Position::Top,
+                    colors,
+                )
             },
         ];
         if show_dxvk_badge {
             let c2 = c;
             title_items.push(Space::new().width(6).into());
             title_items.push(
-                button(text("\u{2699} DXVK conf").size(10).color(c2.link))
+                button(crate::cogwheel_label("DXVK conf", 10.0, 10, c2.link))
                     .on_press(Message::OpenDxvkConfig)
                     .padding([2, 6])
                     .style(move |_t, status| dxvk_badge_style(status, c2))
@@ -1593,7 +2366,7 @@ fn name_cell_with_expand<'a>(
             let c2 = c;
             title_items.push(Space::new().width(6).into());
             title_items.push(
-                button(text("⚙ Configure").size(10).color(c2.link))
+                button(crate::cogwheel_label("Configure", 10.0, 10, c2.link))
                     .on_press(Message::LaunchWowOptimize)
                     .padding([2, 6])
                     .style(move |_t, status| dxvk_badge_style(status, c2))
@@ -1604,12 +2377,12 @@ fn name_cell_with_expand<'a>(
     } else if show_dxvk_badge || show_wow_optimize_badge {
         // Non-multi-DLL mod: show its companion action next to the title.
         let c2 = c;
-        let (label, message, color) = if show_dxvk_badge {
-            ("\u{2699} DXVK conf", Message::OpenDxvkConfig, c2.link)
+        let (label, message) = if show_dxvk_badge {
+            ("DXVK conf", Message::OpenDxvkConfig)
         } else {
-            ("⚙ Configure", Message::LaunchWowOptimize, c2.link)
+            ("Configure", Message::LaunchWowOptimize)
         };
-        let dxvk_badge = button(text(label).size(10).color(color))
+        let dxvk_badge = button(crate::cogwheel_label(label, 10.0, 10, c2.link))
             .on_press(message)
             .padding([2, 6])
             .style(move |_t, status| dxvk_badge_style(status, c2));
@@ -1633,7 +2406,6 @@ fn name_cell_with_expand<'a>(
             tooltip::Position::Top,
             colors,
         )
-        .into()
     } else {
         title_row
     };
@@ -1685,9 +2457,7 @@ fn status_info(
     update_ignored: bool,
     colors: ThemeColors,
 ) -> (&'static str, iced::Color, iced::Color) {
-    if update_ignored {
-        ("Ignored", colors.muted, colors.muted)
-    } else if !enabled {
+    if update_ignored || !enabled {
         ("Ignored", colors.muted, colors.muted)
     } else if has_error {
         ("Error", colors.bad, colors.bad)
@@ -1702,6 +2472,7 @@ fn status_info(
 
 /// Colored badge pill matching Tauri's badge style.
 /// When an update is available, the badge has a tooltip showing the latest version.
+#[allow(clippy::too_many_arguments)]
 fn status_badge<'a>(
     has_error: bool,
     has_update: bool,
@@ -1745,7 +2516,7 @@ fn status_badge<'a>(
         };
         tooltip(
             badge,
-            text(tip).size(13).color(c.text),
+            text(tip).size(theme::TOOLTIP_TEXT_SIZE).color(c.text),
             tooltip::Position::Top,
         )
         .style(move |_theme| container::Style {
@@ -1785,7 +2556,9 @@ fn status_badge<'a>(
         } else {
             tooltip(
                 badge,
-                text(tip_lines.join("\n")).size(13).color(c.text),
+                text(tip_lines.join("\n"))
+                    .size(theme::TOOLTIP_TEXT_SIZE)
+                    .color(c.text),
                 tooltip::Position::Top,
             )
             .style(move |_theme| container::Style {
@@ -1809,11 +2582,12 @@ fn status_badge<'a>(
     }
 }
 
-/// Action column: Update button + triple-dot menu button (with anchored overlay).
+/// Action column: an optional online-update button plus an anchored menu.
 fn action_buttons<'a>(
     repo: &RepoRow,
     menu_key: String,
     has_update: bool,
+    show_update_button: bool,
     is_menu_open: bool,
     menu_content: Element<'a, Message>,
     colors: ThemeColors,
@@ -1823,8 +2597,7 @@ fn action_buttons<'a>(
 
     let mut items: Vec<Element<Message>> = Vec::new();
 
-    // Download/update button — always shown, active only when update available
-    {
+    if show_update_button {
         let c2 = c;
         let btn = button(container(text("\u{2193}").size(14)).center_x(Length::Fill)) // ↓
             .padding([4, 0])
@@ -1849,9 +2622,24 @@ fn action_buttons<'a>(
         items.push(tip(btn_el, dl_tip, tooltip::Position::Top, colors));
     }
 
-    // Triple-dot button wrapped in AnchoredOverlay so the popup is pinned
-    // to the button's actual screen position via Iced's overlay system.
-    let c2 = c;
+    items.push(action_menu_button(
+        menu_key,
+        is_menu_open,
+        menu_content,
+        colors,
+    ));
+
+    row(items).spacing(4).into()
+}
+
+fn action_menu_button<'a>(
+    menu_key: String,
+    is_menu_open: bool,
+    menu_content: Element<'a, Message>,
+    colors: ThemeColors,
+) -> Element<'a, Message> {
+    // Keep every project menu anchored to the same compact triple-dot button.
+    let c2 = colors;
     let dots_btn = button(container(text("\u{22EE}").size(14)).center_x(Length::Fill)) // ⋮
         .on_press(Message::ToggleMenu(menu_key))
         .padding([4, 0])
@@ -1861,13 +2649,9 @@ fn action_buttons<'a>(
             _ => theme::tab_button_style(c2),
         });
 
-    items.push(
-        AnchoredOverlay::new(dots_btn, menu_content, is_menu_open)
-            .on_dismiss(Message::CloseMenu)
-            .into(),
-    );
-
-    row(items).spacing(4).into()
+    AnchoredOverlay::new(dots_btn, menu_content, is_menu_open)
+        .on_dismiss(Message::CloseMenu)
+        .into()
 }
 
 fn filter_button<'a>(
@@ -1916,7 +2700,7 @@ fn tip<'a>(
     let tip_str = String::from(tip_text);
     tooltip(
         content,
-        container(text(tip_str).size(13).color(c.text))
+        container(text(tip_str).size(theme::TOOLTIP_TEXT_SIZE).color(c.text))
             .padding([3, 8])
             .style(move |_theme| theme::tooltip_style(c)),
         pos,
@@ -1968,7 +2752,7 @@ pub fn is_awesome_wotlk_repo(name: &str) -> bool {
     name.eq_ignore_ascii_case("awesome_wotlk") || name.eq_ignore_ascii_case("awesome wotlk")
 }
 
-/// Button style for the ⚙ DXVK conf badge, shared across multi-DLL and single-DLL rows.
+/// Button style for configuration badges shared across multi-DLL and single-DLL rows.
 fn dxvk_badge_style(status: button::Status, c: crate::theme::ThemeColors) -> button::Style {
     let alpha = if matches!(status, button::Status::Hovered) {
         0.18

@@ -20,6 +20,8 @@ pub struct AnchoredOverlay<'a, Message, Theme = iced::Theme, Renderer = iced::Re
     overlay_content: Element<'a, Message, Theme, Renderer>,
     is_open: bool,
     on_dismiss: Option<Message>,
+    anchor_offset: Option<Point>,
+    dismiss_on_underlay_click: bool,
 }
 
 impl<'a, Message, Theme, Renderer> AnchoredOverlay<'a, Message, Theme, Renderer>
@@ -37,11 +39,25 @@ where
             overlay_content: overlay_content.into(),
             is_open,
             on_dismiss: None,
+            anchor_offset: None,
+            dismiss_on_underlay_click: false,
         }
     }
 
     pub fn on_dismiss(mut self, message: Message) -> Self {
         self.on_dismiss = Some(message);
+        self
+    }
+
+    /// Position the overlay at a point relative to the underlay's top-left.
+    /// Existing action menus keep the default bottom-right anchor.
+    pub fn at_point(mut self, offset: Point) -> Self {
+        self.anchor_offset = Some(offset);
+        self
+    }
+
+    pub fn dismiss_on_underlay_click(mut self, dismiss: bool) -> Self {
+        self.dismiss_on_underlay_click = dismiss;
         self
     }
 }
@@ -62,10 +78,7 @@ where
     }
 
     fn children(&self) -> Vec<Tree> {
-        vec![
-            Tree::new(&self.underlay),
-            Tree::new(&self.overlay_content),
-        ]
+        vec![Tree::new(&self.underlay), Tree::new(&self.overlay_content)]
     }
 
     fn diff(&self, tree: &mut Tree) {
@@ -179,10 +192,20 @@ where
         }
 
         let bounds = layout.bounds();
-        // Anchor = bottom-right corner of the underlay in absolute window coords.
-        let anchor = Point::new(
-            bounds.x + bounds.width + translation.x,
-            bounds.y + bounds.height + translation.y,
+        let point_anchored = self.anchor_offset.is_some();
+        let anchor = self.anchor_offset.map_or_else(
+            || {
+                Point::new(
+                    bounds.x + bounds.width + translation.x,
+                    bounds.y + bounds.height + translation.y,
+                )
+            },
+            |offset| {
+                Point::new(
+                    bounds.x + offset.x + translation.x,
+                    bounds.y + offset.y + translation.y,
+                )
+            },
         );
         // Pass the underlay's bounds so the overlay can skip dismissal when
         // the user clicks the button itself (ToggleMenu handles that case).
@@ -197,7 +220,9 @@ where
             content: self.overlay_content.as_widget_mut(),
             tree: &mut tree.children[1],
             anchor,
+            point_anchored,
             underlay_bounds,
+            dismiss_on_underlay_click: self.dismiss_on_underlay_click,
             on_dismiss: self.on_dismiss.clone(),
         })))
     }
@@ -223,7 +248,9 @@ struct ContentOverlay<'b, Message, Theme, Renderer> {
     content: &'b mut dyn Widget<Message, Theme, Renderer>,
     tree: &'b mut Tree,
     anchor: Point,
+    point_anchored: bool,
     underlay_bounds: Rectangle,
+    dismiss_on_underlay_click: bool,
     on_dismiss: Option<Message>,
 }
 
@@ -243,9 +270,14 @@ where
         // Right-align to anchor x; appear 2px below anchor y (visual gap).
         // Flip above if there is not enough room below.
         const GAP: f32 = 2.0;
-        let x = (self.anchor.x - size.width).max(0.0);
+        let x = if self.point_anchored {
+            self.anchor.x.min((bounds.width - size.width).max(0.0))
+        } else {
+            (self.anchor.x - size.width).max(0.0)
+        };
         let y = if self.anchor.y + GAP + size.height > bounds.height {
-            (self.anchor.y - size.height - 28.0 - GAP).max(0.0)
+            let underlay_offset = if self.point_anchored { 0.0 } else { 28.0 };
+            (self.anchor.y - size.height - underlay_offset - GAP).max(0.0)
         } else {
             self.anchor.y + GAP
         };
@@ -297,6 +329,12 @@ where
                 .map(|l| l.bounds().contains(cursor_pos))
                 .unwrap_or(false);
             let on_button = self.underlay_bounds.contains(cursor_pos);
+            if on_button && self.dismiss_on_underlay_click {
+                if let Some(msg) = &self.on_dismiss {
+                    shell.publish(msg.clone());
+                }
+                return;
+            }
             if !in_menu && !on_button {
                 if let Some(msg) = &self.on_dismiss {
                     shell.publish(msg.clone());
@@ -327,8 +365,13 @@ where
         renderer: &Renderer,
     ) -> mouse::Interaction {
         if let Some(child_layout) = layout.children().next() {
-            self.content
-                .mouse_interaction(self.tree, child_layout, cursor, &layout.bounds(), renderer)
+            self.content.mouse_interaction(
+                self.tree,
+                child_layout,
+                cursor,
+                &layout.bounds(),
+                renderer,
+            )
         } else {
             mouse::Interaction::None
         }

@@ -7,10 +7,10 @@
 use iced::widget::{button, column, container, row, text, Space};
 use iced::{Element, Length};
 
-use crate::Message;
+use crate::components::helpers::{badge_tag, tip};
 use crate::service::{ClientFamily, RepoRow};
 use crate::theme::{self, ThemeColors};
-use crate::components::helpers::{badge_tag, tip};
+use crate::Message;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -38,9 +38,17 @@ const LEGACY_DXVK: &[ClientFamily] = &[
 const WOTLK: &[ClientFamily] = &[ClientFamily::Wotlk];
 
 pub const WEIRD_UTILS_DLLS: [&str; 11] = [
-    "weirdutils.dll", "worldmarkers.dll", "pngscreenshots.dll", "transmogfix.dll", "customassets.dll", 
-    "minimapicons.dll", "clickthrough.dll", "logsessions.dll", "healtextfix.dll", 
-    "bigcursor.dll", "weirdperformance.dll"
+    "weirdutils.dll",
+    "worldmarkers.dll",
+    "pngscreenshots.dll",
+    "transmogfix.dll",
+    "customassets.dll",
+    "minimapicons.dll",
+    "clickthrough.dll",
+    "logsessions.dll",
+    "healtextfix.dll",
+    "bigcursor.dll",
+    "weirdperformance.dll",
 ];
 
 pub static WEIRD_UTILS_DESCRIPTIONS: [(&str, &str); 11] = [
@@ -208,14 +216,48 @@ pub fn create_quick_add_presets() -> Vec<Preset> {
 /// Returns true if the given URL corresponds to a preset with an "AV false-positive" warning.
 pub fn is_av_false_positive(url: &str) -> bool {
     let url = url.trim_end_matches('/');
-    create_quick_add_presets().iter().any(|p| {
-        p.url.trim_end_matches('/').eq_ignore_ascii_case(url) && p.warning.is_some()
-    })
+    create_quick_add_presets()
+        .iter()
+        .any(|p| p.url.trim_end_matches('/').eq_ignore_ascii_case(url) && p.warning.is_some())
 }
 
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
+
+pub fn quick_add_readme_button(
+    name: &str,
+    url: &str,
+    colors: ThemeColors,
+) -> Element<'static, Message> {
+    let help_handle =
+        iced::widget::svg::Handle::from_memory(include_bytes!("../../assets/icons/help.svg"));
+    let help_icon =
+        iced::widget::svg(help_handle)
+            .width(20)
+            .height(20)
+            .style(move |_theme, _status| iced::widget::svg::Style {
+                color: Some(colors.muted),
+            });
+    tip(
+        button(help_icon)
+            .on_press(Message::OpenRepoReadmePreview(
+                name.to_string(),
+                url.to_string(),
+            ))
+            .padding(1)
+            .style(move |_theme, _status| button::Style {
+                background: None,
+                text_color: colors.muted,
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+                snap: true,
+            }),
+        &format!("Preview the {name} README"),
+        iced::widget::tooltip::Position::Top,
+        colors,
+    )
+}
 
 /// Build the Quick Add preset card list (shown when URL input is empty in mods dialog).
 pub fn build_quick_add_presets<'a>(
@@ -235,53 +277,57 @@ pub fn build_quick_add_presets<'a>(
             preset.name.starts_with("DXVK") || preset.supported_clients.contains(&family)
         })
         .map(|preset| {
-        let already_installed = repos.iter().any(|r| {
-            r.url.trim_end_matches('/').eq_ignore_ascii_case(preset.url.trim_end_matches('/'))
-        });
+            let already_installed = repos.iter().any(|r| {
+                r.url
+                    .trim_end_matches('/')
+                    .eq_ignore_ascii_case(preset.url.trim_end_matches('/'))
+            });
 
-        let preset_url = preset.url.to_string();
-        let title_btn = button(
-            iced::widget::rich_text::<(), _, _, _>([
+            let preset_url = preset.url.to_string();
+            let title_action = Message::SetAddRepoUrl(preset_url.clone());
+            let title_btn = button(iced::widget::rich_text::<(), _, _, _>([
                 iced::widget::span(preset.name)
                     .underline(true)
-                    .font(iced::Font { weight: iced::font::Weight::Bold, ..Default::default() })
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..Default::default()
+                    })
                     .color(c.link)
                     .size(22.0_f32),
-            ])
-        )
-        .on_press(Message::SetAddRepoUrl(preset_url.clone()))
-        .padding(0)
-        .style(move |_t, _s| button::Style {
-            background: None,
-            text_color: c.link,
-            border: iced::Border::default(),
-            shadow: iced::Shadow::default(),
-            snap: true,
-        });
+            ]))
+            .on_press(title_action)
+            .padding(0)
+            .style(move |_t, _s| button::Style {
+                background: None,
+                text_color: c.link,
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+                snap: true,
+            });
 
-        // Category/flag tags
-        let mut tags: Vec<Element<Message>> = Vec::new();
-        if preset.recommended {
-            tags.push(badge_tag(
-                "Recommended",
-                iced::Color::from_rgb8(0x34, 0xd3, 0x99),
-                iced::Color::from_rgb8(0x10, 0xb9, 0x81),
-            ));
-        }
-        if preset.warning.is_some() {
-            tags.push(tip(
-                badge_tag(
-                    "AV false-positive",
-                    iced::Color::from_rgb8(0xfc, 0xa5, 0xa5),
-                    iced::Color::from_rgb8(0xef, 0x44, 0x44),
-                ),
-                "This mod may trigger an antivirus false-positive.",
-                iced::widget::tooltip::Position::Top,
-                colors,
-            ));
-        }
-        for cat in preset.categories {
-            let (text_col, base_col, tooltip_text) = match *cat {
+            // Category/flag tags
+            let mut tags: Vec<Element<Message>> = Vec::new();
+            if preset.recommended {
+                tags.push(badge_tag(
+                    "Recommended",
+                    iced::Color::from_rgb8(0x34, 0xd3, 0x99),
+                    iced::Color::from_rgb8(0x10, 0xb9, 0x81),
+                ));
+            }
+            if preset.warning.is_some() {
+                tags.push(tip(
+                    badge_tag(
+                        "AV false-positive",
+                        iced::Color::from_rgb8(0xfc, 0xa5, 0xa5),
+                        iced::Color::from_rgb8(0xef, 0x44, 0x44),
+                    ),
+                    "This mod may trigger an antivirus false-positive.",
+                    iced::widget::tooltip::Position::Top,
+                    colors,
+                ));
+            }
+            for cat in preset.categories {
+                let (text_col, base_col, tooltip_text) = match *cat {
                 "Performance" => (
                     iced::Color::from_rgb8(0xc4, 0xb5, 0xfd),
                     iced::Color::from_rgb8(0xa8, 0x55, 0xf7),
@@ -299,100 +345,111 @@ pub fn build_quick_add_presets<'a>(
                 ),
                 _ => (c.muted, c.muted, ""),
             };
-            let badge = badge_tag(cat, text_col, base_col);
-            if !tooltip_text.is_empty() {
-                tags.push(tip(badge, tooltip_text, iced::widget::tooltip::Position::Top, colors));
-            } else {
-                tags.push(badge);
+                let badge = badge_tag(cat, text_col, base_col);
+                if !tooltip_text.is_empty() {
+                    tags.push(tip(
+                        badge,
+                        tooltip_text,
+                        iced::widget::tooltip::Position::Top,
+                        colors,
+                    ));
+                } else {
+                    tags.push(badge);
+                }
             }
-        }
 
-        let tags_row = row(tags).spacing(4).align_y(iced::Alignment::Center);
+            let tags_row = row(tags).spacing(4).align_y(iced::Alignment::Center);
+            let readme_button = quick_add_readme_button(preset.name, preset.url, colors);
 
-        // Description + notes + optional warning
-        let mut desc_col: Vec<Element<Message>> = vec![
-            text(preset.description).size(16).color(colors.title).into(),
-        ];
-        for note in preset.expanded_notes {
-            desc_col.push(
-                row![
-                    text("\u{2022}").size(15).color(c.text),
-                    text(*note).size(15).color(c.text),
-                ]
-                .spacing(4)
-                .into()
-            );
-        }
-        if !preset.companion_links.is_empty() {
-            let companions: Vec<Element<Message>> = preset.companion_links.iter().map(|(label, lurl)| {
-                let l = lurl.to_string();
-                button(
-                    iced::widget::rich_text::<(), _, _, _>([
-                        iced::widget::span(*label)
-                            .underline(true)
-                            .color(c.link)
-                            .size(16.0_f32),
-                    ])
+            // Description + notes + optional warning
+            let mut desc_col: Vec<Element<Message>> =
+                vec![text(preset.description).size(16).color(colors.title).into()];
+            for note in preset.expanded_notes {
+                desc_col.push(
+                    row![
+                        text("\u{2022}").size(15).color(c.text),
+                        text(*note).size(15).color(c.text),
+                    ]
+                    .spacing(4)
+                    .into(),
+                );
+            }
+            if !preset.companion_links.is_empty() {
+                let companions: Vec<Element<Message>> = preset
+                    .companion_links
+                    .iter()
+                    .map(|(label, lurl)| {
+                        let l = lurl.to_string();
+                        button(iced::widget::rich_text::<(), _, _, _>([
+                            iced::widget::span(*label)
+                                .underline(true)
+                                .color(c.link)
+                                .size(16.0_f32),
+                        ]))
+                        .on_press(Message::OpenUrl(l))
+                        .padding(0)
+                        .style(move |_t, _s| button::Style {
+                            background: None,
+                            text_color: c.link,
+                            border: iced::Border::default(),
+                            shadow: iced::Shadow::default(),
+                            snap: true,
+                        })
+                        .into()
+                    })
+                    .collect();
+                desc_col.push(
+                    row![
+                        text("Companion addons:").size(16).color(c.muted),
+                        row(companions).spacing(8),
+                    ]
+                    .spacing(4)
+                    .into(),
+                );
+            }
+
+            // Action button
+            let action_btn: Element<Message> = if already_installed {
+                container(
+                    text("Installed")
+                        .size(12)
+                        .color(iced::Color::from_rgb8(0x34, 0xd3, 0x99)),
                 )
-                .on_press(Message::OpenUrl(l))
-                .padding(0)
-                .style(move |_t, _s| button::Style {
-                    background: None,
-                    text_color: c.link,
-                    border: iced::Border::default(),
-                    shadow: iced::Shadow::default(),
-                    snap: true,
+                .padding([4, 10])
+                .style(move |_t| container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba8(
+                        0x10, 0xb9, 0x81, 0.15,
+                    ))),
+                    border: iced::Border {
+                        color: iced::Color::from_rgba8(0x10, 0xb9, 0x81, 0.4),
+                        width: 1.0,
+                        radius: 6.0.into(),
+                    },
+                    ..Default::default()
                 })
                 .into()
-            }).collect();
-            desc_col.push(
-                row![
-                    text("Companion addons:").size(16).color(c.muted),
-                    row(companions).spacing(8),
-                ].spacing(4).into()
-            );
-        }
+            } else {
+                button(text("Add").size(12))
+                    .on_press(Message::QuickInstallPreset(preset.url.to_string()))
+                    .padding([4, 14])
+                    .style(move |_t, _s| theme::tab_button_active_style(c))
+                    .into()
+            };
 
-        // Action button
-        let action_btn: Element<Message> = if already_installed {
-            container(
-                text("Installed").size(12).color(iced::Color::from_rgb8(0x34, 0xd3, 0x99))
-            )
-            .padding([4, 10])
-            .style(move |_t| container::Style {
-                background: Some(iced::Background::Color(
-                    iced::Color::from_rgba8(0x10, 0xb9, 0x81, 0.15)
-                )),
-                border: iced::Border {
-                    color: iced::Color::from_rgba8(0x10, 0xb9, 0x81, 0.4),
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..Default::default()
-            })
-            .into()
-        } else {
-            let pu = preset.url.to_string();
-            button(text("Add").size(12))
-                .on_press(Message::QuickInstallPreset(pu))
-                .padding([4, 14])
-                .style(move |_t, _s| theme::tab_button_active_style(c))
+            let card_content = column![
+                row![title_btn, readme_button, tags_row]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                column(desc_col).spacing(3),
+                row![Space::new().width(Length::Fill), action_btn].align_y(iced::Alignment::Center),
+            ]
+            .spacing(6);
+
+            container(card_content)
+                .width(Length::Fill)
+                .padding([10, 14])
+                .style(move |_t| theme::card_style(c))
                 .into()
-        };
-
-        let card_content = column![
-            row![title_btn, tags_row].spacing(8).align_y(iced::Alignment::Center),
-            column(desc_col).spacing(3),
-            row![Space::new().width(Length::Fill), action_btn]
-                .align_y(iced::Alignment::Center),
-        ]
-        .spacing(6);
-
-        container(card_content)
-            .width(Length::Fill)
-            .padding([10, 14])
-            .style(move |_t| theme::card_style(c))
-            .into()
         })
         .collect();
 

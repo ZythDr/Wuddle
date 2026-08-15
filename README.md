@@ -30,7 +30,160 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
-### What's New in v3.6.2
+### What's New in v3.7.0-beta.12
+
+- **Backup and Restore** — Export profiles, preferences, launch settings, and tracked addon/mod/patch metadata into one backup ZIP, or import a backup or older Wuddle installation. Restores are validated and staged before restart, with the previous data retained as a rollback copy.
+- **Reset Wuddle** — Start over through an explicit confirmation, with an automatic safety backup and a choice to retain or remove system-vault credentials. WoW installations and deployed addon, mod, and MPQ files remain untouched.
+- **Fixed Windows Self-Updates** — Portable updates no longer fail with `os error 32` while validating the staged executable.
+- **Responsive Backup Dialogs** — Backup and Restore workflows grow as previews and controls appear, while keeping headers and action buttons visible and making smaller layouts scrollable.
+- **Reliable Restore Staging** — Backups and older installations using SQLite WAL mode are converted into portable database snapshots before restoration.
+- **Single-Instance Activation** — Starting Wuddle again on Windows now restores or requests attention from the existing window instead of displaying a file-lock error.
+- **One-Time Manual Update May Be Required** — Windows users on an affected beta may need to download this release manually. Extract it over the existing folder, or import the old folder through Backup and Restore in the fresh copy.
+
+See the [full changelog](CHANGELOG.md#v370-beta12) for the technical details.
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
+### v3.7.0-beta.11
+
+- **Right-Click Copy and Paste** — Editable text fields throughout Wuddle now provide a consistent, themed context menu.
+- **Selection-Aware Editing** — Copy uses the current selection, while Paste replaces it or inserts text at the existing caret position without moving the caret when the menu opens.
+- **Safe Password Pasting** — Secure password fields allow Paste without exposing their contents through Copy or diagnostics.
+
+### v3.7.0-beta.10
+
+- **Reliable Modified Addon Detection** — Rescanning now identifies edited, deleted, and newly added files in Wuddle- and GAM-managed Git addons.
+- **No Extra API Usage** — Modification detection compares against the local checked-out Git revision without contacting GitHub.
+- **Manual Addons Left Alone** — Addons without a local Git baseline are excluded from modification scanning.
+- **Clearer Warnings and Diagnostics** — Modified status is retained reliably, while prompts and privacy-safe logs better explain why an addon was flagged.
+
+### v3.7.0-beta.9
+
+- **Safer Updates for Modified Addons** — Wuddle now asks whether to cancel, ignore future updates, or explicitly overwrite when an addon contains local changes.
+- **Better Batch Behavior** — Update All completes unaffected projects before grouping modified addons into one confirmation dialog.
+- **Real Update Ignoring** — Ignored projects are excluded from automatic and manual checks before any network or GitHub API request.
+- **Windows Line-Ending Fix** — Normal CRLF/LF differences are no longer mistaken for local addon edits, further addressing [Issue #18](https://github.com/ZythDr/Wuddle/issues/18).
+
+### v3.7.0-beta.8
+
+- **Faster Update Checks**
+  - Git repositories, release-based projects, and curated MPQ patches now check concurrently through separate bounded workloads.
+  - New checks begin as soon as a worker becomes available without weakening cancellation or timeout safeguards.
+- **More Reliable Repository Updates**
+  - Stale and duplicate cached update entries are discarded when repositories are removed, replaced, or reloaded.
+  - Update All now skips vanished repositories instead of aborting the remaining batch.
+  - This is intended to address [Issue #18](https://github.com/ZythDr/Wuddle/issues/18), which remains open pending reporter confirmation.
+- **Reliable Lutris Launching**
+  - Lutris launches are isolated from saved Custom command fields, preventing hidden Custom values from replacing the Lutris executable or arguments.
+
+### v3.7.0-beta.7
+
+This beta completes a full security, reliability, and data-integrity review of Wuddle, addressing 75 documented findings.
+
+- **Safer Installs and Removals** — Addons, mods, DLLs, and MPQs now use stronger staging, ownership checks, backups, and rollback handling.
+- **Stronger Security and Privacy** — Hardened downloads, archives, README previews, redirects, credentials, diagnostic exports, and release assets.
+- **Reliable Profile Isolation** — Delayed background work can no longer affect the wrong profile, database, dialog, or WoW installation.
+- **More Dependable Updates** — Added bounded Git operations, cancellation, stronger cache validation, accurate multi-file checks, and safer API budgeting.
+- **Verified Self-Updates** — Linux and Windows updates now validate exact packages and digests while retaining rollback copies.
+- **Launcher and Platform Hardening** — Improved Windows version selection, restart handoff, single-instance ownership, Linux portable paths, and window restoration.
+- **Better MPQ Behavior** — MPQ changes are more transactional, local patches are no longer incorrectly treated as remote repositories, and multi-file packages now have clean names plus a unified package editor.
+- **Expanded Diagnostics** — Meaningful actions, file changes, metadata commits, failures, and rollbacks are now easier to trace without exposing private data.
+
+### v3.7.0-beta.6
+
+#### Improvements
+- **Window Position Memory**
+  - Added an optional setting to remember Wuddle’s window size and position across restarts.
+- **Improved Platform Integration**
+  - Added proper Windows executable icons, metadata, and application identity.
+  - Improved Wuddle’s icon identification on Linux desktops and Wayland.
+
+#### Bug Fixes
+- **Update Check Deadlock** — Fixed an expired GitHub rate-limit record potentially leaving Wuddle permanently stuck checking for updates.
+- **Linux Update Restart** — Fixed Wuddle closing without restarting after installing an AppImage update.
+
+### v3.7.0-beta.5
+
+#### Fixes & Improvements
+- **More Reliable Update Checks**
+  - Prevented local file and antivirus scanning from indefinitely blocking update checks.
+  - Added a 30-second timeout and disabled further checks until restart after a timeout.
+  - Kept missing-file detection within the explicit Rescan/Repair workflow.
+- **Clearer Busy Indicator** — Hovering the spinner now explains what Wuddle is working on, including repository progress and elapsed time.
+
+### v3.7.0-beta.4
+
+#### Improvements
+- **Conserve GitHub API** — Added an optional setting for reducing anonymous GitHub API usage.
+  - Infrequently updated projects follow a longer update schedule.
+  - Their status now persists across profile switches.
+  - The setting automatically becomes inactive when unnecessary.
+- **Improved Diagnostics** — Verbose logs now record privacy-safe update-check stages, timings, outcomes, and file-verification progress.
+  - Parallel repository checks are tracked independently.
+  - Exported summaries include the active operation when diagnostics are created.
+- **Improved Notifications** — Added a smooth lifetime indicator to notifications.
+  - Hovering pauses and resets the timer.
+  - Lengthy tooltips and API-limit warnings are formatted for easier reading.
+
+#### Bug Fixes
+- **Reliable Shutdown** — Closing Wuddle now reliably terminates blocked background work on Windows and Linux, preventing invisible processes from blocking future launches.
+- **Update Check Stability** — Duplicate update checks are ignored, preventing overlapping operations after waking from sleep or repeatedly pressing the update button.
+
+### v3.7.0-beta.3
+
+#### Improvements
+- **Clearer GitHub API Limit Feedback**
+  - Wuddle now explains when GitHub's anonymous hourly limit has been reached and approximately when it resets.
+  - Notifications link directly to GitHub Token settings and consistently cover previews, updates, Quick Add, curated patches, and other GitHub operations.
+  - Invalid or expired token errors now provide clearer guidance.
+- **Consistent Settings Icons**
+  - Replaced platform-rendered cogwheel emoji with a bundled SVG across profile editing, Auto-Login, configuration actions, and file details.
+  - Added theme-aware idle and hover colors with consistent sizing across UI scales while keeping the main Options icon visually distinct.
+
+#### Bug Fixes
+- **Profile Database Recovery** — Fixed migration errors that could prevent affected profiles from loading or installing mods and patches. Partially migrated beta databases now repair themselves automatically without losing tracked projects or installed-file records.
+
+### v3.7.0-beta.2
+
+#### New Features
+- **Curated Epoch Water Patch** — Added Project Epoch's water replacement to MPQ Quick Add, with README previews and update support.
+- **Project Details** — Mods, addons, and patches now share a Details dialog for reviewing installed files and browsing their locations.
+
+#### Improvements
+- **Expanded MPQ Management**
+  - Manage custom MPQs directly from the Patches tab, including names, locations, classifications, protection, and enabled states.
+  - Curated patch updates preserve filenames and locations chosen through Wuddle.
+  - Improved Quick Add statuses, README access, menus, browsing, and management controls.
+- **Friendlier Profile Management**
+  - Profile cards now switch profiles when clicked, with a separate cogwheel for editing.
+  - Replaced user-facing "Instance" wording with the clearer "Profile."
+  - Redesigned Profile Settings for improved readability, keyboard navigation, and smaller screens.
+  - Cached client detection prevents incompatible tabs from briefly appearing while switching profiles.
+- **Clearer, More Consistent Dialogs** — Standardized labels, descriptions, buttons, close controls, tooltips, and read-only README previews across Wuddle.
+- **Channel-Aware Changelogs** — The About page now shows stable notes on Stable and individual prerelease notes on Beta, with clearer Beta guidance and duplicate headings removed.
+
+#### Bug Fixes
+- **Safe Profile Removal** — Removing a profile now closes its editor immediately, preventing an accidental Save from recreating it.
+- **Curated Patch Updates** — Renaming WDM or Epoch Water files no longer creates false update notifications or loses the custom filename during updates.
+- **Browse and README Actions** — Browse now opens the relevant installed location, and Awesome WotLK's README button no longer triggers an addon-folder installation prompt.
+
+### v3.7.0-beta.1
+
+#### New Features
+- **MPQ Patch Management** — Added a dedicated Patches tab for installing and managing MPQ-based client patches.
+  - Install local `.MPQ`, `.zip`, and `.7z` packages through a staged and validated installation workflow.
+  - Detect existing custom, disabled, locale-specific, and core-client MPQs.
+  - Classify, protect, label, rename, enable, disable, and remove supported MPQs.
+  - Protect existing files by default, with conflict review, backups, rollback, and restoration when replacements are approved.
+  - Place locale-named patches in matching `Data/<locale>/` directories while defaulting generic patches to `Data/`.
+  - Install and update WDM for WoW 3.3.5a, including optional Caverns & Mines content and the companion addon.
+- **Per-Profile Tab Visibility** — Instance Settings can hide Mods, Addons, Patches, or Tweaks for profiles where those management areas are unnecessary or unsupported.
+
+#### Improvements
+- **Instance Settings Layout** — Launch Method now uses a compact dropdown, making the dialog easier to scan and leaving the segmented controls for selecting which management tabs are visible.
+
+### v3.6.2
 
 #### New Features
 - **Verbose Diagnostics** — Record detailed internal operations and export a rolling, privacy-sanitized diagnostic ZIP for issue reports.
@@ -48,9 +201,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **Conflict-Safe Finalization** — Addon files and GAM metadata reach `Interface/AddOns` only after conflict checks are accepted.
 - **Addon Repository Switching** — Replacing an addon with a same-named fork now keeps the newly selected repository through refresh and rescan. Should fix #17.
 - **Multi-TOC Addon Selection** — Installing or reinstalling repositories such as Questie now requires an explicit main TOC choice and offers a client-aware suggestion.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.6.0 / v3.6.1
 

@@ -46,8 +46,15 @@ enum Cmd {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    wuddle_engine::initialize_git_transport()?;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     let engine = Engine::open_default()?;
 
@@ -57,8 +64,8 @@ async fn main() -> Result<()> {
             mode,
             asset_regex,
         } => {
-            let mode = InstallMode::from_str(&mode).ok_or_else(|| anyhow::anyhow!("bad mode"))?;
-            let id = if wuddle_engine::is_direct_archive_url(&url) {
+            let mode = InstallMode::parse(&mode).ok_or_else(|| anyhow::anyhow!("bad mode"))?;
+            let id = if wuddle_engine::is_direct_archive_candidate(&url) {
                 engine.add_direct_archive_url(&url)?
             } else {
                 engine.add_repo(&url, mode, asset_regex, None)?
@@ -92,7 +99,9 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Check { wow_dir } => {
-            let plans = engine.check_updates_with_wow(wow_dir.as_deref(), wuddle_engine::CheckMode::Force).await?;
+            let plans = engine
+                .check_updates_with_wow(wow_dir.as_deref(), wuddle_engine::CheckMode::Force)
+                .await?;
             for p in plans {
                 if let Some(err) = p.error.as_deref() {
                     println!("{}/{}: error ({})", p.owner, p.name, err);
@@ -125,6 +134,8 @@ async fn main() -> Result<()> {
                 use_symlinks: symlink_targets,
                 set_xattr_comment,
                 replace_addon_conflicts: false,
+                replace_file_conflicts: false,
+                replace_local_changes: false,
                 cache_keep_versions: 3,
             };
             let plans = engine.apply_updates(&wow_dir, raw_dest_ref, opts).await?;
