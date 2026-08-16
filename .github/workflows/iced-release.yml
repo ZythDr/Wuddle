@@ -109,10 +109,34 @@ jobs:
           cargo fmt --manifest-path wuddle-launcher/Cargo.toml --all -- --check
 
   # ------------------------------------------------------------------
+  # Windows-specific tests. Keep these separate from packaging so the
+  # test and release Cargo profiles can compile on independent runners.
+  # ------------------------------------------------------------------
+  test-windows:
+    needs: guard
+    if: needs.guard.outputs.should_build == 'true'
+    name: Windows tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
+
+      - name: Test Wuddle (Iced) and launcher
+        run: |
+          cargo test --locked --manifest-path wuddle-iced/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --manifest-path wuddle-launcher/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  # ------------------------------------------------------------------
   # Linux portable tar.gz
   # ------------------------------------------------------------------
   build-linux:
-    needs: [guard, validate-release]
+    needs: guard
     if: needs.guard.outputs.should_build == 'true'
     name: Linux (portable tar.gz)
     runs-on: ubuntu-24.04
@@ -283,7 +307,7 @@ jobs:
   # Windows portable zip
   # ------------------------------------------------------------------
   build-windows:
-    needs: [guard, validate-release]
+    needs: guard
     if: needs.guard.outputs.should_build == 'true'
     name: Windows (portable zip)
     runs-on: windows-latest
@@ -309,10 +333,6 @@ jobs:
 
       - name: Build Wuddle (Iced) and launcher
         run: |
-          cargo test --locked --manifest-path wuddle-iced/Cargo.toml
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --manifest-path wuddle-launcher/Cargo.toml
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release --manifest-path wuddle-iced/Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release --manifest-path wuddle-launcher/Cargo.toml
@@ -400,7 +420,7 @@ jobs:
   # Publish pre-release on GitHub
   # ------------------------------------------------------------------
   release:
-    needs: [build-linux, build-windows]
+    needs: [validate-release, test-windows, build-linux, build-windows]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 15
