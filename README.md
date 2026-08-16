@@ -30,6 +30,15 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
 - **Logs panel:** operational visibility and copyable logs
 
+### What's New in v3.7.1-beta.1
+
+#### Bug Fixes
+- **Quick Add and Direct Archive Installs** — Fixed a v3.7.0 regression where legitimate GitHub and GitLab redirect hosts were rejected as untrusted, blocking Quick Add mod installs and direct `.zip`/`.7z` URL installs with a "Blocked asset host" error.
+
+
+<details>
+<summary><strong>v3.x Changelog</strong></summary>
+
 ### What's New in v3.7.0-beta.12
 
 - **Backup and Restore** — Export profiles, preferences, launch settings, and tracked addon/mod/patch metadata into one backup ZIP, or import a backup or older Wuddle installation. Restores are validated and staged before restart, with the previous data retained as a rollback copy.
@@ -41,9 +50,6 @@ If this happens, you need to add the game installation folder to your Anti-virus
 - **One-Time Manual Update May Be Required** — Windows users on an affected beta may need to download this release manually. Extract it over the existing folder, or import the old folder through Backup and Restore in the fresh copy.
 
 See the [full changelog](CHANGELOG.md#v370-beta12) for the technical details.
-
-<details>
-<summary><strong>v3.x Changelog</strong></summary>
 
 ### v3.7.0-beta.11
 
