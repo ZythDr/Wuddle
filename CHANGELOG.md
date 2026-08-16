@@ -2,6 +2,11 @@
 
 All notable changes to Wuddle are documented in this file.
 
+## v3.7.1-beta.1
+
+### Bug Fixes
+- **Quick Add and Direct Archive Installs** — Fixed a v3.7.0 regression where legitimate GitHub and GitLab redirect hosts (`release-assets.githubusercontent.com`, `cdn.artifacts.gitlab-static.net`) were rejected as untrusted, blocking Quick Add mod installs and direct `.zip`/`.7z` URL installs with a "Blocked asset host" error.
+
 ## v3.7.0-beta.12
 
 ### New Features
