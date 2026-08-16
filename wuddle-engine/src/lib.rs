@@ -3575,7 +3575,9 @@ impl Engine {
             .ok_or_else(|| anyhow::anyhow!("Asset URL missing host"))?;
 
         let mut trusted_hosts = vec![trusted_host];
-        if forge.eq_ignore_ascii_case("github") {
+        if forge.eq_ignore_ascii_case("github")
+            || Self::host_matches_or_subdomain(trusted_host, "github.com")
+        {
             trusted_hosts.extend([
                 "github.com",
                 "objects.githubusercontent.com",
@@ -3583,6 +3585,11 @@ impl Engine {
                 "release-assets.githubusercontent.com",
                 "codeload.github.com",
             ]);
+        }
+        if forge.eq_ignore_ascii_case("gitlab")
+            || Self::host_matches_or_subdomain(trusted_host, "gitlab.com")
+        {
+            trusted_hosts.extend(["gitlab.com", "cdn.artifacts.gitlab-static.net"]);
         }
 
         if trusted_hosts
@@ -8154,6 +8161,39 @@ mod tests {
             Engine::validate_asset_url_for(&plan, "https://example.invalid/extra.dll").is_err()
         );
         assert!(Engine::validate_asset_url_for(&plan, "http://github.com/extra.dll").is_err());
+    }
+
+    #[test]
+    fn direct_github_url_trusts_github_asset_cdn_redirects() {
+        Engine::validate_asset_url_for_source(
+            "direct",
+            "github.com",
+            "github.com",
+            "pfQuest-enUS-wotlk",
+            "https://release-assets.githubusercontent.com/github-production-release-asset/1/pfQuest-enUS-wotlk.zip",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn gitlab_releases_trust_gitlab_asset_cdn_redirects() {
+        Engine::validate_asset_url_for_source(
+            "gitlab",
+            "gitlab.com",
+            "Ph42oN",
+            "dxvk-gplasync",
+            "https://cdn.artifacts.gitlab-static.net/Ph42oN/dxvk-gplasync/dxvk-gplasync.tar.gz",
+        )
+        .unwrap();
+
+        assert!(Engine::validate_asset_url_for_source(
+            "gitlab",
+            "gitlab.com",
+            "Ph42oN",
+            "dxvk-gplasync",
+            "https://example.invalid/dxvk-gplasync.tar.gz",
+        )
+        .is_err());
     }
 
     #[test]
