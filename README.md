@@ -10,7 +10,7 @@
 Wuddle brings addon management, DLL mods, MPQ patches, profiles, game launching,
 updates, and client-specific tools into one application for **Vanilla 1.12.1**, **TBC 2.4.3**, and **WotLK 3.3.5** clients.  
 
-## Download Latest Stable Release:
+## Download Latest Stable Release: (WIP - Not working yet)
 | **Linux** | **Windows** |
 |---|---|
 | [![Linux Stable](https://img.shields.io/github/v/release/ZythDr/Wuddle?label=Linux%20AppImage&logo=linux)](https://github.com/ZythDr/Wuddle/releases/latest/download/wuddle-linux-x86_64.AppImage) | [![Windows Stable](https://img.shields.io/github/v/release/ZythDr/Wuddle?label=Windows%20ZIP&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTIgNC4yIDEwLjUgM3Y4SDJWNC4yWm05LjUtMS4zNUwyMiAxLjRWMTFIMTEuNVYyLjg1Wk0yIDEyaDguNXY4TDIgMTguOFYxMlptOS41IDBIMjJ2OS42bC0xMC41LTEuNDVWMTJaIi8+PC9zdmc+)](https://github.com/ZythDr/Wuddle/releases/latest/download/wuddle-windows-x86_64.zip) |
