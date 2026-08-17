@@ -1,34 +1,105 @@
-# Wuddle
+# Wuddle - Legacy WoW Launcher & Manager
+[![Downloads](https://img.shields.io/github/downloads/ZythDr/Wuddle/total?label=Downloads)](https://github.com/ZythDr/Wuddle/releases) 
+[![Stable Release](https://img.shields.io/github/v/release/ZythDr/Wuddle?label=Stable&sort=semver)](https://github.com/ZythDr/Wuddle/releases/latest) 
+[![Beta Release](https://img.shields.io/github/v/tag/ZythDr/Wuddle?filter=*-beta.*&sort=semver&label=Beta)](https://github.com/ZythDr/Wuddle/releases) 
+[![Release Build](https://github.com/ZythDr/Wuddle/actions/workflows/iced-release.yml/badge.svg)](https://github.com/ZythDr/Wuddle/actions/workflows/iced-release.yml) 
+[![License](https://img.shields.io/github/license/ZythDr/Wuddle)](LICENSE)
 
-Wuddle is a desktop WoW launcher/manager primarily focusing Vanilla clients, with support for:
+### **A native desktop launcher and manager for legacy World of Warcraft clients.**
 
-- DLL mod management (install/update)
-- Git-based addon management (inspired by [GitAddonsManager](https://gitlab.com/woblight/GitAddonsManager))
-- Multi-instance profiles
-- One-click game launch per instance
+Wuddle brings addon management, DLL mods, MPQ patches, profiles, game launching,
+updates, and client-specific tools into one application for **Vanilla 1.12.1**, **TBC 2.4.3**, and **WotLK 3.3.5** clients.  
 
+## Download Latest Stable Release:
+| **Linux** | **Windows** |
+|---|---|
+| [![Linux Stable](https://img.shields.io/github/v/release/ZythDr/Wuddle?label=Linux%20AppImage&logo=linux)](https://github.com/ZythDr/Wuddle/releases/latest/download/wuddle-linux-x86_64.AppImage) | [![Windows Stable](https://img.shields.io/github/v/release/ZythDr/Wuddle?label=Windows%20ZIP&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTIgNC4yIDEwLjUgM3Y4SDJWNC4yWm05LjUtMS4zNUwyMiAxLjRWMTFIMTEuNVYyLjg1Wk0yIDEyaDguNXY4TDIgMTguOFYxMlptOS41IDBIMjJ2OS42bC0xMC41LTEuNDVWMTJaIi8+PC9zdmc+)](https://github.com/ZythDr/Wuddle/releases/latest/download/wuddle-windows-x86_64.zip) |
+| [![Linux tar.gz](https://img.shields.io/github/v/release/ZythDr/Wuddle?label=Linux%20tar.gz&logo=linux)](https://github.com/ZythDr/Wuddle/releases/latest/download/wuddle-linux-x86_64.tar.gz) | |
+
+## Antivirus false-positives
 > [!WARNING]
-> Please scroll down and read the Important Note before downloading.
+> ### <ins>TL;DR: To avoid issues, add every game directory that Wuddle manages to your Antivirus software's whitelist, if you intend to use DLL mods for that installation.</ins>  
+> **Various legacy DLL mods, including projects such as SuperWoW, UnitXP_SP3, and Nampower, are known to trigger false positives in antivirus software.**  
+>  
+> **Wuddle warns you before installing known false-positive-triggering mods from the Quick Add list. 
+> But since Wuddle performs the download and installation of these mods, your antivirus software may attribute the detection of a threat directly to `Wuddle.exe` itself.    
+> The most reliable solution is to whitelist your game installation folder in your antivirus software.  
+> If this sounds sketchy, Wuddle is open source and the code is available here on GitHub for you to inspect.**  
+>  
+> **So to simplify the user-experience, Wuddle creates a hidden `.wuddle` cache/staging folder inside the game installation's root directory.
+> This makes things easier since you'd have to whitelist the game directory (or individual files) anyway, when installing DLL mods that trigger false-positives.**  
+>
 
 [Screencast_20260414_150926.webm](https://github.com/user-attachments/assets/231d99f9-1809-49e8-b6ba-6117876c08bc)
 
+## Features
 
-# Important Note (Anti-virus false positives)
-Various DLL mods such as SuperWoW, UnitXP_SP3 and Nampower for the vanilla 1.12 clients are known to trigger false-positives in many antivirus products.  
-Wuddle displays a warning before adding known false-positive triggering mods from it's Quick Add section. If any false-positive mod is installed through Wuddle, antivirus tools may attribute the detection to `Wuddle.exe` because Wuddle performs the download/install action.  
-If this happens, you need to add the game installation folder to your Anti-virus' exclusions/whitelist or else the files will keep being deleted.
+### Addons
 
-### Core Features
+- Install, update, reinstall/repair, and remove addons.
+- Install from Git repositories, GitHub releases, direct `.zip` / `.7z` URLs, or local archives.
+- Supports GitHub, GitLab, Codeberg, Gitea, and compatible Git repositories.
+- Handles addon collections, nested addons, multiple `.toc` layouts, and version-specific addon choices.
+- Compatible with existing GitAddonsManager-style addon layouts (but no guarantees).
+- Detects locally modified tracked addons before replacing them.
 
-- **Addon management:** install, update, reinstall/repair, remove
-- **DLL mod management:** install, update, reinstall/repair, remove
-- **Multi-forge support:** GitHub, Codeberg, Gitea, GitLab
-- **Quick Add catalog:** common Vanilla client mods with descriptions
-- **Companion addon links/info:** shown directly in quick-add entries
-- **`dlls.txt` management:** enable/disable mods in Wuddle without having to uninstall them
-- **Multi-instance profiles:** each profile has its own tracked mods/addons + launch config
-- **GitHub auth token (optional):** helps avoid anonymous API limits (60 per hour)
-- **Logs panel:** operational visibility and copyable logs
+### DLL Mods
+
+- Install, update, repair, and remove DLL-based client mods.
+- Enable or disable DLLs without uninstalling them through managed `dlls.txt` entries and by appending `.disabled` to file names.
+- Supports direct DLL assets plus `.zip` and `.7z` release packages.
+- Quick Add provides curated client-specific mods and companion addons.
+
+### MPQ Patches
+
+- Install and manage custom MPQ patches from local files or archives.
+- Detect existing custom, disabled, locale-specific, and core client MPQs.
+- Rename, classify, protect, enable, disable, move, replace, and remove supported patches.
+- Uses conflict checks, backups, and rollback when replacing existing files.
+- Includes curated patches such as [WDM](https://github.com/Trimitor/WDM-patch) and [Project Epoch Water](https://github.com/ZythDr/EpochWater) through Quick Add.
+
+### Profiles & Launching
+
+- Keep separate profiles for different WoW installations or servers.
+- Each profile tracks its own addons, mods, patches, launch settings, and update state.
+- Launch directly, through a custom command, or through supported external launch methods.
+- Optional per-profile tab visibility keeps unsupported or unused management areas hidden.
+- Starting Wuddle a second time focuses the existing window instead of opening another copy.
+
+### WotLK Tools
+
+- When [Awesome WotLK](https://github.com/noname08662/awesome_wotlk) is installed, Wuddle offers easy patching of `Wow.exe` to enable Awesome WotLK while retaining a backup.
+- When [wow-optimize](https://github.com/suprepupre/wow-optimize) is installed, Wuddle provides an in-app shortcut to launch the wow-optimize launcher which acts as a configurator, directly from Wuddle.
+- Optional Auto-Login (requires [Awesome WotLK](https://github.com/noname08662/awesome_wotlk)) stores account credentials in Windows Credential Manager or Linux Secret Service.
+
+### Updates, Safety & Recovery
+
+- Concurrent update checks for Git repositories, release-based mods, and curated patches.
+- Stable and Beta self-update channels.
+- Optional GitHub authentication and API-conservation controls.
+- Install/update staging, ownership tracking, conflict checks, backups, and rollback.
+- Backup and restore Wuddle profiles, settings, and tracked-project metadata.
+- Reset Wuddle with an automatic recovery backup while leaving WoW installations and deployed game files alone.
+- Privacy-sanitized verbose diagnostics for troubleshooting.
+
+## Supported Clients
+
+Wuddle is aimed at legacy WoW clients rather than modern Retail/Classic clients.
+
+| Expansion | Client version | Features |
+| --- | --- | --- |
+| Vanilla | 1.12.1 | Addons, DLL mods, MPQ Patches, [Vanilla-Tweaks](https://github.com/brndd/vanilla-tweaks) |
+| The Burning Crusade | 2.4.3 | Addons, DLL mods, MPQ Patches |
+| Wrath of the Lich King | 3.3.5 | Addons, DLL mods, MPQ Patches, optional Auto-Login |
+
+> [!NOTE]
+> ### For later (Cata, MoP, WoD etc) clients and newer your mileage may vary.    
+> Wuddle may still work with these clients since much of its profile and launch functionality is not tied to a specific client version.  
+> Even DLL mods and MPQ patches _might work_ on newer clients up to around Legion (7.x).  
+> However, there has been NO testing at all for these clients, and no support is offered to them. So please do not open issue tickets related to unsupported clients.  
+
+
+## Changelog
 
 ### What's New in v3.7.1
 
@@ -465,17 +536,17 @@ Wuddle v3 is a complete frontend rewrite from Tauri/WebView to [Iced 0.14](https
 
 </details>
 
+For the complete release history, see **[CHANGELOG.md](CHANGELOG.md)**.
+
 ## Credits / Inspiration
 
-Wuddle is its own implementation, but parts of the functionality and UX were inspired by:
+Wuddle is its own implementation, but parts of its functionality and UX were inspired by:
 
 - **[GitAddonsManager](https://gitlab.com/woblight/GitAddonsManager)** by WobLight  
-  Git addon update workflows, `.toc`-driven addon deployment ideas, and branch-oriented addon management.  
-
+  Git addon update workflows, `.toc`-driven deployment ideas, and branch-oriented addon management.
 
 - **[WoWRetroLauncher](https://github.com/Parquelle/WoWRetroLauncher)** by Parquelle  
-  Sparked the idea for Wuddle's themes.  
-
+  Sparked the idea for Wuddle's themes.
 
 - **[vanilla-tweaks](https://github.com/brndd/vanilla-tweaks)** by brndd  
-  WoW.exe binary patching logic for the Tweaks tab (FoV, farclip, quickloot, camera fixes, etc.).  
+  WoW executable patching logic used by the Tweaks functionality.
