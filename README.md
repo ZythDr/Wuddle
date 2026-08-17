@@ -17,18 +17,22 @@ updates, and client-specific tools into one application for **Vanilla 1.12.1**, 
 | [![Linux tar.gz](https://img.shields.io/github/v/release/ZythDr/Wuddle?label=Linux%20tar.gz&logo=linux)](https://github.com/ZythDr/Wuddle/releases/latest/download/wuddle-v3.7.1-linux-x86_64.tar.gz) | |
 
 ## Antivirus false-positives
+
 > [!WARNING]
-> ### <ins>TL;DR: To avoid issues, add every game directory that Wuddle manages to your Antivirus software's whitelist, if you intend to use DLL mods for that installation.</ins>  
-> **Various legacy DLL mods, including projects such as SuperWoW, UnitXP_SP3, and Nampower, are known to trigger false positives in antivirus software.**  
+> ### <ins>TL;DR: To avoid issues, every game installation directory where you intend to use the `Mods` tab should be whitelisted in your antivirus software.</ins>
+> <ins>**If any mod fails to install, or if Windows Defender displays a notification as you install a mod, you need to whitelist your game install folder.**</ins> 
 >  
-> **Wuddle warns you before installing known false-positive-triggering mods from the Quick Add list. 
+> Various legacy DLL mods, including projects such as **[SuperWoW](https://github.com/balakethelock/SuperWoW)**, **UnitXP_SP3**, and **Nampower**, are known to trigger false positives in antivirus software.  
+>  
+> Wuddle warns you before installing known false-positive-triggering mods from the Quick Add list. 
 > But since Wuddle performs the download and installation of these mods, your antivirus software may attribute the detection of a threat directly to `Wuddle.exe` itself.    
 > The most reliable solution is to whitelist your game installation folder in your antivirus software.  
-> If this sounds sketchy, Wuddle is open source and the code is available here on GitHub for you to inspect.**  
+> If this sounds sketchy, Wuddle is open source and the code is available here on GitHub for you to inspect.  
 >  
-> **So to simplify the user-experience, Wuddle creates a hidden `.wuddle` cache/staging folder inside the game installation's root directory.
-> This makes things easier since you'd have to whitelist the game directory (or individual files) anyway, when installing DLL mods that trigger false-positives.**  
+> So to simplify the user-experience, Wuddle creates a hidden `.wuddle` cache/staging folder inside the game installation's root directory. This is where all Mods, Addons, MPQs and so on land when they first downloaded, Wuddle then moves the files to their target directories.
+> This makes things easier since you'd have to whitelist the game directory (or individual files) anyway, when installing DLL mods that trigger false-positives. 
 >
+> ### So for every profile where you intend to use the `Mods` tab, please whitelist the game's install directory in your AV software.
 
 [Screencast_20260414_150926.webm](https://github.com/user-attachments/assets/231d99f9-1809-49e8-b6ba-6117876c08bc)
 
